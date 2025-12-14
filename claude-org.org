@@ -152,6 +152,18 @@ Useful for allowing read operations in plan mode."
   :type '(repeat string)
   :group 'claude-org)
 
+(defcustom claude-org-auto-start-mcp-server t
+  "Whether to auto-start MCP server when claude-org-mode is enabled.
+When non-nil, the MCP server will be started automatically if not running."
+  :type 'boolean
+  :group 'claude-org)
+
+(defcustom claude-org-mcp-server-port 9999
+  "Port for the MCP server.
+Used when auto-starting the MCP server."
+  :type 'integer
+  :group 'claude-org)
+
 (defconst claude-org-permission-property "CLAUDE_PERMISSION_MODE"
   "Org property name for permission mode.")
 
@@ -481,6 +493,30 @@ Sets the CLAUDE_PERMISSION_MODE property at the appropriate scope."
       (claude-org--set-permission-mode mode)
       (claude-org--refresh-header-line)
       (message "Permission mode set to: %s" mode))))
+#+END_SRC
+
+** MCP Server Integration
+
+Automatically start MCP server and pass configuration to Claude CLI.
+
+#+BEGIN_SRC elisp
+(defun claude-org--ensure-mcp-server ()
+  "Ensure MCP server is running if auto-start is enabled.
+Starts the MCP server on `claude-org-mcp-server-port' if not already running."
+  (when (and claude-org-auto-start-mcp-server
+             (fboundp 'emacs-mcp-server-running-p)
+             (not (emacs-mcp-server-running-p)))
+    (emacs-mcp-server-start claude-org-mcp-server-port)))
+
+(defun claude-org--get-mcp-config ()
+  "Get MCP config JSON string if server is running.
+Returns nil if MCP server is not available or not running."
+  (when (and (fboundp 'emacs-mcp-server-running-p)
+             (emacs-mcp-server-running-p))
+    (let ((port (emacs-mcp-server-port)))
+      (json-encode
+       `((mcpServers . ((emacs . ((type . "http")
+                                  (url . ,(format "http://localhost:%d/mcp" port)))))))))))
 #+END_SRC
 
 * Project Configuration
@@ -914,7 +950,8 @@ Sends the query to Claude and streams the response below the block."
                    :system-prompt system-prompt
                    :resume sdk-uuid
                    :permission-mode (claude-org--get-permission-mode)
-                   :allowed-tools claude-org-allowed-tools))
+                   :allowed-tools claude-org-allowed-tools
+                   :mcp-config (claude-org--get-mcp-config)))
          ;; Build full prompt with system reminder
          (full-prompt (if (and system-reminder
                                (not (string-empty-p system-reminder)))
@@ -1241,7 +1278,9 @@ to send the query and stream the response.
         ;; Set up header line
         (claude-org--refresh-header-line)
         ;; Register exclusion
-        (claude-org--register-exclusion))
+        (claude-org--register-exclusion)
+        ;; Auto-start MCP server
+        (claude-org--ensure-mcp-server))
     ;; Restore original header line
     (setq header-line-format claude-org--original-header-line)
     ;; Cancel any active queries
