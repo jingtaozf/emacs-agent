@@ -164,6 +164,15 @@ Used when auto-starting the MCP server."
   :type 'integer
   :group 'claude-org)
 
+(defcustom claude-org-setting-sources '("user")
+  "List of setting sources for Claude CLI.
+Controls where Claude loads skills and settings from.
+Valid values: \"user\", \"project\", \"local\".
+
+Can be overridden per-section via CLAUDE_SETTING_SOURCES property."
+  :type '(repeat string)
+  :group 'claude-org)
+
 (defcustom claude-org-default-system-prompts
   '("You are communicating with a senior developer through Emacs org-mode.
 
@@ -205,6 +214,9 @@ You can customize this by adding domain-specific prompts:
 
 (defconst claude-org-sdk-uuid-property "CLAUDE_SDK_UUID"
   "Org property name for SDK session UUID (used for --resume).")
+
+(defconst claude-org-setting-sources-property "CLAUDE_SETTING_SOURCES"
+  "Org property name for setting sources (comma-separated list).")
 
 (defconst claude-org--permission-mode-map
   '(("readonly" . "default")
@@ -476,6 +488,28 @@ Returns CLI permission-mode value."
     ("plan" "PL")
     ("bypass" "BP")
     (_ "??")))
+
+(defun claude-org--get-setting-sources ()
+  "Get setting sources for Claude CLI.
+Checks CLAUDE_SETTING_SOURCES org property first, then uses default.
+Returns list of strings like (\"user\" \"project\")."
+  (let ((prop-value
+         (or
+          ;; Section-level property (with inheritance)
+          (org-entry-get nil claude-org-setting-sources-property t)
+          ;; File-level property via keyword
+          (save-excursion
+            (goto-char (point-min))
+            (when (re-search-forward
+                   (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
+                           claude-org-setting-sources-property)
+                   nil t)
+              (string-trim (match-string-no-properties 1)))))))
+    (if prop-value
+        ;; Parse comma-separated string from property
+        (mapcar #'string-trim (split-string prop-value ","))
+      ;; Use default
+      claude-org-setting-sources)))
 #+END_SRC
 
 ** Permission Mode Setter
@@ -999,7 +1033,8 @@ Sends the query to Claude and streams the response below the block."
                    :resume sdk-uuid
                    :permission-mode (claude-org--get-permission-mode)
                    :allowed-tools claude-org-allowed-tools
-                   :mcp-config (claude-org--get-mcp-config)))
+                   :mcp-config (claude-org--get-mcp-config)
+                   :setting-sources (claude-org--get-setting-sources)))
          ;; Build full prompt with system reminder
          (full-prompt (if (and system-reminder
                                (not (string-empty-p system-reminder)))

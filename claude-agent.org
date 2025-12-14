@@ -214,6 +214,7 @@ Supported keyword arguments:
   :cli-path           - Path to Claude CLI binary
   :hooks              - Alist of (event . matchers)
   :env                - Alist of environment variables
+  :setting-sources    - List of setting sources (\"user\" \"project\" \"local\")
 
 Returns a plist suitable for passing to `claude-agent-query' or
 `claude-agent-client-create'."
@@ -230,7 +231,8 @@ Returns a plist suitable for passing to `claude-agent-query' or
                         :cwd nil
                         :cli-path nil
                         :hooks nil
-                        :env nil)))
+                        :env nil
+                        :setting-sources nil)))
     (cl-loop for (key val) on args by #'cddr
              do (setq defaults (plist-put defaults key val)))
     defaults))
@@ -424,6 +426,11 @@ If STREAMING-P is non-nil, use streaming input mode."
     (let ((resume (plist-get options :resume)))
       (when resume
         (setq args (append args (list "--resume" resume)))))
+    ;; Setting sources (for loading skills from ~/.claude/skills/)
+    (let ((setting-sources (plist-get options :setting-sources)))
+      (when setting-sources
+        (setq args (append args (list "--setting-sources"
+                                      (string-join setting-sources ","))))))
     ;; Streaming input mode
     (if streaming-p
         (setq args (append args (list "--input-format" "stream-json")))
@@ -2447,9 +2454,23 @@ CLI-PATH is the path to claude CLI, ARGS are command line arguments, CWD is work
 
    ;; System message
    ((claude-agent-system-message-p msg)
-    (let ((subtype (claude-agent-system-message-subtype msg)))
-      (when (member subtype '("init" "error"))
-        (format "ℹ %s\n" subtype))))
+    (let* ((subtype (claude-agent-system-message-subtype msg))
+           (data (claude-agent-system-message-data msg))
+           (message-text (plist-get data :message)))
+      (cond
+       ;; Show error messages with message text
+       ((string= subtype "error")
+        (format "❌ Error: %s\n" (or message-text subtype)))
+       ;; Show init messages
+       ((string= subtype "init")
+        (format "ℹ️ %s\n" (or message-text "Initializing...")))
+       ;; Show any message that has text (like "Compacting conversation...")
+       (message-text
+        (format "ℹ️ %s\n" message-text))
+       ;; For other subtypes, just show the subtype
+       (subtype
+        (format "ℹ️ %s\n" subtype))
+       (t nil))))
 
    ;; Result message
    ((claude-agent-result-message-p msg)
