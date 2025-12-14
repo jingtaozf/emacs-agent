@@ -716,6 +716,7 @@ Sends the query to Claude and streams the response below the block."
       (let ((state (claude-agent-query
                     full-prompt
                     :options options
+                    :session-key session-key
                     :on-token (lambda (text)
                                 (when (buffer-live-p buf)
                                   (with-current-buffer buf
@@ -738,7 +739,9 @@ Sends the query to Claude and streams the response below the block."
 
 * Header Line
 
-Dynamic header line showing session status.
+Dynamic header line showing session status, IDE context, and thinking state.
+
+** State Variables
 
 #+BEGIN_SRC elisp
 (defvar-local claude-org--original-header-line nil
@@ -750,6 +753,16 @@ Dynamic header line showing session status.
 (defvar claude-org--header-timer nil
   "Timer for refreshing header line across all claude-org buffers.")
 
+(defvar claude-org--session-badge-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'claude-org-list-sessions)
+    map)
+  "Keymap for clicking on the session badge in the header line.")
+#+END_SRC
+
+** Spinner Control
+
+#+BEGIN_SRC elisp
 (defun claude-org--start-spinner (session-key)
   "Start spinner animation for SESSION-KEY."
   (claude-org--session-put session-key :spinner 0)
@@ -758,13 +771,17 @@ Dynamic header line showing session status.
 (defun claude-org--stop-spinner (session-key)
   "Stop spinner animation for SESSION-KEY."
   (claude-org--session-put session-key :spinner nil))
+#+END_SRC
 
+** Timer Management
+
+#+BEGIN_SRC elisp
 (defun claude-org--ensure-header-timer ()
   "Ensure header refresh timer is running."
   (unless (and claude-org--header-timer
                (timerp claude-org--header-timer))
     (setq claude-org--header-timer
-          (run-at-time 0.5 0.5 #'claude-org--refresh-all-headers))))
+          (run-at-time 0.2 0.2 #'claude-org--refresh-all-headers))))
 
 (defun claude-org--stop-header-timer ()
   "Stop header refresh timer if no active sessions."
@@ -790,33 +807,90 @@ Dynamic header line showing session status.
 
 (defun claude-org--refresh-header-line ()
   "Refresh the header line with current session status."
-  (setq header-line-format (claude-org--build-header-line))
+  (setq header-line-format (claude-org--header-line))
   (force-mode-line-update))
+#+END_SRC
 
-(defun claude-org--build-header-line ()
-  "Build header line format with session status."
-  (let* ((file-name (or (buffer-file-name) "unsaved"))
+** Tooltip Formatting
+
+#+BEGIN_SRC elisp
+(defun claude-org--format-session-tooltip ()
+  "Format tooltip showing all active sessions."
+  (let ((lines (list "Active Sessions" "───────────────────")))
+    (maphash
+     (lambda (id state)
+       (when (plist-get state :busy)
+         (let* ((spinner-idx (or (plist-get state :spinner) 0))
+                (spinner-char (nth spinner-idx claude-org--spinner-frames))
+                (display-name (claude-org--session-display-name id))
+                (elapsed (claude-org--format-elapsed (plist-get state :start-time))))
+           (push (format "● %s  [%s %s]" display-name spinner-char elapsed)
+                 lines))))
+     claude-org--sessions)
+    (if (= (length lines) 2)
+        "No active sessions\n\nClick to open session manager"
+      (concat (string-join (nreverse lines) "\n")
+              "\n\nClick to open session manager"))))
+#+END_SRC
+
+** Header Line Generation
+
+#+BEGIN_SRC elisp
+(defun claude-org--header-line ()
+  "Generate the header line content for Claude Org buffer."
+  (let* ((file-name (if buffer-file-name
+                        (file-name-nondirectory buffer-file-name)
+                      "untitled"))
+         ;; Show user-defined session ID if present
+         (session-id (claude-org--get-session-id))
+         (session-scope (claude-org--get-session-scope))
+         ;; Display: [sec:mysession] or [file:mysession] or [file-only]
+         (session-str (if session-id
+                          (propertize (format " [%s:%s...]"
+                                              (if (eq session-scope 'section) "sec" "file")
+                                              (substring session-id 0 (min 12 (length session-id))))
+                                      'face (if (eq session-scope 'section)
+                                                'font-lock-constant-face
+                                              'font-lock-type-face))
+                        (propertize " [file-only]" 'face 'font-lock-comment-face)))
+         ;; Active session count badge with thinking indicator
          (active-count (claude-org--active-session-count))
-         (session-info (if (> active-count 0)
-                           (claude-org--format-active-sessions)
-                         "[0 sessions]")))
-    (format " %s | Claude Org %s"
-            (file-name-nondirectory file-name)
-            session-info)))
-
-(defun claude-org--format-active-sessions ()
-  "Format active session info for header line."
-  (let ((parts '()))
-    (maphash (lambda (key state)
-               (when (plist-get state :busy)
-                 (let* ((spinner-frame (or (plist-get state :spinner) 0))
-                        (spinner (nth spinner-frame claude-org--spinner-frames))
-                        (name (claude-org--session-display-name key)))
-                   (push (format "%s %s" spinner name) parts))))
-             claude-org--sessions)
-    (if parts
-        (format "[%d busy: %s]" (length parts) (string-join (nreverse parts) ", "))
-      "[0 sessions]")))
+         (active-str (if (> active-count 0)
+                         (propertize (format " [%d thinking...]" active-count)
+                                     'face '(:foreground "orange" :weight bold)
+                                     'help-echo (claude-org--format-session-tooltip)
+                                     'mouse-face 'mode-line-highlight
+                                     'local-map claude-org--session-badge-map)
+                       ""))
+         ;; Project root
+         (project-root (claude-org--get-project-root))
+         (project-str (if project-root
+                          (propertize (format " [%s]"
+                                              (file-name-nondirectory
+                                               (directory-file-name project-root)))
+                                      'face 'font-lock-keyword-face)
+                        ""))
+         ;; Current open file (from IDE context)
+         (ide-context (claude-agent-collect-ide-context))
+         (current-file (plist-get ide-context :current-file))
+         (file-str (if current-file
+                       (propertize (format " | %s%s"
+                                           (or (plist-get current-file :name) "?")
+                                           (if (plist-get current-file :modified) "*" ""))
+                                   'face 'font-lock-string-face)
+                     ""))
+         ;; Selection info
+         (selection (plist-get ide-context :selection))
+         (sel-str (if (and selection (plist-get selection :text))
+                      (let* ((start-line (plist-get selection :start-line))
+                             (end-line (plist-get selection :end-line))
+                             (text-len (length (plist-get selection :text))))
+                        (propertize (format " | sel:%d-%d (%d)" start-line end-line text-len)
+                                    'face 'font-lock-comment-face))
+                    "")))
+    (concat " Claude Org: "
+            (propertize file-name 'face 'font-lock-function-name-face)
+            session-str active-str project-str file-str sel-str)))
 #+END_SRC
 
 * Cancel Support
@@ -858,6 +932,20 @@ Dynamic header line showing session status.
     (message "Cancelled %d queries" cancelled)))
 #+END_SRC
 
+* Verbose Output
+
+#+BEGIN_SRC elisp
+(defun claude-org-show-verbose ()
+  "Show verbose output buffer for current session."
+  (interactive)
+  (let ((session-key (claude-org--current-session-key)))
+    (if-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+        (if (buffer-live-p buf)
+            (display-buffer buf)
+          (message "Verbose buffer no longer exists"))
+      (message "No verbose buffer for session: %s" session-key))))
+#+END_SRC
+
 * Session Manager UI
 
 #+BEGIN_SRC elisp
@@ -895,6 +983,7 @@ Dynamic header line showing session status.
     (define-key map (kbd "C-c C-l") #'claude-org-list-sessions)
     (define-key map (kbd "C-c C-n") #'claude-org-insert-block)
     (define-key map (kbd "C-c C-i") #'claude-org-show-session-info)
+    (define-key map (kbd "C-c C-v") #'claude-org-show-verbose)
     map)
   "Keymap for `claude-org-mode'.")
 

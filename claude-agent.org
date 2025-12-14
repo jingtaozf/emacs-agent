@@ -41,6 +41,10 @@
   - [[#hook-input-structures][Hook Input Structures]]
   - [[#hook-invocation][Hook Invocation]]
 - [[#session-management][Session Management]]
+- [[#query-cancellation][Query Cancellation]]
+- [[#activity-mode-line][Activity Mode-Line]]
+- [[#usage-mode-line][Usage Mode-Line]]
+- [[#interactive-chat-mode][Interactive Chat Mode]]
 - [[#tests][Tests]]
   - [[#unit-tests][Unit Tests]]
 - [[#package-footer][Package Footer]]
@@ -58,6 +62,8 @@ The library mirrors the Python Claude Agent SDK API, providing:
 - Streaming response support via callbacks
 - Basic hook support (PreToolUse, PostToolUse, Stop)
 - Session management (continue, resume)
+- Activity mode-line indicator with spinning animation
+- Usage mode-line showing API utilization percentages
 
 ** Usage Example
 
@@ -440,6 +446,8 @@ Internal state structure for managing async process communication.
   complete-callback ; Completion callback function
   options           ; Original options plist
   request-id        ; Unique request ID for cancellation
+  start-time        ; Query start time (float-time)
+  session-key       ; Session key for verbose buffer grouping
   (ready nil)       ; Boolean ready state
   (closed nil))     ; Boolean closed state
 
@@ -496,9 +504,13 @@ Parses complete newline-delimited JSON and invokes callbacks."
                 (when token-callback
                   (claude-agent--extract-tokens parsed token-callback))
                 ;; Call message callback with parsed message
-                (when callback
-                  (let ((message (claude-agent--parse-message parsed)))
-                    (when message
+                (let ((message (claude-agent--parse-message parsed)))
+                  (when message
+                    ;; Write to verbose buffer if session-key is set
+                    (claude-agent--verbose-write-message
+                     (claude-agent--process-state-session-key state) message)
+                    ;; Call user callback
+                    (when callback
                       (funcall callback message)))))
             (json-parse-error
              (claude-agent--debug-log "JSON parse error: %s" (error-message-string err))
@@ -570,7 +582,7 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
 
 #+BEGIN_SRC elisp
 (defun claude-agent--start-process (prompt options callback error-callback complete-callback
-                                          &optional token-callback request-id)
+                                          &optional token-callback request-id session-key)
   "Start Claude CLI process with PROMPT and OPTIONS.
 
 CALLBACK is called with each parsed message.
@@ -578,6 +590,7 @@ ERROR-CALLBACK is called on errors.
 COMPLETE-CALLBACK is called when process completes.
 TOKEN-CALLBACK is called with each text token for streaming (optional).
 REQUEST-ID is a unique identifier for this request (optional).
+SESSION-KEY identifies the session for verbose output grouping (optional).
 
 Returns a process state object."
   (let* ((cli-path (or (plist-get options :cli-path)
@@ -594,6 +607,8 @@ Returns a process state object."
                  :error-callback error-callback
                  :complete-callback complete-callback
                  :request-id req-id
+                 :start-time (float-time)
+                 :session-key session-key
                  :ready nil
                  :closed nil))
          ;; Note: We use :connection-type 'pipe in make-process below
@@ -623,6 +638,10 @@ Returns a process state object."
       (setf (claude-agent--process-state-ready state) t)
       ;; Register query for cancellation tracking
       (claude-agent--register-query req-id state)
+      ;; Initialize verbose buffer for session if session-key provided
+      (when session-key
+        (claude-agent--get-session-verbose-buffer session-key)
+        (claude-agent--verbose-insert-query-header session-key prompt))
       ;; KEY: Close stdin immediately for non-interactive --print mode
       ;; This signals EOF to the CLI, allowing it to proceed
       (process-send-eof process)
@@ -708,7 +727,7 @@ Returns a process state object."
 ** Query Function
 
 #+BEGIN_SRC elisp
-(cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete)
+(cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete session-key)
   "Send a one-shot query to Claude.
 
 PROMPT is the query string to send.
@@ -733,6 +752,9 @@ ON-ERROR is called if an error occurs.
 ON-COMPLETE is called when the query finishes.
   Function signature: (lambda (result-or-error) ...)
 
+SESSION-KEY identifies the session for verbose output grouping (optional).
+  When provided, messages will be written to a per-session verbose buffer.
+
 Returns the process state object for potential interruption.
 The process state includes a request-id that can be used with
 `claude-agent-cancel-query' for cancellation.
@@ -747,7 +769,8 @@ Example:
    :on-token (lambda (text)
                (insert text))  ; For streaming display
    :on-complete (lambda (result)
-                  (message \"Done!\")))"
+                  (message \"Done!\"))
+   :session-key \"my-session\")"
   (unless prompt
     (error "Prompt is required"))
   (let ((opts (or options (claude-agent-options))))
@@ -757,7 +780,9 @@ Example:
      on-message
      on-error
      on-complete
-     on-token)))
+     on-token
+     nil  ; request-id (auto-generated)
+     session-key)))
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
@@ -1758,11 +1783,24 @@ Returns nil if no mapping exists."
 Use when session expires or needs reset."
   (when session-key
     (remhash session-key claude-agent--session-mapping)
+    ;; Optionally kill verbose buffer
+    (when claude-agent-verbose-buffer-auto-kill
+      (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+        (when (buffer-live-p buf)
+          (kill-buffer buf)))
+      (remhash session-key claude-agent--session-verbose-buffers))
     (claude-agent--debug-log "Session cleared: %s" session-key)))
 
 (defun claude-agent--clear-all-sessions ()
   "Clear all session mappings."
-  (clrhash claude-agent--session-mapping))
+  (clrhash claude-agent--session-mapping)
+  ;; Optionally kill all verbose buffers
+  (when claude-agent-verbose-buffer-auto-kill
+    (maphash (lambda (_key buf)
+               (when (buffer-live-p buf)
+                 (kill-buffer buf)))
+             claude-agent--session-verbose-buffers)
+    (clrhash claude-agent--session-verbose-buffers)))
 #+END_SRC
 
 ** Session Expiration
@@ -1833,6 +1871,193 @@ Returns t if cancelled, nil if not found."
   (maphash (lambda (id _state)
              (claude-agent-cancel-query id))
            claude-agent--active-queries))
+#+END_SRC
+
+* Activity Mode-Line
+
+This section provides a mode-line indicator showing when Claude queries are active.
+Displays a spinning indicator when queries are in progress. Auto-enabled on load.
+
+** State Variables
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-activity-string ""
+  "Current activity string for mode-line display.
+Shows spinner when queries are active, empty when idle.")
+
+(defvar claude-agent--activity-timer nil
+  "Timer for updating the activity spinner.")
+
+(defconst claude-agent--spinner-frames '("◐" "◓" "◑" "◒")
+  "Spinner animation frames for activity indicator.")
+
+(defvar claude-agent--spinner-index 0
+  "Current index in spinner-frames for animation.")
+#+END_SRC
+
+** Activity Count
+
+#+BEGIN_SRC elisp
+(defun claude-agent-active-query-count ()
+  "Return count of currently active queries."
+  (let ((count 0))
+    (maphash (lambda (_id state)
+               (when (and state
+                          (claude-agent--process-state-p state)
+                          (not (claude-agent--process-state-closed state)))
+                 ;; Count as active if not closed, even if process ended
+                 ;; (process might be nil during cleanup)
+                 (cl-incf count)))
+             claude-agent--active-queries)
+    count))
+
+(defun claude-agent-active-p ()
+  "Return non-nil if any queries are currently active."
+  (> (claude-agent-active-query-count) 0))
+#+END_SRC
+
+** Activity Display
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-elapsed (start-time)
+  "Format elapsed time since START-TIME as human-readable string."
+  (if (null start-time)
+      "unknown"
+    (let ((elapsed (- (float-time) start-time)))
+      (cond
+       ((< elapsed 60)
+        (format "%ds" (round elapsed)))
+       ((< elapsed 3600)
+        (format "%dm" (round (/ elapsed 60))))
+       (t
+        (format "%dh" (round (/ elapsed 3600))))))))
+
+(defun claude-agent--format-activity-tooltip ()
+  "Format tooltip showing all active queries."
+  (let ((lines (list "Active Queries" "───────────────────")))
+    (maphash
+     (lambda (id state)
+       (when (and state
+                  (claude-agent--process-state-p state)
+                  (not (claude-agent--process-state-closed state)))
+         (let* ((start-time (claude-agent--process-state-start-time state))
+                (elapsed (claude-agent--format-elapsed start-time))
+                (spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
+                ;; Extract short ID from request-id
+                (short-id (if (string-match "req-\\([0-9]+\\)" id)
+                              (format "#%s" (match-string 1 id))
+                            (substring id 0 (min 12 (length id))))))
+           (push (format "● %s  [%s %s]" short-id spinner elapsed) lines))))
+     claude-agent--active-queries)
+    (if (= (length lines) 2)
+        "No active queries\n\nClick to open session manager"
+      (concat (string-join (nreverse lines) "\n")
+              "\n\nClick to open session manager"))))
+
+(defun claude-agent--update-activity-string ()
+  "Update the activity mode-line string based on active queries."
+  (let ((count (claude-agent-active-query-count)))
+    (if (> count 0)
+        (let* ((spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
+               (display (if (= count 1)
+                            (format " [C:%s]" spinner)
+                          (format " [C:%s×%d]" spinner count))))
+          (setq claude-agent--spinner-index
+                (mod (1+ claude-agent--spinner-index)
+                     (length claude-agent--spinner-frames)))
+          (setq claude-agent-activity-string
+                (propertize display
+                            'face '(:foreground "orange" :weight bold)
+                            'help-echo (claude-agent--format-activity-tooltip)
+                            'mouse-face 'mode-line-highlight
+                            'local-map (let ((map (make-sparse-keymap)))
+                                         (define-key map [mode-line mouse-1]
+                                                     #'claude-agent-list-queries)
+                                         map))))
+      ;; No active queries
+      (setq claude-agent-activity-string "")
+      (setq claude-agent--spinner-index 0)))
+  (force-mode-line-update t))
+#+END_SRC
+
+** Session Manager
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-queries-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "k") #'claude-agent-queries-cancel-at-point)
+    (define-key map (kbd "K") #'claude-agent-cancel-all-queries)
+    (define-key map (kbd "g") #'claude-agent-list-queries)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `claude-agent-queries-mode'.")
+
+(define-derived-mode claude-agent-queries-mode special-mode "Claude-Queries"
+  "Major mode for viewing and managing Claude Agent queries."
+  (setq buffer-read-only t)
+  (setq truncate-lines t))
+
+(defun claude-agent-list-queries ()
+  "Display buffer showing all active queries."
+  (interactive)
+  (let ((buf (get-buffer-create "*Claude Queries*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "Active Queries\n")
+        (insert "══════════════════════════════\n\n")
+        (let ((has-queries nil))
+          (maphash
+           (lambda (id state)
+             (when (and state
+                        (claude-agent--process-state-p state)
+                        (not (claude-agent--process-state-closed state)))
+               (setq has-queries t)
+               (let* ((start-time (claude-agent--process-state-start-time state))
+                      (elapsed (claude-agent--format-elapsed start-time))
+                      ;; Short display ID
+                      (short-id (if (string-match "req-\\([0-9]+\\)" id)
+                                    (format "#%s" (match-string 1 id))
+                                  id)))
+                 (insert (propertize (format "● %s" short-id)
+                                     'face 'font-lock-function-name-face
+                                     'query-id id))
+                 (insert (format "  [%s]\n" elapsed)))))
+           claude-agent--active-queries)
+          (unless has-queries
+            (insert "No active queries.\n")))
+        (insert "\n")
+        (insert "Keys: k=cancel  K=cancel all  g=refresh  q=quit\n"))
+      (claude-agent-queries-mode)
+      (goto-char (point-min)))
+    (display-buffer buf)))
+
+(defun claude-agent-queries-cancel-at-point ()
+  "Cancel the query on the current line."
+  (interactive)
+  (let ((query-id (get-text-property (point) 'query-id)))
+    (if query-id
+        (progn
+          (claude-agent-cancel-query query-id)
+          (message "Cancelled query: %s" query-id)
+          (claude-agent-list-queries))
+      (message "No query on this line."))))
+#+END_SRC
+
+** Auto-Enable
+
+#+BEGIN_SRC elisp
+;; Cancel existing timer if any
+(when (timerp claude-agent--activity-timer)
+  (cancel-timer claude-agent--activity-timer))
+
+;; Start activity timer (shows nothing when idle)
+(setq claude-agent--activity-timer
+      (run-with-timer 0 0.2 #'claude-agent--update-activity-string))
+
+;; Add to mode-line if not already present
+(unless (member '(:eval claude-agent-activity-string) mode-line-misc-info)
+  (push '(:eval claude-agent-activity-string) mode-line-misc-info))
 #+END_SRC
 
 * Usage Mode-Line
@@ -2005,6 +2230,156 @@ Returns nil if not set."
         (delete '(:eval claude-agent-usage-string) mode-line-misc-info))
   (force-mode-line-update t)
   (message "Claude usage mode-line stopped"))
+#+END_SRC
+
+* Verbose Output
+
+This section provides per-session verbose output buffers that display
+CLI-like output for all queries within a session.
+
+** Verbose Buffer Storage
+
+#+BEGIN_SRC elisp
+(defvar claude-agent--session-verbose-buffers (make-hash-table :test 'equal)
+  "Map session-key to verbose output buffer.")
+
+(defcustom claude-agent-verbose-buffer-auto-kill nil
+  "If non-nil, kill verbose buffer when session is cleared."
+  :type 'boolean
+  :group 'claude-agent)
+#+END_SRC
+
+** Verbose Mode
+
+#+BEGIN_SRC elisp
+(define-derived-mode claude-agent-verbose-mode special-mode "Claude-Verbose"
+  "Major mode for viewing Claude session verbose output."
+  (setq buffer-read-only t)
+  (setq truncate-lines nil)
+  (visual-line-mode 1))
+#+END_SRC
+
+** Verbose Buffer Management
+
+#+BEGIN_SRC elisp
+(defun claude-agent--get-session-verbose-buffer (session-key)
+  "Get or create verbose buffer for SESSION-KEY."
+  (or (let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+        (and buf (buffer-live-p buf) buf))
+      (let ((buf (generate-new-buffer
+                  (format "*Claude Session[%s]*"
+                          (if (string-match "::\\(.+\\)$" session-key)
+                              (match-string 1 session-key)
+                            (file-name-nondirectory session-key))))))
+        (with-current-buffer buf
+          (claude-agent-verbose-mode)
+          (let ((inhibit-read-only t))
+            (insert (format "═══ Claude Session ═══\n"))
+            (insert (format "Session: %s\n" session-key))
+            (insert (format "Started: %s\n\n" (format-time-string "%Y-%m-%d %H:%M:%S")))))
+        (puthash session-key buf claude-agent--session-verbose-buffers)
+        buf)))
+
+(defun claude-agent--verbose-insert-query-header (session-key prompt)
+  "Insert query header in verbose buffer for SESSION-KEY with PROMPT."
+  (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert "\n")
+          (insert "────────────────────────────────────────\n")
+          (insert (format "▸ Query [%s]\n" (format-time-string "%H:%M:%S")))
+          (insert prompt)
+          (insert "\n\n"))))))
+#+END_SRC
+
+** Message Formatter
+
+#+BEGIN_SRC elisp
+(defun claude-agent--verbose-format-message (msg)
+  "Format MSG for verbose buffer display."
+  (cond
+   ;; Tool use block
+   ((claude-agent-tool-use-block-p msg)
+    (format "▶ %s\n"
+            (propertize (claude-agent-tool-use-block-name msg)
+                        'face 'font-lock-function-name-face)))
+
+   ;; Tool result block
+   ((claude-agent-tool-result-block-p msg)
+    (if (claude-agent-tool-result-block-is-error msg)
+        (format "◀ %s\n" (propertize "ERROR" 'face 'error))
+      ""))  ; Don't show success results (too verbose)
+
+   ;; Thinking block
+   ((claude-agent-thinking-block-p msg)
+    (format "%s\n" (propertize "thinking..." 'face 'font-lock-comment-face)))
+
+   ;; Text block
+   ((claude-agent-text-block-p msg)
+    (claude-agent-text-block-text msg))
+
+   ;; System message
+   ((claude-agent-system-message-p msg)
+    (let ((subtype (claude-agent-system-message-subtype msg)))
+      (when (member subtype '("init" "error"))
+        (format "ℹ %s\n" subtype))))
+
+   ;; Result message
+   ((claude-agent-result-message-p msg)
+    (format "\n%s\n"
+            (propertize
+             (format "✓ %.1fs | $%.4f"
+                     (/ (or (claude-agent-result-message-duration-ms msg) 0) 1000.0)
+                     (or (claude-agent-result-message-total-cost-usd msg) 0))
+             'face 'font-lock-comment-face)))
+
+   (t nil)))
+
+(defun claude-agent--verbose-write-message (session-key msg)
+  "Write MSG to verbose buffer for SESSION-KEY."
+  (when session-key
+    (when-let* ((buf (gethash session-key claude-agent--session-verbose-buffers))
+                (formatted (claude-agent--verbose-format-message msg)))
+      (when (and buf (buffer-live-p buf) (not (string-empty-p formatted)))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (goto-char (point-max))
+            (insert formatted)))))))
+#+END_SRC
+
+** View Commands
+
+#+BEGIN_SRC elisp
+(defun claude-agent-show-session-verbose (session-key)
+  "Show verbose buffer for SESSION-KEY."
+  (interactive
+   (list (completing-read "Session: "
+           (let (keys)
+             (maphash (lambda (k buf)
+                        (when (buffer-live-p buf)
+                          (push k keys)))
+                      claude-agent--session-verbose-buffers)
+             keys))))
+  (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+    (when (buffer-live-p buf)
+      (display-buffer buf))))
+
+(defun claude-agent-list-session-verbose-buffers ()
+  "List all session verbose buffers."
+  (interactive)
+  (let ((bufs nil))
+    (maphash (lambda (key buf)
+               (when (buffer-live-p buf)
+                 (push (cons key buf) bufs)))
+             claude-agent--session-verbose-buffers)
+    (if bufs
+        (let ((selected (completing-read "Session buffer: "
+                          (mapcar #'car bufs))))
+          (when-let ((buf (cdr (assoc selected bufs))))
+            (switch-to-buffer buf)))
+      (message "No session verbose buffers"))))
 #+END_SRC
 
 * Interactive Chat Mode
