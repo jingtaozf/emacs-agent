@@ -3,73 +3,93 @@
 
 * Overview
 
-This is an Emacs client library for the [[https://claude.ai/code][Claude Code CLI]], implemented using literate programming in Org mode.
+An Emacs client library for the [[https://claude.ai/code][Claude Code CLI]], implemented using literate programming in Org mode.
 
-The library mirrors the Python Claude Agent SDK API, providing:
-- ~claude-agent-query~ for one-shot queries
-- ~claude-agent-client~ for bidirectional interactive conversations
-- ~claude-agent-chat~ for comint-based REPL interaction
-- Streaming response support via callbacks
-- Permission system with pattern matching
-- IDE context collection (current file, open files, selection)
-- File-based session management
-- Query cancellation support
-- Activity mode-line indicator (shows when queries are active)
-- Per-session verbose output buffers (CLI-like output view)
-- Usage mode-line display
+This project provides three integrated modules:
 
-* Prerequisites
+| Module | File | Purpose |
+|--------+------+---------|
+| *claude-agent* | =claude-agent.org= | Core SDK: process management, query API, permissions, IDE context |
+| *claude-org* | =claude-org.org= | Org-mode integration: AI blocks, streaming, session management |
+| *emacs-mcp-server* | =emacs-mcp-server.org= | MCP HTTP server: exposes Emacs tools to Claude |
+
+* Quick Start
+
+** Prerequisites
 
 - Emacs 27.1+
-- Claude Code CLI installed (~npm install -g @anthropic-ai/claude-code~ or via [[https://claude.ai/install.sh][install script]])
-- [[https://github.com/jingtaoxu/literate-elisp][literate-elisp]] for loading the org file directly
+- Claude Code CLI: ~npm install -g @anthropic-ai/claude-code~
+- [[https://github.com/jingtaozf/literate-elisp][literate-elisp]] for loading org files directly
+- =web-server= package (for MCP server): ~M-x package-install RET web-server RET~
 
-* Installation
-
-** Direct Loading (Development)
+** Installation
 
 #+BEGIN_SRC elisp
+;; Load the modules
 (require 'literate-elisp)
 (literate-elisp-load "~/projects/claude-agent/claude-agent.org")
+(literate-elisp-load "~/projects/claude-agent/claude-org.org")
+(literate-elisp-load "~/projects/claude-agent/emacs-mcp-server.org")
 #+END_SRC
 
-** Tangled File
+* Tutorial: Getting Started
 
-Generate ~claude-agent.el~ from the org file:
+** 1. Interactive Chat (Easiest)
 
-#+BEGIN_SRC elisp
-(require 'literate-elisp)
-(literate-elisp-tangle "~/projects/claude-agent/claude-agent.org")
-#+END_SRC
-
-Then add to load-path:
-
-#+BEGIN_SRC elisp
-(add-to-list 'load-path "~/projects/claude-agent/")
-(require 'claude-agent)
-#+END_SRC
-
-* Usage
-
-** Interactive Chat Mode
-
-The easiest way to interact with Claude:
+The simplest way to interact with Claude:
 
 #+BEGIN_SRC elisp
 M-x claude-agent-chat
 #+END_SRC
 
 This opens a comint-based buffer where you can:
-- Type messages and press RET to send
-- ~C-c C-k~ to interrupt current request
-- ~C-c C-l~ to clear and reset session
-- ~C-c C-n~ to start new session without clearing
+- Type messages and press =RET= to send
+- =C-c C-k= to interrupt current request
+- =C-c C-l= to clear and reset session
+- =C-c C-n= to start new session without clearing
 
 The chat automatically includes IDE context (current file, open files, selection).
 
-** One-shot Query
+** 2. Org-mode Integration (Recommended for Documentation)
+
+Enable claude-org-mode in any org file:
 
 #+BEGIN_SRC elisp
+M-x claude-org-mode
+#+END_SRC
+
+Then write queries in AI blocks:
+
+#+BEGIN_EXAMPLE
+#+PROPERTY: PROJECT_ROOT /path/to/your/project
+
+* My Questions :claude_chat:
+
+#+begin_src ai
+What does the main function in this project do?
+#+end_src
+
+Press C-c C-c here to execute, response streams below.
+#+END_EXAMPLE
+
+*** Key Bindings in claude-org-mode
+
+| Key | Command | Description |
+|-----+---------+-------------|
+| =C-c C-c= | Execute query | Send AI block to Claude |
+| =C-c C-k= | Cancel | Cancel active query |
+| =C-c C-n= | New block | Insert new AI block |
+| =C-c C-i= | Session info | Show current session identity |
+| =C-c C-l= | List sessions | Show all sessions in buffer |
+| =C-c C-v= | Verbose output | Show CLI-like output buffer |
+| =C-c C-p= | Permission mode | Switch permission level |
+
+** 3. Programmatic Queries
+
+For scripts and automation:
+
+#+BEGIN_SRC elisp
+;; Simple one-shot query
 (claude-agent-query
  "What is 2+2?"
  :on-message (lambda (msg)
@@ -77,66 +97,102 @@ The chat automatically includes IDE context (current file, open files, selection
                  (message "Response: %s"
                           (claude-agent-extract-text msg))))
  :on-complete (lambda (_) (message "Done!")))
-#+END_SRC
 
-** With Options
-
-#+BEGIN_SRC elisp
+;; With options
 (claude-agent-query
  "Explain this code"
  :options (claude-agent-options
            :model "claude-sonnet-4-5"
            :max-turns 3
-           :permission-mode 'accept-edits)
+           :permission-mode 'accept-edits
+           :cwd "/path/to/project")
+ :on-token (lambda (text) (insert text))  ; Stream tokens
  :on-message #'my-message-handler)
 #+END_SRC
 
-** Interactive Client
+* Features
 
-#+BEGIN_SRC elisp
-(let ((client (claude-agent-client-create
-               :options (claude-agent-options :model "claude-sonnet-4-5")
-               :on-message (lambda (msg)
-                             (message "Got: %s" (claude-agent-message-type msg))))))
-  (claude-agent-client-connect client "Hello, Claude!")
-  ;; Later...
-  (claude-agent-client-send client "Follow-up question"))
-#+END_SRC
+** Session Management
 
-* Permission System
+Sessions preserve conversation context across queries.
+
+*** In claude-org-mode
+
+Sessions are automatically managed per-file. You can also create section-scoped sessions:
+
+#+BEGIN_EXAMPLE
+#+PROPERTY: CLAUDE_SESSION_ID my-project-session
+
+* Task A :claude_session:
+This section has its own independent session.
+
+#+begin_src ai
+Question specific to Task A context
+#+end_src
+
+* Task B :claude_session:
+This is a separate session from Task A.
+
+#+begin_src ai
+Different context here
+#+end_src
+#+END_EXAMPLE
+
+*** Session Recovery
+
+When Claude sessions expire, claude-org automatically:
+1. Collects conversation history from the org file
+2. Rebuilds context with a recovery prompt
+3. Retries transparently
+
+** Permission System
 
 Control which tools Claude can use with pattern-based permissions.
 
-** Permission Presets
+*** Permission Presets
 
 #+BEGIN_SRC elisp
-;; Use a preset (default: "readonly")
-(setq claude-agent-permission-preset "readonly")    ; Read, Glob, Grep, WebSearch, WebFetch
-(setq claude-agent-permission-preset "accept-edits") ; Adds Write, Edit, MultiEdit
-(setq claude-agent-permission-preset "bypass")       ; Allow all
-(setq claude-agent-permission-preset "custom")       ; Use claude-agent-permissions
+;; Set globally
+(setq claude-agent-permission-preset "readonly")    ; Read, Glob, Grep only
+(setq claude-agent-permission-preset "accept-edits") ; + Write, Edit, MultiEdit
+(setq claude-agent-permission-preset "plan")         ; Suggests changes only
+(setq claude-agent-permission-preset "bypass")       ; Allow all tools
 #+END_SRC
 
-** Custom Permissions
+*** In claude-org-mode
+
+Set per-file or per-section:
+
+#+BEGIN_EXAMPLE
+#+PROPERTY: CLAUDE_PERMISSION_MODE accept-edits
+
+* Dangerous Section
+:PROPERTIES:
+:CLAUDE_PERMISSION_MODE: readonly
+:END:
+This section is read-only regardless of file setting.
+#+END_EXAMPLE
+
+*** Custom Permissions
 
 #+BEGIN_SRC elisp
 (setq claude-agent-permission-preset "custom")
 (setq claude-agent-permissions
-      '(:allow ("Read(**)" "Glob(**)" "Bash(git:*)")
+      '(:allow ("Read(**)" "Glob(**)" "Bash(git:*)" "mcp__emacs__*")
         :deny ("Bash(rm *)" "Bash(sudo *)")))
 #+END_SRC
 
-** Pattern Syntax
+*** Pattern Syntax
 
 | Pattern | Example | Meaning |
 |---------+---------+---------|
-| ~*~ | ~*~ | Match all tools |
-| ~ToolName~ | ~WebSearch~ | Match tool by name |
-| ~ToolName(**)~ | ~Read(**)~ | Match with any argument |
-| ~ToolName(pattern)~ | ~Bash(git:*)~ | Match with argument pattern |
-| ~mcp__*~ | ~mcp__emacs__*~ | Glob for MCP tools |
+| =*= | =*= | Match all tools |
+| =ToolName= | =WebSearch= | Match tool by name |
+| =ToolName(**)= | =Read(**)= | Match with any argument |
+| =ToolName(pattern)= | =Bash(git:*)= | Match argument prefix |
+| =mcp__*= | =mcp__emacs__*= | Glob for MCP tools |
 
-* IDE Context
+** IDE Context
 
 The library automatically collects IDE context from Emacs:
 - Current file being edited
@@ -144,142 +200,137 @@ The library automatically collects IDE context from Emacs:
 - Selected text region (if any)
 - Current working directory
 
-This context is prepended to prompts as ~<system-reminder>~ tags.
+This context is prepended to prompts as =<system-reminder>= tags.
 
-** Customizing Buffer Exclusions
+*** Excluding Buffers
 
 #+BEGIN_SRC elisp
-;; Exclude buffers by name pattern (regexp)
+;; Exclude by name pattern (regexp)
 (setq claude-agent-ide-context-exclude-buffer-names
       '("*Claude Chat*" "*Messages*" "*scratch*"))
 
-;; Exclude buffers by major mode
+;; Exclude by major mode
 (setq claude-agent-ide-context-exclude-modes
       '(claude-agent-chat-mode special-mode dired-mode))
 
-;; Add custom predicate for exclusion
+;; Custom predicate
 (add-to-list 'claude-agent-ide-context-exclude-predicates
              (lambda (buf)
                (with-current-buffer buf
                  (bound-and-true-p my-special-mode))))
 #+END_SRC
 
-** Manual Context Collection
+** Project Configuration (claude-org)
+
+*** PROJECT_ROOT
+
+Set working directory for Claude:
+
+#+BEGIN_EXAMPLE
+#+PROPERTY: PROJECT_ROOT /path/to/project
+
+* Or per-section via tags
+** Backend Work :PROJECT_ROOT:/path/to/backend:
+#+END_EXAMPLE
+
+*** System Prompts
+
+Tag sections with =:system_prompt:= to include as project guidelines:
+
+#+BEGIN_EXAMPLE
+* Project Guidelines :system_prompt:
+This project uses Python 3.11.
+Always use absolute imports.
+Follow PEP 8 style guide.
+
+* Code Style :system_prompt:
+- Use type hints
+- Write docstrings for all public functions
+#+END_EXAMPLE
+
+These are automatically collected and included in queries.
+
+** MCP Server (Emacs Tools for Claude)
+
+The MCP server exposes Emacs operations to Claude Code CLI.
+
+*** Starting the Server
 
 #+BEGIN_SRC elisp
-;; Get IDE context as plist
-(claude-agent-collect-ide-context)
-;; => (:current-file (:name "foo.el" :path "/path/to/foo.el" :modified t)
-;;     :open-files (...)
-;;     :selection (:text "..." :start-line 10 :end-line 15)
-;;     :cwd "/path/to/project/")
+;; Manual start
+M-x emacs-mcp-server-start
 
-;; Build system reminder string
-(claude-agent-get-system-reminder "/path/to/notebook.org")
+;; Or auto-start with claude-org-mode
+(setq claude-org-auto-start-mcp-server t)
+(setq claude-org-mcp-server-port 9999)
 #+END_SRC
 
-* Session Management
+*** Available Tools
 
-Sessions allow continuing conversations across queries.
+*Core Tool:*
+- =evalElisp= - Execute arbitrary Emacs Lisp code
+
+*Org-mode Tools (13 tools):*
+
+| Tool | Description |
+|------+-------------|
+| =org_list_sections= | List all sections with paths, levels, tags |
+| =org_read_section= | Read section content, properties, tags |
+| =org_create_section= | Create new subsection |
+| =org_update_section= | Update section body content |
+| =org_delete_section= | Delete section and children |
+| =org_get_property= | Get property value |
+| =org_set_property= | Set property value |
+| =org_delete_property= | Delete property |
+| =org_list_properties= | List all properties |
+| =org_get_tags= | Get section tags |
+| =org_set_tags= | Replace all tags |
+| =org_add_tag= | Add single tag |
+| =org_remove_tag= | Remove single tag |
+
+*** Registering Custom Tools
 
 #+BEGIN_SRC elisp
-;; Sessions are automatically managed in claude-agent-chat
+(emacs-mcp-server-register-tool
+ '((name . "my_tool")
+   (description . "Does something useful")
+   (handler . my-tool-handler)
+   (inputSchema . ((type . "object")
+                   (properties . ((arg1 . ((type . "string")))))
+                   (required . ["arg1"])))))
 
-;; For programmatic use:
-(claude-agent--make-session-key "/path/to/file.org" "my-session")
-;; => "/path/to/file.org::my-session"
-
-;; Store/retrieve SDK UUIDs
-(claude-agent--store-sdk-uuid session-key uuid)
-(claude-agent--get-sdk-uuid session-key)
-(claude-agent--clear-session session-key)
+(defun my-tool-handler (params session)
+  "Handle my_tool call. PARAMS contains arguments."
+  (let ((arg1 (alist-get 'arg1 params)))
+    (list `((type . "text")
+            (text . ,(format "Result: %s" arg1))))))
 #+END_SRC
 
-* Query Cancellation
+** Activity Mode-Line
 
-#+BEGIN_SRC elisp
-;; Cancel a specific query
-(claude-agent-cancel-query request-id)
+Shows when Claude queries are active.
 
-;; Cancel all active queries
-(claude-agent-cancel-all-queries)
-
-;; In chat mode, use C-c C-k to interrupt
-#+END_SRC
-
-* Activity Mode-Line
-
-The activity mode-line indicator shows when Claude queries are active.
-
-** Features
-
-- Automatically enabled when ~claude-agent.org~ is loaded
-- Shows spinning indicator ~[C:◐]~ when queries are active
-- Shows count for multiple queries: ~[C:◓×3]~
+- Spinning indicator =[C:◐]= during queries
+- Count for multiple: =[C:◓×3]=
 - Click to open session manager
-- Hover for detailed query information with elapsed time
-
-** Session Manager
-
-Click the mode-line indicator or run:
+- Hover for detailed query information
 
 #+BEGIN_SRC elisp
+;; View active queries
 M-x claude-agent-list-queries
 #+END_SRC
 
 In the session manager:
-- ~k~ - Cancel query at point
-- ~K~ - Cancel all queries
-- ~g~ - Refresh list
-- ~q~ - Quit
+- =k= - Cancel query at point
+- =K= - Cancel all queries
+- =g= - Refresh list
+- =q= - Quit
 
-* Verbose Output Buffers
+** Usage Mode-Line
 
-Per-session verbose buffers display CLI-like output for all queries within a session.
+Display Claude API usage statistics.
 
-** Usage
-
-When using ~claude-agent-query~ with ~:session-key~, messages are written to a verbose buffer:
-
-#+BEGIN_SRC elisp
-(claude-agent-query
- "Analyze this code"
- :session-key "my-project::main"
- :on-message #'my-handler)
-#+END_SRC
-
-** View Commands
-
-#+BEGIN_SRC elisp
-;; Show verbose buffer for a specific session
-M-x claude-agent-show-session-verbose
-
-;; List all session verbose buffers
-M-x claude-agent-list-session-verbose-buffers
-#+END_SRC
-
-** Buffer Contents
-
-The verbose buffer shows:
-- Session header with start time
-- Query headers with timestamps
-- Tool calls (Read, Write, Bash, etc.)
-- Thinking indicators
-- Text responses
-- Completion summary (duration, cost)
-
-** Cleanup
-
-#+BEGIN_SRC elisp
-;; Auto-kill verbose buffers when sessions are cleared
-(setq claude-agent-verbose-buffer-auto-kill t)
-#+END_SRC
-
-* Usage Mode-Line
-
-Display Claude API usage statistics in the mode-line.
-
-** Setup
+*** Setup
 
 #+BEGIN_SRC elisp
 ;; Set your organization ID (from claude.ai URL)
@@ -290,117 +341,174 @@ Display Claude API usage statistics in the mode-line.
 ;; export CLAUDE_SESSION_KEY="your-session-key"
 #+END_SRC
 
-** Usage
+*** Usage
 
 #+BEGIN_SRC elisp
-;; Start mode-line display (auto-refresh every 5 min during work hours)
-M-x claude-agent-usage-mode-line-start
-
-;; Stop mode-line display
-M-x claude-agent-usage-mode-line-stop
-
-;; Manual refresh
-M-x claude-agent-usage-fetch
+M-x claude-agent-usage-mode-line-start  ; Start (auto-refresh every 5 min)
+M-x claude-agent-usage-mode-line-stop   ; Stop
+M-x claude-agent-usage-fetch            ; Manual refresh
 #+END_SRC
 
-** Display Format
+*Display Format:*
+- =[C:XX|YY|ZZ]= - 5-hour | 7-day | 7-day Sonnet utilization %
+- Hover for reset times (e.g., "7d 10h", "5h 30m")
 
-- ~[C:XX|YY|ZZ]~ - 5-hour | 7-day | 7-day Sonnet utilization percentages
-- ~[C:ERR]~ - API error (hover for details, click to retry)
-- ~[C:CFG]~ - Missing configuration
+** Verbose Output Buffers
 
-Hover over the display for a tooltip with reset times.
-
-* Customization
+Per-session verbose buffers display CLI-like output.
 
 #+BEGIN_SRC elisp
-;; Set default model
+;; In claude-org-mode
+C-c C-v  ; Show verbose buffer for current session
+
+;; Programmatically
+M-x claude-agent-show-session-verbose
+M-x claude-agent-list-session-verbose-buffers
+#+END_SRC
+
+Buffer shows: query headers, tool calls, thinking indicators, responses, cost summary.
+
+* Configuration Reference
+
+** claude-agent
+
+#+BEGIN_SRC elisp
+;; Model
 (setq claude-agent-default-model "claude-sonnet-4-5")
 
-;; Explicit CLI path
+;; CLI path (auto-detected if nil)
 (setq claude-agent-cli-path "/path/to/claude")
 
-;; Enable debug logging
+;; Debug logging
 (setq claude-agent-debug t)
 
-;; Chat mode settings
+;; Permission preset
+(setq claude-agent-permission-preset "readonly")
+
+;; Verbose buffer cleanup
+(setq claude-agent-verbose-buffer-auto-kill t)
+#+END_SRC
+
+** claude-org
+
+#+BEGIN_SRC elisp
+;; Font-lock delay during streaming (lower = more responsive)
+(setq claude-org-fontlock-delay 0.05)
+
+;; Default tags
+(setq claude-org-heading-tag "claude_chat")
+(setq claude-org-session-tag "claude_session")
+
+;; Include IDE context in prompts
+(setq claude-org-include-ide-context t)
+
+;; Show system messages in response
+(setq claude-org-show-system-messages nil)
+
+;; Tools to auto-approve
+(setq claude-org-allowed-tools '("Read(**)" "Glob(**)" "Grep(**)"))
+
+;; MCP server auto-start
+(setq claude-org-auto-start-mcp-server t)
+(setq claude-org-mcp-server-port 9999)
+
+;; Default system prompts (list of strings)
+(setq claude-org-default-system-prompts '("Your custom prompt"))
+#+END_SRC
+
+** emacs-mcp-server
+
+#+BEGIN_SRC elisp
+;; Default port (0 = auto-select)
+(setq emacs-mcp-server-default-port 9999)
+
+;; Permission mode for tools
+(setq emacs-mcp-server-permission-mode "bypassPermissions")
+
+;; Allowed tool patterns
+(setq emacs-mcp-server-allowed-tools '("mcp__emacs__*"))
+
+;; Max output length from evalElisp
+(setq emacs-mcp-server-max-output-length 50000)
+#+END_SRC
+
+** claude-agent-chat
+
+#+BEGIN_SRC elisp
+;; Prompt string
 (setq claude-agent-chat-prompt "You> ")
-(setq claude-agent-chat-show-cost t)
+
+;; Buffer name
+(setq claude-agent-chat-buffer-name "*Claude Chat*")
+
+;; Show system messages
 (setq claude-agent-chat-show-system-messages nil)
+
+;; Show cost after each response
+(setq claude-agent-chat-show-cost t)
+
+;; Include IDE context
 (setq claude-agent-chat-include-ide-context t)
 #+END_SRC
 
 * API Reference
 
-** Core Functions
+** Core Functions (claude-agent)
 
-- ~claude-agent-query~ - Send one-shot query
-- ~claude-agent-options~ - Create options plist
-- ~claude-agent-extract-text~ - Extract text from assistant message
-- ~claude-agent-extract-tool-uses~ - Extract tool use blocks
-- ~claude-agent-extract-thinking~ - Extract thinking content
-- ~claude-agent-message-type~ - Get message type symbol
+| Function | Description |
+|----------+-------------|
+| =claude-agent-query= | Send one-shot query with callbacks |
+| =claude-agent-options= | Create options plist |
+| =claude-agent-extract-text= | Extract text from assistant message |
+| =claude-agent-extract-tool-uses= | Extract tool use blocks |
+| =claude-agent-extract-thinking= | Extract thinking content |
+| =claude-agent-message-type= | Get message type symbol |
+| =claude-agent-cancel-query= | Cancel specific query |
+| =claude-agent-cancel-all-queries= | Cancel all active queries |
+| =claude-agent-active-query-count= | Get number of active queries |
 
 ** Client Functions
 
-- ~claude-agent-client-create~ - Create new client
-- ~claude-agent-client-connect~ - Connect to Claude
-- ~claude-agent-client-send~ - Send message
-- ~claude-agent-client-disconnect~ - Disconnect
-- ~claude-agent-client-interrupt~ - Interrupt current operation
+| Function | Description |
+|----------+-------------|
+| =claude-agent-client-create= | Create new client |
+| =claude-agent-client-connect= | Connect to Claude |
+| =claude-agent-client-send= | Send message |
+| =claude-agent-client-disconnect= | Disconnect |
+| =claude-agent-client-interrupt= | Interrupt current operation |
 
-** Chat Functions
+** Org Functions (claude-org)
 
-- ~claude-agent-chat~ - Open interactive chat buffer
-- ~claude-agent-chat-interrupt~ - Interrupt current request (C-c C-k)
-- ~claude-agent-chat-clear~ - Clear and reset session (C-c C-l)
-- ~claude-agent-chat-new-session~ - Start new session (C-c C-n)
+| Function | Description |
+|----------+-------------|
+| =claude-org-mode= | Enable/disable minor mode |
+| =claude-org-execute= | Execute AI block (C-c C-c) |
+| =claude-org-cancel= | Cancel current query |
+| =claude-org-insert-block= | Insert new AI block |
+| =claude-org-show-session-info= | Show session identity |
+| =claude-org-list-sessions= | List all sessions |
+| =claude-org-show-verbose= | Show verbose output |
+| =claude-org-switch-permission-mode= | Change permission mode |
 
-** Permission Functions
+** MCP Server Functions
 
-- ~claude-agent-permission-match-p~ - Check if tool matches pattern
-- ~claude-agent-check-permission~ - Check allow/deny for tool
-- ~claude-agent-get-effective-permissions~ - Get current permissions
-- ~claude-agent-make-permission-hook~ - Create PreToolUse hook
-
-** IDE Context Functions
-
-- ~claude-agent-collect-ide-context~ - Collect current IDE state
-- ~claude-agent-get-system-reminder~ - Build system-reminder string
-- ~claude-agent-build-system-reminder~ - Build with explicit args
-
-** Session Functions
-
-- ~claude-agent--make-session-key~ - Create session key
-- ~claude-agent--get-sdk-uuid~ - Get SDK UUID for session
-- ~claude-agent--store-sdk-uuid~ - Store session mapping
-- ~claude-agent--clear-session~ - Clear session mapping
-
-** Activity Functions
-
-- ~claude-agent-active-query-count~ - Get number of active queries
-- ~claude-agent-active-p~ - Check if any queries are active
-- ~claude-agent-list-queries~ - Open session manager buffer
-- ~claude-agent-cancel-all-queries~ - Cancel all active queries
-
-** Verbose Output Functions
-
-- ~claude-agent-show-session-verbose~ - Show verbose buffer for a session
-- ~claude-agent-list-session-verbose-buffers~ - List all verbose buffers
-
-** Usage Functions
-
-- ~claude-agent-usage-mode-line-start~ - Start mode-line display
-- ~claude-agent-usage-mode-line-stop~ - Stop mode-line display
-- ~claude-agent-usage-fetch~ - Fetch usage data
+| Function | Description |
+|----------+-------------|
+| =emacs-mcp-server-start= | Start MCP server |
+| =emacs-mcp-server-stop= | Stop MCP server |
+| =emacs-mcp-server-running-p= | Check if running |
+| =emacs-mcp-server-port= | Get current port |
+| =emacs-mcp-server-register-tool= | Register custom tool |
+| =emacs-mcp-server-unregister-tool= | Unregister tool |
+| =claude-mcp-org-enable= | Enable org tools |
+| =claude-mcp-org-disable= | Disable org tools |
 
 * Running Tests
-
-Load the org file with ~literate-elisp-test-p~ set to ~t~, then run ~M-x ert~:
 
 #+BEGIN_SRC elisp
 (setq literate-elisp-test-p t)
 (literate-elisp-load "~/projects/claude-agent/claude-agent.org")
+(literate-elisp-load "~/projects/claude-agent/claude-org.org")
 (ert t)  ; Run all tests
 #+END_SRC
 
