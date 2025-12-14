@@ -1168,6 +1168,618 @@ Returns nil if not yet available."
   (should (memq 'PreToolUse claude-agent-hook-events))
   (should (memq 'PostToolUse claude-agent-hook-events))
   (should (memq 'Stop claude-agent-hook-events)))
+
+;; Permission System Tests
+
+(ert-deftest claude-agent-test-permission-wildcard ()
+  "Test wildcard pattern matches all tools."
+  (should (claude-agent-permission-match-p "Read" nil "*"))
+  (should (claude-agent-permission-match-p "Bash" nil "*"))
+  (should (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "*")))
+
+(ert-deftest claude-agent-test-permission-tool-name ()
+  "Test simple tool name matching."
+  (should (claude-agent-permission-match-p "WebSearch" nil "WebSearch"))
+  (should-not (claude-agent-permission-match-p "WebFetch" nil "WebSearch"))
+  (should (claude-agent-permission-match-p "Read" nil "Read")))
+
+(ert-deftest claude-agent-test-permission-glob-pattern ()
+  "Test glob patterns for MCP tools."
+  (should (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "mcp__emacs__*"))
+  (should (claude-agent-permission-match-p "mcp__context7__getDocs" nil "mcp__context7__*"))
+  (should-not (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "mcp__context7__*")))
+
+(ert-deftest claude-agent-test-permission-with-args ()
+  "Test patterns with argument matching."
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/any/file.txt") "Read(**)"))
+  (should (claude-agent-permission-match-p "Bash" '(:command "git status") "Bash(git:*)"))
+  (should-not (claude-agent-permission-match-p "Bash" '(:command "rm -rf /") "Bash(git:*)")))
+
+(ert-deftest claude-agent-test-permission-check-deny-first ()
+  "Test that deny patterns take precedence."
+  (let ((allow '("Bash(**)"))
+        (deny '("Bash(rm *)")))
+    (should (eq 'deny (claude-agent-check-permission
+                       "Bash" '(:command "rm -rf /") allow deny)))
+    (should (eq 'allow (claude-agent-check-permission
+                        "Bash" '(:command "ls -la") allow deny)))))
+
+(ert-deftest claude-agent-test-effective-permissions ()
+  "Test getting effective permissions from presets."
+  (let ((claude-agent-permission-preset "readonly"))
+    (let ((perms (claude-agent-get-effective-permissions)))
+      (should (member "Read(**)" (plist-get perms :allow)))
+      (should (null (plist-get perms :deny))))))
+
+;; Session Management Tests
+
+(ert-deftest claude-agent-test-session-key-creation ()
+  "Test session key creation."
+  (should (equal "/path/to/file.org"
+                 (claude-agent--make-session-key "/path/to/file.org" nil)))
+  (should (equal "/path/to/file.org::my-session"
+                 (claude-agent--make-session-key "/path/to/file.org" "my-session"))))
+
+(ert-deftest claude-agent-test-session-mapping ()
+  "Test session UUID mapping."
+  (claude-agent--clear-all-sessions)
+  (let ((key "test-file::test-session")
+        (uuid "abc-123-def-456"))
+    (should (null (claude-agent--get-sdk-uuid key)))
+    (claude-agent--store-sdk-uuid key uuid)
+    (should (equal uuid (claude-agent--get-sdk-uuid key)))
+    (claude-agent--clear-session key)
+    (should (null (claude-agent--get-sdk-uuid key)))))
+
+(ert-deftest claude-agent-test-session-expired-detection ()
+  "Test session expiration detection."
+  (should (claude-agent--session-expired-p "No conversation found with session ID abc-123"))
+  (should (claude-agent--session-expired-p "session not found"))
+  (should (claude-agent--session-expired-p "session expired"))
+  (should-not (claude-agent--session-expired-p "some other error")))
+
+;; IDE Context Tests
+
+(ert-deftest claude-agent-test-system-reminder-empty ()
+  "Test system reminder with no context returns empty string."
+  (should (equal "" (claude-agent-build-system-reminder))))
+
+(ert-deftest claude-agent-test-system-reminder-with-file ()
+  "Test system reminder with current file."
+  (let ((result (claude-agent-build-system-reminder
+                 :current-file '(:name "test.el" :path "/path/test.el" :modified t))))
+    (should (string-match-p "<system-reminder>" result))
+    (should (string-match-p "test.el" result))
+    (should (string-match-p "(modified)" result))))
+
+(ert-deftest claude-agent-test-system-reminder-with-notebook ()
+  "Test system reminder with conversation notebook."
+  (let ((result (claude-agent-build-system-reminder
+                 :file-path "/path/to/notes.org")))
+    (should (string-match-p "Conversation notebook:" result))
+    (should (string-match-p "/path/to/notes.org" result))))
+#+END_SRC
+
+* Permission System
+
+This section provides permission pattern matching for controlling which
+Claude tools are allowed or denied. It ports the permission system from
+the Python backend.
+
+** Permission Presets
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-permission-preset "readonly"
+  "Permission preset for Claude operations.
+Options:
+  - \"readonly\": Read, Glob, Grep, WebSearch, WebFetch, Task, MCP tools
+  - \"accept-edits\": Adds Write, Edit, MultiEdit, TodoWrite
+  - \"bypass\": Allow all operations
+  - \"custom\": Use `claude-agent-permissions'"
+  :type '(choice (const :tag "Read-only (recommended)" "readonly")
+                 (const :tag "Accept Edits" "accept-edits")
+                 (const :tag "Bypass All" "bypass")
+                 (const :tag "Custom" "custom"))
+  :group 'claude-agent)
+
+(defcustom claude-agent-permissions
+  '(:allow ("Read(**)" "Glob(**)" "Grep(**)" "WebSearch" "WebFetch")
+    :deny ())
+  "Custom permission patterns when preset is \"custom\".
+Format: (:allow (patterns...) :deny (patterns...))
+
+Pattern examples:
+  - \"Read(**)\" - Allow reading any file
+  - \"Bash(git:*)\" - Allow bash commands starting with git
+  - \"Read(**/.env)\" - Match .env files (use in :deny)
+  - \"mcp__emacs__*\" - Allow all Emacs MCP tools"
+  :type '(plist :key-type symbol :value-type (repeat string))
+  :group 'claude-agent)
+
+(defconst claude-agent--preset-permissions
+  '(("readonly" . (:allow ("Read(**)" "Glob(**)" "Grep(**)" "WebSearch" "WebFetch" "Task"
+                           "mcp__emacs__*" "mcp__context7__*")
+                   :deny ()))
+    ("accept-edits" . (:allow ("Read(**)" "Glob(**)" "Grep(**)" "Write(**)" "Edit(**)"
+                               "MultiEdit(**)" "WebSearch" "WebFetch" "Task" "TodoWrite"
+                               "mcp__emacs__*" "mcp__context7__*")
+                      :deny ()))
+    ("bypass" . (:allow ("*")
+                 :deny ())))
+  "Built-in permission presets.")
+
+(defconst claude-agent--default-deny-patterns
+  '("Bash(rm *)" "Bash(sudo *)" "Bash(chmod 777 *)")
+  "Default deny patterns for safety.
+These are always checked regardless of preset.")
+#+END_SRC
+
+** Pattern Matching
+
+#+BEGIN_SRC elisp
+(defun claude-agent--get-tool-first-arg (tool-name tool-input)
+  "Get the first string argument from TOOL-INPUT for pattern matching.
+Different tools have different primary arguments."
+  (cond
+   ;; File operations use file_path
+   ((member tool-name '("Read" "Write" "Edit" "MultiEdit"))
+    (plist-get tool-input :file_path))
+   ;; Glob uses pattern
+   ((string= tool-name "Glob")
+    (plist-get tool-input :pattern))
+   ;; Grep uses path or pattern
+   ((string= tool-name "Grep")
+    (or (plist-get tool-input :path)
+        (plist-get tool-input :pattern)))
+   ;; Bash uses command
+   ((string= tool-name "Bash")
+    (plist-get tool-input :command))
+   ;; WebSearch uses query
+   ((string= tool-name "WebSearch")
+    (plist-get tool-input :query))
+   ;; WebFetch uses url
+   ((string= tool-name "WebFetch")
+    (plist-get tool-input :url))
+   ;; Task uses subagent_type
+   ((string= tool-name "Task")
+    (plist-get tool-input :subagent_type))
+   ;; TodoWrite uses first todo content
+   ((string= tool-name "TodoWrite")
+    (let ((todos (plist-get tool-input :todos)))
+      (when (and todos (listp todos) (car todos))
+        (plist-get (car todos) :content))))
+   ;; Default: find first string value
+   (t
+    (cl-loop for val in tool-input
+             when (stringp val)
+             return val))))
+
+(defun claude-agent-permission-match-p (tool-name tool-input pattern)
+  "Check if TOOL-NAME with TOOL-INPUT matches PATTERN.
+Patterns can be:
+  - \"*\" matches all tools
+  - \"ToolName\" matches tool by name only
+  - \"ToolName(**)\" matches tool with any arguments
+  - \"ToolName(arg-pattern)\" matches tool with specific argument pattern
+  - \"mcp__server__*\" matches MCP tools with glob"
+  (cond
+   ;; Wildcard matches everything
+   ((string= pattern "*") t)
+
+   ;; Glob pattern for tool names (e.g., mcp__emacs__*)
+   ((and (string-match-p "\\*" pattern)
+         (not (string-match-p "(" pattern)))
+    (let ((regex (concat "^"
+                         (replace-regexp-in-string "\\*" ".*" (regexp-quote pattern))
+                         "$")))
+      ;; Remove double escaping from the replacement
+      (setq regex (replace-regexp-in-string "\\\\\\.\\*" ".*" regex))
+      (string-match-p regex tool-name)))
+
+   ;; Pattern with arguments: ToolName(args)
+   ((string-match "^\\([A-Za-z_][A-Za-z0-9_]*\\)(\\(.*\\))$" pattern)
+    (let ((pattern-tool (match-string 1 pattern))
+          (pattern-args (match-string 2 pattern)))
+      (and (string= tool-name pattern-tool)
+           (claude-agent--match-arg-pattern
+            (claude-agent--get-tool-first-arg tool-name tool-input)
+            pattern-args))))
+
+   ;; Simple tool name match
+   ((string-match "^[A-Za-z_][A-Za-z0-9_]*$" pattern)
+    (string= tool-name pattern))
+
+   ;; No match
+   (t nil)))
+
+(defun claude-agent--match-arg-pattern (arg pattern)
+  "Check if ARG matches PATTERN.
+Supports:
+  - \"**\" matches anything
+  - \"prefix:*\" matches args starting with prefix
+  - \"*\" at end for prefix matching
+  - Literal string matching"
+  (when (and arg pattern)
+    (cond
+     ;; ** matches anything
+     ((string= pattern "**") t)
+
+     ;; prefix:* pattern (e.g., git:* matches 'git status')
+     ((string-match "^\\([^:]+\\):\\*$" pattern)
+      (let ((prefix (match-string 1 pattern)))
+        (string-prefix-p prefix arg)))
+
+     ;; Ends with * for prefix matching
+     ((string-suffix-p "*" pattern)
+      (string-prefix-p (substring pattern 0 -1) arg))
+
+     ;; Contains ** for glob-style matching
+     ((string-match-p "\\*\\*" pattern)
+      (let ((regex (concat "^"
+                           (replace-regexp-in-string
+                            "\\*\\*" ".*"
+                            (regexp-quote pattern))
+                           "$")))
+        (setq regex (replace-regexp-in-string "\\\\\\.\\*" ".*" regex))
+        (string-match-p regex arg)))
+
+     ;; Literal match
+     (t (string= arg pattern)))))
+#+END_SRC
+
+** Permission Checking
+
+#+BEGIN_SRC elisp
+(defun claude-agent-check-permission (tool-name tool-input allow-patterns deny-patterns)
+  "Check if TOOL-NAME with TOOL-INPUT should be allowed.
+Returns 'allow, 'deny, or 'ask.
+Deny patterns are checked first and take precedence."
+  (catch 'result
+    ;; Always check default deny patterns first
+    (dolist (pattern claude-agent--default-deny-patterns)
+      (when (claude-agent-permission-match-p tool-name tool-input pattern)
+        (throw 'result 'deny)))
+    ;; Check user deny patterns
+    (dolist (pattern deny-patterns)
+      (when (claude-agent-permission-match-p tool-name tool-input pattern)
+        (throw 'result 'deny)))
+    ;; Check allow patterns
+    (dolist (pattern allow-patterns)
+      (when (claude-agent-permission-match-p tool-name tool-input pattern)
+        (throw 'result 'allow)))
+    ;; Default to ask
+    'ask))
+
+(defun claude-agent-get-effective-permissions ()
+  "Get effective permissions based on current preset.
+Returns plist with :allow and :deny lists."
+  (if (string= claude-agent-permission-preset "custom")
+      claude-agent-permissions
+    (alist-get claude-agent-permission-preset claude-agent--preset-permissions
+               nil nil #'string=)))
+
+(defun claude-agent-make-permission-hook (allow-patterns deny-patterns)
+  "Create a PreToolUse hook for permission checking.
+ALLOW-PATTERNS is list of patterns that allow tool use.
+DENY-PATTERNS is list of patterns that deny tool use.
+Returns a function that can be used with the hook system."
+  (lambda (input)
+    (let* ((tool-name (claude-agent-pre-tool-use-input-tool-name input))
+           (tool-input (claude-agent-pre-tool-use-input-tool-input input))
+           (decision (claude-agent-check-permission
+                      tool-name tool-input allow-patterns deny-patterns)))
+      (pcase decision
+        ('allow
+         '(:decision "allow"))
+        ('deny
+         '(:decision "deny" :reason "Denied by permission policy"))
+        ('ask
+         ;; Default to allow for now; could prompt user
+         '(:decision "allow"))))))
+#+END_SRC
+
+* IDE Context
+
+This section provides functions for collecting IDE context from Emacs
+and building system reminder tags that match the Python backend format.
+
+** Buffer Filtering
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-ide-context-exclude-buffer-names
+  '("*Claude Chat*" "*Messages*" "*scratch*" "*Completions*")
+  "List of buffer name patterns to exclude from IDE context.
+Patterns are matched using `string-match-p' (regexp)."
+  :type '(repeat string)
+  :group 'claude-agent)
+
+(defcustom claude-agent-ide-context-exclude-modes
+  '(claude-agent-chat-mode special-mode dired-mode)
+  "List of major modes to exclude from IDE context."
+  :type '(repeat symbol)
+  :group 'claude-agent)
+
+(defvar claude-agent-ide-context-exclude-predicates nil
+  "List of predicate functions for excluding buffers from IDE context.
+Each function takes a buffer as argument and returns non-nil to exclude it.
+This allows dynamic exclusion, e.g., for claude-org-mode buffers.")
+
+(defun claude-agent--buffer-excluded-p (buffer)
+  "Check if BUFFER should be excluded from IDE context.
+Returns non-nil if buffer matches any exclusion criteria."
+  (or
+   ;; Check buffer name patterns
+   (cl-some (lambda (pattern)
+              (string-match-p pattern (buffer-name buffer)))
+            claude-agent-ide-context-exclude-buffer-names)
+   ;; Check major mode
+   (with-current-buffer buffer
+     (cl-some (lambda (mode)
+                (derived-mode-p mode))
+              claude-agent-ide-context-exclude-modes))
+   ;; Check custom predicates
+   (cl-some (lambda (pred)
+              (funcall pred buffer))
+            claude-agent-ide-context-exclude-predicates)))
+#+END_SRC
+
+** Buffer Information
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-buffer-info (buffer)
+  "Format BUFFER info as plist with :name :path :modified."
+  (with-current-buffer buffer
+    (list :name (buffer-name)
+          :path (buffer-file-name)
+          :modified (buffer-modified-p))))
+
+(defun claude-agent--get-file-buffers (&optional limit)
+  "Get list of file-visiting buffers, up to LIMIT (default 10).
+Excludes buffers matching `claude-agent-ide-context-exclude-buffer-names',
+`claude-agent-ide-context-exclude-modes', or any predicate in
+`claude-agent-ide-context-exclude-predicates'."
+  (let ((limit (or limit 10))
+        (buffers nil))
+    (dolist (buf (buffer-list))
+      (when (and (buffer-file-name buf)
+                 (not (claude-agent--buffer-excluded-p buf))
+                 (< (length buffers) limit))
+        (push (claude-agent--format-buffer-info buf) buffers)))
+    (nreverse buffers)))
+#+END_SRC
+
+** Selection Formatting
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-selection ()
+  "Format current selection as plist with :text :start-line :end-line.
+Returns nil if no region active. Truncates text at 500 chars."
+  (when (use-region-p)
+    (let* ((start (region-beginning))
+           (end (region-end))
+           (text (buffer-substring-no-properties start end))
+           (start-line (line-number-at-pos start))
+           (end-line (line-number-at-pos end)))
+      (list :text (if (> (length text) 500)
+                      (concat (substring text 0 500) "...")
+                    text)
+            :start-line start-line
+            :end-line end-line))))
+#+END_SRC
+
+** IDE Context Collection
+
+#+BEGIN_SRC elisp
+(defun claude-agent--get-current-file-buffer ()
+  "Get the most recently used file buffer that is not excluded.
+Returns the buffer object or nil if none found.
+This finds the most recently visited file buffer from `buffer-list',
+which works correctly even when called from a special buffer like Claude Chat."
+  (cl-loop for buf in (buffer-list)
+           when (and (buffer-file-name buf)
+                     (not (claude-agent--buffer-excluded-p buf)))
+           return buf))
+
+(defun claude-agent-collect-ide-context ()
+  "Collect IDE context from current Emacs state.
+Returns plist with:
+  :current-file - Most recent non-excluded file buffer info (name, path, modified)
+  :open-files   - List of file-visiting buffers (max 10), excludes filtered buffers
+  :selection    - Region info if active (text, start-line, end-line)
+  :cwd          - Current working directory
+
+Buffers are filtered according to `claude-agent-ide-context-exclude-buffer-names',
+`claude-agent-ide-context-exclude-modes', and `claude-agent-ide-context-exclude-predicates'.
+
+Note: current-file is determined by finding the most recently used file buffer
+from `buffer-list', not necessarily `current-buffer'. This allows correct context
+collection when called from special buffers like Claude Chat."
+  (let ((current-buf (claude-agent--get-current-file-buffer)))
+    (list :current-file (when current-buf
+                          (claude-agent--format-buffer-info current-buf))
+          :open-files (claude-agent--get-file-buffers 10)
+          :selection (claude-agent--format-selection)
+          :cwd default-directory)))
+#+END_SRC
+
+** System Reminder Building
+
+#+BEGIN_SRC elisp
+(cl-defun claude-agent-build-system-reminder (&key current-file open-files
+                                                   selection file-path)
+  "Build <system-reminder> tag with IDE context.
+Returns string suitable for prepending to user prompt.
+
+CURRENT-FILE is plist with :name :path :modified.
+OPEN-FILES is list of such plists.
+SELECTION is plist with :text :start-line :end-line.
+FILE-PATH is the conversation notebook path."
+  (let ((parts nil))
+    ;; Current file
+    (when current-file
+      (let ((name (or (plist-get current-file :name)
+                      (plist-get current-file :path)
+                      "unknown"))
+            (path (plist-get current-file :path))
+            (modified (plist-get current-file :modified)))
+        (push (concat "The user is currently editing: "
+                      name
+                      (if modified " (modified)" "")
+                      (if path (format " (%s)" path) ""))
+              parts)))
+
+    ;; Open files
+    (when open-files
+      (let ((file-list
+             (mapconcat
+              (lambda (f)
+                (concat (or (plist-get f :name)
+                            (plist-get f :path)
+                            "unknown")
+                        (if (plist-get f :modified) "*" "")))
+              (seq-take open-files 10)
+              ", ")))
+        (push (format "Open files in editor: %s" file-list) parts)))
+
+    ;; Selection
+    (when selection
+      (let ((text (plist-get selection :text))
+            (start-line (plist-get selection :start-line))
+            (end-line (plist-get selection :end-line)))
+        (when text
+          (push (format "Selected code (lines %d-%d):\n```\n%s\n```"
+                        start-line end-line text)
+                parts))))
+
+    ;; Conversation notebook
+    (when file-path
+      (push (format "Conversation notebook: %s" file-path) parts))
+
+    ;; Build final string
+    (if parts
+        (concat "<system-reminder>\n"
+                (mapconcat #'identity (nreverse parts) "\n")
+                "\n</system-reminder>")
+      "")))
+
+(defun claude-agent-get-system-reminder (&optional file-path)
+  "Get system reminder with automatically collected IDE context.
+FILE-PATH is the optional conversation notebook path.
+All other context (current-file, open-files, selection) is collected
+automatically from current Emacs state."
+  (let ((context (claude-agent-collect-ide-context)))
+    (claude-agent-build-system-reminder
+     :current-file (plist-get context :current-file)
+     :open-files (plist-get context :open-files)
+     :selection (plist-get context :selection)
+     :file-path file-path)))
+#+END_SRC
+
+* Session Management
+
+This section provides file-based session management, mapping internal
+session keys (file_path::session_id) to SDK UUIDs for conversation resume.
+
+** Session Mapping
+
+#+BEGIN_SRC elisp
+(defvar claude-agent--session-mapping (make-hash-table :test 'equal)
+  "Map internal session keys to SDK UUIDs.
+Internal keys use format: file_path::session_id or just file_path.
+SDK UUIDs are returned by Claude CLI for session resume.")
+
+(defun claude-agent--make-session-key (file-path &optional session-id)
+  "Create internal session key from FILE-PATH and optional SESSION-ID.
+If SESSION-ID provided: \"file-path::session-id\"
+Otherwise: \"file-path\""
+  (if (and file-path session-id)
+      (format "%s::%s" file-path session-id)
+    file-path))
+
+(defun claude-agent--get-sdk-uuid (session-key)
+  "Look up SDK UUID for SESSION-KEY.
+Returns nil if no mapping exists."
+  (gethash session-key claude-agent--session-mapping))
+
+(defun claude-agent--store-sdk-uuid (session-key sdk-uuid)
+  "Store SDK-UUID mapping for SESSION-KEY."
+  (when (and session-key sdk-uuid)
+    (puthash session-key sdk-uuid claude-agent--session-mapping)
+    (claude-agent--debug-log "Session stored: %s -> %s" session-key sdk-uuid)))
+
+(defun claude-agent--clear-session (session-key)
+  "Clear session mapping for SESSION-KEY.
+Use when session expires or needs reset."
+  (when session-key
+    (remhash session-key claude-agent--session-mapping)
+    (claude-agent--debug-log "Session cleared: %s" session-key)))
+
+(defun claude-agent--clear-all-sessions ()
+  "Clear all session mappings."
+  (clrhash claude-agent--session-mapping))
+#+END_SRC
+
+** Session Expiration
+
+#+BEGIN_SRC elisp
+(defun claude-agent--session-expired-p (error-message)
+  "Check if ERROR-MESSAGE indicates session expiration.
+Returns non-nil if the error is about an expired/missing session."
+  (when (stringp error-message)
+    (or (string-match-p "No conversation found with session ID" error-message)
+        (string-match-p "session.*not found" error-message)
+        (string-match-p "session.*expired" error-message))))
+#+END_SRC
+
+* Query Cancellation
+
+This section provides query cancellation support by tracking active
+queries and allowing them to be interrupted.
+
+** Active Query Tracking
+
+#+BEGIN_SRC elisp
+(defvar claude-agent--active-queries (make-hash-table :test 'equal)
+  "Map request-id to process state for cancellation support.")
+
+(defun claude-agent--register-query (request-id state)
+  "Register STATE for REQUEST-ID in active queries table."
+  (when request-id
+    (puthash request-id state claude-agent--active-queries)))
+
+(defun claude-agent--unregister-query (request-id)
+  "Remove REQUEST-ID from active queries table."
+  (when request-id
+    (remhash request-id claude-agent--active-queries)))
+
+(defun claude-agent--get-active-query (request-id)
+  "Get process state for REQUEST-ID."
+  (gethash request-id claude-agent--active-queries))
+#+END_SRC
+
+** Cancellation Functions
+
+#+BEGIN_SRC elisp
+(defun claude-agent-cancel-query (request-id)
+  "Cancel active query by REQUEST-ID.
+Sends SIGINT to process and marks state as cancelled.
+Returns t if cancelled, nil if not found."
+  (let ((state (claude-agent--get-active-query request-id)))
+    (when state
+      (let ((process (claude-agent--process-state-process state)))
+        (when (and process (process-live-p process))
+          ;; Mark as cancelled
+          (setf (claude-agent--process-state-closed state) t)
+          ;; Send interrupt signal
+          (interrupt-process process)
+          (claude-agent--debug-log "Query cancelled: %s" request-id)
+          t)))))
+
+(defun claude-agent-cancel-all-queries ()
+  "Cancel all active queries."
+  (maphash (lambda (id _state)
+             (claude-agent-cancel-query id))
+           claude-agent--active-queries))
 #+END_SRC
 
 * Interactive Chat Mode
@@ -1200,6 +1812,12 @@ allowing users to interact with Claude in a REPL-like environment.
 
 (defcustom claude-agent-chat-show-cost t
   "Whether to display cost information after each response."
+  :type 'boolean
+  :group 'claude-agent-chat)
+
+(defcustom claude-agent-chat-include-ide-context t
+  "Whether to include IDE context (current file, open files, selection) in prompts.
+When non-nil, a <system-reminder> tag with context is prepended to each message."
   :type 'boolean
   :group 'claude-agent-chat)
 
@@ -1367,13 +1985,20 @@ allowing users to interact with Claude in a REPL-like environment.
       (claude-agent-chat--insert-response-start)
       (claude-agent-chat--insert "[Waiting...]" 'claude-agent-chat-thinking-face)
       ;; Build options with session continuation if we have a session
-      (let ((opts (if claude-agent-chat--session-id
-                      (claude-agent-options
-                       :continue-conversation t
-                       :resume claude-agent-chat--session-id)
-                    (claude-agent-options))))
+      (let* ((opts (if claude-agent-chat--session-id
+                       (claude-agent-options
+                        :continue-conversation t
+                        :resume claude-agent-chat--session-id)
+                     (claude-agent-options)))
+             ;; Prepend system reminder with IDE context if enabled
+             (system-reminder (when claude-agent-chat-include-ide-context
+                                (claude-agent-get-system-reminder)))
+             (actual-prompt (if (and system-reminder
+                                     (not (string-empty-p system-reminder)))
+                                (concat system-reminder "\n" input)
+                              input)))
         (claude-agent-query
-         input
+         actual-prompt
          :options opts
          :on-message #'claude-agent-chat--handle-message
          :on-error #'claude-agent-chat--handle-error
