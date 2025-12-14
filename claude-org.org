@@ -164,6 +164,42 @@ Used when auto-starting the MCP server."
   :type 'integer
   :group 'claude-org)
 
+(defcustom claude-org-default-system-prompts
+  '("You are communicating with a senior developer through Emacs org-mode.
+
+User Workflow:
+- The user writes instructions in #+begin_src ai blocks within an org file
+- Your response is streamed and appended directly after the ai block
+- The conversation history is preserved in the same org file, visible above
+- This works like a computational notebook where code and responses interleave
+
+Working with Org Files:
+- Treat org sections as a hierarchical filesystem (like directories and files)
+- Section paths use slash notation: /Project/Tasks/Todo
+- When editing the current org file or any org file, prefer org_* MCP tools:
+  - org_list_sections: Browse structure (like ls)
+  - org_read_section: Read content by path (like cat)
+  - org_update_section: Modify section content (like editing a file)
+  - org_create_section: Add new subsections
+  - org_get/set_property: Manage org properties (metadata)
+  - org_get/set/add/remove_tag: Manage org tags
+- For non-org operations, use evalElisp to execute any Emacs Lisp
+
+Response Format:
+- Your output appears directly in the org file
+- Markdown formatting renders well (headers, lists, code blocks)
+- For code examples, use standard markdown code fences
+- Be concise - the response becomes part of the document")
+  "List of default system prompt strings for claude-org queries.
+Each string in the list will be concatenated with newlines and prepended
+to any user-defined :system_prompt: sections.
+
+You can customize this by adding domain-specific prompts:
+  (add-to-list \\='claude-org-default-system-prompts
+               \"Always use Python 3.11 with type hints.\")"
+  :type '(repeat string)
+  :group 'claude-org)
+
 (defconst claude-org-permission-property "CLAUDE_PERMISSION_MODE"
   "Org property name for permission mode.")
 
@@ -603,6 +639,18 @@ Usage in org file:
                     prompts))))
         (when prompts
           (mapconcat #'identity (nreverse prompts) "\n\n"))))))
+
+(defun claude-org--build-system-prompt ()
+  "Build complete system prompt from defaults and org sections.
+Combines `claude-org-default-system-prompts' with any :system_prompt: tagged sections."
+  (let ((defaults (when claude-org-default-system-prompts
+                    (mapconcat #'identity claude-org-default-system-prompts "\n\n")))
+        (org-prompts (claude-org--collect-system-prompts)))
+    (cond
+     ((and defaults org-prompts) (concat defaults "\n\n" org-prompts))
+     (defaults defaults)
+     (org-prompts org-prompts)
+     (t nil))))
 #+END_SRC
 
 * Process Management
@@ -934,7 +982,7 @@ Sends the query to Claude and streams the response below the block."
   (let* ((session-key (claude-org--current-session-key))
          (sdk-uuid (claude-org--get-sdk-uuid))
          (project-root (claude-org--get-project-root))
-         (system-prompt (claude-org--collect-system-prompts))
+         (system-prompt (claude-org--build-system-prompt))
          ;; Build IDE context
          (ide-context (when claude-org-include-ide-context
                         (claude-agent-collect-ide-context)))
