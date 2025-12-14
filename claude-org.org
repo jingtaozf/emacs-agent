@@ -144,6 +144,19 @@ When non-nil, a <system-reminder> tag with context is prepended to each message.
   "Whether to display system messages in the response."
   :type 'boolean
   :group 'claude-org)
+
+(defconst claude-org-permission-property "CLAUDE_PERMISSION_MODE"
+  "Org property name for permission mode.")
+
+(defconst claude-org-sdk-uuid-property "CLAUDE_SDK_UUID"
+  "Org property name for SDK session UUID (used for --resume).")
+
+(defconst claude-org--permission-mode-map
+  '(("readonly" . "default")
+    ("accept-edits" . "acceptEdits")
+    ("plan" . "plan")
+    ("bypass" . "bypassPermissions"))
+  "Map permission preset names to CLI permission-mode values.")
 #+END_SRC
 
 * Session Management
@@ -205,6 +218,86 @@ Returns the heading position or nil if at file scope."
       nil)))
 #+END_SRC
 
+** SDK UUID Management
+
+The SDK UUID is the session identifier returned by Claude Code CLI. It's stored
+as an org property to enable session resumption across Emacs restarts.
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-sdk-uuid ()
+  "Get SDK UUID from org properties for current session.
+Checks section property drawer first (with inheritance), then file-level #+PROPERTY.
+Returns nil if not set."
+  (or
+   ;; Section-level property (with inheritance)
+   (org-entry-get nil claude-org-sdk-uuid-property t)
+   ;; File-level property via keyword
+   (save-excursion
+     (goto-char (point-min))
+     (when (re-search-forward
+            (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
+                    claude-org-sdk-uuid-property)
+            nil t)
+       (string-trim (match-string-no-properties 1))))))
+
+(defun claude-org--set-sdk-uuid (uuid)
+  "Set SDK UUID in org property.
+Stores at the appropriate scope based on session configuration:
+- If session ID is defined in a section, stores in section property drawer
+- Otherwise stores at file level."
+  (let ((scope (claude-org--get-session-scope)))
+    (if (eq scope 'section)
+        ;; Section-level: find the heading that defines the session and set there
+        (save-excursion
+          (let ((session-heading (claude-org--find-session-scope-heading)))
+            (when session-heading
+              (goto-char session-heading))
+            (org-set-property claude-org-sdk-uuid-property uuid)))
+      ;; File-level: use #+PROPERTY keyword
+      (save-excursion
+        (goto-char (point-min))
+        (if (re-search-forward
+             (format "^#\\+PROPERTY:[ \t]+%s[ \t]+.+$" claude-org-sdk-uuid-property)
+             nil t)
+            ;; Update existing
+            (replace-match (format "#+PROPERTY: %s %s"
+                                   claude-org-sdk-uuid-property uuid))
+          ;; Insert new after other properties
+          (goto-char (point-min))
+          (if (re-search-forward "^#\\+PROPERTY:" nil t)
+              (progn
+                (end-of-line)
+                (insert (format "\n#+PROPERTY: %s %s"
+                                claude-org-sdk-uuid-property uuid)))
+            ;; No properties, insert after title or at beginning
+            (if (re-search-forward "^#\\+TITLE:" nil t)
+                (progn
+                  (end-of-line)
+                  (insert (format "\n#+PROPERTY: %s %s"
+                                  claude-org-sdk-uuid-property uuid)))
+              (insert (format "#+PROPERTY: %s %s\n" claude-org-sdk-uuid-property uuid)))))))))
+
+(defun claude-org--clear-sdk-uuid ()
+  "Clear SDK UUID from org properties.
+Removes the property from the appropriate scope."
+  (let ((scope (claude-org--get-session-scope)))
+    (if (eq scope 'section)
+        ;; Section-level: remove from property drawer
+        (save-excursion
+          (let ((session-heading (claude-org--find-session-scope-heading)))
+            (when session-heading
+              (goto-char session-heading))
+            (org-delete-property claude-org-sdk-uuid-property)))
+      ;; File-level: remove #+PROPERTY line
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward
+               (format "^#\\+PROPERTY:[ \t]+%s[ \t]+.+\n?"
+                       claude-org-sdk-uuid-property)
+               nil t)
+          (replace-match ""))))))
+#+END_SRC
+
 ** Session Recovery
 
 #+BEGIN_SRC elisp
@@ -264,18 +357,123 @@ Returns list of (question . response) pairs for recovery."
   ;; Notify user
   (let ((marker (claude-org--session-get session-key :marker)))
     (when marker
-      (save-excursion
-        (goto-char marker)
-        (insert "\n/Session expired, recovering with context.../\n\n")
-        (set-marker marker (point)))))
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (insert "\n/Session expired, recovering with context.../\n\n")
+          (set-marker marker (point)))
+        ;; Clear old session UUID from org property
+        (claude-org--clear-sdk-uuid))))
   ;; Collect context and retry
   (let* ((context (claude-org--collect-session-context))
          (original-prompt (claude-org--session-get session-key :original-prompt))
          (recovery-prompt (claude-org--build-recovery-prompt context original-prompt)))
-    ;; Clear old session mapping
-    (claude-agent--clear-session session-key)
     ;; Retry with recovery prompt
     (claude-org--send-request recovery-prompt)))
+#+END_SRC
+
+* Permission Mode
+
+Permission mode can be stored as org property `CLAUDE_PERMISSION_MODE`.
+- File-level: =#+PROPERTY: CLAUDE_PERMISSION_MODE accept-edits=
+- Section-level: =:CLAUDE_PERMISSION_MODE: bypass= in property drawer
+
+** Permission Mode Functions
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-permission-mode-property ()
+  "Get CLAUDE_PERMISSION_MODE from org properties.
+Checks section property drawer first, then file-level #+PROPERTY.
+Returns nil if not set."
+  (or
+   ;; Section-level property (with inheritance)
+   (org-entry-get nil claude-org-permission-property t)
+   ;; File-level property via keyword
+   (save-excursion
+     (goto-char (point-min))
+     (when (re-search-forward
+            (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
+                    claude-org-permission-property)
+            nil t)
+       (string-trim (match-string-no-properties 1))))))
+
+(defun claude-org--get-permission-mode ()
+  "Get effective permission mode for current session.
+Priority: org property > global preset > 'readonly'.
+Returns CLI permission-mode value."
+  (let ((preset (or (claude-org--get-permission-mode-property)
+                    claude-agent-permission-preset
+                    "readonly")))
+    (or (cdr (assoc preset claude-org--permission-mode-map))
+        "default")))
+
+(defun claude-org--get-permission-mode-display ()
+  "Get current permission mode name for display."
+  (or (claude-org--get-permission-mode-property)
+      claude-agent-permission-preset
+      "readonly"))
+
+(defun claude-org--permission-mode-short ()
+  "Get short permission mode string for header-line display."
+  (pcase (claude-org--get-permission-mode-display)
+    ("readonly" "RO")
+    ("accept-edits" "ED")
+    ("plan" "PL")
+    ("bypass" "BP")
+    (_ "??")))
+#+END_SRC
+
+** Permission Mode Setter
+
+#+BEGIN_SRC elisp
+(defun claude-org--set-permission-mode (mode)
+  "Set permission MODE in org property.
+Sets at section level if at a heading, otherwise file level."
+  (if (org-at-heading-p)
+      ;; Section-level: set property in drawer
+      (org-set-property claude-org-permission-property mode)
+    ;; File-level: use #+PROPERTY keyword
+    (save-excursion
+      (goto-char (point-min))
+      (if (re-search-forward
+           (format "^#\\+PROPERTY:[ \t]+%s[ \t]+.+$" claude-org-permission-property)
+           nil t)
+          ;; Update existing
+          (replace-match (format "#+PROPERTY: %s %s"
+                                 claude-org-permission-property mode))
+        ;; Insert new after other properties
+        (if (re-search-forward "^#\\+PROPERTY:" nil t)
+            (progn
+              (end-of-line)
+              (insert (format "\n#+PROPERTY: %s %s"
+                              claude-org-permission-property mode)))
+          ;; No properties, insert at beginning
+          (insert (format "#+PROPERTY: %s %s\n" claude-org-permission-property mode)))))))
+
+(defun claude-org-switch-permission-mode ()
+  "Show current permission mode and switch to another.
+Sets the CLAUDE_PERMISSION_MODE property at the appropriate scope."
+  (interactive)
+  (let* ((current (claude-org--get-permission-mode-display))
+         (presets '(("readonly - Require approval for all tools" . "readonly")
+                    ("accept-edits - Accept file edits without prompts" . "accept-edits")
+                    ("plan - Suggests changes, requires approval for edits" . "plan")
+                    ("bypass - All tools auto-approved" . "bypass")))
+         (choices (mapcar (lambda (p)
+                            (if (string= (cdr p) current)
+                                (cons (concat (car p) " [current]") (cdr p))
+                              p))
+                          presets))
+         (selection (completing-read
+                     (format "Permission mode [%s]: " current)
+                     (mapcar #'car choices)
+                     nil t))
+         (mode (cdr (assoc (replace-regexp-in-string " \\[current\\]$" "" selection)
+                           choices))))
+    (when mode
+      (claude-org--set-permission-mode mode)
+      (claude-org--refresh-header-line)
+      (message "Permission mode set to: %s" mode))))
 #+END_SRC
 
 * Project Configuration
@@ -581,11 +779,15 @@ Inserts text at the session's marker and schedules font-lock."
 (defun claude-org--handle-message (session-key msg)
   "Handle incoming MSG for SESSION-KEY.
 Extracts session ID from result messages and stores it."
-  ;; Store SDK UUID when we get a result message
+  ;; Store SDK UUID to org property when we get a result message
   (when (claude-agent-result-message-p msg)
-    (let ((sdk-uuid (claude-agent-result-message-session-id msg)))
-      (when sdk-uuid
-        (claude-agent--store-sdk-uuid session-key sdk-uuid))))
+    (let ((sdk-uuid (claude-agent-result-message-session-id msg))
+          (marker (claude-org--session-get session-key :marker)))
+      (when (and sdk-uuid marker (marker-buffer marker))
+        (with-current-buffer (marker-buffer marker)
+          (save-excursion
+            (goto-char marker)
+            (claude-org--set-sdk-uuid sdk-uuid))))))
   ;; Display system messages if enabled
   (when (and claude-org-show-system-messages
              (claude-agent-system-message-p msg))
@@ -687,7 +889,7 @@ Sends the query to Claude and streams the response below the block."
 (defun claude-org--send-request (prompt)
   "Send PROMPT to Claude via claude-agent."
   (let* ((session-key (claude-org--current-session-key))
-         (sdk-uuid (claude-agent--get-sdk-uuid session-key))
+         (sdk-uuid (claude-org--get-sdk-uuid))
          (project-root (claude-org--get-project-root))
          (system-prompt (claude-org--collect-system-prompts))
          ;; Build IDE context
@@ -703,7 +905,8 @@ Sends the query to Claude and streams the response below the block."
          (options (claude-agent-options
                    :cwd (or project-root default-directory)
                    :system-prompt system-prompt
-                   :resume sdk-uuid))
+                   :resume sdk-uuid
+                   :permission-mode (claude-org--get-permission-mode)))
          ;; Build full prompt with system reminder
          (full-prompt (if (and system-reminder
                                (not (string-empty-p system-reminder)))
@@ -853,6 +1056,11 @@ Dynamic header line showing session status, IDE context, and thinking state.
                                                 'font-lock-constant-face
                                               'font-lock-type-face))
                         (propertize " [file-only]" 'face 'font-lock-comment-face)))
+         ;; Permission mode indicator
+         (perm-str (propertize (format " [%s]" (claude-org--permission-mode-short))
+                               'face 'font-lock-warning-face
+                               'help-echo (format "Permission: %s (C-c C-p to change)"
+                                                  (claude-org--get-permission-mode-display))))
          ;; Active session count badge with thinking indicator
          (active-count (claude-org--active-session-count))
          (active-str (if (> active-count 0)
@@ -890,7 +1098,7 @@ Dynamic header line showing session status, IDE context, and thinking state.
                     "")))
     (concat " Claude Org: "
             (propertize file-name 'face 'font-lock-function-name-face)
-            session-str active-str project-str file-str sel-str)))
+            session-str perm-str active-str project-str file-str sel-str)))
 #+END_SRC
 
 * Cancel Support
@@ -984,6 +1192,7 @@ Dynamic header line showing session status, IDE context, and thinking state.
     (define-key map (kbd "C-c C-n") #'claude-org-insert-block)
     (define-key map (kbd "C-c C-i") #'claude-org-show-session-info)
     (define-key map (kbd "C-c C-v") #'claude-org-show-verbose)
+    (define-key map (kbd "C-c C-p") #'claude-org-switch-permission-mode)
     map)
   "Keymap for `claude-org-mode'.")
 
