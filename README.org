@@ -8,9 +8,13 @@ This is an Emacs client library for the [[https://claude.ai/code][Claude Code CL
 The library mirrors the Python Claude Agent SDK API, providing:
 - ~claude-agent-query~ for one-shot queries
 - ~claude-agent-client~ for bidirectional interactive conversations
+- ~claude-agent-chat~ for comint-based REPL interaction
 - Streaming response support via callbacks
-- Basic hook support (PreToolUse, PostToolUse, Stop)
-- Session management (continue, resume)
+- Permission system with pattern matching
+- IDE context collection (current file, open files, selection)
+- File-based session management
+- Query cancellation support
+- Usage mode-line display
 
 * Prerequisites
 
@@ -44,6 +48,22 @@ Then add to load-path:
 #+END_SRC
 
 * Usage
+
+** Interactive Chat Mode
+
+The easiest way to interact with Claude:
+
+#+BEGIN_SRC elisp
+M-x claude-agent-chat
+#+END_SRC
+
+This opens a comint-based buffer where you can:
+- Type messages and press RET to send
+- ~C-c C-k~ to interrupt current request
+- ~C-c C-l~ to clear and reset session
+- ~C-c C-n~ to start new session without clearing
+
+The chat automatically includes IDE context (current file, open files, selection).
 
 ** One-shot Query
 
@@ -81,19 +101,145 @@ Then add to load-path:
   (claude-agent-client-send client "Follow-up question"))
 #+END_SRC
 
-** Session Management
+* Permission System
+
+Control which tools Claude can use with pattern-based permissions.
+
+** Permission Presets
 
 #+BEGIN_SRC elisp
-;; Resume a previous session
-(let ((client (claude-agent-client-create)))
-  (claude-agent-resume-session client "session-id-here")
-  (claude-agent-client-connect client))
-
-;; Continue from last conversation
-(let ((client (claude-agent-client-create)))
-  (claude-agent-continue-session client)
-  (claude-agent-client-connect client))
+;; Use a preset (default: "readonly")
+(setq claude-agent-permission-preset "readonly")    ; Read, Glob, Grep, WebSearch, WebFetch
+(setq claude-agent-permission-preset "accept-edits") ; Adds Write, Edit, MultiEdit
+(setq claude-agent-permission-preset "bypass")       ; Allow all
+(setq claude-agent-permission-preset "custom")       ; Use claude-agent-permissions
 #+END_SRC
+
+** Custom Permissions
+
+#+BEGIN_SRC elisp
+(setq claude-agent-permission-preset "custom")
+(setq claude-agent-permissions
+      '(:allow ("Read(**)" "Glob(**)" "Bash(git:*)")
+        :deny ("Bash(rm *)" "Bash(sudo *)")))
+#+END_SRC
+
+** Pattern Syntax
+
+| Pattern | Example | Meaning |
+|---------+---------+---------|
+| ~*~ | ~*~ | Match all tools |
+| ~ToolName~ | ~WebSearch~ | Match tool by name |
+| ~ToolName(**)~ | ~Read(**)~ | Match with any argument |
+| ~ToolName(pattern)~ | ~Bash(git:*)~ | Match with argument pattern |
+| ~mcp__*~ | ~mcp__emacs__*~ | Glob for MCP tools |
+
+* IDE Context
+
+The library automatically collects IDE context from Emacs:
+- Current file being edited
+- List of open files (up to 10)
+- Selected text region (if any)
+- Current working directory
+
+This context is prepended to prompts as ~<system-reminder>~ tags.
+
+** Customizing Buffer Exclusions
+
+#+BEGIN_SRC elisp
+;; Exclude buffers by name pattern (regexp)
+(setq claude-agent-ide-context-exclude-buffer-names
+      '("*Claude Chat*" "*Messages*" "*scratch*"))
+
+;; Exclude buffers by major mode
+(setq claude-agent-ide-context-exclude-modes
+      '(claude-agent-chat-mode special-mode dired-mode))
+
+;; Add custom predicate for exclusion
+(add-to-list 'claude-agent-ide-context-exclude-predicates
+             (lambda (buf)
+               (with-current-buffer buf
+                 (bound-and-true-p my-special-mode))))
+#+END_SRC
+
+** Manual Context Collection
+
+#+BEGIN_SRC elisp
+;; Get IDE context as plist
+(claude-agent-collect-ide-context)
+;; => (:current-file (:name "foo.el" :path "/path/to/foo.el" :modified t)
+;;     :open-files (...)
+;;     :selection (:text "..." :start-line 10 :end-line 15)
+;;     :cwd "/path/to/project/")
+
+;; Build system reminder string
+(claude-agent-get-system-reminder "/path/to/notebook.org")
+#+END_SRC
+
+* Session Management
+
+Sessions allow continuing conversations across queries.
+
+#+BEGIN_SRC elisp
+;; Sessions are automatically managed in claude-agent-chat
+
+;; For programmatic use:
+(claude-agent--make-session-key "/path/to/file.org" "my-session")
+;; => "/path/to/file.org::my-session"
+
+;; Store/retrieve SDK UUIDs
+(claude-agent--store-sdk-uuid session-key uuid)
+(claude-agent--get-sdk-uuid session-key)
+(claude-agent--clear-session session-key)
+#+END_SRC
+
+* Query Cancellation
+
+#+BEGIN_SRC elisp
+;; Cancel a specific query
+(claude-agent-cancel-query request-id)
+
+;; Cancel all active queries
+(claude-agent-cancel-all-queries)
+
+;; In chat mode, use C-c C-k to interrupt
+#+END_SRC
+
+* Usage Mode-Line
+
+Display Claude API usage statistics in the mode-line.
+
+** Setup
+
+#+BEGIN_SRC elisp
+;; Set your organization ID (from claude.ai URL)
+(setq claude-agent-usage-org-id "your-org-id-here")
+
+;; Set environment variable for session key
+;; Get from browser: DevTools > Application > Cookies > sessionKey
+;; export CLAUDE_SESSION_KEY="your-session-key"
+#+END_SRC
+
+** Usage
+
+#+BEGIN_SRC elisp
+;; Start mode-line display (auto-refresh every 5 min during work hours)
+M-x claude-agent-usage-mode-line-start
+
+;; Stop mode-line display
+M-x claude-agent-usage-mode-line-stop
+
+;; Manual refresh
+M-x claude-agent-usage-fetch
+#+END_SRC
+
+** Display Format
+
+- ~[C:XX|YY|ZZ]~ - 5-hour | 7-day | 7-day Sonnet utilization percentages
+- ~[C:ERR]~ - API error (hover for details, click to retry)
+- ~[C:CFG]~ - Missing configuration
+
+Hover over the display for a tooltip with reset times.
 
 * Customization
 
@@ -106,11 +252,17 @@ Then add to load-path:
 
 ;; Enable debug logging
 (setq claude-agent-debug t)
+
+;; Chat mode settings
+(setq claude-agent-chat-prompt "You> ")
+(setq claude-agent-chat-show-cost t)
+(setq claude-agent-chat-show-system-messages nil)
+(setq claude-agent-chat-include-ide-context t)
 #+END_SRC
 
 * API Reference
 
-** Functions
+** Core Functions
 
 - ~claude-agent-query~ - Send one-shot query
 - ~claude-agent-options~ - Create options plist
@@ -127,25 +279,47 @@ Then add to load-path:
 - ~claude-agent-client-disconnect~ - Disconnect
 - ~claude-agent-client-interrupt~ - Interrupt current operation
 
+** Chat Functions
+
+- ~claude-agent-chat~ - Open interactive chat buffer
+- ~claude-agent-chat-interrupt~ - Interrupt current request (C-c C-k)
+- ~claude-agent-chat-clear~ - Clear and reset session (C-c C-l)
+- ~claude-agent-chat-new-session~ - Start new session (C-c C-n)
+
+** Permission Functions
+
+- ~claude-agent-permission-match-p~ - Check if tool matches pattern
+- ~claude-agent-check-permission~ - Check allow/deny for tool
+- ~claude-agent-get-effective-permissions~ - Get current permissions
+- ~claude-agent-make-permission-hook~ - Create PreToolUse hook
+
+** IDE Context Functions
+
+- ~claude-agent-collect-ide-context~ - Collect current IDE state
+- ~claude-agent-get-system-reminder~ - Build system-reminder string
+- ~claude-agent-build-system-reminder~ - Build with explicit args
+
 ** Session Functions
 
-- ~claude-agent-continue-session~ - Continue previous session
-- ~claude-agent-resume-session~ - Resume specific session
-- ~claude-agent-get-session-id~ - Get current session ID
+- ~claude-agent--make-session-key~ - Create session key
+- ~claude-agent--get-sdk-uuid~ - Get SDK UUID for session
+- ~claude-agent--store-sdk-uuid~ - Store session mapping
+- ~claude-agent--clear-session~ - Clear session mapping
 
-** Hook Functions
+** Usage Functions
 
-- ~claude-agent-add-hook~ - Add hook callback
+- ~claude-agent-usage-mode-line-start~ - Start mode-line display
+- ~claude-agent-usage-mode-line-stop~ - Stop mode-line display
+- ~claude-agent-usage-fetch~ - Fetch usage data
 
 * Running Tests
 
-#+BEGIN_SRC sh
-emacs -Q --batch \
-  -L ~/projects/literate-elisp \
-  --load literate-elisp \
-  --eval "(setf literate-elisp-test-p t)" \
-  --eval "(literate-elisp-load (expand-file-name \"~/projects/claude-agent/claude-agent.org\"))" \
-  --funcall ert-run-tests-batch
+Load the org file with ~literate-elisp-test-p~ set to ~t~, then run ~M-x ert~:
+
+#+BEGIN_SRC elisp
+(setq literate-elisp-test-p t)
+(literate-elisp-load "~/projects/claude-agent/claude-agent.org")
+(ert t)  ; Run all tests
 #+END_SRC
 
 * License
