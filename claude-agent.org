@@ -1782,6 +1782,178 @@ Returns t if cancelled, nil if not found."
            claude-agent--active-queries))
 #+END_SRC
 
+* Usage Mode-Line
+
+This section provides Claude usage statistics display in the Emacs mode-line,
+showing 5-hour, 7-day, and 7-day Sonnet utilization percentages.
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-usage-org-id nil
+  "Claude organization ID for usage tracking.
+Get from claude.ai account settings or from the URL when logged in."
+  :type '(choice (const :tag "Not set" nil) string)
+  :group 'claude-agent)
+
+(defvar claude-agent-usage-string ""
+  "Current usage string for mode-line display.")
+
+(defvar claude-agent-usage-timer nil
+  "Timer for refreshing Claude usage.")
+
+(defvar claude-agent-usage-data nil
+  "Cached usage data for tooltip.")
+#+END_SRC
+
+** Helper Functions
+
+#+BEGIN_SRC elisp
+(defun claude-agent--get-session-key ()
+  "Get CLAUDE_SESSION_KEY from environment variable.
+Returns nil if not set."
+  (getenv "CLAUDE_SESSION_KEY"))
+
+(defun claude-agent-usage-working-hours-p ()
+  "Return t if current time is within working hours (Mon-Fri, 8am-7pm)."
+  (let ((hour (string-to-number (format-time-string "%H")))
+        (dow (string-to-number (format-time-string "%u")))) ; 1=Mon, 7=Sun
+    (and (>= dow 1) (<= dow 5)      ; Monday to Friday
+         (>= hour 8) (< hour 19)))) ; 8am to 7pm
+
+(defun claude-agent-usage-format-reset-time (iso-time)
+  "Format ISO-TIME to human readable relative time."
+  (if iso-time
+      (let* ((time (parse-iso8601-time-string iso-time))
+             (diff (float-time (time-subtract time (current-time))))
+             (hours (/ diff 3600))
+             (mins (/ (mod diff 3600) 60)))
+        (if (> diff 0)
+            (format "%.0fh%.0fm" hours mins)
+          "soon"))
+    "N/A"))
+#+END_SRC
+
+** Fetch and Callback
+
+#+BEGIN_SRC elisp
+(defun claude-agent-usage-fetch ()
+  "Fetch usage data directly from claude.ai and update mode-line."
+  (interactive)
+  (let ((session-key (claude-agent--get-session-key))
+        (org-id claude-agent-usage-org-id))
+    (if (and session-key org-id)
+        (let ((url (format "https://claude.ai/api/organizations/%s/usage" org-id))
+              (url-request-extra-headers
+               `(("Accept" . "application/json")
+                 ("Content-Type" . "application/json")
+                 ("Cookie" . ,(format "sessionKey=%s" session-key))
+                 ("User-Agent" . "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                 ("Origin" . "https://claude.ai")
+                 ("Referer" . "https://claude.ai/"))))
+          (url-retrieve url #'claude-agent-usage-callback '() t t))
+      ;; Show config error
+      (setq claude-agent-usage-string
+            (propertize " [C:CFG]"
+                        'face '(:foreground "orange")
+                        'help-echo "Configure claude-agent-usage-org-id and set CLAUDE_SESSION_KEY env var"))
+      (force-mode-line-update t))))
+
+(defun claude-agent-usage-fetch-if-working-hours ()
+  "Fetch usage data only during working hours."
+  (when (claude-agent-usage-working-hours-p)
+    (claude-agent-usage-fetch)))
+
+(defun claude-agent-usage-callback (status)
+  "Process usage response and update mode-line. STATUS contains error info."
+  (let ((error-msg nil))
+    ;; Check for connection/HTTP errors
+    (when (plist-get status :error)
+      (setq error-msg (format "Connection error: %s" (plist-get status :error))))
+    ;; Parse response
+    (unless error-msg
+      (goto-char (point-min))
+      (when (re-search-forward "^$" nil t)
+        (condition-case err
+            (let* ((json (json-parse-buffer :object-type 'alist))
+                   (api-error (alist-get 'error json))
+                   (api-detail (alist-get 'detail json)))
+              (cond
+               ;; API returned error
+               ((or api-error api-detail)
+                (setq error-msg (or api-error api-detail "API error")))
+               ;; Success - parse usage data
+               (t
+                (let* ((five-hr-data (alist-get 'five_hour json))
+                       (seven-day-data (alist-get 'seven_day json))
+                       (sonnet-data (alist-get 'seven_day_sonnet json))
+                       (five-hr (alist-get 'utilization five-hr-data))
+                       (seven-day (alist-get 'utilization seven-day-data))
+                       (sonnet (alist-get 'utilization sonnet-data))
+                       (five-reset (alist-get 'resets_at five-hr-data))
+                       (seven-reset (alist-get 'resets_at seven-day-data))
+                       (sonnet-reset (alist-get 'resets_at sonnet-data))
+                       (display (format " [C:%d|%d|%d]"
+                                        (truncate (or five-hr 0))
+                                        (truncate (or seven-day 0))
+                                        (truncate (or sonnet 0))))
+                       (tooltip (format "Claude Usage\n─────────────────────────\n5-hour:       %3d%% (resets in %s)\n7-day:        %3d%% (resets in %s)\n7-day Sonnet: %3d%% (resets in %s)\n\nClick to refresh"
+                                        (truncate (or five-hr 0))
+                                        (claude-agent-usage-format-reset-time five-reset)
+                                        (truncate (or seven-day 0))
+                                        (claude-agent-usage-format-reset-time seven-reset)
+                                        (truncate (or sonnet 0))
+                                        (claude-agent-usage-format-reset-time sonnet-reset))))
+                  (setq claude-agent-usage-data json)
+                  (setq claude-agent-usage-string
+                        (propertize display
+                                    'help-echo tooltip
+                                    'mouse-face 'mode-line-highlight
+                                    'local-map (let ((map (make-sparse-keymap)))
+                                                 (define-key map [mode-line mouse-1] #'claude-agent-usage-fetch)
+                                                 map)))))))
+          (error (setq error-msg (format "Parse error: %s" (error-message-string err)))))))
+    ;; Handle errors
+    (when error-msg
+      (setq claude-agent-usage-string
+            (propertize " [C:ERR]"
+                        'face '(:foreground "red")
+                        'help-echo (format "Claude usage error:\n%s\n\nClick to retry" error-msg)
+                        'mouse-face 'mode-line-highlight
+                        'local-map (let ((map (make-sparse-keymap)))
+                                     (define-key map [mode-line mouse-1] #'claude-agent-usage-fetch)
+                                     map))))
+    (force-mode-line-update t))
+  (kill-buffer))
+#+END_SRC
+
+** Mode-Line Control
+
+#+BEGIN_SRC elisp
+(defun claude-agent-usage-mode-line-start ()
+  "Start Claude usage mode-line display with 5-min refresh."
+  (interactive)
+  (claude-agent-usage-mode-line-stop)
+  (claude-agent-usage-fetch)  ; Always fetch on start
+  (setq claude-agent-usage-timer
+        (run-at-time 300 300 #'claude-agent-usage-fetch-if-working-hours))
+  (unless (member '(:eval claude-agent-usage-string) mode-line-misc-info)
+    (push '(:eval claude-agent-usage-string) mode-line-misc-info))
+  (message "Claude usage mode-line started"))
+
+(defun claude-agent-usage-mode-line-stop ()
+  "Stop Claude usage mode-line display."
+  (interactive)
+  (when claude-agent-usage-timer
+    (cancel-timer claude-agent-usage-timer)
+    (setq claude-agent-usage-timer nil))
+  (setq claude-agent-usage-string "")
+  (setq mode-line-misc-info
+        (delete '(:eval claude-agent-usage-string) mode-line-misc-info))
+  (force-mode-line-update t)
+  (message "Claude usage mode-line stopped"))
+#+END_SRC
+
 * Interactive Chat Mode
 
 This section provides an interactive chat interface based on comint-mode,
