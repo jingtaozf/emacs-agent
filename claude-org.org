@@ -1,0 +1,1009 @@
+# -*- encoding:utf-8 Mode: POLY-ORG; org-src-preserve-indentation: t; -*-
+#+TITLE: Claude Org Integration
+#+SUBTITLE: Org-mode integration for Claude Agent SDK
+#+AUTHOR: Jingtao Xu
+#+OPTIONS: toc:2
+#+Startup: noindent
+#+PROPERTY: header-args :results silent
+#+PROPERTY: literate-lang elisp
+#+PROPERTY: literate-load yes
+
+* Table of Contents                                            :TOC:noexport:
+- [[#introduction][Introduction]]
+- [[#dependencies][Dependencies]]
+- [[#customization][Customization]]
+- [[#session-management][Session Management]]
+  - [[#session-id-functions][Session ID Functions]]
+  - [[#session-scope-detection][Session Scope Detection]]
+  - [[#session-recovery][Session Recovery]]
+- [[#project-configuration][Project Configuration]]
+  - [[#project-root][PROJECT_ROOT]]
+  - [[#system-prompts][System Prompts]]
+- [[#process-management][Process Management]]
+  - [[#state-variables][State Variables]]
+  - [[#session-state-accessors][Session State Accessors]]
+- [[#block-detection][Block Detection]]
+- [[#block-insertion][Block Insertion]]
+- [[#response-handling][Response Handling]]
+  - [[#debounced-font-lock][Debounced Font-Lock]]
+  - [[#token-handling][Token Handling]]
+  - [[#message-handling][Message Handling]]
+  - [[#error-handling][Error Handling]]
+- [[#execution][Execution]]
+  - [[#execute-command][Execute Command]]
+  - [[#send-request][Send Request]]
+- [[#header-line][Header Line]]
+- [[#cancel-support][Cancel Support]]
+- [[#session-manager-ui][Session Manager UI]]
+- [[#mode-definition][Mode Definition]]
+  - [[#keymap][Keymap]]
+  - [[#minor-mode][Minor Mode]]
+- [[#tests][Tests]]
+- [[#package-footer][Package Footer]]
+
+* Introduction
+
+Claude Org Integration is a minor mode for org-mode that enables interactive
+streaming AI queries directly within org files using ~#+begin_src ai~ blocks.
+
+This package depends on ~claude-agent~ for Claude communication and provides
+org-specific features on top of it.
+
+** Features
+
+- *Token-by-token streaming*: Responses stream token-by-token with debounced
+  font-lock for smooth rendering.
+
+- *Multi-session support*: Multiple queries with different CLAUDE_SESSION_ID
+  values can run concurrently.
+
+- *Session recovery*: When backend sessions expire, context is collected from
+  the org file and rebuilt automatically.
+
+- *Project support*: PROJECT_ROOT property sets cwd; :system_prompt: tagged
+  sections provide project guidelines.
+
+** Usage Example
+
+#+BEGIN_SRC org :load no
+,#+PROPERTY: PROJECT_ROOT /path/to/project
+
+,* Project Guidelines :system_prompt:
+This project uses Python 3.11.
+Always use absolute imports.
+
+,* Tasks
+
+,** Instruction 1 :claude_chat:
+
+,#+begin_src ai
+How do I read a JSON file in Python?
+,#+end_src
+
+Response will appear here after pressing C-c C-c inside the ai block.
+#+END_SRC
+
+* Dependencies
+
+#+BEGIN_SRC elisp
+;;; claude-org.el --- Org-mode integration for Claude Agent SDK -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024 Jingtao Xu
+
+;; Author: Jingtao Xu
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (claude-agent "0.1.0"))
+;; Keywords: tools, org, ai
+;; URL: https://github.com/user/claude-agent
+
+;; This file is not part of GNU Emacs.
+
+;;; Commentary:
+
+;; Claude Org Integration - Streaming AI queries in org-mode.
+;; Use #+begin_src ai blocks to query Claude with C-c C-c.
+
+;;; Code:
+
+(require 'claude-agent)
+(require 'org)
+(require 'cl-lib)
+#+END_SRC
+
+* Customization
+
+#+BEGIN_SRC elisp
+(defgroup claude-org nil
+  "Streaming Claude AI for org-mode."
+  :group 'org
+  :prefix "claude-org-")
+
+(defcustom claude-org-fontlock-delay 0.05
+  "Delay in seconds before font-lock after token insertion.
+Lower = more responsive, higher = better performance."
+  :type 'number
+  :group 'claude-org)
+
+(defcustom claude-org-heading-tag "claude_chat"
+  "Default tag for claude chat headings."
+  :type 'string
+  :group 'claude-org)
+
+(defcustom claude-org-session-tag "claude_session"
+  "Tag that marks a section as having independent session scope."
+  :type 'string
+  :group 'claude-org)
+
+(defcustom claude-org-include-ide-context t
+  "Whether to include IDE context (current file, open files, selection) in prompts.
+When non-nil, a <system-reminder> tag with context is prepended to each message."
+  :type 'boolean
+  :group 'claude-org)
+
+(defcustom claude-org-show-system-messages nil
+  "Whether to display system messages in the response."
+  :type 'boolean
+  :group 'claude-org)
+#+END_SRC
+
+* Session Management
+
+Session identity is determined by file path + optional CLAUDE_SESSION_ID property.
+
+** Session ID Functions
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-session-id ()
+  "Get user-defined CLAUDE_SESSION_ID from org properties.
+Searches section property drawer first, then file-level #+PROPERTY.
+Returns nil if no session ID is defined (file path will be used alone)."
+  (save-excursion
+    ;; org-entry-get with t enables inheritance up the heading tree
+    (org-entry-get nil "CLAUDE_SESSION_ID" t)))
+
+(defun claude-org--get-session-scope ()
+  "Determine the scope of the current CLAUDE_SESSION_ID.
+Returns `section' if defined in a property drawer, `file' if defined
+at file level, or nil if no session ID is defined."
+  (save-excursion
+    (let ((local-session (org-entry-get nil "CLAUDE_SESSION_ID" nil))
+          (inherited-session (org-entry-get nil "CLAUDE_SESSION_ID" t)))
+      (cond
+       (local-session 'section)
+       (inherited-session 'file)
+       (t nil)))))
+
+(defun claude-org--current-session-key ()
+  "Get the session key for the current context.
+Combines file path with optional CLAUDE_SESSION_ID property.
+Uses claude-agent session key format for consistency."
+  (let ((custom-id (claude-org--get-session-id)))
+    (claude-agent--make-session-key buffer-file-name custom-id)))
+#+END_SRC
+
+** Session Scope Detection
+
+#+BEGIN_SRC elisp
+(defun claude-org--has-session-tag-p ()
+  "Check if current section has the session tag.
+Returns non-nil if current heading has :claude_session: tag."
+  (save-excursion
+    (when (org-at-heading-p)
+      (let ((tags (org-get-tags nil t)))
+        (member claude-org-session-tag tags)))))
+
+(defun claude-org--find-session-scope-heading ()
+  "Find the heading that defines the session scope.
+Walks up the heading tree looking for :claude_session: tag or CLAUDE_SESSION_ID.
+Returns the heading position or nil if at file scope."
+  (save-excursion
+    (catch 'found
+      (while (org-up-heading-safe)
+        (when (or (claude-org--has-session-tag-p)
+                  (org-entry-get nil "CLAUDE_SESSION_ID" nil))
+          (throw 'found (point))))
+      nil)))
+#+END_SRC
+
+** Session Recovery
+
+#+BEGIN_SRC elisp
+(defun claude-org--collect-session-context ()
+  "Collect conversation history from current session scope.
+If CLAUDE_SESSION_ID is defined in a section, narrows to that subtree.
+Otherwise, collects from the entire file.
+Returns list of (question . response) pairs for recovery."
+  (let ((conversations '())
+        (scope (claude-org--get-session-scope)))
+    (save-excursion
+      (save-restriction
+        ;; Narrow to section scope if session ID is defined locally
+        (when (eq scope 'section)
+          (unless (org-at-heading-p)
+            (org-back-to-heading t))
+          (org-narrow-to-subtree))
+
+        ;; Find all ai blocks and their responses
+        (goto-char (point-min))
+        (while (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+          (let* ((q-start (progn (forward-line 1) (point)))
+                 (q-end (progn (re-search-forward "^[ \t]*#\\+end_src" nil t)
+                               (line-beginning-position)))
+                 (question (string-trim (buffer-substring-no-properties q-start q-end)))
+                 ;; Response is content after #+end_src until next heading or ai block
+                 (r-start (progn (forward-line 1) (point)))
+                 (r-end (save-excursion
+                          (if (re-search-forward "^\\(\\*+ \\|[ \t]*#\\+begin_src\\)" nil t)
+                              (line-beginning-position)
+                            (point-max))))
+                 (response (string-trim (buffer-substring-no-properties r-start r-end))))
+            (when (not (string-empty-p question))
+              (push (cons question response) conversations))))))
+    (nreverse conversations)))
+
+(defun claude-org--build-recovery-prompt (context original-prompt)
+  "Build recovery prompt with CONTEXT history and ORIGINAL-PROMPT."
+  (let ((scope (claude-org--get-session-scope)))
+    (concat
+     "<session_recovery>\n"
+     "The previous session expired. Here is the conversation history from this "
+     (if (eq scope 'section) "section" "file")
+     ":\n\n"
+     (mapconcat
+      (lambda (pair)
+        (format "**User:** %s\n\n**Assistant:** %s\n\n---\n"
+                (car pair) (cdr pair)))
+      context "")
+     "</session_recovery>\n\n"
+     "Please continue the conversation. The user's current question is:\n\n"
+     original-prompt)))
+
+(defun claude-org--recover-session (session-key)
+  "Recover from session expiration for SESSION-KEY by collecting context and retrying."
+  (claude-org--session-put session-key :recovering t)
+  ;; Notify user
+  (let ((marker (claude-org--session-get session-key :marker)))
+    (when marker
+      (save-excursion
+        (goto-char marker)
+        (insert "\n/Session expired, recovering with context.../\n\n")
+        (set-marker marker (point)))))
+  ;; Collect context and retry
+  (let* ((context (claude-org--collect-session-context))
+         (original-prompt (claude-org--session-get session-key :original-prompt))
+         (recovery-prompt (claude-org--build-recovery-prompt context original-prompt)))
+    ;; Clear old session mapping
+    (claude-agent--clear-session session-key)
+    ;; Retry with recovery prompt
+    (claude-org--send-request recovery-prompt)))
+#+END_SRC
+
+* Project Configuration
+
+Project configuration for cwd and system prompts.
+
+** PROJECT_ROOT
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-section-property (property)
+  "Get PROPERTY from current section's tags (format :PROPERTY:value:).
+Searches current heading and parent headings for a tag matching
+:PROPERTY:value: pattern and returns value."
+  (save-excursion
+    (when (org-at-heading-p)
+      (let ((tags (org-get-tags nil t)))  ; Get local tags only
+        (cl-loop for tag in tags
+                 when (string-match (format "^%s:\\(.+\\)$" (regexp-quote property)) tag)
+                 return (match-string 1 tag))))
+    ;; Search parent headings
+    (catch 'found
+      (while (org-up-heading-safe)
+        (let ((tags (org-get-tags nil t)))
+          (cl-loop for tag in tags
+                   when (string-match (format "^%s:\\(.+\\)$" (regexp-quote property)) tag)
+                   do (throw 'found (match-string 1 tag))))))))
+
+(defun claude-org--get-project-root ()
+  "Get project root from org properties.
+Check section-level property first (in parent heading tags), then file-level.
+Returns nil if not set (will use default-directory).
+
+Usage in org file:
+  File-level: #+PROPERTY: PROJECT_ROOT /path/to/project
+  Section-level: * Heading :PROJECT_ROOT:/other/path:"
+  (save-excursion
+    ;; First check section-level property (tag like :PROJECT_ROOT:/path:)
+    (let ((section-root (claude-org--get-section-property "PROJECT_ROOT")))
+      (if section-root
+          section-root
+        ;; Fall back to file-level #+PROPERTY: PROJECT_ROOT
+        (org-entry-get nil "PROJECT_ROOT" t)))))
+#+END_SRC
+
+** System Prompts
+
+#+BEGIN_SRC elisp
+(defun claude-org--collect-system-prompts ()
+  "Collect content from all org sections tagged :system_prompt:.
+Returns concatenated string of heading + body for each section, or nil if none.
+
+Usage in org file:
+  * Project Guidelines :system_prompt:
+  This project uses Python 3.11 with Django.
+  Always use absolute imports."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((prompts '())
+            (heading-re "^\\(\\*+\\) +\\(.*\\):system_prompt:"))
+        ;; Use regex search instead of org-map-entries to avoid cache issues
+        (while (re-search-forward heading-re nil t)
+          (let* ((stars (match-string 1))
+                 (heading-text (match-string 2))
+                 (heading (string-trim (replace-regexp-in-string ":.*$" "" heading-text)))
+                 (beg (save-excursion
+                        (forward-line 1)
+                        ;; Skip property drawers and planning lines
+                        (while (and (not (eobp))
+                                    (looking-at "^[ \t]*\\(:\\|DEADLINE:\\|SCHEDULED:\\|CLOSED:\\)"))
+                          (forward-line 1))
+                        (point)))
+                 (end (save-excursion
+                        (if (re-search-forward "^\\*+ " nil t)
+                            (progn (beginning-of-line) (point))
+                          (point-max))))
+                 (body (when (< beg end)
+                         (string-trim (buffer-substring-no-properties beg end)))))
+            (when (and heading (not (string-empty-p heading)))
+              (push (concat "* " heading
+                            (when (and body (not (string-empty-p body)))
+                              (concat "\n" body)))
+                    prompts))))
+        (when prompts
+          (mapconcat #'identity (nreverse prompts) "\n\n"))))))
+#+END_SRC
+
+* Process Management
+
+Multi-session process management allowing concurrent queries.
+
+** State Variables
+
+#+BEGIN_SRC elisp
+(defvar-local claude-org--sessions (make-hash-table :test 'equal)
+  "Hash table mapping session-key -> session state plist.
+Each session state contains:
+  :process-state - claude-agent process state
+  :marker        - insertion marker
+  :busy          - boolean busy state
+  :spinner       - spinner frame index (0-3)
+  :start-time    - request start time (float-time)
+  :original-prompt - for session recovery
+  :recovering    - non-nil during recovery
+  :section-level - heading level for response adjustment")
+
+(defvar-local claude-org--fontlock-timer nil
+  "Timer for debounced font-lock during streaming.")
+#+END_SRC
+
+** Session State Accessors
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-session (session-key)
+  "Get or create session state for SESSION-KEY."
+  (or (gethash session-key claude-org--sessions)
+      (let ((state (list :process-state nil
+                         :marker nil
+                         :busy nil
+                         :spinner 0
+                         :start-time nil
+                         :original-prompt nil
+                         :recovering nil
+                         :section-level 0)))
+        (puthash session-key state claude-org--sessions)
+        state)))
+
+(defun claude-org--session-put (session-key prop value)
+  "Set PROP to VALUE in session SESSION-KEY."
+  (let ((state (claude-org--get-session session-key)))
+    (plist-put state prop value)
+    (puthash session-key state claude-org--sessions)))
+
+(defun claude-org--session-get (session-key prop)
+  "Get PROP from session SESSION-KEY."
+  (plist-get (claude-org--get-session session-key) prop))
+
+(defun claude-org--active-session-count ()
+  "Return count of sessions with :busy t."
+  (let ((count 0))
+    (maphash (lambda (_id state)
+               (when (plist-get state :busy)
+                 (cl-incf count)))
+             claude-org--sessions)
+    count))
+
+(defun claude-org--session-display-name (session-key)
+  "Extract display name from SESSION-KEY.
+Returns just the custom part after :: or a shortened file path."
+  (if (string-match "::\\(.+\\)$" session-key)
+      (match-string 1 session-key)
+    ;; No custom ID, show abbreviated file name
+    (file-name-nondirectory session-key)))
+
+(defun claude-org--format-elapsed (start-time)
+  "Format elapsed time since START-TIME as human-readable string."
+  (if (null start-time)
+      "unknown"
+    (let ((elapsed (- (float-time) start-time)))
+      (cond
+       ((< elapsed 60)
+        (format "started %d seconds ago" (round elapsed)))
+       ((< elapsed 3600)
+        (format "started %d minutes ago" (round (/ elapsed 60))))
+       (t
+        (format "started %d hours ago" (round (/ elapsed 3600))))))))
+#+END_SRC
+
+* Block Detection
+
+Block detection functions.
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-section-level ()
+  "Get the current org section level (number of stars).
+Returns 0 if not inside any heading, otherwise returns the heading level."
+  (save-excursion
+    (if (org-before-first-heading-p)
+        0
+      (org-back-to-heading t)
+      (org-current-level))))
+
+(defun claude-org--in-ai-block-p ()
+  "Return t if point is inside a #+begin_src ai block."
+  (save-excursion
+    (let ((case-fold-search t)
+          (pos (point)))
+      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
+        (let ((block-start (point)))
+          (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
+            (and (>= pos block-start)
+                 (<= pos (point)))))))))
+
+(defun claude-org--get-block-content ()
+  "Get content of the ai block at point."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
+        (forward-line 1)
+        (let ((start (point)))
+          (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
+            (forward-line 0)
+            (string-trim (buffer-substring-no-properties start (point)))))))))
+
+(defun claude-org--find-block-end ()
+  "Find position at end of #+end_src line."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
+        (line-end-position)))))
+#+END_SRC
+
+* Block Insertion
+
+Block insertion and session info commands.
+
+#+BEGIN_SRC elisp
+(defun claude-org--next-instruction-number ()
+  "Find the next available instruction number."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((max-num 0))
+      (while (re-search-forward "^\\*+ Instruction \\([0-9]+\\)" nil t)
+        (setq max-num (max max-num (string-to-number (match-string 1)))))
+      (1+ max-num))))
+
+(defun claude-org-insert-block ()
+  "Insert an AI query block with auto-numbered Instruction heading.
+Inserts at the same level as the current section with :claude_chat: tag."
+  (interactive)
+  (let* ((level (or (org-current-level) 1))
+         (stars (make-string level ?*))
+         (num (claude-org--next-instruction-number)))
+    (insert stars " Instruction " (number-to-string num) " :" claude-org-heading-tag ":\n\n")
+    (insert "#+begin_src ai\n\n#+end_src")
+    (forward-line -1)))
+
+(defun claude-org-insert-session-block ()
+  "Insert an AI query block with independent section-scoped session.
+The :claude_session: tag creates a new conversation context for this subtree."
+  (interactive)
+  (let* ((level (or (org-current-level) 1))
+         (stars (make-string level ?*))
+         (num (claude-org--next-instruction-number)))
+    (insert stars " Session " (number-to-string num) " :" claude-org-session-tag ":\n\n")
+    (insert "#+begin_src ai\n\n#+end_src")
+    (forward-line -1)))
+
+(defun claude-org-show-session-info ()
+  "Display current session information.
+Shows the session identity which is file_path + optional CLAUDE_SESSION_ID."
+  (interactive)
+  (let* ((session-id (claude-org--get-session-id))
+         (scope (claude-org--get-session-scope))
+         (file-path (or buffer-file-name "unsaved")))
+    (if session-id
+        (message "Session: %s::%s (scope: %s)" file-path session-id scope)
+      (message "Session: %s (file path only, no CLAUDE_SESSION_ID property)" file-path))))
+#+END_SRC
+
+* Response Handling
+
+Response handling for streaming tokens.
+
+** Debounced Font-Lock
+
+#+BEGIN_SRC elisp
+(defun claude-org--schedule-fontlock ()
+  "Schedule a debounced font-lock refresh.
+Batches rapid updates during streaming for better performance."
+  (when claude-org--fontlock-timer
+    (cancel-timer claude-org--fontlock-timer))
+  (setq claude-org--fontlock-timer
+        (run-with-timer claude-org-fontlock-delay nil
+                        (lambda ()
+                          (when (and (buffer-live-p (current-buffer))
+                                     (derived-mode-p 'org-mode))
+                            (font-lock-flush)
+                            (redisplay))))))
+#+END_SRC
+
+** Token Handling
+
+#+BEGIN_SRC elisp
+(defun claude-org--handle-token (session-key text)
+  "Handle incoming TEXT token for SESSION-KEY.
+Inserts text at the session's marker and schedules font-lock."
+  (let ((marker (claude-org--session-get session-key :marker))
+        (buf (current-buffer)))
+    (when (and marker (marker-buffer marker))
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (insert text)
+          (set-marker marker (point)))
+        (claude-org--schedule-fontlock)))))
+#+END_SRC
+
+** Message Handling
+
+#+BEGIN_SRC elisp
+(defun claude-org--handle-message (session-key msg)
+  "Handle incoming MSG for SESSION-KEY.
+Extracts session ID from result messages and stores it."
+  ;; Store SDK UUID when we get a result message
+  (when (claude-agent-result-message-p msg)
+    (let ((sdk-uuid (claude-agent-result-message-session-id msg)))
+      (when sdk-uuid
+        (claude-agent--store-sdk-uuid session-key sdk-uuid))))
+  ;; Display system messages if enabled
+  (when (and claude-org-show-system-messages
+             (claude-agent-system-message-p msg))
+    (let ((marker (claude-org--session-get session-key :marker)))
+      (when (and marker (marker-buffer marker))
+        (with-current-buffer (marker-buffer marker)
+          (save-excursion
+            (goto-char marker)
+            (insert (format "\n[System: %s]\n"
+                            (claude-agent-system-message-subtype msg)))
+            (set-marker marker (point))))))))
+
+(defun claude-org--handle-complete (session-key result)
+  "Handle query completion for SESSION-KEY with RESULT."
+  (claude-org--session-put session-key :busy nil)
+  (claude-org--session-put session-key :recovering nil)
+  (claude-org--stop-spinner session-key)
+  ;; Add newlines after response
+  (let ((marker (claude-org--session-get session-key :marker)))
+    (when (and marker (marker-buffer marker))
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (insert "\n")))))
+  ;; Update header line
+  (claude-org--refresh-header-line))
+#+END_SRC
+
+** Error Handling
+
+#+BEGIN_SRC elisp
+(defun claude-org--handle-error (session-key error)
+  "Handle error ERROR for SESSION-KEY.
+Attempts session recovery if error indicates expired session."
+  (let ((error-msg (format "%s" error)))
+    (if (and (claude-agent--session-expired-p error-msg)
+             (not (claude-org--session-get session-key :recovering)))
+        ;; Session expired - attempt recovery
+        (claude-org--recover-session session-key)
+      ;; Other error - display it
+      (claude-org--insert-error session-key error-msg))))
+
+(defun claude-org--insert-error (session-key error-msg)
+  "Insert ERROR-MSG at SESSION-KEY's marker and clean up."
+  (claude-org--session-put session-key :busy nil)
+  (claude-org--stop-spinner session-key)
+  (let ((marker (claude-org--session-get session-key :marker)))
+    (when (and marker (marker-buffer marker))
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (insert (format "\n[Error: %s]\n" error-msg))
+          (set-marker marker (point))))))
+  (claude-org--refresh-header-line))
+#+END_SRC
+
+* Execution
+
+Execution and request handling.
+
+** Execute Command
+
+#+BEGIN_SRC elisp
+(defun claude-org-execute ()
+  "Execute the AI query at point.
+Must be called when point is inside a #+begin_src ai block.
+Sends the query to Claude and streams the response below the block."
+  (interactive)
+  (unless (claude-org--in-ai-block-p)
+    (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
+  (let* ((content (claude-org--get-block-content))
+         (session-key (claude-org--current-session-key)))
+    (unless content
+      (user-error "Empty ai block"))
+    (when (claude-org--session-get session-key :busy)
+      (user-error "Session is busy. Use C-c C-k to cancel or wait for completion"))
+    ;; Find insertion point (after #+end_src)
+    (let ((insert-point (claude-org--find-block-end)))
+      (unless insert-point
+        (user-error "Cannot find block end"))
+      ;; Set up marker at insertion point
+      (save-excursion
+        (goto-char insert-point)
+        (insert "\n\n")
+        (let ((marker (point-marker)))
+          (claude-org--session-put session-key :marker marker)
+          (claude-org--session-put session-key :original-prompt content)
+          (claude-org--session-put session-key :section-level (claude-org--get-section-level))
+          (claude-org--session-put session-key :start-time (float-time))
+          (claude-org--session-put session-key :busy t)))
+      ;; Start spinner and send request
+      (claude-org--start-spinner session-key)
+      (claude-org--send-request content))))
+#+END_SRC
+
+** Send Request
+
+#+BEGIN_SRC elisp
+(defun claude-org--send-request (prompt)
+  "Send PROMPT to Claude via claude-agent."
+  (let* ((session-key (claude-org--current-session-key))
+         (sdk-uuid (claude-agent--get-sdk-uuid session-key))
+         (project-root (claude-org--get-project-root))
+         (system-prompt (claude-org--collect-system-prompts))
+         ;; Build IDE context
+         (ide-context (when claude-org-include-ide-context
+                        (claude-agent-collect-ide-context)))
+         (system-reminder (when ide-context
+                            (claude-agent-build-system-reminder
+                             :current-file (plist-get ide-context :current-file)
+                             :open-files (plist-get ide-context :open-files)
+                             :selection (plist-get ide-context :selection)
+                             :file-path buffer-file-name)))
+         ;; Build options
+         (options (claude-agent-options
+                   :cwd (or project-root default-directory)
+                   :system-prompt system-prompt
+                   :resume sdk-uuid))
+         ;; Build full prompt with system reminder
+         (full-prompt (if (and system-reminder
+                               (not (string-empty-p system-reminder)))
+                          (concat system-reminder "\n" prompt)
+                        prompt)))
+    ;; Use lexical-let to properly capture variables for callbacks
+    (lexical-let ((buf (current-buffer))
+                  (session-key session-key))
+      ;; Send query via claude-agent
+      (let ((state (claude-agent-query
+                    full-prompt
+                    :options options
+                    :on-token (lambda (text)
+                                (when (buffer-live-p buf)
+                                  (with-current-buffer buf
+                                    (claude-org--handle-token session-key text))))
+                    :on-message (lambda (msg)
+                                  (when (buffer-live-p buf)
+                                    (with-current-buffer buf
+                                      (claude-org--handle-message session-key msg))))
+                    :on-error (lambda (err)
+                                (when (buffer-live-p buf)
+                                  (with-current-buffer buf
+                                    (claude-org--handle-error session-key err))))
+                    :on-complete (lambda (result)
+                                   (when (buffer-live-p buf)
+                                     (with-current-buffer buf
+                                       (claude-org--handle-complete session-key result)))))))
+        ;; Store process state for cancellation
+        (claude-org--session-put session-key :process-state state)))))
+#+END_SRC
+
+* Header Line
+
+Dynamic header line showing session status.
+
+#+BEGIN_SRC elisp
+(defvar-local claude-org--original-header-line nil
+  "Original header-line-format before enabling claude-org-mode.")
+
+(defconst claude-org--spinner-frames '("|" "/" "-" "\\")
+  "Frames for the busy spinner animation.")
+
+(defvar claude-org--header-timer nil
+  "Timer for refreshing header line across all claude-org buffers.")
+
+(defun claude-org--start-spinner (session-key)
+  "Start spinner animation for SESSION-KEY."
+  (claude-org--session-put session-key :spinner 0)
+  (claude-org--ensure-header-timer))
+
+(defun claude-org--stop-spinner (session-key)
+  "Stop spinner animation for SESSION-KEY."
+  (claude-org--session-put session-key :spinner nil))
+
+(defun claude-org--ensure-header-timer ()
+  "Ensure header refresh timer is running."
+  (unless (and claude-org--header-timer
+               (timerp claude-org--header-timer))
+    (setq claude-org--header-timer
+          (run-at-time 0.5 0.5 #'claude-org--refresh-all-headers))))
+
+(defun claude-org--stop-header-timer ()
+  "Stop header refresh timer if no active sessions."
+  (when (and claude-org--header-timer
+             (zerop (claude-org--active-session-count)))
+    (cancel-timer claude-org--header-timer)
+    (setq claude-org--header-timer nil)))
+
+(defun claude-org--refresh-all-headers ()
+  "Refresh header line in all claude-org buffers."
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (bound-and-true-p claude-org-mode)
+          (claude-org--refresh-header-line)
+          ;; Advance spinner for busy sessions
+          (maphash (lambda (key state)
+                     (when (plist-get state :busy)
+                       (let* ((frame (or (plist-get state :spinner) 0))
+                              (next-frame (mod (1+ frame) 4)))
+                         (plist-put state :spinner next-frame))))
+                   claude-org--sessions))))))
+
+(defun claude-org--refresh-header-line ()
+  "Refresh the header line with current session status."
+  (setq header-line-format (claude-org--build-header-line))
+  (force-mode-line-update))
+
+(defun claude-org--build-header-line ()
+  "Build header line format with session status."
+  (let* ((file-name (or (buffer-file-name) "unsaved"))
+         (active-count (claude-org--active-session-count))
+         (session-info (if (> active-count 0)
+                           (claude-org--format-active-sessions)
+                         "[0 sessions]")))
+    (format " %s | Claude Org %s"
+            (file-name-nondirectory file-name)
+            session-info)))
+
+(defun claude-org--format-active-sessions ()
+  "Format active session info for header line."
+  (let ((parts '()))
+    (maphash (lambda (key state)
+               (when (plist-get state :busy)
+                 (let* ((spinner-frame (or (plist-get state :spinner) 0))
+                        (spinner (nth spinner-frame claude-org--spinner-frames))
+                        (name (claude-org--session-display-name key)))
+                   (push (format "%s %s" spinner name) parts))))
+             claude-org--sessions)
+    (if parts
+        (format "[%d busy: %s]" (length parts) (string-join (nreverse parts) ", "))
+      "[0 sessions]")))
+#+END_SRC
+
+* Cancel Support
+
+#+BEGIN_SRC elisp
+(defun claude-org-cancel ()
+  "Cancel the current session's active query."
+  (interactive)
+  (let* ((session-key (claude-org--current-session-key))
+         (process-state (claude-org--session-get session-key :process-state)))
+    (if (and process-state (claude-org--session-get session-key :busy))
+        (progn
+          (claude-agent-query-interrupt process-state)
+          (claude-org--session-put session-key :busy nil)
+          (claude-org--stop-spinner session-key)
+          (let ((marker (claude-org--session-get session-key :marker)))
+            (when (and marker (marker-buffer marker))
+              (with-current-buffer (marker-buffer marker)
+                (save-excursion
+                  (goto-char marker)
+                  (insert "\n[Cancelled]\n")))))
+          (claude-org--refresh-header-line)
+          (message "Query cancelled"))
+      (message "No active query to cancel"))))
+
+(defun claude-org-cancel-all ()
+  "Cancel all active queries in this buffer."
+  (interactive)
+  (let ((cancelled 0))
+    (maphash (lambda (key state)
+               (when (plist-get state :busy)
+                 (let ((process-state (plist-get state :process-state)))
+                   (when process-state
+                     (claude-agent-query-interrupt process-state)
+                     (plist-put state :busy nil)
+                     (cl-incf cancelled)))))
+             claude-org--sessions)
+    (claude-org--refresh-header-line)
+    (message "Cancelled %d queries" cancelled)))
+#+END_SRC
+
+* Session Manager UI
+
+#+BEGIN_SRC elisp
+(defun claude-org-list-sessions ()
+  "Display a list of all sessions in this buffer."
+  (interactive)
+  (let ((sessions '()))
+    (maphash (lambda (key state)
+               (push (list key
+                           (if (plist-get state :busy) "busy" "idle")
+                           (claude-org--format-elapsed (plist-get state :start-time)))
+                     sessions))
+             claude-org--sessions)
+    (if sessions
+        (with-output-to-temp-buffer "*Claude Org Sessions*"
+          (princ "Claude Org Sessions\n")
+          (princ "==================\n\n")
+          (dolist (session (nreverse sessions))
+            (princ (format "%-40s  %-6s  %s\n"
+                           (claude-org--session-display-name (nth 0 session))
+                           (nth 1 session)
+                           (nth 2 session)))))
+      (message "No sessions in this buffer"))))
+#+END_SRC
+
+* Mode Definition
+
+** Keymap
+
+#+BEGIN_SRC elisp
+(defvar claude-org-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'claude-org-maybe-execute)
+    (define-key map (kbd "C-c C-k") #'claude-org-cancel)
+    (define-key map (kbd "C-c C-l") #'claude-org-list-sessions)
+    (define-key map (kbd "C-c C-n") #'claude-org-insert-block)
+    (define-key map (kbd "C-c C-i") #'claude-org-show-session-info)
+    map)
+  "Keymap for `claude-org-mode'.")
+
+(defun claude-org-maybe-execute ()
+  "Execute AI query if in ai block, otherwise run org default."
+  (interactive)
+  (if (claude-org--in-ai-block-p)
+      (claude-org-execute)
+    ;; Fall back to org-mode's C-c C-c
+    (org-ctrl-c-ctrl-c)))
+#+END_SRC
+
+** Minor Mode
+
+#+BEGIN_SRC elisp
+(defun claude-org--register-exclusion ()
+  "Register claude-org buffers as excluded from IDE context."
+  (add-to-list 'claude-agent-ide-context-exclude-predicates
+               (lambda (buf)
+                 (with-current-buffer buf
+                   (bound-and-true-p claude-org-mode)))))
+
+;;;###autoload
+(define-minor-mode claude-org-mode
+  "Minor mode for streaming Claude AI queries in org-mode.
+
+Use #+begin_src ai blocks to query Claude. Press C-c C-c inside a block
+to send the query and stream the response.
+
+\\{claude-org-mode-map}"
+  :lighter " ClaudeOrg"
+  :keymap claude-org-mode-map
+  :group 'claude-org
+  (if claude-org-mode
+      (progn
+        ;; Save original header line
+        (setq claude-org--original-header-line header-line-format)
+        ;; Set up header line
+        (claude-org--refresh-header-line)
+        ;; Register exclusion
+        (claude-org--register-exclusion))
+    ;; Restore original header line
+    (setq header-line-format claude-org--original-header-line)
+    ;; Cancel any active queries
+    (claude-org-cancel-all)
+    ;; Stop header timer if no more claude-org buffers
+    (claude-org--stop-header-timer)))
+
+;;;###autoload
+(defun claude-org-cleanup ()
+  "Clean up claude-org resources."
+  (interactive)
+  (claude-org-cancel-all)
+  (clrhash claude-org--sessions))
+#+END_SRC
+
+* Tests
+
+#+BEGIN_SRC elisp :load test
+(require 'ert)
+
+(ert-deftest claude-org-test-session-key-creation ()
+  "Test session key creation from file path and session ID."
+  (let ((buffer-file-name "/path/to/file.org"))
+    ;; Without custom session ID
+    (cl-letf (((symbol-function 'claude-org--get-session-id) (lambda () nil)))
+      (should (equal "/path/to/file.org" (claude-org--current-session-key))))
+    ;; With custom session ID
+    (cl-letf (((symbol-function 'claude-org--get-session-id) (lambda () "my-session")))
+      (should (equal "/path/to/file.org::my-session" (claude-org--current-session-key))))))
+
+(ert-deftest claude-org-test-session-display-name ()
+  "Test session display name extraction."
+  (should (equal "my-session"
+                 (claude-org--session-display-name "/path/to/file.org::my-session")))
+  (should (equal "file.org"
+                 (claude-org--session-display-name "/path/to/file.org"))))
+
+(ert-deftest claude-org-test-session-state-accessors ()
+  "Test session state put/get operations."
+  (let ((claude-org--sessions (make-hash-table :test 'equal)))
+    (claude-org--session-put "test-key" :foo "bar")
+    (should (equal "bar" (claude-org--session-get "test-key" :foo)))
+    (claude-org--session-put "test-key" :busy t)
+    (should (equal t (claude-org--session-get "test-key" :busy)))))
+
+(ert-deftest claude-org-test-active-session-count ()
+  "Test active session counting."
+  (let ((claude-org--sessions (make-hash-table :test 'equal)))
+    (should (= 0 (claude-org--active-session-count)))
+    (claude-org--session-put "session-1" :busy t)
+    (should (= 1 (claude-org--active-session-count)))
+    (claude-org--session-put "session-2" :busy t)
+    (should (= 2 (claude-org--active-session-count)))
+    (claude-org--session-put "session-1" :busy nil)
+    (should (= 1 (claude-org--active-session-count)))))
+
+(ert-deftest claude-org-test-format-elapsed ()
+  "Test elapsed time formatting."
+  (should (equal "unknown" (claude-org--format-elapsed nil)))
+  (should (string-match-p "started [0-9]+ seconds ago"
+                          (claude-org--format-elapsed (- (float-time) 30))))
+  (should (string-match-p "started [0-9]+ minutes ago"
+                          (claude-org--format-elapsed (- (float-time) 120)))))
+#+END_SRC
+
+* Package Footer
+
+#+BEGIN_SRC elisp
+(provide 'claude-org)
+;;; claude-org.el ends here
+#+END_SRC

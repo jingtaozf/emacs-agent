@@ -435,9 +435,11 @@ Internal state structure for managing async process communication.
   buffer            ; Output buffer
   json-buffer       ; Accumulated partial JSON string
   callback          ; Message callback function
+  token-callback    ; Token callback for streaming text
   error-callback    ; Error callback function
   complete-callback ; Completion callback function
   options           ; Original options plist
+  request-id        ; Unique request ID for cancellation
   (ready nil)       ; Boolean ready state
   (closed nil))     ; Boolean closed state
 
@@ -455,6 +457,20 @@ The process filter accumulates JSON data and parses complete messages.
   (when claude-agent-debug
     (apply #'message (concat "[claude-agent] " format-string) args)))
 
+(defun claude-agent--extract-tokens (json callback)
+  "Extract text tokens from JSON and call CALLBACK with each.
+Handles assistant messages by extracting text from content blocks."
+  (let ((type (plist-get json :type)))
+    (when (string= type "assistant")
+      (let* ((message (plist-get json :message))
+             (content (plist-get message :content)))
+        (when content
+          (dolist (block content)
+            (when (string= (plist-get block :type) "text")
+              (let ((text (plist-get block :text)))
+                (when (and text (not (string-empty-p text)))
+                  (funcall callback text))))))))))
+
 (defun claude-agent--process-json-buffer (process)
   "Process accumulated JSON for PROCESS.
 PROCESS has state stored via `process-get'.
@@ -462,6 +478,7 @@ Parses complete newline-delimited JSON and invokes callbacks."
   (let* ((state (process-get process 'claude-agent-state))
          (buf (claude-agent--process-state-json-buffer state))
          (callback (claude-agent--process-state-callback state))
+         (token-callback (claude-agent--process-state-token-callback state))
          (error-callback (claude-agent--process-state-error-callback state)))
     (while (string-match "^\\([^\n]+\\)\n" buf)
       (let* ((line (match-string 1 buf))
@@ -475,6 +492,10 @@ Parses complete newline-delimited JSON and invokes callbacks."
                      (json-key-type 'keyword)
                      (parsed (json-read-from-string line)))
                 (claude-agent--debug-log "Parsed JSON: %S" (plist-get parsed :type))
+                ;; Extract text for token callback (streaming)
+                (when token-callback
+                  (claude-agent--extract-tokens parsed token-callback))
+                ;; Call message callback with parsed message
                 (when callback
                   (let ((message (claude-agent--parse-message parsed)))
                     (when message
@@ -537,6 +558,9 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
       ;; Cleanup
       (setq claude-agent--active-states
             (delq state claude-agent--active-states))
+      ;; Unregister from active queries
+      (when-let ((req-id (claude-agent--process-state-request-id state)))
+        (claude-agent--unregister-query req-id))
       (when-let ((buf (claude-agent--process-state-buffer state)))
         (when (buffer-live-p buf)
           (kill-buffer buf))))))
@@ -545,12 +569,15 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
 ** Process Creation
 
 #+BEGIN_SRC elisp
-(defun claude-agent--start-process (prompt options callback error-callback complete-callback)
+(defun claude-agent--start-process (prompt options callback error-callback complete-callback
+                                          &optional token-callback request-id)
   "Start Claude CLI process with PROMPT and OPTIONS.
 
 CALLBACK is called with each parsed message.
 ERROR-CALLBACK is called on errors.
 COMPLETE-CALLBACK is called when process completes.
+TOKEN-CALLBACK is called with each text token for streaming (optional).
+REQUEST-ID is a unique identifier for this request (optional).
 
 Returns a process state object."
   (let* ((cli-path (or (plist-get options :cli-path)
@@ -558,12 +585,15 @@ Returns a process state object."
          (args (claude-agent--build-args options nil))
          (cwd (plist-get options :cwd))
          (env-vars (plist-get options :env))
+         (req-id (or request-id (claude-agent--generate-request-id)))
          (state (claude-agent--make-process-state
                  :options options
                  :json-buffer ""
                  :callback callback
+                 :token-callback token-callback
                  :error-callback error-callback
                  :complete-callback complete-callback
+                 :request-id req-id
                  :ready nil
                  :closed nil))
          ;; Note: We use :connection-type 'pipe in make-process below
@@ -591,6 +621,8 @@ Returns a process state object."
       (setf (claude-agent--process-state-process state) process)
       (setf (claude-agent--process-state-buffer state) (process-buffer process))
       (setf (claude-agent--process-state-ready state) t)
+      ;; Register query for cancellation tracking
+      (claude-agent--register-query req-id state)
       ;; KEY: Close stdin immediately for non-interactive --print mode
       ;; This signals EOF to the CLI, allowing it to proceed
       (process-send-eof process)
@@ -676,7 +708,7 @@ Returns a process state object."
 ** Query Function
 
 #+BEGIN_SRC elisp
-(cl-defun claude-agent-query (prompt &key options on-message on-error on-complete)
+(cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete)
   "Send a one-shot query to Claude.
 
 PROMPT is the query string to send.
@@ -691,6 +723,10 @@ ON-MESSAGE is called with each message as it arrives.
     - `claude-agent-system-message'
     - `claude-agent-result-message'
 
+ON-TOKEN is called with each text token for streaming display.
+  Function signature: (lambda (text) ...)
+  This is useful for real-time streaming UIs like claude-org mode.
+
 ON-ERROR is called if an error occurs.
   Function signature: (lambda (error) ...)
 
@@ -698,6 +734,8 @@ ON-COMPLETE is called when the query finishes.
   Function signature: (lambda (result-or-error) ...)
 
 Returns the process state object for potential interruption.
+The process state includes a request-id that can be used with
+`claude-agent-cancel-query' for cancellation.
 
 Example:
   (claude-agent-query
@@ -706,6 +744,8 @@ Example:
                  (when (claude-agent-assistant-message-p msg)
                    (message \"Response: %s\"
                             (claude-agent-extract-text msg))))
+   :on-token (lambda (text)
+               (insert text))  ; For streaming display
    :on-complete (lambda (result)
                   (message \"Done!\")))"
   (unless prompt
@@ -716,7 +756,8 @@ Example:
      opts
      on-message
      on-error
-     on-complete)))
+     on-complete
+     on-token)))
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
@@ -724,6 +765,11 @@ STATE is the process state returned by `claude-agent-query'."
   (when-let ((process (claude-agent--process-state-process state)))
     (when (process-live-p process)
       (interrupt-process process))))
+
+(defun claude-agent-query-request-id (state)
+  "Get the request ID from query STATE.
+Returns the unique request-id that can be used with `claude-agent-cancel-query'."
+  (claude-agent--process-state-request-id state))
 #+END_SRC
 
 ** Helper Functions
@@ -1741,6 +1787,13 @@ queries and allowing them to be interrupted.
 #+BEGIN_SRC elisp
 (defvar claude-agent--active-queries (make-hash-table :test 'equal)
   "Map request-id to process state for cancellation support.")
+
+(defvar claude-agent--request-counter 0
+  "Counter for generating unique request IDs.")
+
+(defun claude-agent--generate-request-id ()
+  "Generate a unique request ID for query tracking."
+  (format "req-%d-%.0f" (cl-incf claude-agent--request-counter) (* 1000 (float-time))))
 
 (defun claude-agent--register-query (request-id state)
   "Register STATE for REQUEST-ID in active queries table."
