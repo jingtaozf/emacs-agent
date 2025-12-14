@@ -645,7 +645,7 @@ Returns a process state object."
       ;; Initialize verbose buffer for session if session-key provided
       (when session-key
         (claude-agent--get-session-verbose-buffer session-key)
-        (claude-agent--verbose-insert-query-header session-key prompt))
+        (claude-agent--verbose-insert-query-header session-key prompt cli-path args default-directory))
       ;; KEY: Close stdin immediately for non-interactive --print mode
       ;; This signals EOF to the CLI, allowing it to proceed
       (process-send-eof process)
@@ -2288,16 +2288,57 @@ CLI-like output for all queries within a session.
         (puthash session-key buf claude-agent--session-verbose-buffers)
         buf)))
 
-(defun claude-agent--verbose-insert-query-header (session-key prompt)
-  "Insert query header in verbose buffer for SESSION-KEY with PROMPT."
+(defun claude-agent--verbose-insert-query-header (session-key prompt &optional cli-path args cwd)
+  "Insert query header in verbose buffer for SESSION-KEY with PROMPT.
+CLI-PATH is the path to claude CLI, ARGS are command line arguments, CWD is working directory."
   (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (let ((inhibit-read-only t))
           (goto-char (point-max))
           (insert "\n")
-          (insert "────────────────────────────────────────\n")
+          (insert "════════════════════════════════════════════════════════════════\n")
           (insert (format "▸ Query [%s]\n" (format-time-string "%H:%M:%S")))
+          ;; Show CLI command if provided
+          (when (and cli-path args)
+            (insert "\n")
+            (insert (propertize "Command:\n" 'face 'font-lock-keyword-face))
+            (insert (format "  %s \\\n" cli-path))
+            (let ((arg-pairs nil)
+                  (i 0))
+              ;; Group args into option-value pairs for better display
+              (while (< i (length args))
+                (let ((arg (nth i args)))
+                  (if (string-prefix-p "-" arg)
+                      (if (and (< (1+ i) (length args))
+                               (not (string-prefix-p "-" (nth (1+ i) args))))
+                          (progn
+                            (push (cons arg (nth (1+ i) args)) arg-pairs)
+                            (setq i (+ i 2)))
+                        (push (cons arg nil) arg-pairs)
+                        (setq i (1+ i)))
+                    (push (cons arg nil) arg-pairs)
+                    (setq i (1+ i)))))
+              (dolist (pair (nreverse arg-pairs))
+                (let ((opt (car pair))
+                      (val (cdr pair)))
+                  (if val
+                      ;; Truncate very long values (like system prompts)
+                      (let ((display-val (if (> (length val) 100)
+                                             (concat (substring val 0 100) "...")
+                                           val)))
+                        (insert (format "    %s %s \\\n"
+                                        (propertize opt 'face 'font-lock-constant-face)
+                                        display-val)))
+                    (insert (format "    %s \\\n"
+                                    (propertize opt 'face 'font-lock-constant-face))))))))
+          ;; Show working directory
+          (when cwd
+            (insert (format "\n%s %s\n"
+                            (propertize "Working directory:" 'face 'font-lock-keyword-face)
+                            cwd)))
+          (insert "\n")
+          (insert (propertize "Prompt:\n" 'face 'font-lock-keyword-face))
           (insert prompt)
           (insert "\n\n"))))))
 #+END_SRC
@@ -2305,28 +2346,104 @@ CLI-like output for all queries within a session.
 ** Message Formatter
 
 #+BEGIN_SRC elisp
+(defun claude-agent--verbose-format-tool-input (input)
+  "Format tool INPUT for display, handling different types."
+  (cond
+   ((null input) "")
+   ((stringp input) input)
+   ((listp input)
+    ;; Convert plist or alist to readable format
+    (let ((json-str (condition-case nil
+                        (json-encode input)
+                      (error (format "%S" input)))))
+      json-str))
+   (t (format "%S" input))))
+
+(defun claude-agent--verbose-format-content-block (block)
+  "Format a single content BLOCK for verbose display."
+  (cond
+   ;; Tool use block - show full tool call with input
+   ((claude-agent-tool-use-block-p block)
+    (let* ((name (claude-agent-tool-use-block-name block))
+           (input (claude-agent-tool-use-block-input block))
+           (input-str (claude-agent--verbose-format-tool-input input)))
+      (concat
+       (format "\n%s %s\n"
+               (propertize "▶ Tool:" 'face 'font-lock-keyword-face)
+               (propertize name 'face 'font-lock-function-name-face))
+       (when (and input-str (not (string-empty-p input-str)))
+         (format "%s\n%s\n"
+                 (propertize "  Input:" 'face 'font-lock-comment-face)
+                 input-str)))))
+
+   ;; Tool result block - show content
+   ((claude-agent-tool-result-block-p block)
+    (let* ((is-error (claude-agent-tool-result-block-is-error block))
+           (content (claude-agent-tool-result-block-content block))
+           (content-str (if (stringp content)
+                            content
+                          (claude-agent--verbose-format-tool-input content))))
+      (concat
+       (format "%s %s\n"
+               (propertize "◀ Result:" 'face 'font-lock-keyword-face)
+               (if is-error
+                   (propertize "ERROR" 'face 'error)
+                 (propertize "OK" 'face 'success)))
+       (when (and content-str (not (string-empty-p content-str)))
+         (format "%s\n" content-str)))))
+
+   ;; Thinking block - show actual thinking content
+   ((claude-agent-thinking-block-p block)
+    (let ((thinking (claude-agent-thinking-block-thinking block)))
+      (concat
+       (format "\n%s\n" (propertize "💭 Thinking:" 'face 'font-lock-comment-face))
+       (when (and thinking (not (string-empty-p thinking)))
+         (format "%s\n" (propertize thinking 'face 'font-lock-doc-face))))))
+
+   ;; Text block
+   ((claude-agent-text-block-p block)
+    (claude-agent-text-block-text block))
+
+   (t nil)))
+
 (defun claude-agent--verbose-format-message (msg)
   "Format MSG for verbose buffer display."
   (cond
-   ;; Tool use block
-   ((claude-agent-tool-use-block-p msg)
-    (format "▶ %s\n"
-            (propertize (claude-agent-tool-use-block-name msg)
-                        'face 'font-lock-function-name-face)))
+   ;; Assistant message - iterate through content blocks
+   ((claude-agent-assistant-message-p msg)
+    (let ((content (claude-agent-assistant-message-content msg))
+          (parts nil))
+      (claude-agent--debug-log "Assistant content blocks: %d items" (length content))
+      (dolist (block content)
+        (claude-agent--debug-log "  Block type: %s"
+                                 (cond
+                                  ((claude-agent-tool-use-block-p block) "tool_use")
+                                  ((claude-agent-thinking-block-p block) "thinking")
+                                  ((claude-agent-text-block-p block) "text")
+                                  ((claude-agent-tool-result-block-p block) "tool_result")
+                                  (t (format "unknown: %S" (type-of block)))))
+        (when-let ((formatted (claude-agent--verbose-format-content-block block)))
+          (push formatted parts)))
+      (when parts
+        (mapconcat #'identity (nreverse parts) ""))))
 
-   ;; Tool result block
-   ((claude-agent-tool-result-block-p msg)
-    (if (claude-agent-tool-result-block-is-error msg)
-        (format "◀ %s\n" (propertize "ERROR" 'face 'error))
-      ""))  ; Don't show success results (too verbose)
-
-   ;; Thinking block
-   ((claude-agent-thinking-block-p msg)
-    (format "%s\n" (propertize "thinking..." 'face 'font-lock-comment-face)))
-
-   ;; Text block
-   ((claude-agent-text-block-p msg)
-    (claude-agent-text-block-text msg))
+   ;; User message - show tool results if any
+   ((claude-agent-user-message-p msg)
+    (let ((content (claude-agent-user-message-content msg)))
+      (cond
+       ;; Content is a list of blocks (tool results)
+       ((and (listp content) (listp (car content)))
+        (let ((parts nil))
+          (dolist (block content)
+            (when-let ((formatted (claude-agent--verbose-format-content-block
+                                   (claude-agent--parse-content-block block))))
+              (push formatted parts)))
+          (when parts
+            (mapconcat #'identity (nreverse parts) ""))))
+       ;; Content is just a string
+       ((stringp content)
+        nil)  ; Don't show user input (already shown in header)
+       (t nil))))
 
    ;; System message
    ((claude-agent-system-message-p msg)
@@ -2338,7 +2455,7 @@ CLI-like output for all queries within a session.
    ((claude-agent-result-message-p msg)
     (format "\n%s\n"
             (propertize
-             (format "✓ %.1fs | $%.4f"
+             (format "════ Complete: %.1fs | $%.4f ════"
                      (/ (or (claude-agent-result-message-duration-ms msg) 0) 1000.0)
                      (or (claude-agent-result-message-total-cost-usd msg) 0))
              'face 'font-lock-comment-face)))
@@ -2347,6 +2464,14 @@ CLI-like output for all queries within a session.
 
 (defun claude-agent--verbose-write-message (session-key msg)
   "Write MSG to verbose buffer for SESSION-KEY."
+  (claude-agent--debug-log "Verbose write: session=%s msg-type=%s"
+                           session-key
+                           (cond
+                            ((claude-agent-assistant-message-p msg) "assistant")
+                            ((claude-agent-user-message-p msg) "user")
+                            ((claude-agent-system-message-p msg) "system")
+                            ((claude-agent-result-message-p msg) "result")
+                            (t "unknown")))
   (when session-key
     (when-let* ((buf (gethash session-key claude-agent--session-verbose-buffers))
                 (formatted (claude-agent--verbose-format-message msg)))
