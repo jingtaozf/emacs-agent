@@ -947,14 +947,32 @@ Extracts session ID from result messages and stores it."
 ** Error Handling
 
 #+BEGIN_SRC elisp
+(defun claude-org--extract-error-message (error)
+  "Extract human-readable message from ERROR.
+ERROR can be (symbol :message ...) plist, a string, or other."
+  (cond
+   ;; CLI error: (claude-agent-cli-error :message "..." ...) - plist starts at cdr
+   ((and (listp error) (symbolp (car error)) (plist-get (cdr error) :message))
+    (plist-get (cdr error) :message))
+   ;; Plain plist with :message
+   ((and (listp error) (plist-get error :message))
+    (plist-get error :message))
+   ;; String error
+   ((stringp error) error)
+   ;; Fallback: convert to string
+   (t (format "%s" error))))
+
 (defun claude-org--handle-error (session-key error)
   "Handle error ERROR for SESSION-KEY.
 Attempts session recovery if error indicates expired session."
-  (let ((error-msg (format "%s" error)))
+  (let ((error-msg (claude-org--extract-error-message error)))
     (if (and (claude-agent--session-expired-p error-msg)
              (not (claude-org--session-get session-key :recovering)))
-        ;; Session expired - attempt recovery
-        (claude-org--recover-session session-key)
+        ;; Session expired - clear invalid UUID and recover
+        (progn
+          (message "Claude session expired, starting new session...")
+          (claude-org--clear-sdk-uuid)
+          (claude-org--recover-session session-key))
       ;; Other error - display it
       (claude-org--insert-error session-key error-msg))))
 
