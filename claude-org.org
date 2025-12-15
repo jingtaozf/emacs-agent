@@ -275,9 +275,16 @@ Returns non-nil if current heading has :claude_session: tag."
 (defun claude-org--find-session-scope-heading ()
   "Find the heading that defines the session scope.
 Walks up the heading tree looking for :claude_session: tag or CLAUDE_SESSION_ID.
+Checks current heading first, then walks upward.
 Returns the heading position or nil if at file scope."
   (save-excursion
     (catch 'found
+      ;; First check current heading (if at one)
+      (when (org-at-heading-p)
+        (when (or (claude-org--has-session-tag-p)
+                  (org-entry-get nil "CLAUDE_SESSION_ID" nil))
+          (throw 'found (point))))
+      ;; Then walk up the tree
       (while (org-up-heading-safe)
         (when (or (claude-org--has-session-tag-p)
                   (org-entry-get nil "CLAUDE_SESSION_ID" nil))
@@ -293,33 +300,36 @@ as an org property to enable session resumption across Emacs restarts.
 #+BEGIN_SRC elisp
 (defun claude-org--get-sdk-uuid ()
   "Get SDK UUID from org properties for current session.
-Checks section property drawer first (with inheritance), then file-level #+PROPERTY.
+Only retrieves UUID from the same scope where CLAUDE_SESSION_ID is defined:
+- If session ID is in a heading, gets UUID from that heading's property drawer
+- If no session ID in headings, gets UUID from file-level #+PROPERTY
 Returns nil if not set."
-  (or
-   ;; Section-level property (with inheritance)
-   (org-entry-get nil claude-org-sdk-uuid-property t)
-   ;; File-level property via keyword
-   (save-excursion
-     (goto-char (point-min))
-     (when (re-search-forward
-            (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
-                    claude-org-sdk-uuid-property)
-            nil t)
-       (string-trim (match-string-no-properties 1))))))
+  (let ((session-heading (claude-org--find-session-scope-heading)))
+    (if session-heading
+        ;; Section-level: get UUID from the heading that defines the session
+        (save-excursion
+          (goto-char session-heading)
+          (org-entry-get nil claude-org-sdk-uuid-property nil))  ;; nil = no inheritance
+      ;; File-level: get from #+PROPERTY keyword
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward
+               (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
+                       claude-org-sdk-uuid-property)
+               nil t)
+          (string-trim (match-string-no-properties 1)))))))
 
 (defun claude-org--set-sdk-uuid (uuid)
   "Set SDK UUID in org property.
-Stores at the appropriate scope based on session configuration:
-- If session ID is defined in a section, stores in section property drawer
+Stores at the appropriate scope based on where CLAUDE_SESSION_ID is defined:
+- If session ID is in a heading (current or parent), stores in that heading's property drawer
 - Otherwise stores at file level."
-  (let ((scope (claude-org--get-session-scope)))
-    (if (eq scope 'section)
-        ;; Section-level: find the heading that defines the session and set there
+  (let ((session-heading (claude-org--find-session-scope-heading)))
+    (if session-heading
+        ;; Section-level: set in the heading that defines the session
         (save-excursion
-          (let ((session-heading (claude-org--find-session-scope-heading)))
-            (when session-heading
-              (goto-char session-heading))
-            (org-set-property claude-org-sdk-uuid-property uuid)))
+          (goto-char session-heading)
+          (org-set-property claude-org-sdk-uuid-property uuid))
       ;; File-level: use #+PROPERTY keyword
       (save-excursion
         (goto-char (point-min))
@@ -346,15 +356,13 @@ Stores at the appropriate scope based on session configuration:
 
 (defun claude-org--clear-sdk-uuid ()
   "Clear SDK UUID from org properties.
-Removes the property from the appropriate scope."
-  (let ((scope (claude-org--get-session-scope)))
-    (if (eq scope 'section)
+Removes the property from the appropriate scope based on where CLAUDE_SESSION_ID is defined."
+  (let ((session-heading (claude-org--find-session-scope-heading)))
+    (if session-heading
         ;; Section-level: remove from property drawer
         (save-excursion
-          (let ((session-heading (claude-org--find-session-scope-heading)))
-            (when session-heading
-              (goto-char session-heading))
-            (org-delete-property claude-org-sdk-uuid-property)))
+          (goto-char session-heading)
+          (org-delete-property claude-org-sdk-uuid-property))
       ;; File-level: remove #+PROPERTY line
       (save-excursion
         (goto-char (point-min))
@@ -749,10 +757,11 @@ Initialized to a new hash table when `claude-org-mode' is enabled.")
 (defun claude-org--active-session-count ()
   "Return count of sessions with :busy t."
   (let ((count 0))
-    (maphash (lambda (_id state)
-               (when (plist-get state :busy)
-                 (cl-incf count)))
-             claude-org--sessions)
+    (when (hash-table-p claude-org--sessions)
+      (maphash (lambda (_id state)
+                 (when (plist-get state :busy)
+                   (cl-incf count)))
+               claude-org--sessions))
     count))
 
 (defun claude-org--session-display-name (session-key)
