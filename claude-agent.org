@@ -2870,6 +2870,179 @@ Ignores all output from the dummy process."
   nil)
 #+END_SRC
 
+* Utilities
+
+This section provides utility commands built on top of claude-agent.
+
+** Translation
+
+Translation utilities with streaming display. Use =C-u= prefix to select
+target language interactively.
+
+*** Customization
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-translate-default-language "Chinese"
+  "Default target language for translation."
+  :type 'string
+  :group 'claude-agent)
+
+(defcustom claude-agent-translate-languages
+  '("Chinese" "English" "Japanese" "Korean" "French" "German" "Spanish")
+  "List of languages available for translation."
+  :type '(repeat string)
+  :group 'claude-agent)
+
+(defcustom claude-agent-translate-buffer-name "*claude-agent-translate*"
+  "Buffer name for translation output."
+  :type 'string
+  :group 'claude-agent)
+#+END_SRC
+
+*** Translation Buffer
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-translate--active-state nil
+  "Currently active translation process state.")
+
+(defun claude-agent-translate--setup-buffer (language text-preview)
+  "Setup translation buffer for LANGUAGE with TEXT-PREVIEW."
+  (let ((buf (get-buffer-create claude-agent-translate-buffer-name)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Translating to %s...\n" language))
+        (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        (insert (format "Source: %s...\n\n"
+                        (truncate-string-to-width text-preview 60 nil nil "...")))
+        (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+        (goto-char (point-max))))
+    (display-buffer buf)
+    buf))
+
+(defun claude-agent-translate--insert-token (text)
+  "Insert TEXT token into translation buffer."
+  (when-let ((buf (get-buffer claude-agent-translate-buffer-name)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert text))))))
+
+(defun claude-agent-translate--complete (result)
+  "Handle translation completion with RESULT."
+  (setq claude-agent-translate--active-state nil)
+  (when-let ((buf (get-buffer claude-agent-translate-buffer-name)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+          (if result
+              (insert (format "[Error: %s]\n" result))
+            (insert "[Translation complete]\n"))))))
+  (message "Translation %s" (if result "failed" "complete")))
+#+END_SRC
+
+*** Core Translation Function
+
+#+BEGIN_SRC elisp
+(defun claude-agent-translate (text language)
+  "Translate TEXT to LANGUAGE with streaming output."
+  (when claude-agent-translate--active-state
+    (user-error "Translation already in progress"))
+  (let* ((prompt (format "Translate the following text to %s. \
+Preserve all formatting, structure, code blocks, and markup. \
+Output only the translation without any explanation:\n\n%s"
+                         language text))
+         (buf (claude-agent-translate--setup-buffer language text)))
+    (setq claude-agent-translate--active-state
+          (claude-agent-query
+           prompt
+           :on-token #'claude-agent-translate--insert-token
+           :on-error (lambda (err)
+                       (claude-agent-translate--complete
+                        (format "%s" err)))
+           :on-complete #'claude-agent-translate--complete))))
+
+(defun claude-agent-translate--select-language ()
+  "Prompt user to select target language."
+  (completing-read "Target language: "
+                   claude-agent-translate-languages
+                   nil t nil nil
+                   claude-agent-translate-default-language))
+#+END_SRC
+
+*** Interactive Commands
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun claude-agent-translate-region (start end &optional language)
+  "Translate region from START to END to LANGUAGE.
+With \\[universal-argument] prefix, prompt for target language.
+Otherwise use `claude-agent-translate-default-language'."
+  (interactive "r\nP")
+  (let ((text (buffer-substring-no-properties start end))
+        (lang (if language
+                  (claude-agent-translate--select-language)
+                claude-agent-translate-default-language)))
+    (claude-agent-translate text lang)))
+
+;;;###autoload
+(defun claude-agent-translate-buffer (&optional language)
+  "Translate entire buffer content.
+With \\[universal-argument] prefix, prompt for target language.
+Otherwise use `claude-agent-translate-default-language'."
+  (interactive "P")
+  (let ((text (buffer-string))
+        (lang (if language
+                  (claude-agent-translate--select-language)
+                claude-agent-translate-default-language)))
+    (claude-agent-translate text lang)))
+
+;;;###autoload
+(defun claude-agent-translate-dwim (&optional language)
+  "Translate region if active, otherwise translate buffer.
+With \\[universal-argument] prefix, prompt for target language.
+Otherwise use `claude-agent-translate-default-language'."
+  (interactive "P")
+  (if (use-region-p)
+      (claude-agent-translate-region (region-beginning) (region-end) language)
+    (claude-agent-translate-buffer language)))
+
+;;;###autoload
+(defun claude-agent-translate-to-chinese ()
+  "Translate region or buffer to Chinese.
+Shortcut for `claude-agent-translate-dwim' with Chinese as target."
+  (interactive)
+  (let ((claude-agent-translate-default-language "Chinese"))
+    (claude-agent-translate-dwim)))
+
+;;;###autoload
+(defun claude-agent-translate-to-english ()
+  "Translate region or buffer to English.
+Shortcut for `claude-agent-translate-dwim' with English as target."
+  (interactive)
+  (let ((claude-agent-translate-default-language "English"))
+    (claude-agent-translate-dwim)))
+#+END_SRC
+
+*** Cancel Translation
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun claude-agent-translate-cancel ()
+  "Cancel active translation."
+  (interactive)
+  (when claude-agent-translate--active-state
+    (let ((req-id (claude-agent--process-state-request-id
+                   claude-agent-translate--active-state)))
+      (when req-id
+        (claude-agent-cancel-query req-id)))
+    (setq claude-agent-translate--active-state nil)
+    (message "Translation cancelled")))
+#+END_SRC
+
 * Package Footer
 
 #+BEGIN_SRC elisp
