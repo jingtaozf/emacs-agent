@@ -1111,12 +1111,24 @@ Sends the query to Claude and streams the response below the block."
 ** Send Request
 
 #+BEGIN_SRC elisp
+(defun claude-org--get-current-section-level ()
+  "Get the org section level containing point.
+Returns the level (1 for *, 2 for **, etc.) or 0 if not in a section."
+  (save-excursion
+    (if (org-before-first-heading-p)
+        0
+      (org-back-to-heading t)
+      (org-current-level))))
+
 (defun claude-org--send-request (prompt)
   "Send PROMPT to Claude via claude-agent."
   (let* ((session-key (claude-org--current-session-key))
          (sdk-uuid (claude-org--get-sdk-uuid))
          (project-root (claude-org--get-project-root))
          (system-prompt (claude-org--build-system-prompt))
+         ;; Get current org section level for output hint
+         (current-level (claude-org--get-current-section-level))
+         (output-level (if (> current-level 0) (1+ current-level) 0))
          ;; Build IDE context
          (ide-context (when claude-org-include-ide-context
                         (claude-agent-collect-ide-context)))
@@ -1125,7 +1137,8 @@ Sends the query to Claude and streams the response below the block."
                              :current-file (plist-get ide-context :current-file)
                              :open-files (plist-get ide-context :open-files)
                              :selection (plist-get ide-context :selection)
-                             :file-path buffer-file-name)))
+                             :file-path buffer-file-name
+                             :org-output-level output-level)))
          ;; Build options
          (options (claude-agent-options
                    :cwd (or project-root default-directory)
