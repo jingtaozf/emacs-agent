@@ -525,27 +525,32 @@ Returns list of strings like (\"user\" \"project\")."
 #+BEGIN_SRC elisp
 (defun claude-org--set-permission-mode (mode)
   "Set permission MODE in org property.
-Sets at section level if at a heading, otherwise file level."
-  (if (org-at-heading-p)
-      ;; Section-level: set property in drawer
-      (org-set-property claude-org-permission-property mode)
-    ;; File-level: use #+PROPERTY keyword
-    (save-excursion
-      (goto-char (point-min))
-      (if (re-search-forward
-           (format "^#\\+PROPERTY:[ \t]+%s[ \t]+.+$" claude-org-permission-property)
-           nil t)
-          ;; Update existing
-          (replace-match (format "#+PROPERTY: %s %s"
-                                 claude-org-permission-property mode))
-        ;; Insert new after other properties
-        (if (re-search-forward "^#\\+PROPERTY:" nil t)
-            (progn
-              (end-of-line)
-              (insert (format "\n#+PROPERTY: %s %s"
-                              claude-org-permission-property mode)))
-          ;; No properties, insert at beginning
-          (insert (format "#+PROPERTY: %s %s\n" claude-org-permission-property mode)))))
+Sets at the appropriate scope based on where CLAUDE_SESSION_ID is defined:
+- If session ID is in a heading (current or parent), sets in that heading's property drawer
+- Otherwise sets at file level."
+  (let ((session-heading (claude-org--find-session-scope-heading)))
+    (if session-heading
+        ;; Section-level: set property in the heading that defines the session
+        (save-excursion
+          (goto-char session-heading)
+          (org-set-property claude-org-permission-property mode))
+      ;; File-level: use #+PROPERTY keyword
+      (save-excursion
+        (goto-char (point-min))
+        (if (re-search-forward
+             (format "^#\\+PROPERTY:[ \t]+%s[ \t]+.+$" claude-org-permission-property)
+             nil t)
+            ;; Update existing
+            (replace-match (format "#+PROPERTY: %s %s"
+                                   claude-org-permission-property mode))
+          ;; Insert new after other properties
+          (if (re-search-forward "^#\\+PROPERTY:" nil t)
+              (progn
+                (end-of-line)
+                (insert (format "\n#+PROPERTY: %s %s"
+                                claude-org-permission-property mode)))
+            ;; No properties, insert at beginning
+            (insert (format "#+PROPERTY: %s %s\n" claude-org-permission-property mode))))))
     ;; Clear org's keyword property cache so org-entry-get reads fresh values
     ;; Without this, org-entry-get with inheritance returns stale cached values
     (setq-local org-keyword-properties nil)))
