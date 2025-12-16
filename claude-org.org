@@ -933,6 +933,37 @@ Inserts text at the session's marker and schedules font-lock."
 ** Message Handling
 
 #+BEGIN_SRC elisp
+(defun claude-org--format-todo-item (todo)
+  "Format a single TODO item as org checkbox.
+TODO is a plist with :content, :status, and :activeForm."
+  (let* ((content (plist-get todo :content))
+         (status (plist-get todo :status))
+         (active-form (plist-get todo :activeForm))
+         (checkbox (pcase status
+                     ("completed" "[X]")
+                     ("in_progress" "[-]")
+                     (_ "[ ]"))))
+    (if (and active-form (not (string= status "completed")))
+        (format "- %s %s - /%s/" checkbox content active-form)
+      (format "- %s %s" checkbox content))))
+
+(defun claude-org--format-todos (todos)
+  "Format TODOS list as org checkbox list.
+TODOS is a list of plists with :content, :status, :activeForm."
+  (when todos
+    (concat "\n*Todos:*\n"
+            (mapconcat #'claude-org--format-todo-item todos "\n")
+            "\n")))
+
+(defun claude-org--handle-tool-use (session-key tool-name tool-input)
+  "Handle special TOOL-NAME with TOOL-INPUT for SESSION-KEY.
+Returns formatted string to insert, or nil if not a special tool."
+  (pcase tool-name
+    ("TodoWrite"
+     (let ((todos (plist-get tool-input :todos)))
+       (claude-org--format-todos todos)))
+    (_ nil)))
+
 (defun claude-org--handle-message (session-key msg)
   "Handle incoming MSG for SESSION-KEY.
 Extracts session ID from result messages and stores it."
@@ -945,6 +976,21 @@ Extracts session ID from result messages and stores it."
           (save-excursion
             (goto-char marker)
             (claude-org--set-sdk-uuid sdk-uuid))))))
+  ;; Handle special tool uses in assistant messages
+  (when (claude-agent-assistant-message-p msg)
+    (let ((marker (claude-org--session-get session-key :marker)))
+      (when (and marker (marker-buffer marker))
+        (dolist (block (claude-agent-assistant-message-content msg))
+          (when (claude-agent-tool-use-block-p block)
+            (let* ((tool-name (claude-agent-tool-use-block-name block))
+                   (tool-input (claude-agent-tool-use-block-input block))
+                   (formatted (claude-org--handle-tool-use session-key tool-name tool-input)))
+              (when formatted
+                (with-current-buffer (marker-buffer marker)
+                  (save-excursion
+                    (goto-char marker)
+                    (insert formatted)
+                    (set-marker marker (point)))))))))))
   ;; Display system messages if enabled
   (when (and claude-org-show-system-messages
              (claude-agent-system-message-p msg))
