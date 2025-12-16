@@ -174,6 +174,12 @@ Can be overridden per-section via CLAUDE_SETTING_SOURCES property."
   :type '(repeat string)
   :group 'claude-org)
 
+(defcustom claude-org-line-width 170
+  "Maximum line width for Claude's output.
+Claude will be instructed to keep lines under this many characters."
+  :type 'integer
+  :group 'claude-org)
+
 (defcustom claude-org-default-system-prompts
   '("You are a Claude agent, built on Anthropic's Claude Agent SDK.You are communicating with a senior developer through Emacs org-mode.
 
@@ -206,7 +212,6 @@ Response Format:
   - Tables: | col1 | col2 | with |-+-| separator rows
   - Links: [[url][description]]
 - Lists work the same: - or + for unordered, 1. for ordered
-- Line width: Keep lines under 170 characters, break long lines naturally
 - Be concise - the response becomes part of the document")
   "List of default system prompt strings for claude-org queries.
 Each string in the list will be concatenated with newlines and prepended
@@ -701,15 +706,22 @@ Usage in org file:
 
 (defun claude-org--build-system-prompt ()
   "Build complete system prompt from defaults and org sections.
-Combines `claude-org-default-system-prompts' with any :system_prompt: tagged sections."
+Combines `claude-org-default-system-prompts' with any :system_prompt: tagged sections.
+Also appends line width instruction based on `claude-org-line-width'."
   (let ((defaults (when claude-org-default-system-prompts
                     (mapconcat #'identity claude-org-default-system-prompts "\n\n")))
-        (org-prompts (claude-org--collect-system-prompts)))
-    (cond
-     ((and defaults org-prompts) (concat defaults "\n\n" org-prompts))
-     (defaults defaults)
-     (org-prompts org-prompts)
-     (t nil))))
+        (org-prompts (claude-org--collect-system-prompts))
+        (line-width-hint (when (and claude-org-line-width (> claude-org-line-width 0))
+                           (format "Keep output lines under %d characters, break long lines naturally."
+                                   claude-org-line-width))))
+    (let ((base-prompt (cond
+                        ((and defaults org-prompts) (concat defaults "\n\n" org-prompts))
+                        (defaults defaults)
+                        (org-prompts org-prompts)
+                        (t nil))))
+      (if (and base-prompt line-width-hint)
+          (concat base-prompt "\n\n" line-width-hint)
+        (or base-prompt line-width-hint)))))
 #+END_SRC
 
 * Process Management
