@@ -490,6 +490,41 @@ Handles assistant messages by extracting text from content blocks."
                 (when (and text (not (string-empty-p text)))
                   (funcall callback text))))))))))
 
+(defun claude-agent--json-true-p (value)
+  "Check if JSON VALUE represents true.
+Emacs JSON parser converts false to :json-false and true to t.
+This function returns non-nil only for actual true values."
+  (and value (not (eq value :json-false))))
+
+(defun claude-agent--extract-json-error (parsed)
+  "Extract error message from PARSED JSON if it indicates an error.
+Returns the error message string if an error is detected, nil otherwise.
+Checks for:
+- result messages with is_error=true
+- assistant messages with error field (e.g., 'invalid_request')
+- result text containing 'Prompt is too long'"
+  (let ((type (plist-get parsed :type)))
+    (cond
+     ;; Result message with is_error flag set to true (not :json-false)
+     ((and (string= type "result")
+           (claude-agent--json-true-p (plist-get parsed :is_error)))
+      (or (plist-get parsed :result) "Unknown error"))
+     ;; Assistant message with error field containing a non-empty string
+     ((and (string= type "assistant")
+           (let ((msg (plist-get parsed :message)))
+             (let ((err (plist-get msg :error)))
+               (and err (stringp err) (not (string-empty-p err))))))
+      (let* ((msg (plist-get parsed :message))
+             (content (plist-get msg :content))
+             (text-block (car-safe (seq-filter
+                                    (lambda (b) (string= (plist-get b :type) "text"))
+                                    content))))
+        (or (plist-get text-block :text)
+            (plist-get msg :error)
+            "API error")))
+     ;; No error detected
+     (t nil))))
+
 (defun claude-agent--process-json-buffer (process)
   "Process accumulated JSON for PROCESS.
 PROCESS has state stored via `process-get'.
@@ -511,18 +546,31 @@ Parses complete newline-delimited JSON and invokes callbacks."
                      (json-key-type 'keyword)
                      (parsed (json-read-from-string line)))
                 (claude-agent--debug-log "Parsed JSON: %S" (plist-get parsed :type))
-                ;; Extract text for token callback (streaming)
-                (when token-callback
-                  (claude-agent--extract-tokens parsed token-callback))
-                ;; Call message callback with parsed message
-                (let ((message (claude-agent--parse-message parsed)))
-                  (when message
-                    ;; Write to verbose buffer if session-key is set
-                    (claude-agent--verbose-write-message
-                     (claude-agent--process-state-session-key state) message)
-                    ;; Call user callback
-                    (when callback
-                      (funcall callback message)))))
+                ;; Check for error conditions in JSON
+                (let ((json-error (claude-agent--extract-json-error parsed)))
+                  (if json-error
+                      ;; Error detected in JSON - call error callback
+                      (progn
+                        (claude-agent--debug-log "JSON error detected: %s" json-error)
+                        (when error-callback
+                          (funcall error-callback
+                                   (list 'claude-agent-api-error
+                                         :message json-error
+                                         :parsed parsed))))
+                    ;; Normal message processing
+                    (progn
+                      ;; Extract text for token callback (streaming)
+                      (when token-callback
+                        (claude-agent--extract-tokens parsed token-callback))
+                      ;; Call message callback with parsed message
+                      (let ((message (claude-agent--parse-message parsed)))
+                        (when message
+                          ;; Write to verbose buffer if session-key is set
+                          (claude-agent--verbose-write-message
+                           (claude-agent--process-state-session-key state) message)
+                          ;; Call user callback
+                          (when callback
+                            (funcall callback message))))))))
             ((json-parse-error json-readtable-error json-end-of-file)
              ;; Line is not valid JSON - could be plain text error from CLI
              (claude-agent--debug-log "Non-JSON output: %s" line)
@@ -561,6 +609,16 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
       (setf (claude-agent--process-state-ready state) nil)
       ;; Process any remaining JSON in buffer
       (claude-agent--process-json-buffer process)
+      ;; Handle any remaining content without trailing newline (e.g., "Prompt is too long")
+      (let ((remaining (claude-agent--process-state-json-buffer state)))
+        (when (and remaining (not (string-empty-p (string-trim remaining))))
+          (let ((error-callback (claude-agent--process-state-error-callback state)))
+            (claude-agent--debug-log "Remaining non-JSON output: %s" remaining)
+            (when error-callback
+              (funcall error-callback
+                       (list 'claude-agent-cli-error
+                             :message (string-trim remaining)
+                             :original-error nil))))))
       ;; Call completion callback
       (let ((complete-cb (claude-agent--process-state-complete-callback state)))
         (cond
