@@ -440,16 +440,20 @@ Returns list of (question . response) pairs for recovery."
      "Please continue the conversation. The user's current question is:\n\n"
      original-prompt)))
 
-(defun claude-org--recover-session (session-key)
-  "Recover from session expiration for SESSION-KEY by collecting context and retrying."
+(defun claude-org--recover-session (session-key &optional reason)
+  "Recover session for SESSION-KEY by collecting context and retrying.
+REASON can be 'context-limit or 'expired (default)."
   (claude-org--session-put session-key :recovering t)
-  ;; Notify user
-  (let ((marker (claude-org--session-get session-key :marker)))
+  ;; Notify user with appropriate message
+  (let ((marker (claude-org--session-get session-key :marker))
+        (msg (pcase reason
+               ('context-limit "/Context limit reached, recovering with history.../")
+               (_ "/Session expired, recovering with context.../"))))
     (when marker
       (with-current-buffer (marker-buffer marker)
         (save-excursion
           (goto-char marker)
-          (insert "\n/Session expired, recovering with context.../\n\n")
+          (insert (format "\n%s\n\n" msg))
           (set-marker marker (point)))
         ;; Clear old session UUID from org property
         (claude-org--clear-sdk-uuid))))
@@ -1036,17 +1040,22 @@ ERROR can be (symbol :message ...) plist, a string, or other."
 
 (defun claude-org--handle-error (session-key error)
   "Handle error ERROR for SESSION-KEY.
-Attempts session recovery if error indicates expired session."
+Attempts session recovery if error indicates expired session or context too long."
   (let ((error-msg (claude-org--extract-error-message error)))
-    (if (and (claude-agent--session-expired-p error-msg)
-             (not (claude-org--session-get session-key :recovering)))
-        ;; Session expired - clear invalid UUID and recover
-        (progn
-          (message "Claude session expired, starting new session...")
-          (claude-org--clear-sdk-uuid)
-          (claude-org--recover-session session-key))
-      ;; Other error - display it
-      (claude-org--insert-error session-key error-msg))))
+    (cond
+     ;; Context too long - clear UUID and recover with conversation history
+     ((and (claude-agent--context-too-long-p error-msg)
+           (not (claude-org--session-get session-key :recovering)))
+      (message "Claude context limit reached, starting fresh session with history...")
+      (claude-org--recover-session session-key 'context-limit))
+     ;; Session expired - clear UUID and recover
+     ((and (claude-agent--session-expired-p error-msg)
+           (not (claude-org--session-get session-key :recovering)))
+      (message "Claude session expired, starting new session...")
+      (claude-org--recover-session session-key 'expired))
+     ;; Other error - display it
+     (t
+      (claude-org--insert-error session-key error-msg)))))
 
 (defun claude-org--insert-error (session-key error-msg)
   "Insert ERROR-MSG at SESSION-KEY's marker and clean up."

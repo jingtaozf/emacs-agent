@@ -1322,6 +1322,21 @@ Returns nil if not yet available."
   (should (claude-agent--session-expired-p "session expired"))
   (should-not (claude-agent--session-expired-p "some other error")))
 
+(ert-deftest claude-agent-test-context-too-long-detection ()
+  "Test context/prompt too long detection."
+  (should (claude-agent--context-too-long-p "Prompt is too long"))
+  (should (claude-agent--context-too-long-p "prompt is too long for this model"))
+  (should (claude-agent--context-too-long-p "context too long"))
+  (should (claude-agent--context-too-long-p "exceeds context limit"))
+  (should (claude-agent--context-too-long-p "token limit reached"))
+  (should-not (claude-agent--context-too-long-p "some other error")))
+
+(ert-deftest claude-agent-test-session-needs-reset ()
+  "Test combined session reset detection."
+  (should (claude-agent--session-needs-reset-p "session expired"))
+  (should (claude-agent--session-needs-reset-p "Prompt is too long"))
+  (should-not (claude-agent--session-needs-reset-p "network error")))
+
 ;; IDE Context Tests
 
 (ert-deftest claude-agent-test-system-reminder-empty ()
@@ -1825,7 +1840,7 @@ Use when session expires or needs reset."
     (clrhash claude-agent--session-verbose-buffers)))
 #+END_SRC
 
-** Session Expiration
+** Session Expiration and Context Limits
 
 #+BEGIN_SRC elisp
 (defun claude-agent--session-expired-p (error-message)
@@ -1835,6 +1850,23 @@ Returns non-nil if the error is about an expired/missing session."
     (or (string-match-p "No conversation found with session ID" error-message)
         (string-match-p "session.*not found" error-message)
         (string-match-p "session.*expired" error-message))))
+
+(defun claude-agent--context-too-long-p (error-message)
+  "Check if ERROR-MESSAGE indicates context/prompt is too long.
+Returns non-nil if the error is about exceeding context limits."
+  (when (stringp error-message)
+    (or (string-match-p "Prompt is too long" error-message)
+        (string-match-p "prompt.*too long" error-message)
+        (string-match-p "context.*too long" error-message)
+        (string-match-p "exceeds.*context" error-message)
+        (string-match-p "token.*limit" error-message))))
+
+(defun claude-agent--session-needs-reset-p (error-message)
+  "Check if ERROR-MESSAGE indicates session needs to be reset.
+Returns non-nil if the error requires starting a fresh session.
+This includes both expired sessions and context limit errors."
+  (or (claude-agent--session-expired-p error-message)
+      (claude-agent--context-too-long-p error-message)))
 #+END_SRC
 
 * Query Cancellation
