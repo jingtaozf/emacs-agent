@@ -148,13 +148,6 @@ If nil, the CLI will be searched in PATH and common locations."
   :type '(repeat string)
   :group 'claude-agent)
 
-(defcustom claude-agent-default-model nil
-  "Default model to use for queries.
-If nil, uses the CLI default."
-  :type '(choice (const nil :tag "CLI default")
-                 (string :tag "Model name"))
-  :group 'claude-agent)
-
 (defcustom claude-agent-debug nil
   "When non-nil, enable debug logging."
   :type 'boolean
@@ -387,10 +380,6 @@ If STREAMING-P is non-nil, use streaming input mode."
     (let ((system-prompt (plist-get options :system-prompt)))
       (when system-prompt
         (setq args (append args (list "--system-prompt" system-prompt)))))
-    ;; Model
-    (let ((model (or (plist-get options :model) claude-agent-default-model)))
-      (when model
-        (setq args (append args (list "--model" model)))))
     ;; Max turns
     (let ((max-turns (plist-get options :max-turns)))
       (when max-turns
@@ -664,8 +653,9 @@ REQUEST-ID is a unique identifier for this request (optional).
 SESSION-KEY identifies the session for verbose output grouping (optional).
 
 Returns a process state object."
-  (let* ((cli-path (or (plist-get options :cli-path)
-                       (claude-agent--find-cli)))
+  (let* ((cli-path (expand-file-name
+                    (or (plist-get options :cli-path)
+                        (claude-agent--find-cli))))
          (args (claude-agent--build-args options nil))
          (cwd (plist-get options :cwd))
          (env-vars (plist-get options :env))
@@ -684,17 +674,19 @@ Returns a process state object."
                  :closed nil))
          ;; Note: We use :connection-type 'pipe in make-process below
          (default-directory (or cwd default-directory))
+         ;; Build process-environment with custom vars
          (process-environment (append
-                               (mapcar (lambda (pair)
-                                         (format "%s=%s" (car pair) (cdr pair)))
-                                       env-vars)
-                               process-environment)))
+                              (mapcar (lambda (pair)
+                                        (format "%s=%s" (car pair) (cdr pair)))
+                                      env-vars)
+                              process-environment)))
     ;; Add prompt to args
     (setq args (append args (list "--" prompt)))
-    (claude-agent--debug-log "Starting CLI: %s %s" cli-path args)
-    (let ((process (make-process
+    ;; Build command
+    (let* ((command (cons cli-path args))
+           (process (make-process
                     :name "claude-agent"
-                    :command (cons cli-path args)
+                    :command command
                     :buffer (generate-new-buffer " *claude-agent*")
                     :connection-type 'pipe  ;; Use pipe, not PTY
                     :filter #'claude-agent--process-filter
@@ -712,7 +704,7 @@ Returns a process state object."
       ;; Initialize verbose buffer for session if session-key provided
       (when session-key
         (claude-agent--get-session-verbose-buffer session-key)
-        (claude-agent--verbose-insert-query-header session-key prompt cli-path args default-directory))
+        (claude-agent--verbose-insert-query-header session-key prompt cli-path args default-directory env-vars))
       ;; KEY: Close stdin immediately for non-interactive --print mode
       ;; This signals EOF to the CLI, allowing it to proceed
       (process-send-eof process)
@@ -2396,9 +2388,10 @@ CLI-like output for all queries within a session.
         (puthash session-key buf claude-agent--session-verbose-buffers)
         buf)))
 
-(defun claude-agent--verbose-insert-query-header (session-key prompt &optional cli-path args cwd)
+(defun claude-agent--verbose-insert-query-header (session-key prompt &optional cli-path args cwd env-vars)
   "Insert query header in verbose buffer for SESSION-KEY with PROMPT.
-CLI-PATH is the path to claude CLI, ARGS are command line arguments, CWD is working directory."
+CLI-PATH is the path to claude CLI, ARGS are command line arguments,
+CWD is working directory, ENV-VARS is alist of environment variables."
   (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
@@ -2445,6 +2438,19 @@ CLI-PATH is the path to claude CLI, ARGS are command line arguments, CWD is work
             (insert (format "\n%s %s\n"
                             (propertize "Working directory:" 'face 'font-lock-keyword-face)
                             cwd)))
+          ;; Show environment variables if any
+          (when env-vars
+            (insert (format "\n%s\n" (propertize "Environment:" 'face 'font-lock-keyword-face)))
+            (dolist (pair env-vars)
+              (let* ((name (car pair))
+                     (value (cdr pair))
+                     ;; Mask sensitive values (tokens/keys)
+                     (display-value (if (string-match-p "TOKEN\\|KEY\\|SECRET\\|PASSWORD" name)
+                                        (concat (substring value 0 (min 8 (length value))) "...")
+                                      value)))
+                (insert (format "  %s=%s\n"
+                                (propertize name 'face 'font-lock-variable-name-face)
+                                display-value)))))
           (insert "\n")
           (insert (propertize "Prompt:\n" 'face 'font-lock-keyword-face))
           (insert prompt)

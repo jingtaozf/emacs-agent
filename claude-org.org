@@ -227,6 +227,12 @@ You can customize this by adding domain-specific prompts:
 (defconst claude-org-setting-sources-property "CLAUDE_SETTING_SOURCES"
   "Org property name for setting sources (comma-separated list).")
 
+(defconst claude-org-env-properties
+  '("ANTHROPIC_MODEL" "ANTHROPIC_BASE_URL" "ANTHROPIC_AUTH_TOKEN")
+  "List of environment variable org properties to pass to Claude CLI.
+These can be set as org properties (file-level or section-level) and will
+be passed as environment variables when starting the Claude process.")
+
 (defconst claude-org--permission-mode-map
   '(("readonly" . "default")
     ("accept-edits" . "acceptEdits")
@@ -531,6 +537,32 @@ Returns list of strings like (\"user\" \"project\")."
         (mapcar #'string-trim (split-string prop-value ","))
       ;; Use default
       claude-org-setting-sources)))
+
+(defun claude-org--get-org-property (property)
+  "Get PROPERTY value from org properties.
+Checks section property drawer first (with inheritance), then file-level #+PROPERTY.
+Returns nil if not set."
+  (or
+   ;; Section-level property (with inheritance)
+   (org-entry-get nil property t)
+   ;; File-level property via keyword
+   (save-excursion
+     (goto-char (point-min))
+     (when (re-search-forward
+            (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$" property)
+            nil t)
+       (string-trim (match-string-no-properties 1))))))
+
+(defun claude-org--get-env-vars ()
+  "Collect environment variables from org properties.
+Returns an alist of (VAR-NAME . VALUE) for all properties in
+`claude-org-env-properties' that have values set."
+  (let (env-vars)
+    (dolist (prop claude-org-env-properties)
+      (let ((value (claude-org--get-org-property prop)))
+        (when (and value (not (string-empty-p value)))
+          (push (cons prop value) env-vars))))
+    (nreverse env-vars)))
 #+END_SRC
 
 ** Permission Mode Setter
@@ -1136,6 +1168,8 @@ Returns the level (1 for *, 2 for **, etc.) or 0 if not in a section."
                              :selection (plist-get ide-context :selection)
                              :file-path buffer-file-name
                              :org-output-level output-level)))
+         ;; Collect environment variables from org properties
+         (env-vars (claude-org--get-env-vars))
          ;; Build options
          (options (claude-agent-options
                    :cwd (or project-root default-directory)
@@ -1144,7 +1178,8 @@ Returns the level (1 for *, 2 for **, etc.) or 0 if not in a section."
                    :permission-mode (claude-org--get-permission-mode)
                    :allowed-tools claude-org-allowed-tools
                    :mcp-config (claude-org--get-mcp-config)
-                   :setting-sources (claude-org--get-setting-sources)))
+                   :setting-sources (claude-org--get-setting-sources)
+                   :env env-vars))
          ;; Build full prompt with system reminder
          (full-prompt (if (and system-reminder
                                (not (string-empty-p system-reminder)))
@@ -1187,6 +1222,9 @@ Dynamic header line showing session status, IDE context, and thinking state.
 #+BEGIN_SRC elisp
 (defvar-local claude-org--original-header-line nil
   "Original header-line-format before enabling claude-org-mode.")
+
+(defvar-local claude-org--original-truncate-lines nil
+  "Original truncate-lines value before enabling claude-org-mode.")
 
 (defconst claude-org--spinner-frames '("|" "/" "-" "\\")
   "Frames for the busy spinner animation.")
@@ -1469,6 +1507,9 @@ to send the query and stream the response.
       (progn
         ;; Save original header line
         (setq claude-org--original-header-line header-line-format)
+        ;; Save and disable line truncation (so long lines wrap)
+        (setq claude-org--original-truncate-lines truncate-lines)
+        (setq truncate-lines nil)
         ;; Set up header line
         (claude-org--refresh-header-line)
         ;; Register exclusion
@@ -1477,6 +1518,8 @@ to send the query and stream the response.
         (claude-org--ensure-mcp-server))
     ;; Restore original header line
     (setq header-line-format claude-org--original-header-line)
+    ;; Restore original truncate-lines
+    (setq truncate-lines claude-org--original-truncate-lines)
     ;; Cancel any active queries
     (claude-org-cancel-all)
     ;; Stop header timer if no more claude-org buffers
