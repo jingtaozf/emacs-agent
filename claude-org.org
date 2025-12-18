@@ -207,7 +207,20 @@ Response Format:
   - Tables: | col1 | col2 | with |-+-| separator rows
   - Links: [[url][description]]
 - Lists work the same: - or + for unordered, 1. for ordered
-- Be concise - the response becomes part of the document")
+- Be concise - the response becomes part of the document
+
+Important: When showing org-mode syntax examples in your response:
+- NEVER use markdown code fences (```org```)
+- Instead, use #+begin_example and #+end_example blocks
+- Prefix org special lines (like #+BEGIN_SRC, #+PROPERTY) with a comma
+- Example of correct way to show org syntax:
+  #+begin_example
+  ,#+PROPERTY: PROJECT_ROOT /path/to/project
+  ,* My Section
+  ,#+begin_src ai
+  query here
+  ,#+end_src
+  #+end_example")
   "List of default system prompt strings for claude-org queries.
 Each string in the list will be concatenated with newlines and prepended
 to any user-defined :system_prompt: sections.
@@ -244,6 +257,29 @@ be passed as environment variables when starting the Claude process.")
 * Session Management
 
 Session identity is determined by file path + optional CLAUDE_SESSION_ID property.
+
+** Helper Functions
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-file-level-property (property)
+  "Get PROPERTY value from file-level #+PROPERTY keyword.
+Only searches in the file header area (before first heading).
+Returns nil if not found."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      ;; Limit search to before first heading (file header area)
+      (let ((limit (save-excursion
+                     (if (re-search-forward "^\\*+ " nil t)
+                         (line-beginning-position)
+                       (point-max)))))
+        (when (re-search-forward
+               (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
+                       (regexp-quote property))
+               limit t)
+          (string-trim (match-string-no-properties 1)))))))
+#+END_SRC
 
 ** Session ID Functions
 
@@ -326,13 +362,7 @@ Returns nil if not set."
           (goto-char session-heading)
           (org-entry-get nil claude-org-sdk-uuid-property nil))  ;; nil = no inheritance
       ;; File-level: get from #+PROPERTY keyword
-      (save-excursion
-        (goto-char (point-min))
-        (when (re-search-forward
-               (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
-                       claude-org-sdk-uuid-property)
-               nil t)
-          (string-trim (match-string-no-properties 1)))))))
+      (claude-org--get-file-level-property claude-org-sdk-uuid-property))))
 
 (defun claude-org--set-sdk-uuid (uuid)
   "Set SDK UUID in org property.
@@ -631,13 +661,7 @@ Returns nil if not set."
    ;; Section-level property (with inheritance)
    (org-entry-get nil claude-org-permission-property t)
    ;; File-level property via keyword
-   (save-excursion
-     (goto-char (point-min))
-     (when (re-search-forward
-            (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
-                    claude-org-permission-property)
-            nil t)
-       (string-trim (match-string-no-properties 1))))))
+   (claude-org--get-file-level-property claude-org-permission-property)))
 
 (defun claude-org--get-permission-mode ()
   "Get effective permission mode for current session.
@@ -673,13 +697,7 @@ Returns list of strings like (\"user\" \"project\")."
           ;; Section-level property (with inheritance)
           (org-entry-get nil claude-org-setting-sources-property t)
           ;; File-level property via keyword
-          (save-excursion
-            (goto-char (point-min))
-            (when (re-search-forward
-                   (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$"
-                           claude-org-setting-sources-property)
-                   nil t)
-              (string-trim (match-string-no-properties 1)))))))
+          (claude-org--get-file-level-property claude-org-setting-sources-property))))
     (if prop-value
         ;; Parse comma-separated string from property
         (mapcar #'string-trim (split-string prop-value ","))
@@ -697,20 +715,8 @@ Set NO-EXPAND to t to disable variable expansion."
          (or
           ;; Section-level property (with inheritance)
           (org-entry-get nil property t)
-          ;; File-level property via keyword - only search before first heading
-          (save-excursion
-            (save-restriction
-              (widen)
-              (goto-char (point-min))
-              ;; Limit search to before first heading (file header area)
-              (let ((limit (save-excursion
-                             (if (re-search-forward "^\\*+ " nil t)
-                                 (line-beginning-position)
-                               (point-max)))))
-                (when (re-search-forward
-                       (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$" (regexp-quote property))
-                       limit t)
-                  (string-trim (match-string-no-properties 1)))))))))
+          ;; File-level property via keyword
+          (claude-org--get-file-level-property property))))
     ;; Apply variable expansion unless disabled
     (if (or no-expand (not raw-value))
         raw-value
