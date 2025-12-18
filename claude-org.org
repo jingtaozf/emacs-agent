@@ -391,10 +391,62 @@ Removes the property from the appropriate scope based on where CLAUDE_SESSION_ID
 ** Session Recovery
 
 #+BEGIN_SRC elisp
+(defun claude-org--section-has-archive-tag-p ()
+  "Check if current heading has :ARCHIVE: tag.
+Point must be at a heading."
+  (when (org-at-heading-p)
+    (member "ARCHIVE" (org-get-tags nil t))))
+
+(defun claude-org--collect-ai-blocks-in-section ()
+  "Collect AI blocks in current section (not including subsections).
+Returns list of (question . response) pairs.
+Point must be at a heading, or before first heading for top-level content."
+  (let ((conversations '())
+        (section-end (save-excursion
+                       (if (org-at-heading-p)
+                           ;; End is before next same-level heading
+                           (progn
+                             (org-end-of-subtree t t)
+                             (point))
+                         ;; Before first heading: search until first heading
+                         (if (re-search-forward "^\\*+ " nil t)
+                             (line-beginning-position)
+                           (point-max))))))
+    (save-excursion
+      (save-restriction
+        (narrow-to-region (point) section-end)
+        ;; Find all ai blocks in this section only (not subsections)
+        (goto-char (point-min))
+        (while (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+          ;; Make sure we're not in a subsection
+          (let ((block-pos (point)))
+            (save-excursion
+              (beginning-of-line)
+              ;; Check if there's a heading between section start and block
+              (goto-char (point-min))
+              (unless (re-search-forward "^\\*+ " block-pos t)
+                ;; No heading found, this block is in current section
+                (goto-char block-pos)
+                (let* ((q-start (progn (forward-line 1) (point)))
+                       (q-end (progn (re-search-forward "^[ \t]*#\\+end_src" nil t)
+                                     (line-beginning-position)))
+                       (question (string-trim (buffer-substring-no-properties q-start q-end)))
+                       ;; Response is content after #+end_src until next heading or ai block
+                       (r-start (progn (forward-line 1) (point)))
+                       (r-end (save-excursion
+                                (if (re-search-forward "^\\(\\*+ \\|[ \t]*#\\+begin_src\\)" nil t)
+                                    (line-beginning-position)
+                                  (point-max))))
+                       (response (string-trim (buffer-substring-no-properties r-start r-end))))
+                  (when (not (string-empty-p question))
+                    (push (cons question response) conversations)))))))))
+    (nreverse conversations)))
+
 (defun claude-org--collect-session-context ()
   "Collect conversation history from current session scope.
 If CLAUDE_SESSION_ID is defined in a section, narrows to that subtree.
 Otherwise, collects from the entire file.
+Skips sections tagged with :ARCHIVE: for better performance with large files.
 Returns list of (question . response) pairs for recovery."
   (let ((conversations '())
         (scope (claude-org--get-session-scope)))
@@ -406,23 +458,28 @@ Returns list of (question . response) pairs for recovery."
             (org-back-to-heading t))
           (org-narrow-to-subtree))
 
-        ;; Find all ai blocks and their responses
+        ;; Collect blocks from before first heading
         (goto-char (point-min))
-        (while (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-          (let* ((q-start (progn (forward-line 1) (point)))
-                 (q-end (progn (re-search-forward "^[ \t]*#\\+end_src" nil t)
-                               (line-beginning-position)))
-                 (question (string-trim (buffer-substring-no-properties q-start q-end)))
-                 ;; Response is content after #+end_src until next heading or ai block
-                 (r-start (progn (forward-line 1) (point)))
-                 (r-end (save-excursion
-                          (if (re-search-forward "^\\(\\*+ \\|[ \t]*#\\+begin_src\\)" nil t)
-                              (line-beginning-position)
-                            (point-max))))
-                 (response (string-trim (buffer-substring-no-properties r-start r-end))))
-            (when (not (string-empty-p question))
-              (push (cons question response) conversations))))))
-    (nreverse conversations)))
+        (unless (org-at-heading-p)
+          (setq conversations (append conversations (claude-org--collect-ai-blocks-in-section))))
+
+        ;; Iterate through top-level sections, skipping archived ones
+        (goto-char (point-min))
+        (when (re-search-forward "^\\*+ " nil t)
+          (beginning-of-line)
+          (while (not (eobp))
+            (if (claude-org--section-has-archive-tag-p)
+                ;; Skip entire archived subtree
+                (org-end-of-subtree t t)
+              ;; Collect blocks from this section
+              (setq conversations (append conversations (claude-org--collect-ai-blocks-in-section)))
+              ;; Move to next same-level heading
+              (org-end-of-subtree t t))
+            ;; Move to next top-level heading
+            (unless (re-search-forward "^\\*+ " nil t)
+              (goto-char (point-max)))
+            (beginning-of-line)))))
+    conversations))
 
 (defun claude-org--build-recovery-prompt (context original-prompt)
   "Build recovery prompt with CONTEXT history and ORIGINAL-PROMPT."
