@@ -523,6 +523,97 @@ REASON can be 'context-limit or 'expired (default)."
     (claude-org--send-request recovery-prompt)))
 #+END_SRC
 
+* Environment Variable Loading
+
+Load environment variables from `.env` files with variable substitution support.
+
+** ENV File Loading
+
+#+BEGIN_SRC elisp
+(defun claude-org--parse-env-file (file-path)
+  "Parse .env FILE-PATH and return alist of (VAR . VALUE).
+Supports standard .env syntax:
+  KEY=value
+  KEY=\"value with spaces\"
+  # Comments
+  export KEY=value (export prefix ignored)
+
+Performs tilde expansion on file-path."
+  (let ((expanded-path (expand-file-name file-path))
+        (env-alist '()))
+    (when (file-exists-p expanded-path)
+      (with-temp-buffer
+        (insert-file-contents expanded-path)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let ((line (string-trim (buffer-substring-no-properties
+                                    (line-beginning-position)
+                                    (line-end-position)))))
+            ;; Skip empty lines and comments
+            (unless (or (string-empty-p line)
+                        (string-prefix-p "#" line))
+              ;; Remove optional "export " prefix
+              (when (string-match "^export[ \t]+" line)
+                (setq line (substring line (match-end 0))))
+              ;; Parse KEY=VALUE
+              (when (string-match "^\\([A-Za-z_][A-Za-z0-9_]*\\)=\\(.*\\)$" line)
+                (let* ((key (match-string 1 line))
+                       (value (match-string 2 line))
+                       ;; Remove surrounding quotes if present
+                       (unquoted-value (if (and (>= (length value) 2)
+                                                (or (and (string-prefix-p "\"" value)
+                                                         (string-suffix-p "\"" value))
+                                                    (and (string-prefix-p "'" value)
+                                                         (string-suffix-p "'" value))))
+                                           (substring value 1 -1)
+                                         value)))
+                  (push (cons key unquoted-value) env-alist)))))
+          (forward-line 1))))
+    (nreverse env-alist)))
+
+(defun claude-org--get-env-file-path ()
+  "Get ENV_FILE path from org properties.
+Returns nil if not set. Supports tilde expansion."
+  (when-let ((env-file (claude-org--get-org-property "ENV_FILE" t))) ; no-expand=t
+    (expand-file-name env-file)))
+
+(defun claude-org--load-env-file ()
+  "Load environment variables from ENV_FILE property.
+Returns alist of (VAR . VALUE), or nil if no ENV_FILE is set."
+  (when-let ((env-file-path (claude-org--get-env-file-path)))
+    (if (file-exists-p env-file-path)
+        (claude-org--parse-env-file env-file-path)
+      (message "Warning: ENV_FILE not found: %s" env-file-path)
+      nil)))
+#+END_SRC
+
+** Variable Substitution
+
+#+BEGIN_SRC elisp
+(defun claude-org--expand-env-vars (value env-alist)
+  "Expand ${VAR} references in VALUE using ENV-ALIST.
+ENV-ALIST is an alist of (VAR-NAME . VAR-VALUE).
+Also expands environment variables from process-environment.
+
+Examples:
+  \"${HOME}/projects\"     -> \"/Users/user/projects\"
+  \"token=${API_TOKEN}\"   -> \"token=sk-abc123\"
+  \"${VAR:-default}\"      -> Uses default if VAR not set (bash syntax)"
+  (when value
+    (let ((result value))
+      ;; Replace ${VAR} with values from env-alist or process-environment
+      (while (string-match "\\${\\([A-Za-z_][A-Za-z0-9_]*\\)\\(:-\\([^}]*\\)\\)?}" result)
+        (let* ((var-name (match-string 1 result))
+               (default-value (match-string 3 result))
+               ;; Look up in env-alist first, then process-environment
+               (var-value (or (cdr (assoc var-name env-alist))
+                              (getenv var-name)
+                              default-value
+                              "")))
+          (setq result (replace-match var-value t t result))))
+      result)))
+#+END_SRC
+
 * Permission Mode
 
 Permission mode can be stored as org property `CLAUDE_PERMISSION_MODE`.
@@ -595,20 +686,36 @@ Returns list of strings like (\"user\" \"project\")."
       ;; Use default
       claude-org-setting-sources)))
 
-(defun claude-org--get-org-property (property)
-  "Get PROPERTY value from org properties.
+(defun claude-org--get-org-property (property &optional no-expand)
+  "Get PROPERTY value from org properties with variable expansion.
 Checks section property drawer first (with inheritance), then file-level #+PROPERTY.
-Returns nil if not set."
-  (or
-   ;; Section-level property (with inheritance)
-   (org-entry-get nil property t)
-   ;; File-level property via keyword
-   (save-excursion
-     (goto-char (point-min))
-     (when (re-search-forward
-            (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$" property)
-            nil t)
-       (string-trim (match-string-no-properties 1))))))
+Returns nil if not set.
+
+By default, expands ${VAR} references using ENV_FILE variables and process environment.
+Set NO-EXPAND to t to disable variable expansion."
+  (let ((raw-value
+         (or
+          ;; Section-level property (with inheritance)
+          (org-entry-get nil property t)
+          ;; File-level property via keyword - only search before first heading
+          (save-excursion
+            (save-restriction
+              (widen)
+              (goto-char (point-min))
+              ;; Limit search to before first heading (file header area)
+              (let ((limit (save-excursion
+                             (if (re-search-forward "^\\*+ " nil t)
+                                 (line-beginning-position)
+                               (point-max)))))
+                (when (re-search-forward
+                       (format "^#\\+PROPERTY:[ \t]+%s[ \t]+\\(.+\\)$" (regexp-quote property))
+                       limit t)
+                  (string-trim (match-string-no-properties 1)))))))))
+    ;; Apply variable expansion unless disabled
+    (if (or no-expand (not raw-value))
+        raw-value
+      (let ((env-alist (claude-org--load-env-file)))
+        (claude-org--expand-env-vars raw-value env-alist)))))
 
 (defun claude-org--get-env-vars ()
   "Collect environment variables from org properties.
