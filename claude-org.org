@@ -1175,8 +1175,28 @@ Example: dir/custom/test.md becomes /custom:test"
                 commands)))
       commands)))
 
+(defun claude-org--scan-plugin-commands ()
+  "Scan plugin commands from ~/.claude/plugins/marketplaces/*/plugins/*/commands/*.md.
+Returns list of slash commands with plugin namespace.
+Example: /plugin-name:command"
+  (let ((commands nil)
+        (plugins-dir (expand-file-name "~/.claude/plugins")))
+    (when (file-directory-p plugins-dir)
+      ;; Scan both direct plugins and marketplace plugins
+      (dolist (search-pattern (list (expand-file-name "*/commands" plugins-dir)
+                                     (expand-file-name "marketplaces/*/plugins/*/commands" plugins-dir)))
+        (dolist (commands-dir (file-expand-wildcards search-pattern))
+          (when (file-directory-p commands-dir)
+            (let* ((plugin-dir (file-name-directory (directory-file-name commands-dir)))
+                   (plugin-name (file-name-nondirectory (directory-file-name plugin-dir))))
+              ;; Only scan root of commands/ (flat, no recursion)
+              (dolist (file (directory-files commands-dir nil "\\.md$"))
+                (let ((cmd-name (file-name-sans-extension file)))
+                  (push (concat "/" plugin-name ":" cmd-name) commands))))))))
+    commands))
+
 (defun claude-org--discover-slash-commands ()
-  "Discover all available slash commands from user and project .claude/commands.
+  "Discover all available slash commands from user, project, and plugins.
 Returns list of command strings with / prefix."
   (let ((commands (copy-sequence claude-org-builtin-slash-commands))
         (user-dir (expand-file-name "~/.claude/commands"))
@@ -1187,7 +1207,9 @@ Returns list of command strings with / prefix."
     (when project-root
       (let ((project-dir (expand-file-name ".claude/commands" project-root)))
         (setq commands (append commands (claude-org--scan-command-dir project-dir)))))
-    ;; Remove duplicates (project overrides user)
+    ;; Add plugin commands
+    (setq commands (append commands (claude-org--scan-plugin-commands)))
+    ;; Remove duplicates (first match wins)
     (delete-dups commands)
     commands))
 #+END_SRC
