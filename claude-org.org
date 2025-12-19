@@ -1470,6 +1470,42 @@ section with :ai_output: tag for flat pattern organization."
       (claude-org--send-request content))))
 #+END_SRC
 
+** Send Request Helpers
+
+#+BEGIN_SRC elisp
+(defun claude-org--build-ide-context-reminder (project-root)
+  "Build IDE context system reminder for PROJECT-ROOT.
+Returns nil if IDE context is disabled or unavailable."
+  (when claude-org-include-ide-context
+    (let* ((ide-context (claude-agent-collect-ide-context
+                         (or project-root default-directory)))
+           (current-level (claude-org--get-section-level))
+           (output-level (if (> current-level 0) (1+ current-level) 0)))
+      (when ide-context
+        (claude-agent-build-system-reminder
+         :current-file (plist-get ide-context :current-file)
+         :open-files (plist-get ide-context :open-files)
+         :selection (plist-get ide-context :selection)
+         :file-path buffer-file-name
+         :org-output-level output-level
+         :cwd (plist-get ide-context :cwd))))))
+
+(defun claude-org--build-query-options (project-root system-prompt sdk-uuid)
+  "Build options plist for claude-agent query.
+PROJECT-ROOT: Working directory
+SYSTEM-PROMPT: System prompt text
+SDK-UUID: Session UUID for resume"
+  (claude-agent-options
+   :cwd (or project-root default-directory)
+   :system-prompt system-prompt
+   :resume sdk-uuid
+   :permission-mode (claude-org--get-permission-mode)
+   :allowed-tools claude-org-allowed-tools
+   :mcp-config (claude-org--get-mcp-config)
+   :setting-sources (claude-org--get-setting-sources)
+   :env (claude-org--get-env-vars)))
+#+END_SRC
+
 ** Send Request
 
 #+BEGIN_SRC elisp
@@ -1479,32 +1515,9 @@ section with :ai_output: tag for flat pattern organization."
          (sdk-uuid (claude-org--get-sdk-uuid))
          (project-root (claude-org--get-project-root))
          (system-prompt (claude-org--build-system-prompt))
-         ;; Get current org section level for output hint
-         (current-level (claude-org--get-section-level))
-         (output-level (if (> current-level 0) (1+ current-level) 0))
-         ;; Build IDE context with project-root as cwd
-         (ide-context (when claude-org-include-ide-context
-                        (claude-agent-collect-ide-context (or project-root default-directory))))
-         (system-reminder (when ide-context
-                            (claude-agent-build-system-reminder
-                             :current-file (plist-get ide-context :current-file)
-                             :open-files (plist-get ide-context :open-files)
-                             :selection (plist-get ide-context :selection)
-                             :file-path buffer-file-name
-                             :org-output-level output-level
-                             :cwd (plist-get ide-context :cwd))))
-         ;; Collect environment variables from org properties
-         (env-vars (claude-org--get-env-vars))
-         ;; Build options
-         (options (claude-agent-options
-                   :cwd (or project-root default-directory)
-                   :system-prompt system-prompt
-                   :resume sdk-uuid
-                   :permission-mode (claude-org--get-permission-mode)
-                   :allowed-tools claude-org-allowed-tools
-                   :mcp-config (claude-org--get-mcp-config)
-                   :setting-sources (claude-org--get-setting-sources)
-                   :env env-vars))
+         ;; Build IDE context reminder and query options using helpers
+         (system-reminder (claude-org--build-ide-context-reminder project-root))
+         (options (claude-org--build-query-options project-root system-prompt sdk-uuid))
          ;; Build full prompt with system reminder
          (full-prompt (if (and system-reminder
                                (not (string-empty-p system-reminder)))
