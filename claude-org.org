@@ -108,6 +108,7 @@ Response will appear here after pressing C-c C-c inside the ai block.
 (require 'claude-agent)
 (require 'org)
 (require 'cl-lib)
+(require 'cl)  ; For lexical-let in callback closures
 #+END_SRC
 
 * Customization
@@ -132,6 +133,18 @@ Lower = more responsive, higher = better performance."
 (defcustom claude-org-session-tag "claude_session"
   "Tag that marks a section as having independent session scope."
   :type 'string
+  :group 'claude-org)
+
+(defcustom claude-org-output-tag "ai_output"
+  "Tag for AI output sections in flat pattern.
+Used to mark sections containing Claude's responses."
+  :type 'string
+  :group 'claude-org)
+
+(defcustom claude-org-auto-create-response-section t
+  "Whether to automatically create Response sections after executing AI blocks.
+When non-nil, claude-org-execute will create a Response heading with :ai_output: tag."
+  :type 'boolean
   :group 'claude-org)
 
 (defcustom claude-org-include-ide-context t
@@ -199,7 +212,7 @@ Working with Org Files:
 Response Format:
 - Your output appears directly in the org file
 - Use org-mode syntax, NOT markdown:
-  - Headers: * for h1, ** for h2, *** for h3 (not # or ##)
+  - Headers: MUST have space after asterisks: '* Title' (not '*Title'), '** Section' (not '**Section')
   - Bold: *bold* (not **bold**)
   - Italic: /italic/ (not _italic_)
   - Code inline: =code= or ~code~ (not backticks)
@@ -432,6 +445,13 @@ Point must be at a heading."
 Returns list of (question . response) pairs.
 Point must be at a heading, or before first heading for top-level content."
   (let ((conversations '())
+        (section-start (if (org-at-heading-p)
+                           ;; Start after the heading line
+                           (save-excursion
+                             (forward-line 1)
+                             (point))
+                         ;; Before first heading: start from current point
+                         (point)))
         (section-end (save-excursion
                        (if (org-at-heading-p)
                            ;; End is before next same-level heading
@@ -444,7 +464,7 @@ Point must be at a heading, or before first heading for top-level content."
                            (point-max))))))
     (save-excursion
       (save-restriction
-        (narrow-to-region (point) section-end)
+        (narrow-to-region section-start section-end)
         ;; Find all ai blocks in this section only (not subsections)
         (goto-char (point-min))
         (while (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
@@ -1036,6 +1056,29 @@ Returns 0 if not inside any heading, otherwise returns the heading level."
     (let ((case-fold-search t))
       (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
         (line-end-position)))))
+
+(defun claude-org--in-output-section-p ()
+  "Check if cursor is inside an :ai_output: tagged section.
+Returns non-nil if current heading or any parent heading has the output tag."
+  (save-excursion
+    (let ((tags (org-get-tags nil t)))
+      (member claude-org-output-tag tags))))
+
+(defun claude-org--find-instruction-number ()
+  "Extract instruction number from current or parent heading.
+Returns nil if not in an Instruction heading."
+  (save-excursion
+    (when (ignore-errors (org-back-to-heading t))
+      (when (looking-at "^\\*+ Instruction \\([0-9]+\\)")
+        (string-to-number (match-string 1))))))
+
+(defun claude-org--skip-to-after-output-section ()
+  "Skip to after the current :ai_output: section.
+Moves point to after the output section's subtree, ready to insert sibling."
+  (when (claude-org--in-output-section-p)
+    (org-back-to-heading t)
+    ;; Move to the end of this subtree
+    (org-end-of-subtree t t)))
 #+END_SRC
 
 * Block Insertion
@@ -1054,14 +1097,22 @@ Block insertion and session info commands.
 
 (defun claude-org-insert-block ()
   "Insert an AI query block with auto-numbered Instruction heading.
-Inserts at the same level as the current section with :claude_chat: tag."
+Smart insertion that skips :ai_output: sections to maintain flat pattern.
+Inserts at the same level as the last Instruction heading, or current level if no Instructions exist."
   (interactive)
-  (let* ((level (or (org-current-level) 1))
+  ;; If inside an output section, skip to after it
+  (claude-org--skip-to-after-output-section)
+  ;; Find the level by looking for the last Instruction heading
+  (let* ((level (or (save-excursion
+                      (when (re-search-backward "^\\(\\*+\\) Instruction [0-9]+" nil t)
+                        (length (match-string 1))))
+                    (org-current-level)
+                    1))
          (stars (make-string level ?*))
          (num (claude-org--next-instruction-number)))
     (insert stars " Instruction " (number-to-string num) " :" claude-org-heading-tag ":\n\n")
-    (insert "#+begin_src ai\n\n#+end_src")
-    (forward-line -1)))
+    (insert "#+begin_src ai\n\n#+end_src\n")
+    (forward-line -2)))
 
 (defun claude-org-insert-session-block ()
   "Insert an AI query block with independent section-scoped session.
@@ -1278,7 +1329,9 @@ Execution and request handling.
 (defun claude-org-execute ()
   "Execute the AI query at point.
 Must be called when point is inside a #+begin_src ai block.
-Sends the query to Claude and streams the response below the block."
+Sends the query to Claude and streams the response below the block.
+When `claude-org-auto-create-response-section' is non-nil, creates a Response
+section with :ai_output: tag for flat pattern organization."
   (interactive)
   (unless (claude-org--in-ai-block-p)
     (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
@@ -1289,13 +1342,20 @@ Sends the query to Claude and streams the response below the block."
     (when (claude-org--session-get session-key :busy)
       (user-error "Session is busy. Use C-c C-k to cancel or wait for completion"))
     ;; Find insertion point (after #+end_src)
-    (let ((insert-point (claude-org--find-block-end)))
+    (let ((insert-point (claude-org--find-block-end))
+          (instr-num (claude-org--find-instruction-number)))
       (unless insert-point
         (user-error "Cannot find block end"))
       ;; Set up marker at insertion point
       (save-excursion
         (goto-char insert-point)
         (insert "\n\n")
+        ;; Create Response section if enabled and we found an instruction number
+        (when (and claude-org-auto-create-response-section instr-num)
+          (let* ((level (claude-org--get-section-level))
+                 (stars (make-string level ?*)))
+            (insert stars " Response " (number-to-string instr-num)
+                    " :" claude-org-output-tag ":\n\n")))
         (let ((marker (point-marker)))
           (claude-org--session-put session-key :marker marker)
           (claude-org--session-put session-key :original-prompt content)
