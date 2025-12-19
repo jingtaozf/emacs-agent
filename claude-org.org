@@ -270,11 +270,12 @@ These can be set as org properties (file-level or section-level) and will
 be passed as environment variables when starting the Claude process.")
 
 (defconst claude-org--permission-mode-map
-  '(("readonly" . "default")
-    ("accept-edits" . "acceptEdits")
-    ("plan" . "plan")
-    ("bypass" . "bypassPermissions"))
-  "Map permission preset names to CLI permission-mode values.")
+  '(("readonly"      . (:cli "default"            :short "RO"))
+    ("accept-edits"  . (:cli "acceptEdits"        :short "ED"))
+    ("plan"          . (:cli "plan"               :short "PL"))
+    ("bypass"        . (:cli "bypassPermissions"  :short "BP")))
+  "Map permission preset names to CLI values and short display names.
+Each entry is (PRESET . (:cli CLI-VALUE :short SHORT-NAME)).")
 #+END_SRC
 
 * Session Management
@@ -697,11 +698,13 @@ Returns nil if not set."
   "Get effective permission mode for current session.
 Priority: org property > global preset > 'readonly'.
 Returns CLI permission-mode value."
-  (let ((preset (or (claude-org--get-permission-mode-property)
-                    claude-agent-permission-preset
-                    "readonly")))
-    (or (cdr (assoc preset claude-org--permission-mode-map))
-        "default")))
+  (let* ((preset (or (claude-org--get-permission-mode-property)
+                     claude-agent-permission-preset
+                     "readonly"))
+         (mode-info (cdr (assoc preset claude-org--permission-mode-map))))
+    (if mode-info
+        (plist-get mode-info :cli)
+      "default")))
 
 (defun claude-org--get-permission-mode-display ()
   "Get current permission mode name for display."
@@ -711,12 +714,11 @@ Returns CLI permission-mode value."
 
 (defun claude-org--permission-mode-short ()
   "Get short permission mode string for header-line display."
-  (pcase (claude-org--get-permission-mode-display)
-    ("readonly" "RO")
-    ("accept-edits" "ED")
-    ("plan" "PL")
-    ("bypass" "BP")
-    (_ "??")))
+  (let* ((preset (claude-org--get-permission-mode-display))
+         (mode-info (cdr (assoc preset claude-org--permission-mode-map))))
+    (if mode-info
+        (plist-get mode-info :short)
+      "??")))
 
 (defun claude-org--get-setting-sources ()
   "Get setting sources for Claude CLI.
