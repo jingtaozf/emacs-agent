@@ -24,6 +24,9 @@
   - [[#session-state-accessors][Session State Accessors]]
 - [[#block-detection][Block Detection]]
 - [[#block-insertion][Block Insertion]]
+- [[#slash-command-completion][Slash Command Completion]]
+  - [[#command-discovery][Command Discovery]]
+  - [[#company-backend][Company Backend]]
 - [[#response-handling][Response Handling]]
   - [[#debounced-font-lock][Debounced Font-Lock]]
   - [[#token-handling][Token Handling]]
@@ -186,6 +189,13 @@ Can be overridden per-section via CLAUDE_SETTING_SOURCES property."
   "Maximum line width for Claude's output.
 Claude will be instructed to keep lines under this many characters."
   :type 'integer
+  :group 'claude-org)
+
+(defcustom claude-org-builtin-slash-commands
+  '("/add-dir" "/clear" "/compact" "/content" "/help" "/ls" "/pwd" "/cd")
+  "Built-in Claude Code slash commands.
+These are embedded commands in the Claude Code CLI."
+  :type '(repeat string)
   :group 'claude-org)
 
 (defcustom claude-org-default-system-prompts
@@ -1035,9 +1045,13 @@ Returns 0 if not inside any heading, otherwise returns the heading level."
           (pos (point)))
       (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
         (let ((block-start (point)))
-          (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
-            (and (>= pos block-start)
-                 (<= pos (point)))))))))
+          ;; If we find end_src, check we're between begin and end
+          ;; If no end_src found, assume we're still inside the block (incomplete block)
+          (if (re-search-forward "^[ \t]*#\\+end_src" nil t)
+              (and (>= pos block-start)
+                   (<= pos (point)))
+            ;; No end found, we're in an incomplete block - that's OK
+            (>= pos block-start)))))))
 
 (defun claude-org--get-block-content ()
   "Get content of the ai block at point."
@@ -1135,6 +1149,79 @@ Shows the session identity which is file_path + optional CLAUDE_SESSION_ID."
     (if session-id
         (message "Session: %s::%s (scope: %s)" file-path session-id scope)
       (message "Session: %s (file path only, no CLAUDE_SESSION_ID property)" file-path))))
+#+END_SRC
+
+* Slash Command Completion
+
+Auto-completion for Claude Code slash commands in AI blocks.
+
+** Command Discovery
+
+#+BEGIN_SRC elisp
+(defun claude-org--scan-command-dir (dir)
+  "Scan DIR for .md files and return list of slash commands.
+Subdirectories create namespaced commands with : separator.
+Example: dir/custom/test.md becomes /custom:test"
+  (when (file-directory-p dir)
+    (let ((commands nil))
+      (dolist (file (directory-files-recursively dir "\\.md$"))
+        (let* ((relative (file-relative-name file dir))
+               (parts (split-string relative "/"))
+               (name (file-name-sans-extension (car (last parts))))
+               (namespace (butlast parts)))
+          (push (if namespace
+                    (concat "/" (mapconcat #'identity namespace ":") ":" name)
+                  (concat "/" name))
+                commands)))
+      commands)))
+
+(defun claude-org--discover-slash-commands ()
+  "Discover all available slash commands from user and project .claude/commands.
+Returns list of command strings with / prefix."
+  (let ((commands (copy-sequence claude-org-builtin-slash-commands))
+        (user-dir (expand-file-name "~/.claude/commands"))
+        (project-root (claude-org--get-project-root)))
+    ;; Add user commands
+    (setq commands (append commands (claude-org--scan-command-dir user-dir)))
+    ;; Add project commands if PROJECT_ROOT is set
+    (when project-root
+      (let ((project-dir (expand-file-name ".claude/commands" project-root)))
+        (setq commands (append commands (claude-org--scan-command-dir project-dir)))))
+    ;; Remove duplicates (project overrides user)
+    (delete-dups commands)
+    commands))
+#+END_SRC
+
+** Company Backend
+
+#+BEGIN_SRC elisp
+(defun claude-org--at-line-start-p ()
+  "Check if point is at the start of a line (ignoring whitespace)."
+  (save-excursion
+    (skip-chars-backward " \t")
+    (bolp)))
+
+(defun claude-org-company-slash-commands (command &optional arg &rest ignored)
+  "Company backend for Claude slash commands in AI blocks.
+Only triggers when / is at the start of a line."
+  (interactive (list 'interactive))
+  (cl-case command
+    (interactive (company-begin-backend 'claude-org-company-slash-commands))
+    (prefix (when (claude-org--in-ai-block-p)
+              (if (and (save-excursion
+                         ;; Skip back over the partial command and whitespace
+                         (skip-chars-backward "/a-z:_- \t")
+                         (bolp))
+                       (looking-back "/[a-z:_-]*" (line-beginning-position)))
+                  ;; We match - return prefix and stop other backends
+                  (cons (match-string 0) t)
+                ;; In AI block but not a slash command - don't interfere
+                nil)))
+    (candidates (let ((commands (claude-org--discover-slash-commands)))
+                  (cl-remove-if-not
+                   (lambda (c) (string-prefix-p arg c t))  ;; case-insensitive
+                   commands)))
+    (sorted t)))
 #+END_SRC
 
 * Response Handling
@@ -1388,16 +1475,17 @@ Returns the level (1 for *, 2 for **, etc.) or 0 if not in a section."
          ;; Get current org section level for output hint
          (current-level (claude-org--get-current-section-level))
          (output-level (if (> current-level 0) (1+ current-level) 0))
-         ;; Build IDE context
+         ;; Build IDE context with project-root as cwd
          (ide-context (when claude-org-include-ide-context
-                        (claude-agent-collect-ide-context)))
+                        (claude-agent-collect-ide-context (or project-root default-directory))))
          (system-reminder (when ide-context
                             (claude-agent-build-system-reminder
                              :current-file (plist-get ide-context :current-file)
                              :open-files (plist-get ide-context :open-files)
                              :selection (plist-get ide-context :selection)
                              :file-path buffer-file-name
-                             :org-output-level output-level)))
+                             :org-output-level output-level
+                             :cwd (plist-get ide-context :cwd))))
          ;; Collect environment variables from org properties
          (env-vars (claude-org--get-env-vars))
          ;; Build options
@@ -1745,7 +1833,14 @@ to send the query and stream the response.
         ;; Register exclusion
         (claude-org--register-exclusion)
         ;; Auto-start MCP server
-        (claude-org--ensure-mcp-server))
+        (claude-org--ensure-mcp-server)
+        ;; Add company backend for slash commands (buffer-local, high priority)
+        (when (boundp 'company-backends)
+          (set (make-local-variable 'company-backends)
+               (cons 'claude-org-company-slash-commands
+                     (if (listp company-backends)
+                         company-backends
+                       (list company-backends))))))
     ;; Restore original header line
     (setq header-line-format claude-org--original-header-line)
     ;; Restore original truncate-lines
@@ -1753,7 +1848,9 @@ to send the query and stream the response.
     ;; Cancel any active queries
     (claude-org-cancel-all)
     ;; Stop header timer if no more claude-org buffers
-    (claude-org--stop-header-timer)))
+    (claude-org--stop-header-timer)
+    ;; Company backends will be cleaned up automatically (buffer-local)
+    ))
 
 ;;;###autoload
 (defun claude-org-cleanup ()
