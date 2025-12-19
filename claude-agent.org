@@ -916,6 +916,35 @@ ERROR can be (symbol :message ...) plist, a string, or other."
    ((stringp error) error)
    ;; Fall back to prin1-to-string
    (t (prin1-to-string error))))
+
+(defun claude-agent-format-elapsed-time (start-time &optional format-style)
+  "Format elapsed time since START-TIME as human-readable string.
+FORMAT-STYLE can be:
+  'compact   - \"5s\", \"10m\", \"2h\" (default for mode-line)
+  'verbose   - \"started 5 seconds ago\"
+  nil        - defaults to 'compact
+
+Returns \"unknown\" if START-TIME is nil."
+  (if (null start-time)
+      "unknown"
+    (let* ((elapsed (- (float-time) start-time))
+           (style (or format-style 'compact)))
+      (cond
+       ;; Less than 60 seconds
+       ((< elapsed 60)
+        (if (eq style 'verbose)
+            (format "started %d seconds ago" (round elapsed))
+          (format "%ds" (round elapsed))))
+       ;; Less than 1 hour
+       ((< elapsed 3600)
+        (if (eq style 'verbose)
+            (format "started %d minutes ago" (round (/ elapsed 60)))
+          (format "%dm" (round (/ elapsed 60)))))
+       ;; 1 hour or more
+       (t
+        (if (eq style 'verbose)
+            (format "started %d hours ago" (round (/ elapsed 3600)))
+          (format "%dh" (round (/ elapsed 3600)))))))))
 #+END_SRC
 
 * Client API
@@ -2039,17 +2068,9 @@ Shows spinner when queries are active, empty when idle.")
 
 #+BEGIN_SRC elisp
 (defun claude-agent--format-elapsed (start-time)
-  "Format elapsed time since START-TIME as human-readable string."
-  (if (null start-time)
-      "unknown"
-    (let ((elapsed (- (float-time) start-time)))
-      (cond
-       ((< elapsed 60)
-        (format "%ds" (round elapsed)))
-       ((< elapsed 3600)
-        (format "%dm" (round (/ elapsed 60))))
-       (t
-        (format "%dh" (round (/ elapsed 3600))))))))
+  "Format elapsed time since START-TIME as human-readable string.
+Uses compact format for mode-line display."
+  (claude-agent-format-elapsed-time start-time 'compact))
 
 (defun claude-agent--format-activity-tooltip ()
   "Format tooltip showing all active queries."
