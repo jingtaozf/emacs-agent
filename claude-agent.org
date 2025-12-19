@@ -1052,6 +1052,25 @@ Cleans up process and resources."
     (when-let ((process (claude-agent--process-state-process state)))
       (when (process-live-p process)
         (interrupt-process process)))))
+
+(defun claude-agent-continue-session (client)
+  "Configure CLIENT to continue from the previous session.
+Must be called before `claude-agent-client-connect'."
+  (let ((options (claude-agent-client-options client)))
+    (setf (claude-agent-client-options client)
+          (plist-put options :continue-conversation t))))
+
+(defun claude-agent-resume-session (client session-id)
+  "Configure CLIENT to resume SESSION-ID.
+Must be called before `claude-agent-client-connect'."
+  (let ((options (claude-agent-client-options client)))
+    (setf (claude-agent-client-options client)
+          (plist-put options :resume session-id))))
+
+(defun claude-agent-get-session-id (client)
+  "Get the current session ID from CLIENT.
+Returns nil if not yet available."
+  (claude-agent-client-session-id client))
 #+END_SRC
 
 * Hook System
@@ -1141,30 +1160,6 @@ Returns combined hook output plist."
     ;; Combine results (last result wins for conflicting keys)
     (apply #'append (nreverse results))))
 #+END_SRC
-
-* Session Management
-
-#+BEGIN_SRC elisp
-(defun claude-agent-continue-session (client)
-  "Configure CLIENT to continue from the previous session.
-Must be called before `claude-agent-client-connect'."
-  (let ((options (claude-agent-client-options client)))
-    (setf (claude-agent-client-options client)
-          (plist-put options :continue-conversation t))))
-
-(defun claude-agent-resume-session (client session-id)
-  "Configure CLIENT to resume SESSION-ID.
-Must be called before `claude-agent-client-connect'."
-  (let ((options (claude-agent-client-options client)))
-    (setf (claude-agent-client-options client)
-          (plist-put options :resume session-id))))
-
-(defun claude-agent-get-session-id (client)
-  "Get the current session ID from CLIENT.
-Returns nil if not yet available."
-  (claude-agent-client-session-id client))
-#+END_SRC
-
 * Tests
 
 ** Unit Tests
@@ -1744,13 +1739,13 @@ which works correctly even when called from a special buffer like Claude Chat."
                      (not (claude-agent--buffer-excluded-p buf)))
            return buf))
 
-(defun claude-agent-collect-ide-context ()
+(defun claude-agent-collect-ide-context (&optional cwd)
   "Collect IDE context from current Emacs state.
 Returns plist with:
   :current-file - Most recent non-excluded file buffer info (name, path, modified)
   :open-files   - List of file-visiting buffers (max 10), excludes filtered buffers
   :selection    - Region info if active (text, start-line, end-line)
-  :cwd          - Current working directory
+  :cwd          - Working directory (uses CWD if provided, otherwise default-directory)
 
 Buffers are filtered according to `claude-agent-ide-context-exclude-buffer-names',
 `claude-agent-ide-context-exclude-modes', and `claude-agent-ide-context-exclude-predicates'.
@@ -1763,7 +1758,7 @@ collection when called from special buffers like Claude Chat."
                           (claude-agent--format-buffer-info current-buf))
           :open-files (claude-agent--get-file-buffers 10)
           :selection (claude-agent--format-selection)
-          :cwd default-directory)))
+          :cwd (or cwd default-directory))))
 #+END_SRC
 
 ** System Reminder Building
@@ -1771,7 +1766,7 @@ collection when called from special buffers like Claude Chat."
 #+BEGIN_SRC elisp
 (cl-defun claude-agent-build-system-reminder (&key current-file open-files
                                                    selection file-path
-                                                   org-output-level)
+                                                   org-output-level cwd)
   "Build <system-reminder> tag with IDE context.
 Returns string suitable for prepending to user prompt.
 
@@ -1779,7 +1774,8 @@ CURRENT-FILE is plist with :name :path :modified.
 OPEN-FILES is list of such plists.
 SELECTION is plist with :text :start-line :end-line.
 FILE-PATH is the conversation notebook path.
-ORG-OUTPUT-LEVEL is the target org section level for output headers."
+ORG-OUTPUT-LEVEL is the target org section level for output headers.
+CWD is the working directory (project root) where operations should be performed."
   (let ((parts nil))
     ;; Current file
     (when current-file
@@ -1816,6 +1812,10 @@ ORG-OUTPUT-LEVEL is the target org section level for output headers."
           (push (format "Selected code (lines %d-%d):\n```\n%s\n```"
                         start-line end-line text)
                 parts))))
+
+    ;; Working directory
+    (when cwd
+      (push (format "Working directory (project root): %s\nIMPORTANT: All file operations should be relative to this directory unless absolute paths are specified." cwd) parts))
 
     ;; Conversation notebook
     (when file-path
