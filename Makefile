@@ -9,7 +9,7 @@ SOURCES = claude-agent.org claude-org.org
 
 # Test files
 UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el
-INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el
+INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-hooks.el
 ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
@@ -33,8 +33,9 @@ help:
 	@echo "  make test             - Run all tests (unit + integration)"
 	@echo "  make test-unit        - Run unit tests only (fast, no API)"
 	@echo "  make test-integration - Run integration tests (requires API key)"
-	@echo "  make test-agent       - Run claude-agent unit tests"
-	@echo "  make test-org         - Run claude-org unit tests"
+	@echo "  make test-agent-unit  - Run claude-agent unit tests"
+	@echo "  make test-org-unit    - Run claude-org unit tests"
+	@echo "  make test-hooks       - Run hook system tests"
 	@echo ""
 	@echo "Coverage:"
 	@echo "  make coverage         - Generate test coverage report"
@@ -123,6 +124,25 @@ test-org-integration:
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-org-integration.el \
 		-f ert-run-tests-batch-and-exit
+
+.PHONY: test-hooks
+test-hooks:
+	@echo "Running hook system tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		-l tests/test-claude-agent-hooks.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :hooks))"
+
+.PHONY: test-org-hooks
+test-org-hooks:
+	@echo "Running org file protection hook tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/test-claude-agent-hooks.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
 
 # Interactive test runner (opens in Emacs UI)
 .PHONY: test-interactive

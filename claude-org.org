@@ -1873,6 +1873,8 @@ to send the query and stream the response.
         (claude-org--register-exclusion)
         ;; Auto-start MCP server
         (claude-org--ensure-mcp-server)
+        ;; Install org file protection hook (prevents Edit/Write on .org files)
+        (claude-org--install-protection-hook)
         ;; Add company backend for slash commands (buffer-local, high priority)
         (when (boundp 'company-backends)
           (set (make-local-variable 'company-backends)
@@ -1886,6 +1888,8 @@ to send the query and stream the response.
     (setq truncate-lines claude-org--original-truncate-lines)
     ;; Cancel any active queries
     (claude-org-cancel-all)
+    ;; Remove org file protection hook
+    (claude-org--remove-protection-hook)
     ;; Stop header timer if no more claude-org buffers
     (claude-org--stop-header-timer)
     ;; Company backends will be cleaned up automatically (buffer-local)
@@ -1947,6 +1951,58 @@ to send the query and stream the response.
                           (claude-org--format-elapsed (- (float-time) 30))))
   (should (string-match-p "started [0-9]+ minutes ago"
                           (claude-org--format-elapsed (- (float-time) 120)))))
+#+END_SRC
+
+* Org File Protection Hook
+
+Prevent Claude from using Edit/Write tools on .org files. Claude should use
+Emacs MCP org_* tools instead for proper org structure handling.
+
+#+BEGIN_SRC elisp
+(defun claude-org--protect-org-files (input-data tool-use-id context)
+  "Hook to prevent Edit/Write tools on .org files.
+
+INPUT-DATA: plist with :tool_name and :tool_input
+TOOL-USE-ID: string ID (may be nil)
+CONTEXT: plist with :signal
+
+Returns nil to allow, or a hook output plist to deny with error message."
+  (let* ((tool-name (plist-get input-data :tool_name))
+         (tool-input (plist-get input-data :tool_input))
+         (file-path (plist-get tool-input :file_path)))
+    (when (and (member tool-name '("Edit" "Write"))
+               file-path
+               (string-match-p "\\.org$" file-path))
+      ;; Deny with helpful error message
+      (list :reason "Org files require Emacs MCP tools for proper structure handling"
+            :systemMessage
+            (concat "🚫 Cannot use " tool-name " on .org files.\n\n"
+                    "Use Emacs MCP tools instead:\n"
+                    "- mcp__emacs__org_read_section - Read section by path\n"
+                    "- mcp__emacs__org_update_section - Update section content\n"
+                    "- mcp__emacs__org_create_section - Create new subsection\n"
+                    "- mcp__emacs__org_delete_section - Delete section\n"
+                    "- mcp__emacs__org_set_property - Set property value\n"
+                    "- mcp__emacs__org_set_tags - Set section tags\n\n"
+                    "These tools preserve org structure and work with Emacs directly.")
+            :hookSpecificOutput
+            (list :hookEventName "PreToolUse"
+                  :permissionDecision "deny"
+                  :permissionDecisionReason
+                  (format "Use Emacs MCP org_* tools for %s" file-path))))))
+
+(defun claude-org--install-protection-hook ()
+  "Install the org file protection hook (buffer-local)."
+  (make-local-variable 'claude-agent-pre-tool-use-hook)
+  (add-hook 'claude-agent-pre-tool-use-hook
+            #'claude-org--protect-org-files
+            nil t))  ; LOCAL=t
+
+(defun claude-org--remove-protection-hook ()
+  "Remove the org file protection hook."
+  (remove-hook 'claude-agent-pre-tool-use-hook
+               #'claude-org--protect-org-files
+               t))  ; LOCAL=t
 #+END_SRC
 
 * Package Footer

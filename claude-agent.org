@@ -533,33 +533,39 @@ Parses complete newline-delimited JSON and invokes callbacks."
               (let* ((json-object-type 'plist)
                      (json-array-type 'list)
                      (json-key-type 'keyword)
-                     (parsed (json-read-from-string line)))
-                (claude-agent--debug-log "Parsed JSON: %S" (plist-get parsed :type))
-                ;; Check for error conditions in JSON
-                (let ((json-error (claude-agent--extract-json-error parsed)))
-                  (if json-error
-                      ;; Error detected in JSON - call error callback
+                     (parsed (json-read-from-string line))
+                     (msg-type (plist-get parsed :type)))
+                (claude-agent--debug-log "Parsed JSON: %S" msg-type)
+
+                ;; Handle control requests (bidirectional protocol)
+                (if (equal msg-type "control_request")
+                    (claude-agent--handle-control-request process parsed)
+
+                  ;; Normal message processing
+                  (let ((json-error (claude-agent--extract-json-error parsed)))
+                    (if json-error
+                        ;; Error detected in JSON - call error callback
+                        (progn
+                          (claude-agent--debug-log "JSON error detected: %s" json-error)
+                          (when error-callback
+                            (funcall error-callback
+                                     (list 'claude-agent-api-error
+                                           :message json-error
+                                           :parsed parsed))))
+                      ;; Normal message processing
                       (progn
-                        (claude-agent--debug-log "JSON error detected: %s" json-error)
-                        (when error-callback
-                          (funcall error-callback
-                                   (list 'claude-agent-api-error
-                                         :message json-error
-                                         :parsed parsed))))
-                    ;; Normal message processing
-                    (progn
-                      ;; Extract text for token callback (streaming)
-                      (when token-callback
-                        (claude-agent--extract-tokens parsed token-callback))
-                      ;; Call message callback with parsed message
-                      (let ((message (claude-agent--parse-message parsed)))
-                        (when message
-                          ;; Write to verbose buffer if session-key is set
-                          (claude-agent--verbose-write-message
-                           (claude-agent--process-state-session-key state) message)
-                          ;; Call user callback
-                          (when callback
-                            (funcall callback message))))))))
+                        ;; Extract text for token callback (streaming)
+                        (when token-callback
+                          (claude-agent--extract-tokens parsed token-callback))
+                        ;; Call message callback with parsed message
+                        (let ((message (claude-agent--parse-message parsed)))
+                          (when message
+                            ;; Write to verbose buffer if session-key is set
+                            (claude-agent--verbose-write-message
+                             (claude-agent--process-state-session-key state) message)
+                            ;; Call user callback
+                            (when callback
+                              (funcall callback message)))))))))
             ((json-parse-error json-readtable-error json-end-of-file)
              ;; Line is not valid JSON - could be plain text error from CLI
              (claude-agent--debug-log "Non-JSON output: %s" line)
@@ -1104,91 +1110,321 @@ Returns nil if not yet available."
 
 * Hook System
 
-** Hook Input Structures
+Claude Agent SDK integrates with Emacs's native hook system to intercept and
+control Claude's tool use via the bidirectional control protocol. This allows
+you to use familiar =add-hook= and =remove-hook= functions to customize Claude's
+behavior.
+
+** Hook Variables
+
+Define Emacs-style hooks for each Claude control protocol event.
 
 #+BEGIN_SRC elisp
-(cl-defstruct (claude-agent-pre-tool-use-input
-               (:constructor claude-agent-make-pre-tool-use-input)
-               (:copier nil))
-  "Input for PreToolUse hooks."
-  session-id
-  tool-name
-  tool-input
-  cwd
-  permission-mode)
+(defvar claude-agent-pre-tool-use-hook nil
+  "Hook run before Claude executes a tool via control protocol.
 
-(cl-defstruct (claude-agent-post-tool-use-input
-               (:constructor claude-agent-make-post-tool-use-input)
-               (:copier nil))
-  "Input for PostToolUse hooks."
-  session-id
-  tool-name
-  tool-input
-  tool-response
-  cwd)
+Functions are called with three arguments:
+  INPUT-DATA: plist with :tool_name and :tool_input
+  TOOL-USE-ID: string ID of the tool use (may be nil)
+  CONTEXT: plist with :signal for cancellation
 
-(cl-defstruct (claude-agent-stop-input
-               (:constructor claude-agent-make-stop-input)
-               (:copier nil))
-  "Input for Stop hooks."
-  session-id
-  stop-hook-active)
+Each function should return nil to allow the tool, or a plist with
+hook output to modify or deny the tool execution.
+
+Hook output plist format:
+  :reason                  - String explaining the decision
+  :systemMessage           - String shown to Claude in conversation
+  :hookSpecificOutput      - Plist with event-specific fields:
+    :hookEventName         - \"PreToolUse\"
+    :permissionDecision    - \"allow\" or \"deny\"
+    :permissionDecisionReason - String explaining permission decision
+    :updatedInput          - Modified tool input (if allowing with changes)
+
+Example - Block dangerous bash commands:
+  (defun my-block-rm-rf (input-data tool-use-id context)
+    (let ((tool-name (plist-get input-data :tool_name))
+          (tool-input (plist-get input-data :tool_input)))
+      (when (and (equal tool-name \"Bash\")
+                 (string-match-p \"rm -rf\"
+                               (plist-get tool-input :command)))
+        (list :reason \"Dangerous command blocked\"
+              :systemMessage \"🚫 'rm -rf' commands are not allowed\"
+              :hookSpecificOutput
+                (list :hookEventName \"PreToolUse\"
+                      :permissionDecision \"deny\"
+                      :permissionDecisionReason
+                        \"rm -rf is blocked for safety\")))))
+
+  (add-hook 'claude-agent-pre-tool-use-hook #'my-block-rm-rf)
+
+This hook is made buffer-local automatically when used in minor modes.")
+
+(defvar claude-agent-post-tool-use-hook nil
+  "Hook run after Claude executes a tool via control protocol.
+
+Functions are called with the same arguments as pre-tool-use-hook, but
+INPUT-DATA also contains :tool_response with the tool's output.
+
+Hook output plist format:
+  :reason                  - String explaining feedback
+  :systemMessage           - String shown to Claude
+  :continue_               - Boolean (if false, stops execution)
+  :stopReason              - String explaining why execution stopped
+  :hookSpecificOutput      - Plist with:
+    :hookEventName         - \"PostToolUse\"
+    :additionalContext     - String with extra context for Claude
+
+Example - Stop on critical errors:
+  (defun my-stop-on-critical-error (input-data tool-use-id context)
+    (let ((response (plist-get input-data :tool_response)))
+      (when (string-match-p \"CRITICAL\" response)
+        (list :continue_ nil
+              :stopReason \"Critical error detected\"
+              :systemMessage \"🛑 Execution stopped due to critical error\"))))
+
+  (add-hook 'claude-agent-post-tool-use-hook
+            #'my-stop-on-critical-error)
+
+This hook is made buffer-local automatically when used in minor modes.")
+
+(defvar claude-agent-user-prompt-submit-hook nil
+  "Hook run when user submits a prompt to Claude.
+
+Functions are called with three arguments (tool-use-id will be nil).
+
+Hook output plist format:
+  :hookSpecificOutput      - Plist with:
+    :hookEventName         - \"UserPromptSubmit\"
+    :additionalContext     - String with context to inject
+
+Example - Add project-specific context:
+  (defun my-add-project-context (input-data tool-use-id context)
+    (list :hookSpecificOutput
+          (list :hookEventName \"UserPromptSubmit\"
+                :additionalContext
+                  \"This project uses Python 3.11 and pytest.\")))
+
+  (add-hook 'claude-agent-user-prompt-submit-hook
+            #'my-add-project-context)
+
+This hook is made buffer-local automatically when used in minor modes.")
+
+(defvar claude-agent-session-start-hook nil
+  "Hook run when a Claude session starts.
+
+Functions are called with three arguments (tool-use-id will be nil).
+
+Hook output plist format:
+  :hookSpecificOutput      - Plist with:
+    :hookEventName         - \"SessionStart\"
+    :additionalContext     - String with session-wide context
+
+This hook is made buffer-local automatically when used in minor modes.")
+#+END_SRC
+
+** Control Protocol State
+
+Track control protocol request/response state in process state.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--process-state-add-fields (state)
+  "Add control protocol fields to process STATE if not present.
+This extends the cl-defstruct without modifying the definition."
+  ;; Control protocol state (stored as plist in process-get)
+  (unless (process-get (claude-agent--process-state-process state)
+                       'claude-control-requests)
+    (process-put (claude-agent--process-state-process state)
+                 'claude-control-requests
+                 (make-hash-table :test 'equal)))
+  (unless (process-get (claude-agent--process-state-process state)
+                       'claude-request-counter)
+    (process-put (claude-agent--process-state-process state)
+                 'claude-request-counter
+                 0)))
 #+END_SRC
 
 ** Hook Invocation
 
+Run Emacs hooks and merge results for control protocol responses.
+
 #+BEGIN_SRC elisp
-(defun claude-agent-add-hook (client event matcher callback &optional timeout)
-  "Add a hook to CLIENT for EVENT.
+(defun claude-agent--run-hooks-for-event (hook-symbol input-data tool-use-id context)
+  "Run Emacs hooks in HOOK-SYMBOL and merge results.
 
-EVENT is one of `claude-agent-hook-events'.
-MATCHER is a string pattern (tool name) or nil for all.
-CALLBACK is called when the hook fires.
-  For PreToolUse: (lambda (input) ...) where INPUT is `claude-agent-pre-tool-use-input'
-    Return plist with :decision (allow, deny, ask)
-  For PostToolUse: (lambda (input) ...) where INPUT is `claude-agent-post-tool-use-input'
-    Return plist with :additional-context string
-  For Stop: (lambda (input) ...) where INPUT is `claude-agent-stop-input'
-    Return plist with :continue boolean
-TIMEOUT is optional seconds before hook times out."
-  (unless (memq event claude-agent-hook-events)
-    (error "Unknown hook event: %s" event))
-  (let* ((hooks (claude-agent-client-hooks client))
-         (matchers (alist-get event hooks))
-         (new-matcher (claude-agent-make-hook-matcher
-                       :matcher matcher
-                       :callbacks (list callback)
-                       :timeout (or timeout 60.0))))
-    (if matchers
-        (setf (alist-get event hooks)
-              (append matchers (list new-matcher)))
-      (push (cons event (list new-matcher)) hooks))
-    (setf (claude-agent-client-hooks client) hooks)))
+HOOK-SYMBOL: Symbol like 'claude-agent-pre-tool-use-hook
+INPUT-DATA: plist with :tool_name, :tool_input, etc.
+TOOL-USE-ID: string ID or nil
+CONTEXT: plist with :signal
 
-(defun claude-agent--invoke-hooks (client event input)
-  "Invoke hooks on CLIENT for EVENT with INPUT.
-Returns combined hook output plist."
-  (let ((hooks (claude-agent-client-hooks client))
-        (results nil))
-    (when-let ((matchers (alist-get event hooks)))
-      (dolist (matcher matchers)
-        (let ((pattern (claude-agent-hook-matcher-matcher matcher))
-              (callbacks (claude-agent-hook-matcher-callbacks matcher))
-              (tool-name (and (claude-agent-pre-tool-use-input-p input)
-                              (claude-agent-pre-tool-use-input-tool-name input))))
-          ;; Check if matcher applies
-          (when (or (null pattern)
-                    (and tool-name (string-match-p pattern tool-name)))
-            (dolist (callback callbacks)
-              (condition-case err
-                  (let ((result (funcall callback input)))
-                    (when result
-                      (push result results)))
-                (error
-                 (claude-agent--debug-log "Hook error: %s" (error-message-string err)))))))))
-    ;; Combine results (last result wins for conflicting keys)
-    (apply #'append (nreverse results))))
+Returns: Merged hook output plist, or nil if all hooks allow."
+  (let ((results '())
+        (denied nil)
+        (hooks (symbol-value hook-symbol)))
+    ;; Run all hook functions
+    (dolist (hook-fn hooks)
+      (when (functionp hook-fn)
+        (condition-case err
+            (let ((result (funcall hook-fn input-data tool-use-id context)))
+              (when result
+                (push result results)
+                ;; Check for deny decision
+                (when (equal "deny"
+                            (plist-get
+                              (plist-get result :hookSpecificOutput)
+                              :permissionDecision))
+                  (setq denied t)
+                  ;; Stop at first deny
+                  (return))))
+          (error
+           (claude-agent--debug-log "Hook error: %s"
+                                    (error-message-string err))))))
+
+    ;; Merge results
+    (cond
+     ;; If any hook denied, return first deny
+     (denied
+      (cl-find-if (lambda (r)
+                    (equal "deny"
+                           (plist-get
+                             (plist-get r :hookSpecificOutput)
+                             :permissionDecision)))
+                  results))
+     ;; Otherwise merge all results
+     (results
+      (let ((merged '()))
+        (dolist (result (nreverse results))
+          (setq merged (append merged result)))
+        merged))
+     ;; No results - allow by default
+     (t nil))))
+
+(defun claude-agent--hook-event-name-to-symbol (event-name)
+  "Convert EVENT-NAME string to hook symbol.
+PreToolUse -> claude-agent-pre-tool-use-hook
+PostToolUse -> claude-agent-post-tool-use-hook"
+  ;; Convert CamelCase to kebab-case
+  ;; 1. Insert dash before every uppercase: PreToolUse -> -Pre-Tool-Use
+  ;; 2. Remove leading dash: -Pre-Tool-Use -> Pre-Tool-Use
+  ;; 3. Downcase: Pre-Tool-Use -> pre-tool-use
+  (let* ((case-fold-search nil)  ; Disable case-insensitive matching
+         (with-dashes (replace-regexp-in-string
+                       "\\([A-Z]\\)" "-\\1"
+                       event-name))
+         (without-leading-dash (if (string-prefix-p "-" with-dashes)
+                                   (substring with-dashes 1)
+                                 with-dashes))
+         (kebab-case (downcase without-leading-dash)))
+    (intern (concat "claude-agent-" kebab-case "-hook"))))
 #+END_SRC
+
+** Control Request Handling
+
+Handle incoming control requests from Claude CLI and send responses.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--send-control-response (process request-id subtype response-data)
+  "Send control protocol response to PROCESS.
+
+REQUEST-ID: string matching the request
+SUBTYPE: \"success\" or \"error\"
+RESPONSE-DATA: plist with response fields or :error string"
+  (let* ((response (list :type "control_response"
+                        :response (list :subtype subtype
+                                       :request_id request-id
+                                       :response response-data)))
+         (json-object-type 'plist)
+         (json-array-type 'list)
+         (json-key-type 'keyword)
+         (json (concat (json-encode response) "\n")))
+    (claude-agent--debug-log "Sending control response: %s"
+                            (substring json 0 (min 200 (length json))))
+    (process-send-string process json)))
+
+(defun claude-agent--handle-control-request (process request)
+  "Handle control_request from Claude CLI.
+
+PROCESS: The Claude CLI process
+REQUEST: Parsed control_request plist
+
+Invokes appropriate Emacs hooks and sends control_response."
+  (let* ((request-id (plist-get request :request_id))
+         (request-data (plist-get request :request))
+         (subtype (plist-get request-data :subtype)))
+
+    (claude-agent--debug-log "Control request: %s (id=%s)" subtype request-id)
+
+    (condition-case err
+        (cond
+         ;; Hook callback
+         ((equal subtype "hook_callback")
+          (let* ((callback-id (plist-get request-data :callback_id))
+                 (input-data (plist-get request-data :input))
+                 (tool-use-id (plist-get request-data :tool_use_id))
+                 (context (list :signal nil))
+                 ;; Extract hook event name from input
+                 (hook-event (plist-get input-data :hook_event_name))
+                 ;; Convert to hook symbol
+                 (hook-symbol (claude-agent--hook-event-name-to-symbol hook-event))
+                 ;; Run hooks
+                 (hook-output (claude-agent--run-hooks-for-event
+                              hook-symbol input-data tool-use-id context)))
+            ;; Send response
+            (claude-agent--send-control-response
+             process request-id "success"
+             (or hook-output (list)))))
+
+         ;; Tool permission (uses PreToolUse hooks)
+         ((equal subtype "can_use_tool")
+          (let* ((tool-name (plist-get request-data :tool_name))
+                 (tool-input (plist-get request-data :input))
+                 (input-data (list :tool_name tool-name
+                                  :tool_input tool-input))
+                 (context (list :signal nil))
+                 ;; Run PreToolUse hooks
+                 (hook-output (claude-agent--run-hooks-for-event
+                              'claude-agent-pre-tool-use-hook
+                              input-data nil context)))
+            ;; Convert hook output to permission response
+            (if hook-output
+                (let* ((hook-specific (plist-get hook-output :hookSpecificOutput))
+                       (decision (plist-get hook-specific :permissionDecision))
+                       (updated-input (plist-get hook-specific :updatedInput)))
+                  (if (equal decision "deny")
+                      ;; Deny with message
+                      (claude-agent--send-control-response
+                       process request-id "success"
+                       (list :behavior "deny"
+                             :message (or (plist-get hook-output :systemMessage)
+                                         (plist-get hook-output :reason)
+                                         "Tool use denied by hook")))
+                    ;; Allow (possibly with modified input)
+                    (claude-agent--send-control-response
+                     process request-id "success"
+                     (list :behavior "allow"
+                           :updatedInput (or updated-input tool-input)))))
+              ;; No hooks - allow by default
+              (claude-agent--send-control-response
+               process request-id "success"
+               (list :behavior "allow"
+                     :updatedInput tool-input)))))
+
+         (t
+          ;; Unsupported subtype
+          (error "Unsupported control request subtype: %s" subtype)))
+
+      (error
+       ;; Send error response
+       (claude-agent--send-control-response
+        process request-id "error"
+        (list :error (error-message-string err)))))))
+#+END_SRC
+
+** Process Filter Integration
+
+The control request handling is integrated directly into =claude-agent--process-json-buffer=
+at line ~540. When a =control_request= message is received, it is routed to
+=claude-agent--handle-control-request= which invokes the appropriate Emacs hooks
+and sends back a =control_response=.
 * Tests
 
 ** Unit Tests

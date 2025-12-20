@@ -19,6 +19,12 @@
   - [[#session-management][Session Management]]
     - [[#in-claude-org-mode][In claude-org-mode]]
     - [[#session-recovery][Session Recovery]]
+  - [[#hook-system][Hook System]]
+    - [[#quick-example---block-dangerous-commands][Quick Example - Block Dangerous Commands]]
+    - [[#available-hooks][Available Hooks]]
+    - [[#buffer-local-hooks][Buffer-Local Hooks]]
+    - [[#practical-examples][Practical Examples]]
+    - [[#integration-with-claude-org-mode][Integration with claude-org-mode]]
   - [[#permission-system][Permission System]]
     - [[#permission-presets][Permission Presets]]
     - [[#in-claude-org-mode-1][In claude-org-mode]]
@@ -299,6 +305,171 @@ Another old conversation...
 
 This allows you to keep historical context in the file while excluding it from session recovery, reducing
 context size and improving performance.
+
+** Hook System
+
+Intercept and control Claude's tool use via Emacs's native hook system. Hooks run *before* tools are executed,
+allowing you to block, modify, or monitor Claude's actions through the bidirectional control protocol.
+
+*** Quick Example - Block Dangerous Commands
+
+#+BEGIN_SRC elisp
+(defun my-block-dangerous-bash (input-data tool-use-id context)
+  "Block rm and other dangerous bash commands."
+  (let ((tool-name (plist-get input-data :tool_name))
+        (tool-input (plist-get input-data :tool_input)))
+    (when (and (equal tool-name "Bash")
+               (string-match-p "\\(rm\\|sudo\\)" (plist-get tool-input :command)))
+      ;; Return hook output to deny
+      (list :reason "Dangerous command blocked for safety"
+            :systemMessage "🚫 This command is not allowed"
+            :hookSpecificOutput
+            (list :hookEventName "PreToolUse"
+                  :permissionDecision "deny"
+                  :permissionDecisionReason "Security policy blocks rm/sudo")))))
+
+;; Add hook using standard Emacs add-hook
+(add-hook 'claude-agent-pre-tool-use-hook #'my-block-dangerous-bash)
+#+END_SRC
+
+*** Available Hooks
+
+**** =claude-agent-pre-tool-use-hook=
+
+Runs *before* Claude executes a tool. Return nil to allow, or a plist to deny/modify:
+
+#+BEGIN_SRC elisp
+;; Hook function signature
+(defun my-pre-tool-hook (input-data tool-use-id context)
+  "INPUT-DATA: plist with :tool_name and :tool_input
+TOOL-USE-ID: string ID (may be nil)
+CONTEXT: plist with :signal
+
+Return nil to allow, or plist to deny/modify.")
+#+END_SRC
+
+Hook output format:
+- =:reason= - Internal reason string
+- =:systemMessage= - Message shown to Claude in conversation
+- =:hookSpecificOutput= - Control protocol fields:
+  - =:hookEventName= - "PreToolUse"
+  - =:permissionDecision= - "allow" or "deny"
+  - =:permissionDecisionReason= - Explanation for decision
+  - =:updatedInput= - Modified tool input (if allowing with changes)
+
+**** =claude-agent-post-tool-use-hook=
+
+Runs *after* Claude executes a tool. Can add context or stop execution:
+
+#+BEGIN_SRC elisp
+(defun my-stop-on-error (input-data tool-use-id context)
+  "Stop execution if tool returns critical error."
+  (let ((response (plist-get input-data :tool_response)))
+    (when (string-match-p "CRITICAL" response)
+      (list :continue_ nil  ; Stop execution
+            :stopReason "Critical error detected"
+            :systemMessage "🛑 Execution stopped due to critical error"))))
+
+(add-hook 'claude-agent-post-tool-use-hook #'my-stop-on-error)
+#+END_SRC
+
+**** =claude-agent-user-prompt-submit-hook=
+
+Runs when user submits a prompt. Add project-specific context:
+
+#+BEGIN_SRC elisp
+(defun my-add-project-context (input-data tool-use-id context)
+  "Inject project guidelines into every query."
+  (list :hookSpecificOutput
+        (list :hookEventName "UserPromptSubmit"
+              :additionalContext
+              "This project uses Python 3.11 and pytest for testing.")))
+
+(add-hook 'claude-agent-user-prompt-submit-hook #'my-add-project-context)
+#+END_SRC
+
+**** =claude-agent-session-start-hook=
+
+Runs when a Claude session starts. Set session-wide context.
+
+*** Buffer-Local Hooks
+
+Hooks can be buffer-local for context-specific behavior:
+
+#+BEGIN_SRC elisp
+(defun my-org-mode-hook ()
+  "Add org-specific protections when claude-org-mode is enabled."
+  (make-local-variable 'claude-agent-pre-tool-use-hook)
+  (add-hook 'claude-agent-pre-tool-use-hook
+            #'claude-org--protect-org-files
+            nil t))  ; LOCAL=t makes it buffer-local
+#+END_SRC
+
+*** Practical Examples
+
+**** Protect Specific Files
+
+#+BEGIN_SRC elisp
+(defun my-protect-config-files (input-data tool-use-id context)
+  "Prevent Claude from editing configuration files."
+  (let ((tool-name (plist-get input-data :tool_name))
+        (file-path (plist-get (plist-get input-data :tool_input) :file_path)))
+    (when (and (member tool-name '("Edit" "Write"))
+               file-path
+               (string-match-p "\\.\\(env\\|config\\|json\\)$" file-path))
+      (list :reason "Configuration files require manual editing"
+            :systemMessage "🚫 Cannot modify config files"
+            :hookSpecificOutput
+            (list :hookEventName "PreToolUse"
+                  :permissionDecision "deny"
+                  :permissionDecisionReason
+                  (format "Manual review required for %s" file-path))))))
+
+(add-hook 'claude-agent-pre-tool-use-hook #'my-protect-config-files)
+#+END_SRC
+
+**** Log All Tool Use
+
+#+BEGIN_SRC elisp
+(defun my-log-tool-use (input-data tool-use-id context)
+  "Log every tool Claude uses."
+  (let ((tool-name (plist-get input-data :tool_name)))
+    (message "[Claude Tool] %s at %s"
+             tool-name
+             (format-time-string "%H:%M:%S")))
+  nil)  ; Return nil = allow
+
+(add-hook 'claude-agent-pre-tool-use-hook #'my-log-tool-use)
+#+END_SRC
+
+**** Auto-approve Safe Tools, Block Others
+
+#+BEGIN_SRC elisp
+(defvar my-safe-tools '("Read" "Grep" "Glob")
+  "Tools that don't modify state.")
+
+(defun my-auto-approve-safe-tools (input-data tool-use-id context)
+  "Auto-approve read-only tools, ask for others."
+  (let ((tool-name (plist-get input-data :tool_name)))
+    (unless (member tool-name my-safe-tools)
+      (list :reason (format "%s requires approval" tool-name)
+            :systemMessage
+            (format "⚠️ %s requires manual approval" tool-name)
+            :hookSpecificOutput
+            (list :hookEventName "PreToolUse"
+                  :permissionDecision "deny"
+                  :permissionDecisionReason "Auto-approve only for safe tools")))))
+
+(add-hook 'claude-agent-pre-tool-use-hook #'my-auto-approve-safe-tools)
+#+END_SRC
+
+*** Integration with claude-org-mode
+
+The =claude-org= package automatically adds hooks to protect .org files:
+
+- Blocks =Edit= and =Write= tools on .org files
+- Directs Claude to use Emacs MCP org_* tools instead
+- Ensures org structure integrity
 
 ** Permission System
 
