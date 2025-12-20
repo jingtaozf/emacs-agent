@@ -34,7 +34,12 @@
   (should (eq (claude-agent--hook-event-name-to-symbol "UserPromptSubmit")
               'claude-agent-user-prompt-submit-hook))
   (should (eq (claude-agent--hook-event-name-to-symbol "SessionStart")
-              'claude-agent-session-start-hook)))
+              'claude-agent-session-start-hook))
+  ;; Test acronym handling (consecutive uppercase)
+  (should (eq (claude-agent--hook-event-name-to-symbol "MCPToolUse")
+              'claude-agent-mcp-tool-use-hook))
+  (should (eq (claude-agent--hook-event-name-to-symbol "URLHandler")
+              'claude-agent-url-handler-hook)))
 
 (ert-deftest test-hook-invocation-no-hooks ()
   "Test hook invocation when no hooks are registered."
@@ -87,17 +92,17 @@
     (setq claude-agent-pre-tool-use-hook nil)))
 
 (ert-deftest test-hook-invocation-multiple-hooks ()
-  "Test multiple hooks with first deny winning."
+  "Test multiple hooks with first deny stopping execution."
   :tags '(:unit :fast :stable :isolated :hooks)
   (let ((claude-agent-pre-tool-use-hook nil)
         (hook1-called nil)
         (hook2-called nil))
-    ;; Hook 1: Allows
+    ;; Hook 1: Allows (added first, runs second due to add-hook prepending)
     (add-hook 'claude-agent-pre-tool-use-hook
               (lambda (input-data tool-use-id context)
                 (setq hook1-called t)
                 nil))
-    ;; Hook 2: Denies
+    ;; Hook 2: Denies (added second, runs first due to add-hook prepending)
     (add-hook 'claude-agent-pre-tool-use-hook
               (lambda (input-data tool-use-id context)
                 (setq hook2-called t)
@@ -109,7 +114,8 @@
                    (list :tool_name "Bash" :tool_input (list :command "test"))
                    nil
                    (list :signal nil))))
-      (should hook1-called)
+      ;; Hook 2 runs first and denies, so hook 1 never runs
+      (should-not hook1-called)
       (should hook2-called)
       (should (not (null result)))
       (should (equal (plist-get result :reason) "Denied by hook 2")))
@@ -138,10 +144,16 @@
     (setq claude-agent-pre-tool-use-hook nil)))
 
 ;;; Integration Tests - Real Claude CLI
+;;
+;; NOTE: These tests are marked as :flaky because they depend on:
+;; 1. Claude CLI being available and configured
+;; 2. Claude's response behavior (may not always use Bash tool)
+;; 3. Network conditions and API availability
+;; They are valuable for manual verification but may not pass in CI.
 
 (ert-deftest test-integration-hook-blocks-bash-command ()
   "Test that PreToolUse hook can block bash commands."
-  :tags '(:integration :slow :api :stable :hooks :process)
+  :tags '(:integration :slow :api :flaky :hooks :process)
   (test-claude-skip-unless-cli-available)
 
   (let ((hook-called nil)
@@ -190,7 +202,7 @@
 
 (ert-deftest test-integration-hook-allows-safe-command ()
   "Test that PreToolUse hook allows safe commands."
-  :tags '(:integration :slow :api :stable :hooks :process)
+  :tags '(:integration :slow :api :flaky :hooks :process)
   (test-claude-skip-unless-cli-available)
 
   (let ((hook-called nil)
@@ -232,7 +244,7 @@
 
 (ert-deftest test-integration-buffer-local-hooks ()
   "Test that hooks can be buffer-local."
-  :tags '(:integration :slow :api :stable :hooks :buffer-local)
+  :tags '(:integration :slow :api :flaky :hooks :buffer-local)
   (test-claude-skip-unless-cli-available)
 
   (let ((buffer1 (generate-new-buffer "*test-hooks-1*"))

@@ -1222,27 +1222,6 @@ Hook output plist format:
 This hook is made buffer-local automatically when used in minor modes.")
 #+END_SRC
 
-** Control Protocol State
-
-Track control protocol request/response state in process state.
-
-#+BEGIN_SRC elisp
-(defun claude-agent--process-state-add-fields (state)
-  "Add control protocol fields to process STATE if not present.
-This extends the cl-defstruct without modifying the definition."
-  ;; Control protocol state (stored as plist in process-get)
-  (unless (process-get (claude-agent--process-state-process state)
-                       'claude-control-requests)
-    (process-put (claude-agent--process-state-process state)
-                 'claude-control-requests
-                 (make-hash-table :test 'equal)))
-  (unless (process-get (claude-agent--process-state-process state)
-                       'claude-request-counter)
-    (process-put (claude-agent--process-state-process state)
-                 'claude-request-counter
-                 0)))
-#+END_SRC
-
 ** Hook Invocation
 
 Run Emacs hooks and merge results for control protocol responses.
@@ -1260,24 +1239,25 @@ Returns: Merged hook output plist, or nil if all hooks allow."
   (let ((results '())
         (denied nil)
         (hooks (symbol-value hook-symbol)))
-    ;; Run all hook functions
-    (dolist (hook-fn hooks)
-      (when (functionp hook-fn)
-        (condition-case err
-            (let ((result (funcall hook-fn input-data tool-use-id context)))
-              (when result
-                (push result results)
-                ;; Check for deny decision
-                (when (equal "deny"
-                            (plist-get
-                              (plist-get result :hookSpecificOutput)
-                              :permissionDecision))
-                  (setq denied t)
-                  ;; Stop at first deny
-                  (return))))
-          (error
-           (claude-agent--debug-log "Hook error: %s"
-                                    (error-message-string err))))))
+    ;; Run all hook functions, stop at first deny
+    (catch 'hook-denied
+      (dolist (hook-fn hooks)
+        (when (functionp hook-fn)
+          (condition-case err
+              (let ((result (funcall hook-fn input-data tool-use-id context)))
+                (when result
+                  (push result results)
+                  ;; Check for deny decision
+                  (when (equal "deny"
+                              (plist-get
+                                (plist-get result :hookSpecificOutput)
+                                :permissionDecision))
+                    (setq denied t)
+                    ;; Stop at first deny
+                    (throw 'hook-denied nil))))
+            (error
+             (claude-agent--debug-log "Hook error: %s"
+                                      (error-message-string err)))))))
 
     ;; Merge results
     (cond
@@ -1301,19 +1281,22 @@ Returns: Merged hook output plist, or nil if all hooks allow."
 (defun claude-agent--hook-event-name-to-symbol (event-name)
   "Convert EVENT-NAME string to hook symbol.
 PreToolUse -> claude-agent-pre-tool-use-hook
-PostToolUse -> claude-agent-post-tool-use-hook"
-  ;; Convert CamelCase to kebab-case
-  ;; 1. Insert dash before every uppercase: PreToolUse -> -Pre-Tool-Use
-  ;; 2. Remove leading dash: -Pre-Tool-Use -> Pre-Tool-Use
+PostToolUse -> claude-agent-post-tool-use-hook
+MCPToolUse -> claude-agent-mcp-tool-use-hook"
+  ;; Convert CamelCase to kebab-case (handles acronyms correctly)
+  ;; 1. Insert dash before uppercase that follows lowercase: PreToolUse -> Pre-ToolUse
+  ;; 2. Insert dash before uppercase that precedes lowercase (acronyms): MCPToolUse -> MCP-ToolUse
   ;; 3. Downcase: Pre-Tool-Use -> pre-tool-use
   (let* ((case-fold-search nil)  ; Disable case-insensitive matching
-         (with-dashes (replace-regexp-in-string
-                       "\\([A-Z]\\)" "-\\1"
-                       event-name))
-         (without-leading-dash (if (string-prefix-p "-" with-dashes)
-                                   (substring with-dashes 1)
-                                 with-dashes))
-         (kebab-case (downcase without-leading-dash)))
+         ;; Step 1: lowercase followed by uppercase
+         (step1 (replace-regexp-in-string
+                 "\\([a-z]\\)\\([A-Z]\\)" "\\1-\\2"
+                 event-name))
+         ;; Step 2: uppercase followed by uppercase+lowercase (for acronyms)
+         (step2 (replace-regexp-in-string
+                 "\\([A-Z]+\\)\\([A-Z][a-z]\\)" "\\1-\\2"
+                 step1))
+         (kebab-case (downcase step2)))
     (intern (concat "claude-agent-" kebab-case "-hook"))))
 #+END_SRC
 
