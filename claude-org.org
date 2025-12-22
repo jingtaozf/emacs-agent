@@ -1302,78 +1302,25 @@ Batches rapid updates during streaming for better performance."
 Normalize org headers in Claude's output to fit the document hierarchy.
 Headers are adjusted so Claude's top-level (=*=) becomes the target level.
 
-#+BEGIN_SRC elisp
-(defun claude-org--normalize-headers-in-text (text target-level pending-line)
-  "Normalize org headers in TEXT to start at TARGET-LEVEL.
-PENDING-LINE is incomplete text from previous token (no trailing newline).
-Returns (normalized-text . new-pending-line).
+Uses simple regex replacement - no buffering needed since =^= matches
+both start of string and start of line (after newline).
 
+#+BEGIN_SRC elisp
+(defun claude-org--normalize-headers-in-text (text target-level)
+  "Normalize org headers in TEXT to start at TARGET-LEVEL.
 Headers at line start are adjusted: Claude's level N becomes target-level + (N-1).
 Only lines starting with asterisks followed by space are treated as headers.
-Only buffers incomplete lines that could potentially be headers (start with *)."
+No buffering - processes each token independently using regex."
   (if (not claude-org-normalize-headers)
-      ;; Normalization disabled - just handle pending line
-      (cons (concat pending-line text) "")
-    ;; Combine pending line with new text
-    (let* ((combined (concat pending-line text))
-           (has-trailing-newline (string-suffix-p "\n" combined))
-           (lines (split-string combined "\n"))
-           (last-idx (1- (length lines)))
-           (result-lines '())
-           (new-pending "")
-           (offset (1- target-level)))  ; offset to add to Claude's levels
-      ;; Process lines
-      (cl-loop for line in lines
-               for idx from 0
-               do (cond
-                   ;; Last line without trailing newline
-                   ((and (= idx last-idx) (not has-trailing-newline))
-                    ;; Only buffer if it could be a header (starts with *)
-                    ;; Otherwise output immediately to avoid buffering all text
-                    (if (string-prefix-p "*" line)
-                        (setq new-pending line)
-                      ;; Not a potential header - output immediately (no newline)
-                      (push line result-lines)))
-                   ;; Empty string after trailing newline - skip
-                   ((and (= idx last-idx) has-trailing-newline (string= line ""))
-                    nil)
-                   ;; Normal complete line - process and add newline
-                   (t
-                    (push (concat (claude-org--normalize-header-line line offset) "\n")
-                          result-lines))))
-      (cons (apply #'concat (nreverse result-lines))
-            new-pending))))
-
-(defun claude-org--normalize-header-line (line offset)
-  "Normalize a single LINE by adding OFFSET to any org header level.
-Returns the normalized line."
-  ;; Match org header: starts with one or more *, then space, then content
-  (if (string-match "^\\(\\*+\\) " line)
-      (let* ((stars (match-string 1 line))
-             (rest (substring line (match-end 1)))
-             (new-level (+ (length stars) offset))
-             (new-stars (make-string (max 1 new-level) ?*)))
-        (concat new-stars rest))
-    ;; Not a header, return unchanged
-    line))
-
-(defun claude-org--flush-pending-line (session-key)
-  "Flush any pending line for SESSION-KEY.
-Called when response is complete to output remaining text."
-  (let ((pending (claude-org--session-get session-key :pending-line)))
-    (when (and pending (> (length pending) 0))
-      (let ((marker (claude-org--session-get session-key :marker)))
-        (when (and marker (marker-buffer marker))
-          (with-current-buffer (marker-buffer marker)
-            (save-excursion
-              (goto-char marker)
-              ;; Normalize the pending line too
-              (let* ((target-level (or (claude-org--session-get session-key :section-level) 1))
-                     (offset (1- target-level))
-                     (normalized (claude-org--normalize-header-line pending offset)))
-                (insert normalized))
-              (set-marker marker (point))))))
-      (claude-org--session-put session-key :pending-line ""))))
+      text
+    (let ((offset (1- target-level)))
+      (replace-regexp-in-string
+       "^\\(\\*+\\) "
+       (lambda (match)
+         (let* ((stars (match-string 1 match))
+                (new-level (+ (length stars) offset)))
+           (concat (make-string (max 1 new-level) ?*) " ")))
+       text))))
 #+END_SRC
 
 ** Token Handling
@@ -1386,12 +1333,7 @@ Normalizes org headers and inserts text at the session's marker."
     (when (and marker (marker-buffer marker))
       (with-current-buffer (marker-buffer marker)
         (let* ((target-level (1+ (or (claude-org--session-get session-key :section-level) 0)))
-               (pending (or (claude-org--session-get session-key :pending-line) ""))
-               (result (claude-org--normalize-headers-in-text text target-level pending))
-               (normalized-text (car result))
-               (new-pending (cdr result)))
-          ;; Save new pending line
-          (claude-org--session-put session-key :pending-line new-pending)
+               (normalized-text (claude-org--normalize-headers-in-text text target-level)))
           ;; Insert normalized text
           (when (> (length normalized-text) 0)
             (save-excursion
@@ -1483,8 +1425,6 @@ Extracts session ID from result messages and stores it."
   (claude-org--session-put session-key :busy nil)
   (claude-org--session-put session-key :recovering nil)
   (claude-org--stop-spinner session-key)
-  ;; Flush any pending line from header normalization
-  (claude-org--flush-pending-line session-key)
   ;; Add newlines after response
   (let ((marker (claude-org--session-get session-key :marker)))
     (when (and marker (marker-buffer marker))
@@ -2064,60 +2004,40 @@ to send the query and stream the response.
   (should (string-match-p "started [0-9]+ minutes ago"
                           (claude-org--format-elapsed (- (float-time) 120)))))
 
-(ert-deftest claude-org-test-normalize-header-line ()
-  "Test single header line normalization."
-  ;; With offset 3 (target level 4): * becomes ****
-  (should (equal "**** Heading" (claude-org--normalize-header-line "* Heading" 3)))
-  (should (equal "***** Sub" (claude-org--normalize-header-line "** Sub" 3)))
-  (should (equal "****** SubSub" (claude-org--normalize-header-line "*** SubSub" 3)))
-  ;; Non-headers unchanged
-  (should (equal "regular text" (claude-org--normalize-header-line "regular text" 3)))
-  (should (equal "  * not at start" (claude-org--normalize-header-line "  * not at start" 3)))
-  (should (equal "*no space after" (claude-org--normalize-header-line "*no space after" 3)))
-  (should (equal "" (claude-org--normalize-header-line "" 3))))
-
 (ert-deftest claude-org-test-normalize-headers-in-text ()
-  "Test full text normalization with newline handling."
+  "Test org header normalization with regex replacement."
   (let ((claude-org-normalize-headers t))
-    ;; Simple case: complete lines
-    (let ((result (claude-org--normalize-headers-in-text "* Top\n** Sub\n" 4 "")))
-      (should (equal "**** Top\n***** Sub\n" (car result)))
-      (should (equal "" (cdr result))))
-    ;; Pending line: no trailing newline
-    (let ((result (claude-org--normalize-headers-in-text "* Top\n** Pen" 4 "")))
-      (should (equal "**** Top\n" (car result)))
-      (should (equal "** Pen" (cdr result))))
-    ;; Continue with pending
-    (let ((result (claude-org--normalize-headers-in-text "ding\n" 4 "** Pen")))
-      (should (equal "***** Pending\n" (car result)))
-      (should (equal "" (cdr result))))
+    ;; Simple case: single header
+    (should (equal "**** Top\n" (claude-org--normalize-headers-in-text "* Top\n" 4)))
+    ;; Multiple headers
+    (should (equal "**** Top\n***** Sub\n"
+                   (claude-org--normalize-headers-in-text "* Top\n** Sub\n" 4)))
     ;; Mixed content
-    (let ((result (claude-org--normalize-headers-in-text "Hello\n* Head\nText\n" 4 "")))
-      (should (equal "Hello\n**** Head\nText\n" (car result)))
-      (should (equal "" (cdr result))))))
+    (should (equal "Hello\n**** Head\nText\n"
+                   (claude-org--normalize-headers-in-text "Hello\n* Head\nText\n" 4)))
+    ;; Non-headers unchanged
+    (should (equal "  * not at start\n"
+                   (claude-org--normalize-headers-in-text "  * not at start\n" 4)))
+    (should (equal "*no space after\n"
+                   (claude-org--normalize-headers-in-text "*no space after\n" 4)))
+    ;; Empty string
+    (should (equal "" (claude-org--normalize-headers-in-text "" 4)))
+    ;; No newline - still works
+    (should (equal "**** Header" (claude-org--normalize-headers-in-text "* Header" 4)))))
 
 (ert-deftest claude-org-test-normalize-headers-disabled ()
   "Test that normalization can be disabled."
   (let ((claude-org-normalize-headers nil))
-    (let ((result (claude-org--normalize-headers-in-text "* Top\n" 4 "")))
-      (should (equal "* Top\n" (car result)))
-      (should (equal "" (cdr result))))))
+    (should (equal "* Top\n" (claude-org--normalize-headers-in-text "* Top\n" 4)))))
 
-(ert-deftest claude-org-test-normalize-headers-token-boundary ()
-  "Test header split across token boundaries."
-  (let ((claude-org-normalize-headers t))
-    ;; Token ends with partial header
-    (let ((result (claude-org--normalize-headers-in-text "text\n*" 4 "")))
-      (should (equal "text\n" (car result)))
-      (should (equal "*" (cdr result))))
-    ;; Next token completes header
-    (let ((result (claude-org--normalize-headers-in-text "* Head\n" 4 "*")))
-      (should (equal "***** Head\n" (car result)))
-      (should (equal "" (cdr result))))
-    ;; Stars split across tokens
-    (let ((result (claude-org--normalize-headers-in-text "* Head\n" 4 "**")))
-      (should (equal "****** Head\n" (car result)))
-      (should (equal "" (cdr result))))))
+(ert-deftest claude-org-test-normalize-headers-streaming ()
+  "Test header normalization with streaming tokens."
+  (let ((claude-org-normalize-headers t)
+        (output ""))
+    ;; Simulate streaming - each token is processed independently
+    (dolist (token '("Here is " "the ans" "wer:\n" "* Sum" "mary\n" "Text\n"))
+      (setq output (concat output (claude-org--normalize-headers-in-text token 4))))
+    (should (equal "Here is the answer:\n**** Summary\nText\n" output))))
 #+END_SRC
 
 * Org File Protection Hook

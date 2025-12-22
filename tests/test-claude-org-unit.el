@@ -538,87 +538,43 @@
 
 ;;; Header Normalization Tests
 
-(ert-deftest test-claude-org-normalize-header-line ()
-  "Test single header line normalization."
-  :tags '(:unit :fast :stable :isolated :org :normalization)
-  ;; With offset 3 (target level 4): * becomes ****
-  (should (equal "**** Heading" (claude-org--normalize-header-line "* Heading" 3)))
-  (should (equal "***** Sub" (claude-org--normalize-header-line "** Sub" 3)))
-  (should (equal "****** SubSub" (claude-org--normalize-header-line "*** SubSub" 3)))
-  ;; Non-headers unchanged
-  (should (equal "regular text" (claude-org--normalize-header-line "regular text" 3)))
-  (should (equal "  * not at start" (claude-org--normalize-header-line "  * not at start" 3)))
-  (should (equal "*no space after" (claude-org--normalize-header-line "*no space after" 3)))
-  (should (equal "" (claude-org--normalize-header-line "" 3))))
-
 (ert-deftest test-claude-org-normalize-headers-in-text ()
-  "Test full text normalization with newline handling."
+  "Test org header normalization with regex replacement."
   :tags '(:unit :fast :stable :isolated :org :normalization)
   (let ((claude-org-normalize-headers t))
-    ;; Simple case: complete lines
-    (let ((result (claude-org--normalize-headers-in-text "* Top\n** Sub\n" 4 "")))
-      (should (equal "**** Top\n***** Sub\n" (car result)))
-      (should (equal "" (cdr result))))
-    ;; Pending line: no trailing newline
-    (let ((result (claude-org--normalize-headers-in-text "* Top\n** Pen" 4 "")))
-      (should (equal "**** Top\n" (car result)))
-      (should (equal "** Pen" (cdr result))))
-    ;; Continue with pending
-    (let ((result (claude-org--normalize-headers-in-text "ding\n" 4 "** Pen")))
-      (should (equal "***** Pending\n" (car result)))
-      (should (equal "" (cdr result))))
+    ;; Simple case: single header
+    (should (equal "**** Top\n" (claude-org--normalize-headers-in-text "* Top\n" 4)))
+    ;; Multiple headers
+    (should (equal "**** Top\n***** Sub\n"
+                   (claude-org--normalize-headers-in-text "* Top\n** Sub\n" 4)))
     ;; Mixed content
-    (let ((result (claude-org--normalize-headers-in-text "Hello\n* Head\nText\n" 4 "")))
-      (should (equal "Hello\n**** Head\nText\n" (car result)))
-      (should (equal "" (cdr result))))))
+    (should (equal "Hello\n**** Head\nText\n"
+                   (claude-org--normalize-headers-in-text "Hello\n* Head\nText\n" 4)))
+    ;; Non-headers unchanged
+    (should (equal "  * not at start\n"
+                   (claude-org--normalize-headers-in-text "  * not at start\n" 4)))
+    (should (equal "*no space after\n"
+                   (claude-org--normalize-headers-in-text "*no space after\n" 4)))
+    ;; Empty string
+    (should (equal "" (claude-org--normalize-headers-in-text "" 4)))
+    ;; No newline - still works (header at start of string)
+    (should (equal "**** Header" (claude-org--normalize-headers-in-text "* Header" 4)))))
 
 (ert-deftest test-claude-org-normalize-headers-disabled ()
   "Test that normalization can be disabled."
   :tags '(:unit :fast :stable :isolated :org :normalization)
   (let ((claude-org-normalize-headers nil))
-    (let ((result (claude-org--normalize-headers-in-text "* Top\n" 4 "")))
-      (should (equal "* Top\n" (car result)))
-      (should (equal "" (cdr result))))))
+    (should (equal "* Top\n" (claude-org--normalize-headers-in-text "* Top\n" 4)))))
 
-(ert-deftest test-claude-org-normalize-headers-token-boundary ()
-  "Test header split across token boundaries."
-  :tags '(:unit :fast :stable :isolated :org :normalization)
-  (let ((claude-org-normalize-headers t))
-    ;; Token ends with partial header - should buffer
-    (let ((result (claude-org--normalize-headers-in-text "text\n*" 4 "")))
-      (should (equal "text\n" (car result)))
-      (should (equal "*" (cdr result))))
-    ;; Next token completes header
-    (let ((result (claude-org--normalize-headers-in-text "* Head\n" 4 "*")))
-      (should (equal "***** Head\n" (car result)))
-      (should (equal "" (cdr result))))
-    ;; Stars split across tokens
-    (let ((result (claude-org--normalize-headers-in-text "* Head\n" 4 "**")))
-      (should (equal "****** Head\n" (car result)))
-      (should (equal "" (cdr result))))
-    ;; Non-header text without newline should output immediately
-    (let ((result (claude-org--normalize-headers-in-text "Hello world" 4 "")))
-      (should (equal "Hello world" (car result)))
-      (should (equal "" (cdr result))))))
-
-(ert-deftest test-claude-org-normalize-headers-streaming-simulation ()
-  "Test header normalization simulating real streaming scenario."
+(ert-deftest test-claude-org-normalize-headers-streaming ()
+  "Test header normalization with streaming tokens."
   :tags '(:unit :fast :stable :isolated :org :normalization)
   (let ((claude-org-normalize-headers t)
-        (pending "")
         (output ""))
-    ;; Simulate streaming tokens - text without newlines should stream immediately
-    (let* ((tokens '("Here is " "the ans" "wer:\n\n" "* Sum" "mary\n" "Some " "text\n" "** Det" "ails\n"))
-           (target-level 4))
-      (dolist (token tokens)
-        (let ((result (claude-org--normalize-headers-in-text token target-level pending)))
-          (setq output (concat output (car result)))
-          (setq pending (cdr result))))
-      ;; Final flush of pending
-      (when (> (length pending) 0)
-        (setq output (concat output (claude-org--normalize-header-line pending 3))))
-      ;; Verify result
-      (should (equal "Here is the answer:\n\n**** Summary\nSome text\n***** Details\n" output)))))
+    ;; Simulate streaming - each token is processed independently
+    (dolist (token '("Here is " "the ans" "wer:\n" "* Sum" "mary\n" "Text\n"))
+      (setq output (concat output (claude-org--normalize-headers-in-text token 4))))
+    (should (equal "Here is the answer:\n**** Summary\nText\n" output))))
 
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
