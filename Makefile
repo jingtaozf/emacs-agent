@@ -9,7 +9,7 @@ SOURCES = claude-agent.org claude-org.org
 
 # Test files
 UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el
-INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-hooks.el
+INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-hooks.el tests/test-mcp-ide-integration.el
 ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
@@ -36,6 +36,8 @@ help:
 	@echo "  make test-agent-unit  - Run claude-agent unit tests"
 	@echo "  make test-org-unit    - Run claude-org unit tests"
 	@echo "  make test-hooks       - Run hook system tests"
+	@echo "  make test-mcp-ide     - Run MCP IDE diagnostics tests"
+	@echo "  make test-mcp-ide-unit - Run MCP IDE unit tests only"
 	@echo ""
 	@echo "Coverage:"
 	@echo "  make coverage         - Generate test coverage report"
@@ -143,6 +145,26 @@ test-org-hooks:
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
 		-l tests/test-claude-agent-hooks.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
+
+.PHONY: test-mcp-ide
+test-mcp-ide:
+	@echo "Running MCP IDE diagnostics tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		-l tests/fixtures/test-config.el \
+		-l tests/test-mcp-ide-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :mcp-ide))"
+
+.PHONY: test-mcp-ide-unit
+test-mcp-ide-unit:
+	@echo "Running MCP IDE unit tests only (no flycheck required)..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(provide 'web-server)" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		-l tests/test-mcp-ide-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(and (tag :mcp-ide) (tag :unit)))"
 
 # Interactive test runner (opens in Emacs UI)
 .PHONY: test-interactive

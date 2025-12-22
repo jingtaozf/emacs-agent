@@ -1243,6 +1243,236 @@ PARAMS should contain 'file_path', 'section_path', and 'tag' keys."
 (claude-mcp-org-enable)
 #+END_SRC
 
+* MCP IDE Diagnostics Tools
+
+This module provides MCP tools for sharing Emacs IDE diagnostics (flycheck/flymake)
+with Claude Code, similar to what VS Code extension does.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'flycheck nil t)  ; Optional - for flycheck support
+(require 'flymake nil t)   ; Optional - for flymake support
+#+END_SRC
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defgroup claude-mcp-ide nil
+  "IDE diagnostics MCP tools for emacs-mcp-server."
+  :group 'tools
+  :prefix "claude-mcp-ide-")
+
+(defvar claude-mcp-ide--enabled nil
+  "Whether IDE diagnostics MCP tools are currently enabled.")
+#+END_SRC
+
+** Helper Functions
+
+*** Flycheck Conversion
+
+#+BEGIN_SRC elisp
+(defun claude-mcp-ide--flycheck-error-to-diagnostic (err)
+  "Convert flycheck error ERR to VS Code diagnostic format.
+Returns an alist with severity, message, range, source, and code."
+  `((severity . ,(pcase (flycheck-error-level err)
+                   ('error "Error")
+                   ('warning "Warning")
+                   ('info "Information")
+                   (_ "Hint")))
+    (message . ,(flycheck-error-message err))
+    (range . ((start . ((line . ,(1- (flycheck-error-line err)))
+                        (character . ,(or (flycheck-error-column err) 0))))
+              (end . ((line . ,(1- (or (flycheck-error-end-line err)
+                                       (flycheck-error-line err))))
+                      (character . ,(or (flycheck-error-end-column err)
+                                        (1+ (or (flycheck-error-column err) 0))))))))
+    (source . ,(symbol-name (flycheck-error-checker err)))
+    (code . ,(or (flycheck-error-id err) ""))))
+#+END_SRC
+
+*** Flymake Conversion
+
+#+BEGIN_SRC elisp
+(defun claude-mcp-ide--flymake-diagnostic-to-vscode (diag)
+  "Convert flymake diagnostic DIAG to VS Code diagnostic format."
+  (let* ((beg (flymake-diagnostic-beg diag))
+         (end (flymake-diagnostic-end diag))
+         (type (flymake-diagnostic-type diag))
+         (text (flymake-diagnostic-text diag))
+         (backend (flymake-diagnostic-backend diag)))
+    `((severity . ,(pcase type
+                     (:error "Error")
+                     (:warning "Warning")
+                     (:note "Information")
+                     (_ "Hint")))
+      (message . ,text)
+      (range . ((start . ((line . ,(1- (line-number-at-pos beg)))
+                          (character . ,(save-excursion
+                                          (goto-char beg)
+                                          (current-column)))))
+                (end . ((line . ,(1- (line-number-at-pos end)))
+                        (character . ,(save-excursion
+                                        (goto-char end)
+                                        (current-column)))))))
+      (source . ,(if backend (symbol-name backend) "flymake"))
+      (code . ""))))
+#+END_SRC
+
+*** Buffer Diagnostics Collection
+
+#+BEGIN_SRC elisp
+(defun claude-mcp-ide--collect-buffer-diagnostics (buffer)
+  "Collect diagnostics from BUFFER using flycheck or flymake.
+Returns list of diagnostics in VS Code format."
+  (with-current-buffer buffer
+    (cond
+     ;; Flycheck
+     ((and (bound-and-true-p flycheck-mode)
+           (boundp 'flycheck-current-errors)
+           flycheck-current-errors)
+      (mapcar #'claude-mcp-ide--flycheck-error-to-diagnostic
+              flycheck-current-errors))
+     ;; Flymake
+     ((and (bound-and-true-p flymake-mode)
+           (fboundp 'flymake-diagnostics))
+      (mapcar #'claude-mcp-ide--flymake-diagnostic-to-vscode
+              (flymake-diagnostics)))
+     (t nil))))
+#+END_SRC
+
+*** Response Helpers
+
+#+BEGIN_SRC elisp
+(defun claude-mcp-ide--make-json-response (data)
+  "Create MCP response with DATA encoded as JSON."
+  (list `((type . "text") (text . ,(json-encode data)))))
+#+END_SRC
+
+** Tool Handlers
+
+*** Get Diagnostics
+
+#+BEGIN_SRC elisp
+(defun claude-mcp-ide--get-diagnostics-handler (params _session)
+  "Handle getDiagnostics tool call.
+If file_path is provided, get diagnostics for that file only.
+Otherwise, get diagnostics for all open buffers with file names."
+  (let* ((file-path (alist-get 'file_path params))
+         (all-diagnostics '()))
+    (if file-path
+        ;; Single file mode
+        (let ((buf (get-file-buffer file-path)))
+          (when buf
+            (let ((diags (claude-mcp-ide--collect-buffer-diagnostics buf)))
+              (when diags
+                (push `((file . ,file-path)
+                        (diagnostics . ,(vconcat diags)))
+                      all-diagnostics)))))
+      ;; All buffers mode
+      (dolist (buf (buffer-list))
+        (when-let ((file (buffer-file-name buf)))
+          (let ((diags (claude-mcp-ide--collect-buffer-diagnostics buf)))
+            (when diags
+              (push `((file . ,file)
+                      (diagnostics . ,(vconcat diags)))
+                    all-diagnostics))))))
+    (claude-mcp-ide--make-json-response (vconcat (nreverse all-diagnostics)))))
+#+END_SRC
+
+*** Get Diagnostics Summary
+
+#+BEGIN_SRC elisp
+(defun claude-mcp-ide--get-diagnostics-summary-handler (_params _session)
+  "Handle getDiagnosticsSummary tool call.
+Returns counts of errors, warnings, info, and affected files."
+  (let ((errors 0)
+        (warnings 0)
+        (info 0)
+        (files 0))
+    (dolist (buf (buffer-list))
+      (when (buffer-file-name buf)
+        (let ((diags (claude-mcp-ide--collect-buffer-diagnostics buf)))
+          (when diags
+            (cl-incf files)
+            (dolist (d diags)
+              (pcase (alist-get 'severity d)
+                ("Error" (cl-incf errors))
+                ("Warning" (cl-incf warnings))
+                (_ (cl-incf info))))))))
+    (claude-mcp-ide--make-json-response
+     `((errors . ,errors)
+       (warnings . ,warnings)
+       (info . ,info)
+       (files . ,files)
+       (summary . ,(format "%d Errors, %d Warnings in %d files"
+                           errors warnings files))))))
+#+END_SRC
+
+** Tool Definitions
+
+#+BEGIN_SRC elisp
+(defconst claude-mcp-ide--tool-definitions
+  `(((name . "getDiagnostics")
+     (description . "Get diagnostics (errors, warnings) from Emacs buffers. Returns flycheck/flymake errors in VS Code diagnostic format.")
+     (handler . claude-mcp-ide--get-diagnostics-handler)
+     (inputSchema . ((type . "object")
+                     (properties . ((file_path . ((type . "string")
+                                                  (description . "Optional: specific file path. If omitted, returns diagnostics for all open buffers.")))))
+                     (required . []))))
+
+    ((name . "getDiagnosticsSummary")
+     (description . "Get summary counts of diagnostics across all open buffers")
+     (handler . claude-mcp-ide--get-diagnostics-summary-handler)
+     (inputSchema . ((type . "object")
+                     (properties . ())
+                     (required . [])))))
+  "List of MCP tool definitions for IDE diagnostics.")
+#+END_SRC
+
+** Public API
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun claude-mcp-ide-enable ()
+  "Enable IDE diagnostics MCP tools for emacs-mcp-server."
+  (interactive)
+  (unless claude-mcp-ide--enabled
+    (if (fboundp 'emacs-mcp-server-register-tool)
+        (progn
+          (dolist (tool claude-mcp-ide--tool-definitions)
+            (emacs-mcp-server-register-tool tool))
+          (setq claude-mcp-ide--enabled t)
+          (message "Claude-MCP-IDE: %d tools enabled" (length claude-mcp-ide--tool-definitions)))
+      (message "Claude-MCP-IDE: emacs-mcp-server not available."))))
+
+;;;###autoload
+(defun claude-mcp-ide-disable ()
+  "Disable IDE diagnostics MCP tools for emacs-mcp-server."
+  (interactive)
+  (when claude-mcp-ide--enabled
+    (when (fboundp 'emacs-mcp-server-unregister-tool)
+      (dolist (tool claude-mcp-ide--tool-definitions)
+        (emacs-mcp-server-unregister-tool (alist-get 'name tool)))
+      (setq claude-mcp-ide--enabled nil)
+      (message "Claude-MCP-IDE: Tools disabled"))))
+
+;;;###autoload
+(defun claude-mcp-ide-status ()
+  "Show status of Claude MCP IDE integration."
+  (interactive)
+  (message "Claude-MCP-IDE: %s, %d tools defined"
+           (if claude-mcp-ide--enabled "enabled" "disabled")
+           (length claude-mcp-ide--tool-definitions)))
+#+END_SRC
+
+** Auto-enable
+
+#+BEGIN_SRC elisp
+;; Auto-enable IDE tools when loaded
+(claude-mcp-ide-enable)
+#+END_SRC
+
 * Provide
 
 #+BEGIN_SRC elisp
