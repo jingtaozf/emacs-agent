@@ -57,13 +57,13 @@ compile:
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-tangle-file \"claude-agent.org\")" \
 		--eval "(literate-elisp-tangle-file \"claude-org.org\")" \
-		--eval "(byte-compile-file \"claude-agent.el\")" \
+		--eval "(byte-compile-file \"claude-code.el\")" \
 		--eval "(byte-compile-file \"claude-org.el\")"
 
 .PHONY: clean
 clean:
 	@echo "Cleaning compiled files..."
-	rm -f claude-agent.el claude-agent.elc
+	rm -f claude-code.elc
 	rm -f claude-org.el claude-org.elc
 	rm -f tests/*.elc
 

@@ -396,5 +396,46 @@
                           :tool_input (list :command "cat file.org"))))
     (should (null (claude-org--protect-org-files input-data nil nil)))))
 
+(ert-deftest test-org-protection-hook-is-global ()
+  "Test that org protection hook is installed globally, not buffer-local."
+  :tags '(:unit :fast :stable :isolated :hooks :org)
+  (unless (fboundp 'claude-org--install-protection-hook)
+    (ert-skip "claude-org not loaded - run make test-org-hooks"))
+
+  ;; Clean state
+  (remove-hook 'claude-agent-pre-tool-use-hook #'claude-org--protect-org-files)
+
+  ;; Install hook
+  (claude-org--install-protection-hook)
+
+  ;; Should be in global hook, not local
+  (should (memq #'claude-org--protect-org-files claude-agent-pre-tool-use-hook))
+
+  ;; Clean up
+  (remove-hook 'claude-agent-pre-tool-use-hook #'claude-org--protect-org-files))
+
+(ert-deftest test-org-protection-hook-blocks-multiext ()
+  "Test that protection handles various .org path patterns."
+  :tags '(:unit :fast :stable :isolated :hooks :org)
+  (unless (fboundp 'claude-org--protect-org-files)
+    (ert-skip "claude-org not loaded - run make test-org-hooks"))
+
+  ;; Should block .org files in any directory
+  (dolist (path '("/path/to/file.org"
+                  "/Users/foo/notes.org"
+                  "relative/path.org"
+                  "/a.org"))
+    (let ((input-data (list :tool_name "Edit"
+                            :tool_input (list :file_path path))))
+      (should (not (null (claude-org--protect-org-files input-data nil nil))))))
+
+  ;; Should NOT block .org in middle of name or .org_archive etc
+  (dolist (path '("/path/to/file.org_archive"
+                  "/path/to/org.el"
+                  "/path/to/.orgconfig"))
+    (let ((input-data (list :tool_name "Edit"
+                            :tool_input (list :file_path path))))
+      (should (null (claude-org--protect-org-files input-data nil nil))))))
+
 (provide 'test-claude-agent-hooks)
 ;;; test-claude-agent-hooks.el ends here

@@ -1,4 +1,4 @@
-;;; test-claude-agent-integration.el --- Integration tests for claude-agent.el -*- lexical-binding: t; -*-
+;;; test-claude-agent-integration.el --- Integration tests for claude-agent.org -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024 Jingtao Xu
 
@@ -7,7 +7,7 @@
 
 ;;; Commentary:
 
-;; Integration tests for claude-agent.el
+;; Integration tests for claude-agent.org (core SDK module)
 ;; These tests make REAL API calls to Claude.
 ;; Requires ANTHROPIC_API_KEY environment variable.
 

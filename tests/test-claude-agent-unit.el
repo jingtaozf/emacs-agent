@@ -1,4 +1,4 @@
-;;; test-claude-agent-unit.el --- Unit tests for claude-agent.el -*- lexical-binding: t; -*-
+;;; test-claude-agent-unit.el --- Unit tests for claude-agent.org -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024 Jingtao Xu
 
@@ -7,7 +7,7 @@
 
 ;;; Commentary:
 
-;; Unit tests for claude-agent.el
+;; Unit tests for claude-agent.org (core SDK module)
 ;; These tests do NOT make actual API calls.
 
 ;;; Code:

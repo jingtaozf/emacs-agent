@@ -1408,6 +1408,7 @@ The control request handling is integrated directly into =claude-agent--process-
 at line ~540. When a =control_request= message is received, it is routed to
 =claude-agent--handle-control-request= which invokes the appropriate Emacs hooks
 and sends back a =control_response=.
+
 * Tests
 
 ** Unit Tests
@@ -2014,7 +2015,7 @@ collection when called from special buffers like Claude Chat."
 #+BEGIN_SRC elisp
 (cl-defun claude-agent-build-system-reminder (&key current-file open-files
                                                    selection file-path
-                                                   org-output-level cwd)
+                                                   cwd extra-lines)
   "Build <system-reminder> tag with IDE context.
 Returns string suitable for prepending to user prompt.
 
@@ -2022,8 +2023,8 @@ CURRENT-FILE is plist with :name :path :modified.
 OPEN-FILES is list of such plists.
 SELECTION is plist with :text :start-line :end-line.
 FILE-PATH is the conversation notebook path.
-ORG-OUTPUT-LEVEL is the target org section level for output headers.
-CWD is the working directory (project root) where operations should be performed."
+CWD is the working directory (project root) where operations should be performed.
+EXTRA-LINES is a list of additional strings to include in the reminder."
   (let ((parts nil))
     ;; Current file
     (when current-file
@@ -2069,12 +2070,11 @@ CWD is the working directory (project root) where operations should be performed
     (when file-path
       (push (format "Conversation notebook: %s" file-path) parts))
 
-    ;; Org output level hint
-    (when (and org-output-level (> org-output-level 0))
-      (push (format "When creating org section headers in output, use level %d (%s) or deeper"
-                    org-output-level
-                    (make-string org-output-level ?*))
-            parts))
+    ;; Extra lines (for caller-specific context like org output level)
+    (when extra-lines
+      (dolist (line extra-lines)
+        (when (and line (stringp line) (> (length line) 0))
+          (push line parts))))
 
     ;; Build final string
     (if parts
