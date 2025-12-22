@@ -584,7 +584,7 @@
   "Test header split across token boundaries."
   :tags '(:unit :fast :stable :isolated :org :normalization)
   (let ((claude-org-normalize-headers t))
-    ;; Token ends with partial header
+    ;; Token ends with partial header - should buffer
     (let ((result (claude-org--normalize-headers-in-text "text\n*" 4 "")))
       (should (equal "text\n" (car result)))
       (should (equal "*" (cdr result))))
@@ -595,6 +595,10 @@
     ;; Stars split across tokens
     (let ((result (claude-org--normalize-headers-in-text "* Head\n" 4 "**")))
       (should (equal "****** Head\n" (car result)))
+      (should (equal "" (cdr result))))
+    ;; Non-header text without newline should output immediately
+    (let ((result (claude-org--normalize-headers-in-text "Hello world" 4 "")))
+      (should (equal "Hello world" (car result)))
       (should (equal "" (cdr result))))))
 
 (ert-deftest test-claude-org-normalize-headers-streaming-simulation ()
@@ -603,7 +607,7 @@
   (let ((claude-org-normalize-headers t)
         (pending "")
         (output ""))
-    ;; Simulate streaming tokens
+    ;; Simulate streaming tokens - text without newlines should stream immediately
     (let* ((tokens '("Here is " "the ans" "wer:\n\n" "* Sum" "mary\n" "Some " "text\n" "** Det" "ails\n"))
            (target-level 4))
       (dolist (token tokens)
