@@ -198,6 +198,14 @@ This ensures Claude's output fits properly within the document hierarchy."
   :type 'boolean
   :group 'claude-org)
 
+(defcustom claude-org-auto-break-line-length -1
+  "Auto-break lines exceeding this length after sentence-ending punctuation.
+When set to a positive integer, lines longer than this will be broken
+after sentence-ending punctuation (. ! ?) followed by a space.
+Set to -1 (default) to disable automatic line breaking."
+  :type 'integer
+  :group 'claude-org)
+
 (defcustom claude-org-builtin-slash-commands
   '("/add-dir" "/clear" "/compact" "/content" "/help" "/ls" "/pwd" "/cd")
   "Built-in Claude Code slash commands.
@@ -996,7 +1004,8 @@ Initialized to a new hash table when `claude-org-mode' is enabled.")
                          :start-time nil
                          :original-prompt nil
                          :recovering nil
-                         :section-level 0)))
+                         :section-level 0
+                         :current-line-length 0)))  ; Track line length for auto-breaking
         (puthash session-key state claude-org--sessions)
         state)))
 
@@ -1324,6 +1333,45 @@ No buffering - processes each token independently using regex."
                   (new-level (+ (length stars) offset)))
              (concat (make-string (max 1 new-level) ?*) " ")))
          clean-text)))))
+
+(defun claude-org--auto-break-lines (text current-line-length)
+  "Auto-break long lines in TEXT after sentence-ending punctuation.
+CURRENT-LINE-LENGTH is the length of the current line before this text.
+Returns (NEW-TEXT . NEW-LINE-LENGTH) cons cell.
+Only active when `claude-org-auto-break-line-length' is positive."
+  (if (< claude-org-auto-break-line-length 1)
+      ;; Disabled - return text unchanged, update line length
+      (let ((last-newline (string-match-p "\n[^\n]*\\'" text)))
+        (cons text
+              (if last-newline
+                  (- (length text) last-newline 1)
+                (+ current-line-length (length text)))))
+    ;; Enabled - process text for line breaks
+    (let ((result "")
+          (line-len current-line-length)
+          (threshold claude-org-auto-break-line-length)
+          (i 0)
+          (len (length text)))
+      (while (< i len)
+        (let ((char (aref text i)))
+          ;; Always add char to result and increment line length first
+          (setq result (concat result (char-to-string char)))
+          (setq line-len (1+ line-len))
+          (cond
+           ;; Newline resets counter
+           ((= char ?\n)
+            (setq line-len 0))
+           ;; Check for sentence-ending punctuation followed by space
+           ;; Break if line length exceeds threshold
+           ((and (>= line-len threshold)
+                 (memq char '(?. ?! ?\?))
+                 (< (1+ i) len)
+                 (= (aref text (1+ i)) ?\s))
+            ;; Insert newline after the punctuation
+            (setq result (concat result "\n"))
+            (setq line-len 0))))
+        (setq i (1+ i)))
+      (cons result line-len))))
 #+END_SRC
 
 ** Token Handling
@@ -1331,17 +1379,24 @@ No buffering - processes each token independently using regex."
 #+BEGIN_SRC elisp
 (defun claude-org--handle-token (session-key text)
   "Handle incoming TEXT token for SESSION-KEY.
-Normalizes org headers and inserts text at the session's marker."
+Normalizes org headers, auto-breaks long lines, and inserts text at the session's marker."
   (let ((marker (claude-org--session-get session-key :marker)))
     (when (and marker (marker-buffer marker))
       (with-current-buffer (marker-buffer marker)
         (let* ((target-level (1+ (or (claude-org--session-get session-key :section-level) 0)))
-               (normalized-text (claude-org--normalize-headers-in-text text target-level)))
-          ;; Insert normalized text
-          (when (> (length normalized-text) 0)
+               (normalized-text (claude-org--normalize-headers-in-text text target-level))
+               ;; Auto-break long lines
+               (current-line-len (or (claude-org--session-get session-key :current-line-length) 0))
+               (break-result (claude-org--auto-break-lines normalized-text current-line-len))
+               (final-text (car break-result))
+               (new-line-len (cdr break-result)))
+          ;; Update line length state
+          (claude-org--session-put session-key :current-line-length new-line-len)
+          ;; Insert processed text
+          (when (> (length final-text) 0)
             (save-excursion
               (goto-char marker)
-              (insert normalized-text)
+              (insert final-text)
               (set-marker marker (point)))))
         (claude-org--schedule-fontlock)))))
 #+END_SRC
@@ -2057,6 +2112,45 @@ to send the query and stream the response.
     (dolist (token '("Here is " "the ans" "wer:\n" "* Sum" "mary\n" "Text\n"))
       (setq output (concat output (claude-org--normalize-headers-in-text token 4))))
     (should (equal "Here is the answer:\n**** Summary\nText\n" output))))
+
+(ert-deftest claude-org-test-auto-break-lines-disabled ()
+  "Test that auto-break is disabled when threshold is -1."
+  (let ((claude-org-auto-break-line-length -1))
+    ;; Long line should not be broken
+    (let* ((text "This is a very long line that exceeds any reasonable threshold. It should not be broken.")
+           (result (claude-org--auto-break-lines text 0)))
+      (should (equal text (car result)))
+      (should (= (length text) (cdr result))))))
+
+(ert-deftest claude-org-test-auto-break-lines-enabled ()
+  "Test auto-break when threshold is positive."
+  (let ((claude-org-auto-break-line-length 50))
+    ;; Line exceeding threshold with sentence-ending punctuation
+    (let* ((text "This is a long sentence that goes over fifty chars. Next sentence here.")
+           (result (claude-org--auto-break-lines text 0)))
+      ;; Should break after the period+space when line > 50
+      (should (string-match-p "\n" (car result))))))
+
+(ert-deftest claude-org-test-auto-break-lines-streaming ()
+  "Test auto-break with streaming tokens across multiple calls."
+  (let ((claude-org-auto-break-line-length 30)
+        (line-len 0)
+        (output ""))
+    ;; Simulate streaming - track line length across tokens
+    (dolist (token '("Hello world. " "This is " "a test. " "More text here. " "End."))
+      (let ((result (claude-org--auto-break-lines token line-len)))
+        (setq output (concat output (car result)))
+        (setq line-len (cdr result))))
+    ;; Should have inserted breaks after sentences when line > 30
+    (should (> (length (split-string output "\n")) 1))))
+
+(ert-deftest claude-org-test-auto-break-lines-newline-reset ()
+  "Test that newlines in text reset the line length counter."
+  (let ((claude-org-auto-break-line-length 50))
+    ;; Text with embedded newline
+    (let* ((result (claude-org--auto-break-lines "First line\nSecond line" 40)))
+      ;; Line length should be length of "Second line" (11), not 40+22
+      (should (= 11 (cdr result))))))
 #+END_SRC
 
 * Org File Protection Hook
