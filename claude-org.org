@@ -1310,17 +1310,20 @@ both start of string and start of line (after newline).
   "Normalize org headers in TEXT to start at TARGET-LEVEL.
 Headers at line start are adjusted: Claude's level N becomes target-level + (N-1).
 Only lines starting with asterisks followed by space are treated as headers.
+Also normalizes line endings: \\r\\n (DOS) and \\r (old Mac) become \\n.
 No buffering - processes each token independently using regex."
-  (if (not claude-org-normalize-headers)
-      text
-    (let ((offset (1- target-level)))
-      (replace-regexp-in-string
-       "^\\(\\*+\\) "
-       (lambda (match)
-         (let* ((stars (match-string 1 match))
-                (new-level (+ (length stars) offset)))
-           (concat (make-string (max 1 new-level) ?*) " ")))
-       text))))
+  ;; Normalize line endings: \r\n -> \n, then \r -> \n
+  (let ((clean-text (replace-regexp-in-string "\r\n?" "\n" text)))
+    (if (not claude-org-normalize-headers)
+        clean-text
+      (let ((offset (1- target-level)))
+        (replace-regexp-in-string
+         "^\\(\\*+\\) "
+         (lambda (match)
+           (let* ((stars (match-string 1 match))
+                  (new-level (+ (length stars) offset)))
+             (concat (make-string (max 1 new-level) ?*) " ")))
+         clean-text)))))
 #+END_SRC
 
 ** Token Handling
@@ -1551,14 +1554,18 @@ This integrates with org-babel's C-c C-c execution mechanism."
 Returns nil if IDE context is disabled or unavailable."
   (when claude-org-include-ide-context
     (let ((ide-context (claude-agent-collect-ide-context
-                        (or project-root default-directory))))
+                        (or project-root default-directory)))
+          ;; Hint for org header normalization
+          (org-hint (when claude-org-normalize-headers
+                      "When outputting org-mode headers, always use level 1 (*) as top-level. Headers will be auto-adjusted to fit the document hierarchy.")))
       (when ide-context
         (claude-agent-build-system-reminder
          :current-file (plist-get ide-context :current-file)
          :open-files (plist-get ide-context :open-files)
          :selection (plist-get ide-context :selection)
          :file-path buffer-file-name
-         :cwd (plist-get ide-context :cwd))))))
+         :cwd (plist-get ide-context :cwd)
+         :extra-lines (when org-hint (list org-hint)))))))
 
 (defun claude-org--build-query-options (project-root system-prompt sdk-uuid)
   "Build options plist for claude-agent query.
@@ -2023,12 +2030,24 @@ to send the query and stream the response.
     ;; Empty string
     (should (equal "" (claude-org--normalize-headers-in-text "" 4)))
     ;; No newline - still works
-    (should (equal "**** Header" (claude-org--normalize-headers-in-text "* Header" 4)))))
+    (should (equal "**** Header" (claude-org--normalize-headers-in-text "* Header" 4)))
+    ;; DOS line endings (\r\n) become \n
+    (should (equal "**** Header\nText\n"
+                   (claude-org--normalize-headers-in-text "* Header\r\nText\r\n" 4)))
+    (should (equal "Line1\nLine2\n"
+                   (claude-org--normalize-headers-in-text "Line1\r\nLine2\r\n" 4)))
+    ;; Old Mac line endings (\r) become \n
+    (should (equal "Line1\nLine2\n"
+                   (claude-org--normalize-headers-in-text "Line1\rLine2\r" 4)))))
 
 (ert-deftest claude-org-test-normalize-headers-disabled ()
-  "Test that normalization can be disabled."
+  "Test that normalization can be disabled but line endings still normalized."
   (let ((claude-org-normalize-headers nil))
-    (should (equal "* Top\n" (claude-org--normalize-headers-in-text "* Top\n" 4)))))
+    ;; Headers not normalized
+    (should (equal "* Top\n" (claude-org--normalize-headers-in-text "* Top\n" 4)))
+    ;; But line endings are still normalized
+    (should (equal "* Top\n" (claude-org--normalize-headers-in-text "* Top\r\n" 4)))
+    (should (equal "* Top\n" (claude-org--normalize-headers-in-text "* Top\r" 4)))))
 
 (ert-deftest claude-org-test-normalize-headers-streaming ()
   "Test header normalization with streaming tokens."
