@@ -21,17 +21,37 @@
 ;;; Basic Execution Tests
 
 (ert-deftest test-org-integration-basic-execution ()
-  "Test basic AI block execution with real API.
-SKIPPED: End-to-end org-mode integration too complex for stable testing.
-Response capture often returns empty, making tests flaky."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test basic AI block execution with real API."
+  :tags '(:integration :slow :api :org :process)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (let ((response (test-claude-execute-and-wait org-file 1 30)))
+       ;; Should get a response containing "4" (answer to 2+2)
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))
+       (should (string-match-p "4" response))))))
 
 (ert-deftest test-org-integration-session-context ()
-  "Test that session maintains context across queries.
-SKIPPED: End-to-end org-mode integration too complex for stable testing."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test that session maintains context across queries."
+  :tags '(:integration :slow :api :org :session)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Execute instruction 1 (asks 2+2)
+     (let ((response1 (test-claude-execute-and-wait org-file 1 30)))
+       (should (stringp response1))
+       (should (string-match-p "4" response1)))
+     ;; Execute instruction 2 (asks what was in instruction 1)
+     (let ((response2 (test-claude-execute-and-wait org-file 2 30)))
+       (should (stringp response2))
+       ;; Should reference the previous question about 2+2 or 4
+       (should (or (string-match-p "2.*\\+.*2" response2)
+                   (string-match-p "addition" response2)
+                   (string-match-p "sum" response2)
+                   (string-match-p "4" response2)))))))
 
 (ert-deftest test-org-integration-response-section-creation ()
   "Test automatic Response section creation."
@@ -65,25 +85,47 @@ SKIPPED: Complex scope isolation test with flaky response capture."
 ;;; Tool Use Tests
 
 (ert-deftest test-org-integration-tool-use-read ()
-  "Test Claude using Read tool from org file.
-SKIPPED: Tool use tests often timeout or return empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test Claude using Read tool from org file."
+  :tags '(:integration :slow :api :org :tools)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (let ((response (test-claude-execute-and-wait org-file 7 60)))
+       ;; Should get a response about README.md content
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))))))
 
 (ert-deftest test-org-integration-tool-use-glob ()
-  "Test Claude using Glob tool from org file.
-SKIPPED: Tool use tests often timeout or return empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test Claude using Glob tool from org file."
+  :tags '(:integration :slow :api :org :tools)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (let ((response (test-claude-execute-and-wait org-file 8 60)))
+       ;; Should get a response listing .org files
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))
+       ;; Should mention test-session.org
+       (should (string-match-p "test-session\\.org" response))))))
 
 ;;; Session Recovery Tests
 
 (ert-deftest test-org-integration-session-recovery ()
-  "Test automatic session recovery with invalid UUID.
-  :tags '(:integration :slow :api :stable :org :session)
-SKIPPED: Recovery mechanism complex, responses often empty."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test automatic session recovery with invalid UUID."
+  :tags '(:integration :slow :api :org :session)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Instruction 11 has intentionally-invalid-uuid
+     (let ((response (test-claude-execute-and-wait org-file 11 60)))
+       ;; Should get a response despite invalid UUID (recovery kicks in)
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))
+       ;; Should see recovery confirmation
+       (should (string-match-p "Recovery\\|successful\\|read" response))))))
 
 ;;; Permission Mode Tests
 
@@ -231,25 +273,46 @@ SKIPPED: Complex concurrent test, often times out or gets empty responses."
 ;;; Project Configuration Tests
 
 (ert-deftest test-org-integration-project-root ()
-  "Test that PROJECT_ROOT property is used for cwd.
-  :tags '(:integration :slow :api :stable :org :context)
-SKIPPED: Returns empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test that PROJECT_ROOT property is used for cwd."
+  :tags '(:integration :slow :api :org :context)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; The fixture has PROJECT_ROOT set to ~/projects/claude-agent
+     ;; Instruction 7 asks to read README.md from project root
+     (let ((response (test-claude-execute-and-wait org-file 7 60)))
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))))))
 
 (ert-deftest test-org-integration-system-prompts ()
-  "Test that :system_prompt: sections are included.
-SKIPPED: Returns empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test that :system_prompt: sections are included."
+  :tags '(:integration :slow :api :org :context)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; The fixture has a :system_prompt: section asking for brief responses
+     ;; Test that instruction 1 gets a brief response
+     (let ((response (test-claude-execute-and-wait org-file 1 30)))
+       (should (stringp response))
+       ;; Response should be relatively brief (system prompt asks for 2 sentences max)
+       (should (< (length response) 500))))))
 
 ;;; Environment Variable Tests
 
 (ert-deftest test-org-integration-env-property ()
-  "Test ANTHROPIC_MODEL property override.
-SKIPPED: Returns empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test ANTHROPIC_MODEL property override."
+  :tags '(:integration :slow :api :org :env)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Instruction 15 asks what model is being used
+     ;; The fixture has ANTHROPIC_MODEL: claude-sonnet-3-5
+     (let ((response (test-claude-execute-and-wait org-file 15 30)))
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))))))
 
 ;;; Session Manager UI Tests
 
@@ -287,10 +350,22 @@ SKIPPED: Returns empty responses."
 ;;; Stress Tests
 
 (ert-deftest test-org-integration-multiple-sequential-queries ()
-  "Test executing multiple queries sequentially in same session.
-SKIPPED: Sequential multi-query tests return empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+  "Test executing multiple queries sequentially in same session."
+  :tags '(:integration :slow :api :org :stress)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Execute 3 sequential queries
+     (let ((response1 (test-claude-execute-and-wait org-file 1 30)))
+       (should (stringp response1))
+       (should (string-match-p "4" response1)))
+     (let ((response2 (test-claude-execute-and-wait org-file 2 30)))
+       (should (stringp response2))
+       (should (> (length (string-trim response2)) 0)))
+     (let ((response3 (test-claude-execute-and-wait org-file 3 30)))
+       (should (stringp response3))
+       (should (> (length (string-trim response3)) 0))))))
 
 ;;; MCP Tool Access Tests
 

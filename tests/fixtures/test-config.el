@@ -122,15 +122,30 @@ Returns the response text or nil if timeout."
           (claude-org-execute)
           ;; Wait for completion
           (if (test-claude-wait-for-completion session-key timeout)
-              ;; Extract response
+              ;; Extract response - handle both with and without Response section
               (save-excursion
                 (re-search-forward "^[ \t]*#\\+end_src" nil t)
                 (forward-line 1)
+                ;; Skip blank lines
+                (while (and (not (eobp)) (looking-at "^[ \t]*$"))
+                  (forward-line 1))
+                ;; If we hit a Response section, skip into it
+                (when (looking-at "^\\*+ Response [0-9]+")
+                  (forward-line 1)
+                  ;; Skip blank lines after Response heading
+                  (while (and (not (eobp)) (looking-at "^[ \t]*$"))
+                    (forward-line 1)))
                 (let ((start (point)))
-                  ;; Find next heading or end of buffer
-                  (if (re-search-forward "^\\*+ " nil t)
-                      (buffer-substring-no-properties start (line-beginning-position))
-                    (buffer-substring-no-properties start (point-max)))))
+                  ;; Find next non-output heading or end of buffer
+                  ;; Skip over :ai_output: tagged sections
+                  (let ((end-pos nil))
+                    (while (and (not end-pos)
+                                (re-search-forward "^\\*+ " nil t))
+                      (goto-char (match-beginning 0))
+                      (unless (member claude-org-output-tag (org-get-tags nil nil))
+                        (setq end-pos (point)))
+                      (unless end-pos (forward-line 1)))
+                    (buffer-substring-no-properties start (or end-pos (point-max))))))
             (error "Timeout waiting for instruction %d" instruction-num)))))))
 
 ;;; Org Test Helpers
