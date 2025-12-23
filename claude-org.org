@@ -1512,6 +1512,16 @@ These create blocks with isolated conversation context. Session blocks use the
 =:claude_session:= tag for section-scoped isolation. Story blocks use
 =CLAUDE_SESSION_ID= property for named, persistent sessions.
 
+| Command | Keybinding | Level Behavior |
+|---------+------------+----------------|
+| =claude-org-insert-session-block= | | Uses current section level |
+| =claude-org-insert-story= | =C-c C-s= | Aligns with previous story, or top level if none |
+
+Story level alignment: When inserting a new story, the function searches backwards
+for an existing story section (heading with =CLAUDE_SESSION_ID= starting with "story-").
+If found, the new story uses the same level. If no previous story exists, it defaults
+to top level (=*=), keeping stories at a consistent hierarchy.
+
 #+NAME: block-insert-session-story
 #+BEGIN_SRC elisp
 (defun claude-org-insert-session-block ()
@@ -1525,14 +1535,39 @@ The :claude_session: tag creates a new conversation context for this subtree."
     (insert "#+begin_src ai\n\n#+end_src")
     (forward-line -1)))
 
+(defun claude-org--find-previous-story-level ()
+  "Find the level of the most recent story section before point.
+Searches backwards from current position for a heading with CLAUDE_SESSION_ID
+property starting with 'story-'. Returns the level (integer) or nil if not found."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((start-pos (point))
+            (found-level nil))
+        ;; Search backwards through all headings
+        (while (and (not found-level)
+                    (re-search-backward "^\\*+ " nil t))
+          (when (string-prefix-p "story-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
+            (setq found-level (org-current-level))))
+        ;; If not found before point, search from beginning (for stories after point)
+        (unless found-level
+          (goto-char (point-min))
+          (while (and (not found-level)
+                      (re-search-forward "^\\*+ " start-pos t))
+            (when (string-prefix-p "story-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
+              (setq found-level (org-current-level)))))
+        found-level))))
+
 (defun claude-org-insert-story ()
   "Insert a new story section with unique CLAUDE_SESSION_ID.
 Prompts for story title and creates a section with session property.
-The story has its own isolated conversation context."
+The story has its own isolated conversation context.
+Aligns section level with previous story if any exists, otherwise uses top level."
   (interactive)
   (let* ((title (read-string "Story title: "))
          (session-id (format "story-%s" (format-time-string "%Y%m%d-%H%M%S")))
-         (level (or (org-current-level) 1))
+         ;; Align with previous story level, or use top level (1) if no story exists
+         (level (or (claude-org--find-previous-story-level) 1))
          (stars (make-string level ?*)))
     ;; Insert heading
     (insert stars " " title "\n")
