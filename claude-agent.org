@@ -316,6 +316,15 @@ Message types mirror the Python SDK discriminated union.
 
 ** Hook Types
 
+Hook matchers configure how callbacks are invoked during Claude's tool execution
+lifecycle. Each matcher can target specific tools by name pattern (or match all
+tools with nil) and includes a configurable timeout for async operations.
+
+The supported hook events correspond to different stages of tool execution:
+- =PreToolUse= / =PostToolUse= - Before and after tool execution
+- =UserPromptSubmit= - When user submits a prompt
+- =Stop= / =SubagentStop= - When execution stops
+
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent-hook-matcher
                (:constructor claude-agent-make-hook-matcher)
@@ -359,8 +368,14 @@ Returns version string or nil if unable to determine."
 
 ** Argument Builder
 
-Build CLI arguments from options plist.
+The argument builder transforms the options plist into CLI arguments for the
+Claude Code CLI. This is split into logical groups for maintainability.
 
+*** Permission Mode Conversion
+
+Convert Emacs symbols to CLI-compatible permission mode strings.
+
+#+NAME: arg-builder-permission-mode
 #+BEGIN_SRC elisp
 (defun claude-agent--permission-mode-to-string (mode)
   "Convert permission MODE symbol to CLI string."
@@ -371,59 +386,65 @@ Build CLI arguments from options plist.
     ('bypass-permissions "bypassPermissions")
     ((pred stringp) mode)
     (_ nil)))
+#+END_SRC
 
+*** Core Argument Builder
+
+Build the complete argument list by combining base arguments with option-specific
+flags. The function processes options in groups: execution limits, permissions,
+tool controls, session management, and output format.
+
+#+NAME: arg-builder-main
+#+BEGIN_SRC elisp
 (defun claude-agent--build-args (options &optional streaming-p)
   "Build CLI arguments from OPTIONS plist.
 If STREAMING-P is non-nil, use streaming input mode."
   (let ((args (list "--output-format" "stream-json" "--verbose")))
-    ;; System prompt
+    ;; === Execution Limits ===
     (let ((system-prompt (plist-get options :system-prompt)))
       (when system-prompt
         (setq args (append args (list "--system-prompt" system-prompt)))))
-    ;; Max turns
     (let ((max-turns (plist-get options :max-turns)))
       (when max-turns
         (setq args (append args (list "--max-turns" (number-to-string max-turns))))))
-    ;; Max budget
     (let ((max-budget (plist-get options :max-budget-usd)))
       (when max-budget
         (setq args (append args (list "--max-budget-usd" (number-to-string max-budget))))))
-    ;; Permission mode
+
+    ;; === Permission Mode ===
     (let ((perm-mode (plist-get options :permission-mode)))
       (when perm-mode
         (let ((mode-str (claude-agent--permission-mode-to-string perm-mode)))
           (when mode-str
             (setq args (append args (list "--permission-mode" mode-str)))))))
-    ;; Allowed tools
+
+    ;; === Tool Controls ===
     (let ((allowed-tools (plist-get options :allowed-tools)))
       (when allowed-tools
         (setq args (append args (list "--allowedTools"
                                       (string-join allowed-tools ","))))))
-    ;; Disallowed tools
     (let ((disallowed-tools (plist-get options :disallowed-tools)))
       (when disallowed-tools
         (setq args (append args (list "--disallowedTools"
                                       (string-join disallowed-tools ","))))))
-    ;; MCP config
     (let ((mcp-config (plist-get options :mcp-config)))
       (when mcp-config
         (setq args (append args (list "--mcp-config" mcp-config)))))
-    ;; Continue conversation
+
+    ;; === Session Management ===
     (when (plist-get options :continue-conversation)
       (setq args (append args (list "--continue"))))
-    ;; Resume session
     (let ((resume (plist-get options :resume)))
       (when resume
         (setq args (append args (list "--resume" resume)))))
-    ;; Setting sources (for loading skills from ~/.claude/skills/)
     (let ((setting-sources (plist-get options :setting-sources)))
       (when setting-sources
         (setq args (append args (list "--setting-sources"
                                       (string-join setting-sources ","))))))
-    ;; Streaming input mode
+
+    ;; === Output Format ===
     (if streaming-p
         (setq args (append args (list "--input-format" "stream-json")))
-      ;; Non-streaming: --print flag will be added with prompt
       (setq args (append args (list "--print"))))
     args))
 #+END_SRC
@@ -457,14 +478,28 @@ Internal state structure for managing async process communication.
 
 ** Process Filter
 
-The process filter accumulates JSON data and parses complete messages.
+The process filter accumulates JSON data and parses complete messages. This is
+the core of the streaming protocol - data arrives in chunks which we buffer
+until complete JSON lines are available.
 
+*** Debug Logging
+
+#+NAME: filter-debug-log
 #+BEGIN_SRC elisp
 (defun claude-agent--debug-log (format-string &rest args)
   "Log debug message if `claude-agent-debug' is non-nil."
   (when claude-agent-debug
     (apply #'message (concat "[claude-agent] " format-string) args)))
+#+END_SRC
 
+*** Token Extraction
+
+Extract text tokens from assistant messages for real-time streaming display.
+This enables showing response text as it arrives rather than waiting for
+complete messages.
+
+#+NAME: filter-extract-tokens
+#+BEGIN_SRC elisp
 (defun claude-agent--extract-tokens (json callback)
   "Extract text tokens from JSON and call CALLBACK with each.
 Handles assistant messages by extracting text from content blocks."
@@ -478,13 +513,30 @@ Handles assistant messages by extracting text from content blocks."
               (let ((text (plist-get block :text)))
                 (when (and text (not (string-empty-p text)))
                   (funcall callback text))))))))))
+#+END_SRC
 
+*** JSON Boolean Handling
+
+Emacs JSON parser represents =false= as =:json-false= and =true= as =t=.
+This helper ensures we correctly interpret boolean values from the API.
+
+#+NAME: filter-json-true
+#+BEGIN_SRC elisp
 (defun claude-agent--json-true-p (value)
   "Check if JSON VALUE represents true.
 Emacs JSON parser converts false to :json-false and true to t.
 This function returns non-nil only for actual true values."
   (and value (not (eq value :json-false))))
+#+END_SRC
 
+*** Error Detection
+
+Detect and extract error messages from various JSON response formats.
+The Claude CLI can signal errors in multiple ways - result messages with
+=is_error=true=, assistant messages with error fields, etc.
+
+#+NAME: filter-extract-error
+#+BEGIN_SRC elisp
 (defun claude-agent--extract-json-error (parsed)
   "Extract error message from PARSED JSON if it indicates an error.
 Returns the error message string if an error is detected, nil otherwise.
@@ -513,7 +565,16 @@ Checks for:
             "API error")))
      ;; No error detected
      (t nil))))
+#+END_SRC
 
+*** JSON Buffer Processing
+
+Process accumulated JSON data line by line. Each complete line (terminated by
+newline) is parsed and dispatched to the appropriate handler - either control
+requests for the bidirectional protocol, or normal message callbacks.
+
+#+NAME: filter-process-json-buffer
+#+BEGIN_SRC elisp
 (defun claude-agent--process-json-buffer (process)
   "Process accumulated JSON for PROCESS.
 PROCESS has state stored via `process-get'.
@@ -575,7 +636,15 @@ Parses complete newline-delimited JSON and invokes callbacks."
                         (list 'claude-agent-cli-error
                               :message line
                               :original-error err))))))))))
+#+END_SRC
 
+*** Process Filter Entry Point
+
+The filter function is called by Emacs whenever data arrives from the CLI
+subprocess. It accumulates data and triggers JSON processing.
+
+#+NAME: filter-main
+#+BEGIN_SRC elisp
 (defun claude-agent--process-filter (process output)
   "Process filter function for PROCESS.
 OUTPUT is the data received from the process.
@@ -1411,262 +1480,43 @@ and sends back a =control_response=.
 
 * Tests
 
-** Unit Tests
+Tests are organized in the =tests/= directory as separate test files. This
+follows the best practice of keeping tests in dedicated files that can be
+run independently via ERT or the Makefile.
 
-#+BEGIN_SRC elisp :load test
-(require 'ert)
+** Test File Organization
 
-(ert-deftest claude-agent-test-options-creation ()
-  "Test options plist creation."
-  (let ((opts (claude-agent-options
-               :model "claude-sonnet-4-5"
-               :max-turns 5)))
-    (should (equal (plist-get opts :model) "claude-sonnet-4-5"))
-    (should (equal (plist-get opts :max-turns) 5))
-    (should (null (plist-get opts :system-prompt)))))
+| Test File | Purpose |
+|-----------+---------|
+| =test-claude-agent-unit.el= | Unit tests for core SDK (no API calls) |
+| =test-claude-agent-integration.el= | Integration tests (requires CLI) |
+| =test-claude-agent-hooks.el= | Hook system tests |
+| =test-claude-org-unit.el= | Org-mode integration unit tests |
+| =test-claude-org-integration.el= | Org-mode integration tests |
+| =test-mcp-ide-integration.el= | MCP IDE tools tests |
 
-(ert-deftest claude-agent-test-options-defaults ()
-  "Test options defaults."
-  (let ((opts (claude-agent-options)))
-    (should (null (plist-get opts :model)))
-    (should (null (plist-get opts :max-turns)))
-    (should (null (plist-get opts :permission-mode)))))
+** Running Tests
 
-(ert-deftest claude-agent-test-permission-mode-conversion ()
-  "Test permission mode symbol to string conversion."
-  (should (equal (claude-agent--permission-mode-to-string 'default) "default"))
-  (should (equal (claude-agent--permission-mode-to-string 'accept-edits) "acceptEdits"))
-  (should (equal (claude-agent--permission-mode-to-string 'plan) "plan"))
-  (should (equal (claude-agent--permission-mode-to-string 'bypass-permissions) "bypassPermissions"))
-  (should (equal (claude-agent--permission-mode-to-string "custom") "custom"))
-  (should (null (claude-agent--permission-mode-to-string nil))))
+Run all tests via Makefile:
+#+begin_example
+make test           # Run unit tests only
+make test-all       # Run unit + integration tests
+make test-quick     # Run only fast unit tests
+#+end_example
 
-(ert-deftest claude-agent-test-build-args-basic ()
-  "Test basic argument building."
-  (let* ((opts (claude-agent-options :model "test-model" :max-turns 3))
-         (args (claude-agent--build-args opts nil)))
-    (should (member "--output-format" args))
-    (should (member "stream-json" args))
-    (should (member "--model" args))
-    (should (member "test-model" args))
-    (should (member "--max-turns" args))
-    (should (member "3" args))
-    (should (member "--print" args))))
+Or run specific test files in Emacs:
+#+begin_example elisp
+(ert-run-tests-batch-and-exit "test-claude-agent-.*")
+#+end_example
 
-(ert-deftest claude-agent-test-build-args-permission-mode ()
-  "Test argument building with permission mode."
-  (let* ((opts (claude-agent-options :permission-mode 'accept-edits))
-         (args (claude-agent--build-args opts nil)))
-    (should (member "--permission-mode" args))
-    (should (member "acceptEdits" args))))
+** Test Categories
 
-(ert-deftest claude-agent-test-build-args-tools ()
-  "Test argument building with tools."
-  (let* ((opts (claude-agent-options
-                :allowed-tools '("Read" "Write")
-                :disallowed-tools '("Bash")))
-         (args (claude-agent--build-args opts nil)))
-    (should (member "--allowedTools" args))
-    (should (member "Read,Write" args))
-    (should (member "--disallowedTools" args))
-    (should (member "Bash" args))))
-
-(ert-deftest claude-agent-test-parse-text-block ()
-  "Test parsing text content block."
-  (let ((block (claude-agent--parse-content-block
-                '(:type "text" :text "Hello world"))))
-    (should (claude-agent-text-block-p block))
-    (should (equal (claude-agent-text-block-text block) "Hello world"))))
-
-(ert-deftest claude-agent-test-parse-tool-use-block ()
-  "Test parsing tool use content block."
-  (let ((block (claude-agent--parse-content-block
-                '(:type "tool_use"
-                  :id "tool_123"
-                  :name "Read"
-                  :input (:path "/tmp/test.txt")))))
-    (should (claude-agent-tool-use-block-p block))
-    (should (equal (claude-agent-tool-use-block-id block) "tool_123"))
-    (should (equal (claude-agent-tool-use-block-name block) "Read"))
-    (should (equal (plist-get (claude-agent-tool-use-block-input block) :path)
-                   "/tmp/test.txt"))))
-
-(ert-deftest claude-agent-test-parse-assistant-message ()
-  "Test parsing assistant message."
-  (let ((msg (claude-agent--parse-message
-              '(:type "assistant"
-                :message (:content ((:type "text" :text "Hello"))
-                          :model "claude-sonnet-4-5")))))
-    (should (claude-agent-assistant-message-p msg))
-    (should (equal (claude-agent-assistant-message-model msg) "claude-sonnet-4-5"))
-    (should (= (length (claude-agent-assistant-message-content msg)) 1))
-    (should (claude-agent-text-block-p
-             (car (claude-agent-assistant-message-content msg))))))
-
-(ert-deftest claude-agent-test-parse-result-message ()
-  "Test parsing result message."
-  (let ((msg (claude-agent--parse-message
-              '(:type "result"
-                :subtype "success"
-                :session_id "sess_123"
-                :total_cost_usd 0.01
-                :num_turns 1))))
-    (should (claude-agent-result-message-p msg))
-    (should (equal (claude-agent-result-message-session-id msg) "sess_123"))
-    (should (equal (claude-agent-result-message-total-cost-usd msg) 0.01))
-    (should (equal (claude-agent-result-message-num-turns msg) 1))))
-
-(ert-deftest claude-agent-test-extract-text ()
-  "Test extracting text from assistant message."
-  (let ((msg (claude-agent-make-assistant-message
-              :content (list (claude-agent-make-text-block :text "Hello ")
-                             (claude-agent-make-text-block :text "World"))
-              :model "test")))
-    (should (equal (claude-agent-extract-text msg) "Hello World"))))
-
-(ert-deftest claude-agent-test-extract-text-no-text ()
-  "Test extracting text when no text blocks."
-  (let ((msg (claude-agent-make-assistant-message
-              :content (list (claude-agent-make-tool-use-block
-                              :id "1" :name "Test" :input nil))
-              :model "test")))
-    (should (null (claude-agent-extract-text msg)))))
-
-(ert-deftest claude-agent-test-message-type ()
-  "Test message type detection."
-  (should (eq (claude-agent-message-type
-               (claude-agent-make-user-message :content "test"))
-              'user))
-  (should (eq (claude-agent-message-type
-               (claude-agent-make-assistant-message :content nil :model "test"))
-              'assistant))
-  (should (eq (claude-agent-message-type
-               (claude-agent-make-system-message :subtype "init" :data nil))
-              'system))
-  (should (eq (claude-agent-message-type
-               (claude-agent-make-result-message :subtype "success"))
-              'result))
-  (should (eq (claude-agent-message-type "unknown") 'unknown)))
-
-(ert-deftest claude-agent-test-client-creation ()
-  "Test client creation."
-  (let ((client (claude-agent-client-create
-                 :options (claude-agent-options :model "test"))))
-    (should (claude-agent-client-p client))
-    (should (not (claude-agent-client-connected-p client)))
-    (should (null (claude-agent-client-session-id client)))))
-
-(ert-deftest claude-agent-test-hook-events ()
-  "Test hook events constant."
-  (should (memq 'PreToolUse claude-agent-hook-events))
-  (should (memq 'PostToolUse claude-agent-hook-events))
-  (should (memq 'Stop claude-agent-hook-events)))
-
-;; Permission System Tests
-
-(ert-deftest claude-agent-test-permission-wildcard ()
-  "Test wildcard pattern matches all tools."
-  (should (claude-agent-permission-match-p "Read" nil "*"))
-  (should (claude-agent-permission-match-p "Bash" nil "*"))
-  (should (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "*")))
-
-(ert-deftest claude-agent-test-permission-tool-name ()
-  "Test simple tool name matching."
-  (should (claude-agent-permission-match-p "WebSearch" nil "WebSearch"))
-  (should-not (claude-agent-permission-match-p "WebFetch" nil "WebSearch"))
-  (should (claude-agent-permission-match-p "Read" nil "Read")))
-
-(ert-deftest claude-agent-test-permission-glob-pattern ()
-  "Test glob patterns for MCP tools."
-  (should (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "mcp__emacs__*"))
-  (should (claude-agent-permission-match-p "mcp__context7__getDocs" nil "mcp__context7__*"))
-  (should-not (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "mcp__context7__*")))
-
-(ert-deftest claude-agent-test-permission-with-args ()
-  "Test patterns with argument matching."
-  (should (claude-agent-permission-match-p "Read" '(:file_path "/any/file.txt") "Read(**)"))
-  (should (claude-agent-permission-match-p "Bash" '(:command "git status") "Bash(git:*)"))
-  (should-not (claude-agent-permission-match-p "Bash" '(:command "rm -rf /") "Bash(git:*)")))
-
-(ert-deftest claude-agent-test-permission-check-deny-first ()
-  "Test that deny patterns take precedence."
-  (let ((allow '("Bash(**)"))
-        (deny '("Bash(rm *)")))
-    (should (eq 'deny (claude-agent-check-permission
-                       "Bash" '(:command "rm -rf /") allow deny)))
-    (should (eq 'allow (claude-agent-check-permission
-                        "Bash" '(:command "ls -la") allow deny)))))
-
-(ert-deftest claude-agent-test-effective-permissions ()
-  "Test getting effective permissions from presets."
-  (let ((claude-agent-permission-preset "readonly"))
-    (let ((perms (claude-agent-get-effective-permissions)))
-      (should (member "Read(**)" (plist-get perms :allow)))
-      (should (null (plist-get perms :deny))))))
-
-;; Session Management Tests
-
-(ert-deftest claude-agent-test-session-key-creation ()
-  "Test session key creation."
-  (should (equal "/path/to/file.org"
-                 (claude-agent--make-session-key "/path/to/file.org" nil)))
-  (should (equal "/path/to/file.org::my-session"
-                 (claude-agent--make-session-key "/path/to/file.org" "my-session"))))
-
-(ert-deftest claude-agent-test-session-mapping ()
-  "Test session UUID mapping."
-  (claude-agent--clear-all-sessions)
-  (let ((key "test-file::test-session")
-        (uuid "abc-123-def-456"))
-    (should (null (claude-agent--get-sdk-uuid key)))
-    (claude-agent--store-sdk-uuid key uuid)
-    (should (equal uuid (claude-agent--get-sdk-uuid key)))
-    (claude-agent--clear-session key)
-    (should (null (claude-agent--get-sdk-uuid key)))))
-
-(ert-deftest claude-agent-test-session-expired-detection ()
-  "Test session expiration detection."
-  (should (claude-agent--session-expired-p "No conversation found with session ID abc-123"))
-  (should (claude-agent--session-expired-p "session not found"))
-  (should (claude-agent--session-expired-p "session expired"))
-  (should-not (claude-agent--session-expired-p "some other error")))
-
-(ert-deftest claude-agent-test-context-too-long-detection ()
-  "Test context/prompt too long detection."
-  (should (claude-agent--context-too-long-p "Prompt is too long"))
-  (should (claude-agent--context-too-long-p "prompt is too long for this model"))
-  (should (claude-agent--context-too-long-p "context too long"))
-  (should (claude-agent--context-too-long-p "exceeds context limit"))
-  (should (claude-agent--context-too-long-p "token limit reached"))
-  (should-not (claude-agent--context-too-long-p "some other error")))
-
-(ert-deftest claude-agent-test-session-needs-reset ()
-  "Test combined session reset detection."
-  (should (claude-agent--session-needs-reset-p "session expired"))
-  (should (claude-agent--session-needs-reset-p "Prompt is too long"))
-  (should-not (claude-agent--session-needs-reset-p "network error")))
-
-;; IDE Context Tests
-
-(ert-deftest claude-agent-test-system-reminder-empty ()
-  "Test system reminder with no context returns empty string."
-  (should (equal "" (claude-agent-build-system-reminder))))
-
-(ert-deftest claude-agent-test-system-reminder-with-file ()
-  "Test system reminder with current file."
-  (let ((result (claude-agent-build-system-reminder
-                 :current-file '(:name "test.el" :path "/path/test.el" :modified t))))
-    (should (string-match-p "<system-reminder>" result))
-    (should (string-match-p "test.el" result))
-    (should (string-match-p "(modified)" result))))
-
-(ert-deftest claude-agent-test-system-reminder-with-notebook ()
-  "Test system reminder with conversation notebook."
-  (let ((result (claude-agent-build-system-reminder
-                 :file-path "/path/to/notes.org")))
-    (should (string-match-p "Conversation notebook:" result))
-    (should (string-match-p "/path/to/notes.org" result))))
-#+END_SRC
+Tests are tagged for selective execution:
+- =:unit= - Fast, isolated unit tests
+- =:integration= - Tests requiring Claude CLI
+- =:api= - Tests making actual API calls
+- =:slow= - Long-running tests
+- =:stable= - Tests that reliably pass
 
 * Permission System
 

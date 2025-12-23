@@ -153,8 +153,16 @@ and returns the result as JSON.
 
 ** HTTP Response Helpers
 
-Functions for sending HTTP responses with proper headers.
+HTTP responses follow RFC 7230 format with status line, headers, and body.
+JSON-RPC responses are wrapped in HTTP - even errors return HTTP 200 with
+an error payload (per JSON-RPC spec), except parse errors which use HTTP 400.
 
+*** Raw HTTP Response Construction
+
+The foundation for all responses. Constructs proper HTTP/1.1 response format
+with status line, headers (CRLF-separated), blank line, then body.
+
+#+NAME: http-response-raw
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--send-raw-response (process status-code headers body)
   "Send a complete HTTP response with STATUS-CODE, HEADERS, and BODY.
@@ -178,7 +186,15 @@ HEADERS is an alist of (name . value) pairs."
     ;; Send body
     (when body
       (process-send-string process body))))
+#+END_SRC
 
+*** Success Response Helper
+
+Sends a JSON-RPC 2.0 success response. The =initialize= method includes
+a session ID header for the client to use in subsequent requests.
+
+#+NAME: http-response-success
+#+BEGIN_SRC elisp
 (defun emacs-mcp-server--send-response (request id result &optional new-session-id)
   "Send JSON-RPC success response to REQUEST with ID and RESULT.
 If NEW-SESSION-ID is provided, include it in headers."
@@ -202,7 +218,21 @@ If NEW-SESSION-ID is provided, include it in headers."
      '(("Content-Type" . "text/plain")
        ("Content-Length" . "0"))
      nil)))
+#+END_SRC
 
+*** Error Response Helper
+
+Sends a JSON-RPC 2.0 error response. Note: JSON-RPC errors still use HTTP 200
+status - the error is in the response body, not the HTTP status.
+
+Standard JSON-RPC error codes:
+- =-32700=: Parse error (invalid JSON)
+- =-32600=: Invalid Request
+- =-32601=: Method not found
+- =-32603=: Internal error
+
+#+NAME: http-response-error
+#+BEGIN_SRC elisp
 (defun emacs-mcp-server--send-error (request id code message)
   "Send JSON-RPC error response to REQUEST with ID, CODE, and MESSAGE."
   (with-slots (process) request
@@ -220,8 +250,25 @@ If NEW-SESSION-ID is provided, include it in headers."
 
 ** MCP Method Handlers
 
-These functions handle the core MCP protocol methods.
+The MCP protocol defines a set of JSON-RPC methods that clients (like Claude Code)
+call to interact with the server. Each method has a specific role:
 
+| Method | Purpose |
+|--------+---------|
+| =initialize= | Handshake - exchange protocol versions and capabilities |
+| =tools/list= | Discovery - client learns what tools are available |
+| =tools/call= | Execution - client invokes a specific tool |
+| =prompts/list= | (Unused) List available prompt templates |
+| =resources/list= | (Unused) List available resources |
+
+*** Initialize Handler
+
+The =initialize= method is called once when the client connects. It:
+1. Creates a unique session ID for tracking this connection
+2. Reports our protocol version (must match client's expected version)
+3. Declares server capabilities (we support tools, no dynamic list changes)
+
+#+NAME: mcp-handler-initialize
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--handle-initialize (_params)
   "Handle initialize method.  Return server info and capabilities."
@@ -235,7 +282,16 @@ These functions handle the core MCP protocol methods.
           `((protocolVersion . ,emacs-mcp-server-protocol-version)
             (capabilities . ((tools . ((listChanged . :json-false)))))
             (serverInfo . ,emacs-mcp-server--server-info)))))
+#+END_SRC
 
+*** Schema Conversion Helpers
+
+MCP requires JSON Schema format for tool definitions. Elisp alists have a quirk:
+empty lists =()= encode as =null= in JSON, but MCP expects ={}= for empty objects.
+This helper recursively converts empty alists to hash tables.
+
+#+NAME: mcp-handler-schema-helpers
+#+BEGIN_SRC elisp
 (defun emacs-mcp-server--fix-empty-alists (obj)
   "Recursively fix empty alists in OBJ to use hash tables.
 Empty alists () encode as null in JSON, but we need {} for MCP schema.
@@ -262,14 +318,30 @@ This converts empty () to an empty hash-table which encodes as {}."
     `((name . ,(alist-get 'name tool))
       (description . ,(alist-get 'description tool))
       (inputSchema . ,(emacs-mcp-server--fix-empty-alists schema)))))
+#+END_SRC
 
+*** Tools List Handler
+
+Returns all available tools (built-in + user-registered) in MCP format.
+The client calls this after =initialize= to discover what operations are available.
+
+#+NAME: mcp-handler-tools-list
+#+BEGIN_SRC elisp
 (defun emacs-mcp-server--handle-tools-list ()
   "Handle tools/list method.  Return registered tools (builtin + user-registered)."
   (let ((all-tools (append emacs-mcp-server--builtin-tools emacs-mcp-server--tools)))
     `((tools . ,(vconcat
                  (mapcar #'emacs-mcp-server--tool-to-mcp-format
                          all-tools))))))
+#+END_SRC
 
+*** Tools Call Handler
+
+Executes a tool by name with provided arguments. This is the main workhorse -
+every actual operation (evalElisp, org operations, etc.) flows through here.
+
+#+NAME: mcp-handler-tools-call
+#+BEGIN_SRC elisp
 (defun emacs-mcp-server--handle-tools-call (params session-id)
   "Handle tools/call method.  Execute tool with PARAMS using SESSION-ID."
   (let* ((tool-name (alist-get 'name params))
@@ -283,7 +355,16 @@ This converts empty () to an empty hash-table which encodes as {}."
     (let* ((handler (alist-get 'handler tool))
            (result (funcall handler arguments session-id)))
       `((content . ,(vconcat result))))))
+#+END_SRC
 
+*** Method Dispatcher
+
+Routes incoming JSON-RPC method calls to the appropriate handler.
+Returns empty arrays for =prompts/list= and =resources/list= since we don't
+implement those MCP features.
+
+#+NAME: mcp-handler-dispatch
+#+BEGIN_SRC elisp
 (defun emacs-mcp-server--dispatch (method params)
   "Dispatch MCP METHOD with PARAMS and return result."
   (pcase method
@@ -1060,10 +1141,19 @@ PARAMS should contain 'file_path', 'section_path', and 'tag' keys."
 
 ** Tool Definitions
 
+Tool definitions follow the MCP schema format, mapping tool names to handlers
+and JSON Schema input specifications. These are registered with the MCP server
+when =claude-mcp-org-enable= is called.
+
+*** Section Tool Definitions
+
+Section tools provide CRUD operations on org headings and their content.
+These form the primary interface for navigating and editing org documents.
+
+#+NAME: org-tool-defs-section
 #+BEGIN_SRC elisp
-(defvar claude-mcp-org--tool-definitions
+(defvar claude-mcp-org--section-tool-definitions
   (list
-   ;; Section tools
    `((name . "org_list_sections")
      (description . "List all org-mode sections in a file with their hierarchical paths, levels, and tags")
      (handler . claude-mcp-org--list-sections-handler)
@@ -1119,9 +1209,19 @@ PARAMS should contain 'file_path', 'section_path', and 'tag' keys."
                                                   (description . "Absolute path to the org file")))
                                     (section_path . ((type . "string")
                                                      (description . "Section path to delete")))))
-                     (required . ["file_path" "section_path"]))))
+                     (required . ["file_path" "section_path"])))))
+  "Section manipulation tool definitions.")
+#+END_SRC
 
-   ;; Property tools
+*** Property Tool Definitions
+
+Property tools manage org property drawers (=:PROPERTIES:= blocks).
+Properties store metadata like timestamps, IDs, and custom key-value pairs.
+
+#+NAME: org-tool-defs-property
+#+BEGIN_SRC elisp
+(defvar claude-mcp-org--property-tool-definitions
+  (list
    `((name . "org_get_property")
      (description . "Get a property value from an org section")
      (handler . claude-mcp-org--get-property-handler)
@@ -1168,9 +1268,19 @@ PARAMS should contain 'file_path', 'section_path', and 'tag' keys."
                                                   (description . "Absolute path to the org file")))
                                     (section_path . ((type . "string")
                                                      (description . "Section path")))))
-                     (required . ["file_path" "section_path"]))))
+                     (required . ["file_path" "section_path"])))))
+  "Property manipulation tool definitions.")
+#+END_SRC
 
-   ;; Tag tools
+*** Tag Tool Definitions
+
+Tag tools manage org heading tags (the =:tag1:tag2:= syntax at end of headings).
+Tags enable filtering, searching, and categorizing org entries.
+
+#+NAME: org-tool-defs-tag
+#+BEGIN_SRC elisp
+(defvar claude-mcp-org--tag-tool-definitions
+  (list
    `((name . "org_get_tags")
      (description . "Get tags of an org section")
      (handler . claude-mcp-org--get-tags-handler)
@@ -1217,7 +1327,20 @@ PARAMS should contain 'file_path', 'section_path', and 'tag' keys."
                                     (tag . ((type . "string")
                                             (description . "Tag to remove")))))
                      (required . ["file_path" "section_path" "tag"])))))
-  "List of MCP tool definitions for org-mode operations.")
+  "Tag manipulation tool definitions.")
+#+END_SRC
+
+*** Combined Tool Definitions
+
+Aggregate all tool definitions into a single list for registration.
+
+#+NAME: org-tool-defs-combined
+#+BEGIN_SRC elisp
+(defvar claude-mcp-org--tool-definitions
+  (append claude-mcp-org--section-tool-definitions
+          claude-mcp-org--property-tool-definitions
+          claude-mcp-org--tag-tool-definitions)
+  "List of all MCP tool definitions for org-mode operations.")
 #+END_SRC
 
 ** Public API

@@ -118,18 +118,34 @@ Response will appear here after pressing C-c C-c inside the ai block.
 
 * Customization
 
+User-configurable options for claude-org. These control how AI blocks are
+processed, how responses are displayed, and what behaviors are triggered.
+
+** Customization Group
+
+The defgroup establishes the =claude-org= customization namespace.
+
+#+NAME: custom-group
 #+BEGIN_SRC elisp
 (defgroup claude-org nil
   "Streaming Claude AI for org-mode."
   :group 'org
   :prefix "claude-org-")
+#+END_SRC
 
-(defcustom claude-org-fontlock-delay 0.05
-  "Delay in seconds before font-lock after token insertion.
-Lower = more responsive, higher = better performance."
-  :type 'number
-  :group 'claude-org)
+** Tag Names
 
+These define the org tags used to mark different types of sections.
+Customize these if you prefer different naming conventions.
+
+| Tag | Purpose |
+|-----+---------|
+| =claude_chat= | Marks instruction headings |
+| =claude_session= | Creates isolated session scope |
+| =ai_output= | Marks Claude's response sections |
+
+#+NAME: custom-tags
+#+BEGIN_SRC elisp
 (defcustom claude-org-heading-tag "claude_chat"
   "Default tag for claude chat headings."
   :type 'string
@@ -145,7 +161,56 @@ Lower = more responsive, higher = better performance."
 Used to mark sections containing Claude's responses."
   :type 'string
   :group 'claude-org)
+#+END_SRC
 
+** Display Settings
+
+Options controlling how Claude's output appears in the buffer:
+- Font-lock delay balances responsiveness vs. performance during streaming
+- Line width constrains output for readability
+- Header normalization ensures responses fit document hierarchy
+- Auto-break splits long lines at sentence boundaries
+
+#+NAME: custom-display
+#+BEGIN_SRC elisp
+(defcustom claude-org-fontlock-delay 0.05
+  "Delay in seconds before font-lock after token insertion.
+Lower = more responsive, higher = better performance."
+  :type 'number
+  :group 'claude-org)
+
+(defcustom claude-org-line-width 170
+  "Maximum line width for Claude's output.
+Claude will be instructed to keep lines under this many characters."
+  :type 'integer
+  :group 'claude-org)
+
+(defcustom claude-org-normalize-headers t
+  "When non-nil, normalize org headers in Claude's output.
+Headers are adjusted so top-level headers match the current section level + 1.
+This ensures Claude's output fits properly within the document hierarchy."
+  :type 'boolean
+  :group 'claude-org)
+
+(defcustom claude-org-auto-break-line-length -1
+  "Auto-break lines exceeding this length after sentence-ending punctuation.
+When set to a positive integer, lines longer than this will be broken
+after sentence-ending punctuation (. ! ?) followed by a space.
+Set to -1 (default) to disable automatic line breaking."
+  :type 'integer
+  :group 'claude-org)
+#+END_SRC
+
+** Execution Behavior
+
+Options controlling what happens when AI blocks are executed:
+- Auto-create response sections for the flat Instruction/Response pattern
+- IDE context adds buffer info, selection, and open files to prompts
+- System messages toggle shows/hides Claude's internal messages
+- Allowed tools auto-approve certain operations without confirmation
+
+#+NAME: custom-execution
+#+BEGIN_SRC elisp
 (defcustom claude-org-auto-create-response-section t
   "Whether to automatically create Response sections after executing AI blocks.
 When non-nil, claude-org-execute will create a Response heading with :ai_output: tag."
@@ -177,7 +242,6 @@ When non-nil, the MCP server will be started automatically if not running."
   :type 'boolean
   :group 'claude-org)
 
-
 (defcustom claude-org-setting-sources '("user")
   "List of setting sources for Claude CLI.
 Controls where Claude loads skills and settings from.
@@ -186,35 +250,31 @@ Valid values: \"user\", \"project\", \"local\".
 Can be overridden per-section via CLAUDE_SETTING_SOURCES property."
   :type '(repeat string)
   :group 'claude-org)
+#+END_SRC
 
-(defcustom claude-org-line-width 170
-  "Maximum line width for Claude's output.
-Claude will be instructed to keep lines under this many characters."
-  :type 'integer
-  :group 'claude-org)
+** Slash Commands
 
-(defcustom claude-org-normalize-headers t
-  "When non-nil, normalize org headers in Claude's output.
-Headers are adjusted so top-level headers match the current section level + 1.
-This ensures Claude's output fits properly within the document hierarchy."
-  :type 'boolean
-  :group 'claude-org)
+Built-in CLI commands that can be used in AI blocks. These are passed
+directly to Claude Code rather than being interpreted as user prompts.
 
-(defcustom claude-org-auto-break-line-length -1
-  "Auto-break lines exceeding this length after sentence-ending punctuation.
-When set to a positive integer, lines longer than this will be broken
-after sentence-ending punctuation (. ! ?) followed by a space.
-Set to -1 (default) to disable automatic line breaking."
-  :type 'integer
-  :group 'claude-org)
-
+#+NAME: custom-slash-commands
+#+BEGIN_SRC elisp
 (defcustom claude-org-builtin-slash-commands
   '("/add-dir" "/clear" "/compact" "/content" "/help" "/ls" "/pwd" "/cd")
   "Built-in Claude Code slash commands.
 These are embedded commands in the Claude Code CLI."
   :type '(repeat string)
   :group 'claude-org)
+#+END_SRC
 
+** System Prompts
+
+Default system prompts establish Claude's persona and org-mode awareness.
+These are prepended to every query. Add domain-specific prompts via
+=add-to-list= rather than replacing these defaults.
+
+#+NAME: custom-system-prompts
+#+BEGIN_SRC elisp
 (defcustom claude-org-default-system-prompts
   '("You are a Claude agent, built on Anthropic's Claude Agent SDK.You are communicating with a senior developer through Emacs org-mode.
 
@@ -227,13 +287,16 @@ User Workflow:
 Working with Org Files:
 - Treat org sections as a hierarchical filesystem (like directories and files)
 - Section paths use slash notation: /Project/Tasks/Todo
-- When editing the current org file or any org file, prefer org_* MCP tools:
+- CRITICAL: For .org files, you MUST use MCP org_* tools. NEVER use Edit/Write tools on .org files.
+  The Edit/Write tools will corrupt org structure (headings, properties, tags).
+  Only MCP org_* tools preserve org-mode structure correctly:
   - org_list_sections: Browse structure (like ls)
   - org_read_section: Read content by path (like cat)
-  - org_update_section: Modify section content (like editing a file)
-  - org_create_section: Add new subsections
-  - org_get/set_property: Manage org properties (metadata)
-  - org_get/set/add/remove_tag: Manage org tags
+  - org_update_section: Modify section content (preserves heading, properties, tags)
+  - org_create_section: Add new subsections with proper level
+  - org_delete_section: Remove section and children
+  - org_get/set_property: Manage org properties (metadata in :PROPERTIES: drawers)
+  - org_get/set/add/remove_tag: Manage org tags (the :tag: syntax on headings)
 - For non-org operations, use evalElisp to execute any Emacs Lisp
 - IMPORTANT: Buffer position management for org edit tasks:
   - Before starting an org edit task, save current buffer and position using evalElisp
@@ -279,7 +342,18 @@ You can customize this by adding domain-specific prompts:
                \"Always use Python 3.11 with type hints.\")"
   :type '(repeat string)
   :group 'claude-org)
+#+END_SRC
 
+** Tag-Based Behaviors
+
+Org tags (like =:explore:=, =:review:=) trigger specific behavior prompts.
+This enables workflow phases: explore → plan → code → test → review → commit.
+
+Phase tags define development workflow stages. Modifier tags (=strict=,
+=security=, =no_edit=, =parallel=) adjust behavior within any phase.
+
+#+NAME: custom-tag-behaviors
+#+BEGIN_SRC elisp
 (defcustom claude-org-tag-behaviors
   '((explore . "## EXPLORE PHASE
 Focus on understanding. Use Read/Grep/Glob/LSP tools. Do NOT modify files.
@@ -330,7 +404,21 @@ To add custom tags:
                \\='(my-tag . \"My custom behavior prompt\"))"
   :type '(alist :key-type symbol :value-type string)
   :group 'claude-org)
+#+END_SRC
 
+** Header Argument Behaviors
+
+Header arguments (=#+begin_src ai :phase plan :strict t=) provide inline
+behavior control. Unlike tags which apply to whole sections, header args
+apply only to that specific block.
+
+Values can be:
+- Template strings with =%s= for value substitution
+- Fixed strings for boolean flags
+- Alists for enum-style mappings (like =:phase=)
+
+#+NAME: custom-header-behaviors
+#+BEGIN_SRC elisp
 (defcustom claude-org-header-behaviors
   '((:phase . (("explore" . "## EXPLORE PHASE\nFocus on understanding. Do NOT modify files.")
                ("plan" . "## PLAN PHASE\nDesign approach. Wait for approval before coding.")
@@ -371,7 +459,21 @@ To add custom headers:
                 :value-type (choice string
                                     (alist :key-type string :value-type string)))
   :group 'claude-org)
+#+END_SRC
 
+** Property Name Constants
+
+These constants define the org property names used for session and permission
+configuration. Using constants ensures consistency across the codebase.
+
+| Property | Purpose |
+|----------+---------|
+| =CLAUDE_PERMISSION_MODE= | Tool permission level (readonly/accept-edits/plan/bypass) |
+| =CLAUDE_SDK_UUID= | Session identifier for =--resume= |
+| =CLAUDE_SETTING_SOURCES= | Comma-separated list of setting sources |
+
+#+NAME: custom-property-constants
+#+BEGIN_SRC elisp
 (defconst claude-org-permission-property "CLAUDE_PERMISSION_MODE"
   "Org property name for permission mode.")
 
@@ -402,6 +504,11 @@ Session identity is determined by file path + optional CLAUDE_SESSION_ID propert
 
 ** Helper Functions
 
+File-level properties (=#+ PROPERTY:=) require different lookup logic than
+section properties. This function searches only the file header area (before
+the first heading) to avoid matching properties inside headings.
+
+#+NAME: session-file-level-property
 #+BEGIN_SRC elisp
 (defun claude-org--get-file-level-property (property)
   "Get PROPERTY value from file-level #+PROPERTY keyword.
@@ -425,6 +532,10 @@ Returns nil if not found."
 
 ** Session ID Functions
 
+These functions retrieve and interpret the =CLAUDE_SESSION_ID= property.
+Session IDs enable multiple independent conversations within a single org file.
+
+#+NAME: session-id-functions
 #+BEGIN_SRC elisp
 (defun claude-org--get-session-id ()
   "Get user-defined CLAUDE_SESSION_ID from org properties.
@@ -456,6 +567,11 @@ Uses claude-agent session key format for consistency."
 
 ** Session Scope Detection
 
+Session scope determines how conversation context is shared. The =:claude_session:=
+tag creates a section-scoped session (isolated subtree). Without it, the whole
+file shares one conversation context.
+
+#+NAME: session-scope-detection
 #+BEGIN_SRC elisp
 (defun claude-org--has-session-tag-p ()
   "Check if current section has the session tag.
@@ -1238,8 +1354,19 @@ Returns combined prompt string or nil if no behaviors active."
 
 * Block Detection
 
-Block detection functions.
+Block detection answers the fundamental question: "Where am I in the document?"
+These functions determine the execution context for AI blocks by examining:
 
+1. *Section hierarchy* - What level heading contains the cursor?
+2. *Block boundaries* - Is point inside a =#+begin_src ai= block?
+3. *Output sections* - Is this an AI response area (tagged with =:ai_output:=)?
+4. *Instruction numbering* - Which instruction number does this belong to?
+
+The detection logic supports both complete blocks (with =#+end_src=) and incomplete
+blocks (still being edited), allowing execution during composition.
+
+** Section Level Detection
+#+NAME: block-detect-section-level
 #+BEGIN_SRC elisp
 (defun claude-org--get-section-level ()
   "Get the current org section level (number of stars).
@@ -1250,6 +1377,16 @@ Returns 0 if not inside any heading, otherwise returns the heading level."
       (org-back-to-heading t)
       (org-current-level))))
 
+#+END_SRC
+
+** AI Block Boundary Detection
+
+These functions detect whether point is inside an AI block and extract its boundaries.
+The key insight: an incomplete block (no =#+end_src= yet) is valid for execution,
+enabling users to run queries while still composing them.
+
+#+NAME: block-detect-boundaries
+#+BEGIN_SRC elisp
 (defun claude-org--in-ai-block-p ()
   "Return t if point is inside a #+begin_src ai block."
   (save-excursion
@@ -1283,6 +1420,16 @@ Returns 0 if not inside any heading, otherwise returns the heading level."
       (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
         (line-end-position)))))
 
+#+END_SRC
+
+** Output Section and Instruction Detection
+
+Output sections (tagged =:ai_output:=) contain Claude's responses.
+Instruction detection finds which numbered instruction contains the cursor,
+used for maintaining conversation context and navigation.
+
+#+NAME: block-detect-output-instruction
+#+BEGIN_SRC elisp
 (defun claude-org--in-output-section-p ()
   "Check if cursor is inside an :ai_output: tagged section.
 Returns non-nil if current heading or any parent heading has the output tag."
@@ -1309,8 +1456,16 @@ Moves point to after the output section's subtree, ready to insert sibling."
 
 * Block Insertion
 
-Block insertion and session info commands.
+Block insertion creates new AI query blocks with proper structure and numbering.
+The insertion logic is "smart" - it understands the document's flat pattern where
+Instruction N and Response N are siblings, not parent-child.
 
+** Instruction Numbering
+
+Each instruction gets a unique sequential number. This function scans all existing
+instruction headings and returns the next available number, ensuring no duplicates.
+
+#+NAME: block-insert-numbering
 #+BEGIN_SRC elisp
 (defun claude-org--next-instruction-number ()
   "Find the next available instruction number."
@@ -1320,7 +1475,17 @@ Block insertion and session info commands.
       (while (re-search-forward "^\\*+ Instruction \\([0-9]+\\)" nil t)
         (setq max-num (max max-num (string-to-number (match-string 1)))))
       (1+ max-num))))
+#+END_SRC
 
+** Standard Block Insertion
+
+The primary insertion command. Key behaviors:
+- Skips past output sections to maintain the flat Instruction/Response pattern
+- Matches heading level of existing instructions (or uses current level)
+- Auto-generates the next instruction number
+
+#+NAME: block-insert-standard
+#+BEGIN_SRC elisp
 (defun claude-org-insert-block ()
   "Insert an AI query block with auto-numbered Instruction heading.
 Smart insertion that skips :ai_output: sections to maintain flat pattern.
@@ -1339,7 +1504,16 @@ Inserts at the same level as the last Instruction heading, or current level if n
     (insert stars " Instruction " (number-to-string num) " :" claude-org-heading-tag ":\n\n")
     (insert "#+begin_src ai\n\n#+end_src\n")
     (forward-line -2)))
+#+END_SRC
 
+** Session and Story Blocks
+
+These create blocks with isolated conversation context. Session blocks use the
+=:claude_session:= tag for section-scoped isolation. Story blocks use
+=CLAUDE_SESSION_ID= property for named, persistent sessions.
+
+#+NAME: block-insert-session-story
+#+BEGIN_SRC elisp
 (defun claude-org-insert-session-block ()
   "Insert an AI query block with independent section-scoped session.
 The :claude_session: tag creates a new conversation context for this subtree."
@@ -1368,7 +1542,15 @@ The story has its own isolated conversation context."
     (insert ":END:\n\n")
     ;; Position cursor for content
     (message "Created story '%s' with session ID: %s" title session-id)))
+#+END_SRC
 
+** Session Info Display
+
+Diagnostic command showing current session identity - useful for understanding
+which conversation context will be used for the next query.
+
+#+NAME: block-insert-session-info
+#+BEGIN_SRC elisp
 (defun claude-org-show-session-info ()
   "Display current session information.
 Shows the session identity which is file_path + optional CLAUDE_SESSION_ID."
@@ -2348,9 +2530,34 @@ to send the query and stream the response.
 
 * Org File Protection Hook
 
-Prevent Claude from using Edit/Write tools on .org files. Claude should use
-Emacs MCP org_* tools instead for proper org structure handling.
+*NOTE: This hook does NOT work as intended.* It is kept for documentation purposes
+and potential future use if Claude Code CLI changes its architecture.
 
+** Why This Hook Cannot Intercept Edit/Write Tools
+
+The =claude-agent-pre-tool-use-hook= is triggered when Claude Code CLI sends a
+=can_use_tool= control request to Emacs. However, Claude Code's built-in Edit/Write
+tools are *not* routed through this mechanism:
+
+| Tool Type | Execution Path | Hook Intercept? |
+|-----------+----------------+-----------------|
+| Claude Code's Edit/Write | Claude CLI → filesystem directly | ❌ No |
+| MCP tools (evalElisp, org_*) | Claude CLI → HTTP → Emacs MCP server | ❌ No (MCP protocol) |
+| Emacs-delegated tools | Claude CLI → control_request → Emacs | ✅ Yes |
+
+In =bypassPermissions= mode (which we use for efficiency), the CLI auto-approves
+Edit/Write without asking Emacs. Even in other modes, the CLI handles these tools
+internally rather than delegating to Emacs.
+
+*Current Solution:* System prompt instructions tell Claude to use MCP org_* tools
+for .org files. This relies on prompt compliance rather than enforcement.
+
+** Hook Implementation (Non-Functional)
+
+This code remains as reference for the intended behavior. If Claude Code CLI
+ever adds a hook mechanism for built-in tools, this pattern could be adapted.
+
+#+NAME: org-protect-hook
 #+BEGIN_SRC elisp
 (defun claude-org--protect-org-files (input-data tool-use-id context)
   "Hook to prevent Edit/Write tools on .org files.
@@ -2384,15 +2591,30 @@ Returns nil to allow, or a hook output plist to deny with error message."
                   :permissionDecisionReason
                   (format "Use Emacs MCP org_* tools for %s" file-path))))))
 
+#+END_SRC
+
+** Hook Installation (Non-Functional)
+
+These functions install/remove the hook, but since the hook never triggers for
+Edit/Write tools, they have no practical effect. Kept for potential future use.
+
+#+NAME: org-protect-hook-install
+#+BEGIN_SRC elisp
 (defun claude-org--install-protection-hook ()
   "Install the org file protection hook globally.
 The hook must be global because it runs in process filter context,
-not in the org buffer where the query originated."
+not in the org buffer where the query originated.
+
+NOTE: This hook does not actually intercept Edit/Write tools.
+See documentation in 'Org File Protection Hook' section."
   (add-hook 'claude-agent-pre-tool-use-hook
             #'claude-org--protect-org-files))
 
 (defun claude-org--remove-protection-hook ()
-  "Remove the org file protection hook if no claude-org buffers remain."
+  "Remove the org file protection hook if no claude-org buffers remain.
+
+NOTE: This hook does not actually intercept Edit/Write tools.
+See documentation in 'Org File Protection Hook' section."
   ;; Only remove if no other claude-org-mode buffers exist
   (unless (cl-some (lambda (buf)
                      (and (not (eq buf (current-buffer)))
