@@ -3403,6 +3403,127 @@ Shortcut for `claude-agent-translate-dwim' with English as target."
     (message "Translation cancelled")))
 #+END_SRC
 
+* Conversation Titling
+
+Generate short titles for conversations using Haiku model for low cost and fast response.
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-title-model "claude-haiku-4-5-20251001"
+  "Model to use for generating conversation titles.
+Haiku is recommended for low cost and fast response."
+  :type 'string
+  :group 'claude-agent)
+
+(defcustom claude-agent-title-max-chars 50
+  "Maximum characters for generated titles."
+  :type 'integer
+  :group 'claude-agent)
+
+(defcustom claude-agent-title-max-messages 10
+  "Maximum number of recent messages to include in title generation prompt."
+  :type 'integer
+  :group 'claude-agent)
+#+END_SRC
+
+** Title Generation
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-messages-for-title (messages)
+  "Format MESSAGES for title generation prompt.
+MESSAGES is a list of (role . content) pairs."
+  (let ((formatted nil)
+        (count 0))
+    (dolist (msg (reverse messages))
+      (when (< count claude-agent-title-max-messages)
+        (let ((role (car msg))
+              (content (cdr msg)))
+          ;; Truncate long content
+          (when (> (length content) 200)
+            (setq content (concat (substring content 0 197) "...")))
+          (push (format "%s: %s" (capitalize (symbol-name role)) content) formatted)
+          (cl-incf count))))
+    (mapconcat #'identity formatted "\n\n")))
+
+(cl-defun claude-agent-generate-title (messages &key on-title on-error)
+  "Generate a short title for conversation MESSAGES.
+
+MESSAGES is a list of (role . content) pairs, e.g.:
+  \\='((user . \"How do I sort a list?\")
+    (assistant . \"You can use the sort function...\"))
+
+ON-TITLE is called with the generated title string.
+  Function signature: (lambda (title) ...)
+
+ON-ERROR is called if an error occurs.
+  Function signature: (lambda (error) ...)
+
+Uses Haiku model for low cost and fast response.
+Each call uses a fresh session (no conversation continuity).
+
+Example:
+  (claude-agent-generate-title
+   \\='((user . \"Help me write a Python script\")
+     (assistant . \"Sure, what would you like the script to do?\")
+     (user . \"Parse JSON files\"))
+   :on-title (lambda (title) (message \"Title: %s\" title)))"
+  (let* ((formatted-messages (claude-agent--format-messages-for-title messages))
+         (prompt (format "Please write a %d character or less title for the following conversation. \
+Output ONLY the title, nothing else - no quotes, no explanation, no punctuation at the end.
+
+%s"
+                         claude-agent-title-max-chars
+                         formatted-messages))
+         (system-prompt (format "You are a conversation title generator. \
+Generate concise, descriptive titles that capture the main topic. \
+Keep titles under %d characters. Output only the title text."
+                                claude-agent-title-max-chars))
+         (options (claude-agent-options
+                   :model claude-agent-title-model
+                   :system-prompt system-prompt
+                   :disallowed-tools '("*")  ; No tools needed for titling
+                   :max-turns 1)))
+    ;; Use lexical-let to create proper closure for mutable state
+    (lexical-let ((collected-text "")
+                  (on-title-cb on-title)
+                  (max-chars claude-agent-title-max-chars))
+      (claude-agent-query
+       prompt
+       :options options
+       ;; Use fresh session - don't pass session-key
+       :on-message (lambda (msg)
+                     (when (claude-agent-assistant-message-p msg)
+                       (when-let ((text (claude-agent-extract-text msg)))
+                         (setq collected-text (concat collected-text text)))))
+       :on-error on-error
+       :on-complete (lambda (_result)
+                      (when on-title-cb
+                        ;; Clean up the title: trim whitespace, remove quotes
+                        (let ((title (string-trim collected-text)))
+                          ;; Remove surrounding quotes if present
+                          (when (and (>= (length title) 2)
+                                     (string-match-p "^[\"'].*[\"']$" title))
+                            (setq title (substring title 1 -1)))
+                          ;; Truncate if too long
+                          (when (> (length title) max-chars)
+                            (setq title (concat (substring title 0 (- max-chars 3)) "...")))
+                          (funcall on-title-cb title))))))))
+
+(defun claude-agent-generate-title-from-text (text &optional callback)
+  "Generate a title for TEXT content.
+TEXT is a string containing the conversation or content to title.
+CALLBACK is called with the generated title, defaults to `message'.
+
+This is a convenience wrapper for simple use cases."
+  (let ((cb (or callback #'message)))
+    (claude-agent-generate-title
+     `((user . ,text))
+     :on-title cb
+     :on-error (lambda (err)
+                 (message "Title generation error: %s" err)))))
+#+END_SRC
+
 * Package Footer
 
 #+BEGIN_SRC elisp

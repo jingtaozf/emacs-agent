@@ -21,6 +21,11 @@
 ;; We don't use (require 'claude-agent) or (require 'claude-org) because
 ;; the features are provided by the org files, not compiled .el files.
 
+;; Configure MCP server to use a free port (0 = auto-select) to avoid conflicts
+;; This is important for CI environments where port 9999 may already be in use
+(when (boundp 'emacs-mcp-server-default-port)
+  (setq emacs-mcp-server-default-port 0))
+
 ;;; Configuration Variables
 
 (defvar test-claude-fixture-dir
@@ -48,6 +53,12 @@ Returns t if claude command is found, nil otherwise."
   "Skip test if Claude CLI is not available."
   (unless (test-claude-check-cli-available)
     (ert-skip "Claude CLI not found - skipping integration test")))
+
+(defun test-claude-skip-unless-mcp-server-available ()
+  "Skip test if MCP server cannot be started (e.g., web-server not available)."
+  (unless (and (fboundp 'emacs-mcp-server-running-p)
+               (fboundp 'ws-start))
+    (ert-skip "MCP server not available (web-server package missing) - skipping MCP test")))
 
 ;;; Fixture Management
 

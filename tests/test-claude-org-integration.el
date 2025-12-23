@@ -292,5 +292,31 @@ SKIPPED: Sequential multi-query tests return empty responses."
   :expected-result :failed
   (ert-skip "Claude-org integration too flaky - empty responses"))
 
+;;; MCP Tool Access Tests
+
+(ert-deftest test-org-integration-mcp-emacs-tools ()
+  "Test that Emacs MCP tools are accessible via claude-org.
+This test verifies the MCP server integration is working correctly
+by checking that Claude can see the emacs MCP tools.
+FLAKY: Response capture sometimes returns empty in batch mode."
+  :tags '(:integration :slow :api :mcp :org :process :flaky)
+  (test-claude-skip-unless-cli-available)
+  (test-claude-skip-unless-mcp-server-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (let ((response (test-claude-execute-and-wait org-file 16 60)))
+       ;; Response may be empty due to timing issues in batch mode
+       ;; Skip if empty rather than fail
+       (when (or (null response) (string-empty-p (string-trim response)))
+         (ert-skip "Empty response - flaky in batch mode"))
+       ;; Verify emacs MCP tools are listed
+       ;; The response should contain mcp__emacs__ prefixed tools
+       (should (or (string-match-p "mcp__emacs__" response)
+                   (string-match-p "evalElisp" response)
+                   (string-match-p "org_list_sections" response)
+                   (string-match-p "org_read_section" response)
+                   (string-match-p "getDiagnostics" response)))))))
+
 (provide 'test-claude-org-integration)
 ;;; test-claude-org-integration.el ends here

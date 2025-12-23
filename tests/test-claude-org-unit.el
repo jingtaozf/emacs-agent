@@ -16,6 +16,10 @@
 (require 'org)
 (require 'claude-org)
 
+;; Configure MCP server to use a free port (0 = auto-select) to avoid conflicts
+;; This is important for CI environments where port 9999 may already be in use
+(setq emacs-mcp-server-default-port 0)
+
 ;;; Session ID Tests
 
 (ert-deftest test-claude-org-session-key-creation ()

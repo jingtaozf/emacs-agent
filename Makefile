@@ -14,7 +14,8 @@ ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
 LITERATE_ELISP_DIR = $(HOME)/projects/literate-elisp
-LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR)
+WEB_SERVER_DIR = $(HOME)/.emacs.d/straight/build/web-server
+LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR)
 
 .PHONY: all
 all: compile test-unit
@@ -101,6 +102,7 @@ test-org-unit:
 	$(BATCH) $(LOAD_PATH) \
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
 		-l tests/test-claude-org-unit.el \
 		-f ert-run-tests-batch-and-exit
@@ -122,6 +124,7 @@ test-org-integration:
 	$(BATCH) $(LOAD_PATH) \
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-org-integration.el \
@@ -161,7 +164,6 @@ test-mcp-ide-unit:
 	@echo "Running MCP IDE unit tests only (no flycheck required)..."
 	$(BATCH) $(LOAD_PATH) \
 		--eval "(require 'literate-elisp)" \
-		--eval "(provide 'web-server)" \
 		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		-l tests/test-mcp-ide-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(and (tag :mcp-ide) (tag :unit)))"

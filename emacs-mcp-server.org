@@ -67,8 +67,8 @@ Uses Claude Code permission pattern syntax."
 Protocol version and server information:
 
 #+BEGIN_SRC elisp
-(defconst emacs-mcp-server-protocol-version "2025-06-18"
-  "MCP protocol version.")
+(defconst emacs-mcp-server-protocol-version "2024-11-05"
+  "MCP protocol version. Must match version expected by Claude Code CLI.")
 
 (defconst emacs-mcp-server--server-info
   '((name . "emacs-mcp-server")
@@ -236,12 +236,32 @@ These functions handle the core MCP protocol methods.
             (capabilities . ((tools . ((listChanged . :json-false)))))
             (serverInfo . ,emacs-mcp-server--server-info)))))
 
+(defun emacs-mcp-server--fix-empty-alists (obj)
+  "Recursively fix empty alists in OBJ to use hash tables.
+Empty alists () encode as null in JSON, but we need {} for MCP schema.
+This converts empty () to an empty hash-table which encodes as {}."
+  (cond
+   ;; Empty list -> empty hash table (encodes as {})
+   ((null obj) (make-hash-table))
+   ;; Vector -> process elements
+   ((vectorp obj) (vconcat (mapcar #'emacs-mcp-server--fix-empty-alists obj)))
+   ;; Cons cell (alist entry) -> process value
+   ((consp obj)
+    (if (and (car obj) (not (consp (car obj))))
+        ;; This is an alist entry (key . value)
+        (cons (car obj) (emacs-mcp-server--fix-empty-alists (cdr obj)))
+      ;; This is a list of entries
+      (mapcar #'emacs-mcp-server--fix-empty-alists obj)))
+   ;; Other values pass through
+   (t obj)))
+
 (defun emacs-mcp-server--tool-to-mcp-format (tool)
   "Convert TOOL to MCP wire format (without handler)."
-  `((name . ,(alist-get 'name tool))
-    (description . ,(alist-get 'description tool))
-    (inputSchema . ,(or (alist-get 'inputSchema tool)
-                        '((type . "object") (properties))))))
+  (let ((schema (or (alist-get 'inputSchema tool)
+                    '((type . "object") (properties)))))
+    `((name . ,(alist-get 'name tool))
+      (description . ,(alist-get 'description tool))
+      (inputSchema . ,(emacs-mcp-server--fix-empty-alists schema)))))
 
 (defun emacs-mcp-server--handle-tools-list ()
   "Handle tools/list method.  Return registered tools (builtin + user-registered)."
