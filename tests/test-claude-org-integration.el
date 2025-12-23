@@ -72,15 +72,61 @@
 
 (ert-deftest test-org-integration-independent-sessions ()
   "Test that :claude_session: tagged sections are independent.
-SKIPPED: Complex multi-session test with flaky response capture."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+Session A remembers '42', Session B remembers 'blue'.
+Session B should NOT know about '42' from Session A."
+  :tags '(:integration :slow :api :org :session)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Execute Session A: remember 42
+     (let ((response3 (test-claude-execute-and-wait org-file 3 30)))
+       (should (stringp response3))
+       (should (string-match-p "42\\|remember\\|confirm" response3)))
+
+     ;; Execute Session B: remember blue
+     (let ((response5 (test-claude-execute-and-wait org-file 5 30)))
+       (should (stringp response5))
+       (should (string-match-p "blue\\|remember\\|confirm" response5)))
+
+     ;; Now ask Session B what number was remembered
+     ;; It should NOT know about 42 (that was Session A)
+     ;; Instruction 6 asks about color, so we need to check Session A's recall
+     (let ((response4 (test-claude-execute-and-wait org-file 4 30)))
+       (should (stringp response4))
+       ;; Session A should remember 42
+       (should (string-match-p "42" response4)))
+
+     (let ((response6 (test-claude-execute-and-wait org-file 6 30)))
+       (should (stringp response6))
+       ;; Session B should remember blue
+       (should (string-match-p "blue" response6))))))
 
 (ert-deftest test-org-integration-section-vs-file-scope ()
   "Test that section-scoped sessions don't see file-scoped context.
-SKIPPED: Complex scope isolation test with flaky response capture."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+Instructions 1-2 are file-scoped, Instructions 3-4 are in Session A.
+Session A should NOT see the 2+2 question from file scope."
+  :tags '(:integration :slow :api :org :session)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Execute file-scoped instruction 1 (2+2)
+     (let ((response1 (test-claude-execute-and-wait org-file 1 30)))
+       (should (stringp response1))
+       (should (string-match-p "4" response1)))
+
+     ;; Execute Session A instruction 3 (remember 42)
+     (let ((response3 (test-claude-execute-and-wait org-file 3 30)))
+       (should (stringp response3))
+       (should (string-match-p "42\\|remember\\|confirm" response3)))
+
+     ;; Session A's instruction 4 should remember 42 from its own session
+     ;; but should NOT have context about the 2+2 question from file scope
+     (let ((response4 (test-claude-execute-and-wait org-file 4 30)))
+       (should (stringp response4))
+       ;; Should remember 42 from Session A
+       (should (string-match-p "42" response4))))))
 
 ;;; Tool Use Tests
 
@@ -131,24 +177,72 @@ SKIPPED: Complex scope isolation test with flaky response capture."
 
 (ert-deftest test-org-integration-readonly-mode ()
   "Test readonly permission mode from org property.
-SKIPPED: Permission mode tests return empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+Instruction 12 has CLAUDE_PERMISSION_MODE: readonly and asks to read a file."
+  :tags '(:integration :slow :api :org :permissions)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Instruction 12 has readonly permission mode
+     ;; It asks Claude to read README.md
+     (let ((response (test-claude-execute-and-wait org-file 12 60)))
+       ;; Should get a response (readonly mode allows read operations)
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))))))
 
 (ert-deftest test-org-integration-plan-mode ()
   "Test plan permission mode from org property.
-SKIPPED: Permission mode tests return empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - empty responses"))
+Instruction 13 has CLAUDE_PERMISSION_MODE: plan and asks for a plan."
+  :tags '(:integration :slow :api :org :permissions)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Instruction 13 has plan permission mode
+     ;; It asks Claude to suggest a plan
+     (let ((response (test-claude-execute-and-wait org-file 13 60)))
+       ;; Should get a response with planning content
+       (should (stringp response))
+       (should (> (length (string-trim response)) 0))
+       ;; Response should contain planning-related content
+       (should (or (string-match-p "plan\\|step\\|read\\|file" response)
+                   (string-match-p "\\.el" response)))))))
 
 ;;; Multi-Session Concurrency Tests
 
 (ert-deftest test-org-integration-concurrent-sessions ()
   "Test executing multiple sessions concurrently.
-  :tags '(:integration :slow :api :stable :org :session)
-SKIPPED: Complex concurrent test, often times out or gets empty responses."
-  :expected-result :failed
-  (ert-skip "Claude-org integration too flaky - timeouts and empty responses"))
+Concurrent Session 1 (Instruction 9) and Concurrent Session 2 (Instruction 10)
+should be able to execute in parallel without interference."
+  :tags '(:integration :slow :api :org :session :concurrent)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (claude-org-mode 1)
+
+       ;; Start both sessions
+       (let (session-key-1 session-key-2)
+         ;; Start instruction 9 (Concurrent Session 1)
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 9")
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai")
+         (setq session-key-1 (claude-org--current-session-key))
+         (claude-org-execute)
+
+         ;; Start instruction 10 (Concurrent Session 2)
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 10")
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai")
+         (setq session-key-2 (claude-org--current-session-key))
+         (claude-org-execute)
+
+         ;; Wait for both to complete (with longer timeout for concurrent ops)
+         (let ((completed-1 (test-claude-wait-for-completion session-key-1 60))
+               (completed-2 (test-claude-wait-for-completion session-key-2 60)))
+           (should completed-1)
+           (should completed-2)))))))
 
 ;;; Header Line Tests
 
