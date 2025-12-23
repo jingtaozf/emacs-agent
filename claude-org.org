@@ -7,6 +7,8 @@
 #+PROPERTY: header-args :results silent
 #+PROPERTY: literate-lang elisp
 #+PROPERTY: literate-load yes
+#+TAGS: explore(e) plan(p) code(c) test(t) review(r) commit(m)
+#+TAGS: strict(s) security(S) no_edit(n) parallel(P)
 
 * Table of Contents                                            :TOC:noexport:
 - [[#introduction][Introduction]]
@@ -276,6 +278,98 @@ You can customize this by adding domain-specific prompts:
   (add-to-list \\='claude-org-default-system-prompts
                \"Always use Python 3.11 with type hints.\")"
   :type '(repeat string)
+  :group 'claude-org)
+
+(defcustom claude-org-tag-behaviors
+  '((explore . "## EXPLORE PHASE
+Focus on understanding. Use Read/Grep/Glob/LSP tools. Do NOT modify files.
+Summarize findings clearly. Ask clarifying questions if needed.")
+
+    (plan . "## PLAN PHASE
+Design approach before implementing. Present 2-3 options with trade-offs.
+Recommend one approach with rationale. Wait for human approval.")
+
+    (code . "## CODE PHASE
+Implement solution. Track progress with TodoWrite for complex tasks.
+Run tests as you go. Keep changes focused and minimal.")
+
+    (test . "## TEST PHASE
+Write comprehensive tests: happy path, edge cases, error conditions.
+Run tests and report results. Tests should be independent and deterministic.")
+
+    (review . "## REVIEW PHASE
+Find bugs, security issues, edge cases. Do NOT write new code.
+Report findings with severity: CRITICAL/HIGH/MEDIUM/LOW.
+Check: logic errors, null handling, exceptions, pattern compliance.")
+
+    (commit . "## COMMIT PHASE
+Stage and commit changes. Write semantic commit message explaining WHY.
+Verify clean state with git status. Do NOT push unless explicitly asked.")
+
+    ;; Modifier tags
+    (strict . "## STRICT MODE
+Zero tolerance: Any bug, security issue, or pattern violation blocks progress.")
+
+    (security . "## SECURITY FOCUS
+Check: injection, auth, secrets, input validation, CSRF, XSS, path traversal.")
+
+    (no_edit . "## READ-ONLY MODE
+Analysis only. Do NOT modify or create any files.")
+
+    (parallel . "## PARALLEL EXECUTION
+Use Task agents concurrently for independent subtasks."))
+
+  "Alist mapping org tags to behavior prompt text.
+Each entry: (TAG-SYMBOL . PROMPT-STRING)
+
+Tags activate via org section tags like :explore: or :review:.
+Multiple tags combine (alphabetically for consistency).
+
+To add custom tags:
+  (add-to-list \\='claude-org-tag-behaviors
+               \\='(my-tag . \"My custom behavior prompt\"))"
+  :type '(alist :key-type symbol :value-type string)
+  :group 'claude-org)
+
+(defcustom claude-org-header-behaviors
+  '((:phase . (("explore" . "## EXPLORE PHASE\nFocus on understanding. Do NOT modify files.")
+               ("plan" . "## PLAN PHASE\nDesign approach. Wait for approval before coding.")
+               ("code" . "## CODE PHASE\nImplement solution. Track progress. Run tests.")
+               ("test" . "## TEST PHASE\nWrite and run comprehensive tests.")
+               ("review" . "## REVIEW PHASE\nFind issues. Do NOT write new code.")
+               ("commit" . "## COMMIT PHASE\nCommit with semantic message.")))
+
+    (:tests . "## TEST GENERATION
+Generate tests: unit tests, edge cases, error conditions. Run to verify.")
+
+    (:coverage . "## COVERAGE REQUIREMENT
+Minimum test coverage: %s%%. Coverage below this blocks completion.")
+
+    (:strict . "## STRICT MODE
+Zero tolerance: Any issue blocks progress.")
+
+    (:files . "## FILE SCOPE
+Focus only on: %s. Do not modify other files.")
+
+    (:context . "## ADDITIONAL CONTEXT\n%s")
+
+    (:agent . "## AGENT MODE
+Delegate to specialized %s agent via Task tool."))
+
+  "Alist mapping header arguments to prompt templates.
+Each entry: (HEADER-KEYWORD . VALUE) where VALUE is:
+  - STRING with %s: Template, value substituted at %s
+  - STRING without %s: Fixed prompt (for boolean headers like :tests t)
+  - ALIST: Map specific values to prompts (for enum headers like :phase)
+
+Headers activate via #+begin_src ai :header value syntax.
+
+To add custom headers:
+  (add-to-list \\='claude-org-header-behaviors
+               \\='(:timeout . \"Complete within %s minutes.\"))"
+  :type '(alist :key-type keyword
+                :value-type (choice string
+                                    (alist :key-type string :value-type string)))
   :group 'claude-org)
 
 (defconst claude-org-permission-property "CLAUDE_PERMISSION_MODE"
@@ -947,23 +1041,23 @@ Usage in org file:
           (mapconcat #'identity (nreverse prompts) "\n\n"))))))
 
 (defun claude-org--build-system-prompt ()
-  "Build complete system prompt from defaults and org sections.
-Combines `claude-org-default-system-prompts' with any :system_prompt: tagged sections.
-Also appends line width instruction based on `claude-org-line-width'."
+  "Build complete system prompt from defaults, org sections, and behaviors.
+Combines:
+1. `claude-org-default-system-prompts' (base prompts)
+2. :system_prompt: tagged org sections
+3. Behavior prompts from tags and header arguments
+4. Line width instruction based on `claude-org-line-width'"
   (let ((defaults (when claude-org-default-system-prompts
                     (mapconcat #'identity claude-org-default-system-prompts "\n\n")))
         (org-prompts (claude-org--collect-system-prompts))
+        (behavior-prompt (claude-org--build-behavior-prompt))
         (line-width-hint (when (and claude-org-line-width (> claude-org-line-width 0))
                            (format "Keep output lines under %d characters, break long lines naturally."
                                    claude-org-line-width))))
-    (let ((base-prompt (cond
-                        ((and defaults org-prompts) (concat defaults "\n\n" org-prompts))
-                        (defaults defaults)
-                        (org-prompts org-prompts)
-                        (t nil))))
-      (if (and base-prompt line-width-hint)
-          (concat base-prompt "\n\n" line-width-hint)
-        (or base-prompt line-width-hint)))))
+    ;; Combine all parts: defaults + org-prompts + behaviors + line-width
+    (let ((parts (delq nil (list defaults org-prompts behavior-prompt line-width-hint))))
+      (when parts
+        (string-join parts "\n\n")))))
 #+END_SRC
 
 * Process Management
@@ -1045,6 +1139,101 @@ Returns just the custom part after :: or a shortened file path."
   "Format elapsed time since START-TIME as human-readable string.
 Uses verbose format for header-line display."
   (claude-agent-format-elapsed-time start-time 'verbose))
+#+END_SRC
+
+* Behavior Prompts
+
+Tag and header argument based behavior injection system.
+
+** Tag Prompt Lookup
+
+#+BEGIN_SRC elisp
+(defun claude-org--tag-prompt (tag)
+  "Get behavior prompt for TAG symbol."
+  (alist-get tag claude-org-tag-behaviors))
+#+END_SRC
+
+** Header Prompt Lookup
+
+#+BEGIN_SRC elisp
+(defun claude-org--header-prompt (header value)
+  "Get behavior prompt for HEADER keyword with VALUE.
+Returns nil if header not found or value is nil/empty."
+  (when value
+    (when-let ((entry (alist-get header claude-org-header-behaviors)))
+      (cond
+       ;; Alist: lookup value directly (for enum headers like :phase)
+       ((and (consp entry) (consp (car entry)))
+        (alist-get value entry nil nil #'equal))
+       ;; Template with %s: format with value
+       ((and (stringp entry) (string-match-p "%s" entry))
+        (format entry value))
+       ;; Fixed string: return if value is truthy (for boolean headers)
+       ((stringp entry)
+        entry)))))
+#+END_SRC
+
+** Collect Current Context
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-current-tags ()
+  "Get list of tag strings for current section (inherited)."
+  (when-let ((tags (org-get-tags nil t)))
+    (mapcar #'downcase tags)))
+
+(defun claude-org--get-block-header-args ()
+  "Get header arguments from current ai block.
+Returns plist of header arguments, e.g. (:phase \"code\" :tests t)."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
+        (let ((line (buffer-substring-no-properties (point) (line-end-position))))
+          (when (string-match "#\\+begin_src[ \t]+ai\\b[ \t]*\\(.*\\)" line)
+            (let ((args-str (match-string 1 line))
+                  (result nil))
+              (when (and args-str (not (string-empty-p args-str)))
+                ;; Parse header args: :key value :key2 value2
+                (with-temp-buffer
+                  (insert args-str)
+                  (goto-char (point-min))
+                  (while (re-search-forward ":\\([a-zA-Z_-]+\\)\\(?:[ \t]+\\([^ \t\n:]+\\)\\)?" nil t)
+                    (let ((key (intern (concat ":" (match-string 1))))
+                          (val (match-string 2)))
+                      ;; Build plist: push value first, then key (reversed later)
+                      (push key result)
+                      (push (or val t) result)))))
+              ;; Result is (val2 key2 val1 key1), reverse to get (key1 val1 key2 val2)
+              (nreverse result))))))))
+#+END_SRC
+
+** Build Behavior Prompt
+
+#+BEGIN_SRC elisp
+(defun claude-org--collect-behavior-config ()
+  "Collect current behavior configuration.
+Returns plist with :tags and :header-args."
+  (list :tags (claude-org--get-current-tags)
+        :header-args (claude-org--get-block-header-args)))
+
+(defun claude-org--build-behavior-prompt ()
+  "Build behavior prompt from current tags and header arguments.
+Returns combined prompt string or nil if no behaviors active."
+  (let* ((config (claude-org--collect-behavior-config))
+         (tags (plist-get config :tags))
+         (header-args (plist-get config :header-args))
+         (parts '()))
+    ;; Collect tag prompts (sorted alphabetically for consistency)
+    (dolist (tag-str (sort (copy-sequence tags) #'string<))
+      (when-let ((prompt (claude-org--tag-prompt (intern tag-str))))
+        (push prompt parts)))
+    ;; Collect header argument prompts
+    (cl-loop for (header value) on header-args by #'cddr
+             when (keywordp header)
+             do (when-let ((prompt (claude-org--header-prompt header value)))
+                  (push prompt parts)))
+    ;; Combine (reverse to maintain order: tags first, then headers)
+    (when parts
+      (string-join (nreverse parts) "\n\n"))))
 #+END_SRC
 
 * Block Detection
