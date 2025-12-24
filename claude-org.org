@@ -2073,7 +2073,8 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
       ;; Auto-generate title in parallel (using Haiku, separate session)
       (when heading-marker
         (claude-org--maybe-auto-generate-title content heading-marker))
-      (claude-org--send-request content))))
+      ;; Pass instruction number for session manager display
+      (claude-org--send-request content instr-num))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -2124,8 +2125,9 @@ SDK-UUID: Session UUID for resume"
 ** Send Request
 
 #+BEGIN_SRC elisp
-(defun claude-org--send-request (prompt)
-  "Send PROMPT to Claude via claude-agent."
+(defun claude-org--send-request (prompt &optional instr-num)
+  "Send PROMPT to Claude via claude-agent.
+INSTR-NUM is the instruction number for display in session manager (optional)."
   (let* ((session-key (claude-org--current-session-key))
          (sdk-uuid (claude-org--get-sdk-uuid))
          (project-root (claude-org--get-project-root))
@@ -2137,15 +2139,20 @@ SDK-UUID: Session UUID for resume"
          (full-prompt (if (and system-reminder
                                (not (string-empty-p system-reminder)))
                           (concat system-reminder "\n" prompt)
-                        prompt)))
+                        prompt))
+         ;; Capture source context for session manager display
+         (source-buf (current-buffer))
+         (source-label (when instr-num (number-to-string instr-num))))
     ;; Use lexical-let to properly capture variables for callbacks
-    (lexical-let ((buf (current-buffer))
+    (lexical-let ((buf source-buf)
                   (session-key session-key))
       ;; Send query via claude-agent
       (let ((state (claude-agent-query
                     full-prompt
                     :options options
                     :session-key session-key
+                    :source-buffer source-buf
+                    :source-label source-label
                     :on-token (lambda (text)
                                 (when (buffer-live-p buf)
                                   (with-current-buffer buf

@@ -467,5 +467,88 @@
   (should (equal "https://example.com"
                  (claude-agent--get-tool-first-arg "WebFetch" '(:url "https://example.com")))))
 
+;;; Query Identity Display Tests
+
+(ert-deftest test-claude-agent-format-query-identity-with-buffer-and-label ()
+  "Test query identity formatting with source buffer and label."
+  :tags '(:unit :fast :stable :isolated :display)
+  (with-temp-buffer
+    (rename-buffer "claude-agent-dev.org" t)
+    (let ((state (claude-agent--make-process-state
+                  :request-id "req-42-1234567890"
+                  :source-buffer (current-buffer)
+                  :source-label "5")))
+      ;; Short form should show "basename#label"
+      (should (equal "claude-agent-dev#5"
+                     (claude-agent--format-query-identity state)))
+      ;; Long form should show full buffer name
+      (should (string-match-p "claude-agent-dev.*#5"
+                              (claude-agent--format-query-identity state t))))))
+
+(ert-deftest test-claude-agent-format-query-identity-buffer-only ()
+  "Test query identity with buffer but no label."
+  :tags '(:unit :fast :stable :isolated :display)
+  (with-temp-buffer
+    (rename-buffer "test-file.org" t)
+    (let ((state (claude-agent--make-process-state
+                  :request-id "req-10-1234567890"
+                  :source-buffer (current-buffer)
+                  :source-label nil)))
+      ;; Should show just buffer name without "#"
+      (should (equal "test-file"
+                     (claude-agent--format-query-identity state))))))
+
+(ert-deftest test-claude-agent-format-query-identity-fallback ()
+  "Test query identity fallback when no buffer available."
+  :tags '(:unit :fast :stable :isolated :display)
+  ;; No source buffer - should fall back to request-id
+  (let ((state (claude-agent--make-process-state
+                :request-id "req-99-1234567890"
+                :source-buffer nil
+                :source-label nil)))
+    (should (equal "#99" (claude-agent--format-query-identity state))))
+  ;; Dead buffer - should also fall back
+  (let* ((buf (generate-new-buffer "temp-dead"))
+         (state (claude-agent--make-process-state
+                 :request-id "req-88-1234567890"
+                 :source-buffer buf
+                 :source-label "3")))
+    (kill-buffer buf)
+    (should (equal "#88" (claude-agent--format-query-identity state)))))
+
+(ert-deftest test-claude-agent-get-single-active-state ()
+  "Test getting single active query state."
+  :tags '(:unit :fast :stable :isolated :display)
+  (let ((claude-agent--active-queries (make-hash-table :test 'equal)))
+    ;; Empty - should return nil
+    (should-not (claude-agent--get-single-active-state))
+    ;; One active query
+    (let ((state1 (claude-agent--make-process-state
+                   :request-id "req-1"
+                   :closed nil)))
+      (claude-agent--register-query "req-1" state1)
+      (should (eq state1 (claude-agent--get-single-active-state))))
+    ;; Two queries - should return nil
+    (let ((state2 (claude-agent--make-process-state
+                   :request-id "req-2"
+                   :closed nil)))
+      (claude-agent--register-query "req-2" state2)
+      (should-not (claude-agent--get-single-active-state)))
+    ;; Clean up
+    (claude-agent--unregister-query "req-1")
+    (claude-agent--unregister-query "req-2")))
+
+(ert-deftest test-claude-agent-process-state-source-slots ()
+  "Test that process-state has source-buffer and source-label slots."
+  :tags '(:unit :fast :stable :isolated :display)
+  (with-temp-buffer
+    (let ((state (claude-agent--make-process-state
+                  :source-buffer (current-buffer)
+                  :source-label "42")))
+      (should (eq (current-buffer)
+                  (claude-agent--process-state-source-buffer state)))
+      (should (equal "42"
+                     (claude-agent--process-state-source-label state))))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

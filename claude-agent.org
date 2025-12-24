@@ -473,6 +473,8 @@ Internal state structure for managing async process communication.
   request-id        ; Unique request ID for cancellation
   start-time        ; Query start time (float-time)
   session-key       ; Session key for verbose buffer grouping
+  source-buffer     ; Buffer that initiated query (for display)
+  source-label      ; Human-readable label like "5" for Instruction 5
   (ready nil)       ; Boolean ready state
   (closed nil))     ; Boolean closed state
 
@@ -788,7 +790,8 @@ PROCESS is the CLI process."
 
 #+BEGIN_SRC elisp
 (defun claude-agent--start-process (prompt options callback error-callback complete-callback
-                                          &optional token-callback request-id session-key)
+                                          &optional token-callback request-id session-key
+                                          source-buffer source-label)
   "Start Claude CLI process with PROMPT and OPTIONS.
 
 CALLBACK is called with each parsed message.
@@ -797,6 +800,8 @@ COMPLETE-CALLBACK is called when process completes.
 TOKEN-CALLBACK is called with each text token for streaming (optional).
 REQUEST-ID is a unique identifier for this request (optional).
 SESSION-KEY identifies the session for verbose output grouping (optional).
+SOURCE-BUFFER is the buffer that initiated this query (optional).
+SOURCE-LABEL is a human-readable label like \"5\" for Instruction 5 (optional).
 
 Uses streaming mode by default to enable bidirectional control protocol
 for features like canUseTool permission callback.
@@ -820,6 +825,8 @@ Returns a process state object."
                  :request-id req-id
                  :start-time (float-time)
                  :session-key session-key
+                 :source-buffer source-buffer
+                 :source-label source-label
                  :ready nil
                  :closed nil))
          ;; Note: We use :connection-type 'pipe in make-process below
@@ -936,7 +943,8 @@ Returns a process state object."
 ** Query Function
 
 #+BEGIN_SRC elisp
-(cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete session-key)
+(cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete
+                                     session-key source-buffer source-label)
   "Send a one-shot query to Claude.
 
 PROMPT is the query string to send.
@@ -964,6 +972,12 @@ ON-COMPLETE is called when the query finishes.
 SESSION-KEY identifies the session for verbose output grouping (optional).
   When provided, messages will be written to a per-session verbose buffer.
 
+SOURCE-BUFFER is the buffer that initiated this query (optional).
+  Used for display in session manager and mode-line.
+
+SOURCE-LABEL is a human-readable label like \"5\" for Instruction 5 (optional).
+  Used together with SOURCE-BUFFER for display.
+
 Returns the process state object for potential interruption.
 The process state includes a request-id that can be used with
 `claude-agent-cancel-query' for cancellation.
@@ -979,7 +993,9 @@ Example:
                (insert text))  ; For streaming display
    :on-complete (lambda (result)
                   (message \"Done!\"))
-   :session-key \"my-session\")"
+   :session-key \"my-session\"
+   :source-buffer (current-buffer)
+   :source-label \"5\")"
   (unless prompt
     (error "Prompt is required"))
   (let ((opts (or options (claude-agent-options))))
@@ -991,7 +1007,9 @@ Example:
      on-complete
      on-token
      nil  ; request-id (auto-generated)
-     session-key)))
+     session-key
+     source-buffer
+     source-label)))
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
@@ -2191,35 +2209,74 @@ Shows spinner when queries are active, empty when idle.")
 Uses compact format for mode-line display."
   (claude-agent-format-elapsed-time start-time 'compact))
 
+(defun claude-agent--format-query-identity (state &optional long-form)
+  "Format human-readable identity for query STATE.
+If LONG-FORM is non-nil, use full buffer name instead of abbreviated.
+Returns a string like \"dev.org#5\" or \"#123\" as fallback."
+  (let ((buf (claude-agent--process-state-source-buffer state))
+        (label (claude-agent--process-state-source-label state))
+        (req-id (claude-agent--process-state-request-id state)))
+    (if (and buf (buffer-live-p buf))
+        (let* ((buf-name (buffer-name buf))
+               (short-name (if long-form
+                               buf-name
+                             (file-name-base buf-name))))
+          (if label
+              (format "%s#%s" short-name label)
+            short-name))
+      ;; Fallback to request-id based format
+      (if (and req-id (string-match "req-\\([0-9]+\\)" req-id))
+          (format "#%s" (match-string 1 req-id))
+        (if req-id
+            (substring req-id 0 (min 12 (length req-id)))
+          "#?")))))
+
 (defun claude-agent--format-activity-tooltip ()
   "Format tooltip showing all active queries."
   (let ((lines (list "Active Queries" "───────────────────")))
     (maphash
-     (lambda (id state)
+     (lambda (_id state)
        (when (and state
                   (claude-agent--process-state-p state)
                   (not (claude-agent--process-state-closed state)))
          (let* ((start-time (claude-agent--process-state-start-time state))
                 (elapsed (claude-agent--format-elapsed start-time))
                 (spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
-                ;; Extract short ID from request-id
-                (short-id (if (string-match "req-\\([0-9]+\\)" id)
-                              (format "#%s" (match-string 1 id))
-                            (substring id 0 (min 12 (length id))))))
-           (push (format "● %s  [%s %s]" short-id spinner elapsed) lines))))
+                (identity (claude-agent--format-query-identity state)))
+           (push (format "● %s  [%s %s]" identity spinner elapsed) lines))))
      claude-agent--active-queries)
     (if (= (length lines) 2)
         "No active queries\n\nClick to open session manager"
       (concat (string-join (nreverse lines) "\n")
               "\n\nClick to open session manager"))))
 
+(defun claude-agent--get-single-active-state ()
+  "Return the single active query state, or nil if count != 1."
+  (let ((result nil)
+        (count 0))
+    (maphash
+     (lambda (_id state)
+       (when (and state
+                  (claude-agent--process-state-p state)
+                  (not (claude-agent--process-state-closed state)))
+         (setq result state)
+         (cl-incf count)))
+     claude-agent--active-queries)
+    (when (= count 1) result)))
+
 (defun claude-agent--update-activity-string ()
   "Update the activity mode-line string based on active queries."
   (let ((count (claude-agent-active-query-count)))
     (if (> count 0)
         (let* ((spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
+               ;; For single query, show identity; for multiple, show count
                (display (if (= count 1)
-                            (format " [C:%s]" spinner)
+                            (let* ((state (claude-agent--get-single-active-state))
+                                   (identity (when state
+                                               (claude-agent--format-query-identity state))))
+                              (if identity
+                                  (format " [C:%s %s]" spinner identity)
+                                (format " [C:%s]" spinner)))
                           (format " [C:%s×%d]" spinner count))))
           (setq claude-agent--spinner-index
                 (mod (1+ claude-agent--spinner-index)
@@ -2264,7 +2321,7 @@ Uses compact format for mode-line display."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert "Active Queries\n")
-        (insert "══════════════════════════════\n\n")
+        (insert "══════════════════════════════════════════════════\n\n")
         (let ((has-queries nil))
           (maphash
            (lambda (id state)
@@ -2274,13 +2331,16 @@ Uses compact format for mode-line display."
                (setq has-queries t)
                (let* ((start-time (claude-agent--process-state-start-time state))
                       (elapsed (claude-agent--format-elapsed start-time))
-                      ;; Short display ID
-                      (short-id (if (string-match "req-\\([0-9]+\\)" id)
-                                    (format "#%s" (match-string 1 id))
-                                  id)))
-                 (insert (propertize (format "● %s" short-id)
+                      ;; Use identity with long-form buffer name
+                      (identity (claude-agent--format-query-identity state t))
+                      (label (claude-agent--process-state-source-label state)))
+                 ;; Format: ● buffer-name Instruction N  [elapsed]
+                 (insert (propertize (format "● %s" identity)
                                      'face 'font-lock-function-name-face
                                      'query-id id))
+                 (when label
+                   (insert (propertize (format " Instruction %s" label)
+                                       'face 'font-lock-keyword-face)))
                  (insert (format "  [%s]\n" elapsed)))))
            claude-agent--active-queries)
           (unless has-queries

@@ -564,5 +564,88 @@ Headings that don't match 'Instruction N' pattern should not be changed."
                  ;; so it should remain unchanged
                  (should (string= current-heading original-heading)))))))))))
 
+;;; Query Identity Display Tests
+
+(ert-deftest test-org-integration-query-identity-display ()
+  "Test that active queries show buffer name and instruction number.
+When a query is running, the session manager should display the source
+buffer and instruction number for better identification."
+  :tags '(:integration :slow :api :org :display)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (claude-org-mode 1)
+       ;; Clear any stale queries from previous tests
+       (clrhash claude-agent--active-queries)
+       ;; Go to instruction 1
+       (goto-char (point-min))
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key))
+             (buf (current-buffer)))
+         ;; Execute and immediately check active query
+         (claude-org-execute)
+         ;; Give it a moment to register
+         (sleep-for 0.5)
+         ;; Check active query has source info
+         (let ((found-state nil))
+           (maphash
+            (lambda (_id state)
+              (when (and state
+                         (claude-agent--process-state-p state)
+                         (not (claude-agent--process-state-closed state))
+                         ;; Filter to queries from THIS buffer
+                         (claude-agent--process-state-source-buffer state))
+                (setq found-state state)))
+            claude-agent--active-queries)
+           ;; Should find an active query with source info
+           (should found-state)
+           ;; Query should have source-buffer set
+           (let ((source-buf (claude-agent--process-state-source-buffer found-state)))
+             (should source-buf)
+             (should (buffer-live-p source-buf))
+             ;; Should be our buffer
+             (should (eq source-buf buf)))
+           ;; Query should have source-label set to "1" (Instruction 1)
+           (should (equal "1" (claude-agent--process-state-source-label found-state)))
+           ;; Format identity should show buffer#instruction
+           (let ((identity (claude-agent--format-query-identity found-state)))
+             (should (stringp identity))
+             ;; Should contain "#1" for instruction number
+             (should (string-match-p "#1" identity))))
+         ;; Wait for completion
+         (test-claude-wait-for-completion session-key 30))))))
+
+(ert-deftest test-org-integration-mode-line-shows-identity ()
+  "Test that mode-line shows query identity for single active query."
+  :tags '(:integration :slow :api :org :display)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (claude-org-mode 1)
+       ;; Clear any stale queries from previous tests
+       (clrhash claude-agent--active-queries)
+       (goto-char (point-min))
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+         (sleep-for 0.5)
+         ;; Trigger mode-line update
+         (claude-agent--update-activity-string)
+         ;; Mode-line string should be a string (may be empty if query finished quickly)
+         (should (stringp claude-agent-activity-string))
+         ;; If there's an active query showing, verify the format
+         (when (and (> (length claude-agent-activity-string) 0)
+                    (claude-agent-active-p))
+           ;; Should show spinner format "[C:..."
+           (should (string-match-p "\\[C:" claude-agent-activity-string))
+           ;; For single query with source info, should show "#1"
+           (when (= 1 (claude-agent-active-query-count))
+             (should (string-match-p "#1" claude-agent-activity-string))))
+         (test-claude-wait-for-completion session-key 30))))))
+
 (provide 'test-claude-org-integration)
 ;;; test-claude-org-integration.el ends here
