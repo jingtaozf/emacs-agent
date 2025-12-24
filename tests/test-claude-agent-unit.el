@@ -289,5 +289,183 @@
     (should (or (file-executable-p cli)
                 (equal "claude" cli)))))
 
+;;; Permission System Tests
+
+(ert-deftest test-claude-agent-permission-match-wildcard ()
+  "Test that wildcard pattern matches everything."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/tmp/test.txt") "*"))
+  (should (claude-agent-permission-match-p "Write" '(:file_path "/etc/passwd") "*"))
+  (should (claude-agent-permission-match-p "Bash" '(:command "rm -rf /") "*"))
+  (should (claude-agent-permission-match-p "mcp__emacs__evalElisp" '(:code "(+ 1 2)") "*")))
+
+(ert-deftest test-claude-agent-permission-match-tool-name ()
+  "Test simple tool name matching without arguments."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/tmp/test.txt") "Read"))
+  (should (claude-agent-permission-match-p "Write" '(:file_path "/tmp/test.txt") "Write"))
+  (should-not (claude-agent-permission-match-p "Read" '(:file_path "/tmp/test.txt") "Write"))
+  (should-not (claude-agent-permission-match-p "Bash" '(:command "ls") "Read")))
+
+(ert-deftest test-claude-agent-permission-match-double-star ()
+  "Test (**) pattern matches any arguments."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/tmp/test.txt") "Read(**)"))
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/etc/passwd") "Read(**)"))
+  (should (claude-agent-permission-match-p "Write" '(:file_path "/home/user/doc.txt") "Write(**)"))
+  (should-not (claude-agent-permission-match-p "Read" '(:file_path "/tmp/x") "Write(**)")))
+
+(ert-deftest test-claude-agent-permission-match-prefix ()
+  "Test prefix:* pattern matches commands starting with prefix."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (should (claude-agent-permission-match-p "Bash" '(:command "git status") "Bash(git:*)"))
+  (should (claude-agent-permission-match-p "Bash" '(:command "git commit -m test") "Bash(git:*)"))
+  (should-not (claude-agent-permission-match-p "Bash" '(:command "rm -rf /") "Bash(git:*)")))
+
+(ert-deftest test-claude-agent-permission-match-mcp-glob ()
+  "Test glob pattern for MCP tool names."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (should (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "mcp__emacs__*"))
+  (should (claude-agent-permission-match-p "mcp__emacs__getDiagnostics" nil "mcp__emacs__*"))
+  (should (claude-agent-permission-match-p "mcp__context7__resolve-library-id" nil "mcp__context7__*"))
+  (should-not (claude-agent-permission-match-p "mcp__emacs__evalElisp" nil "mcp__context7__*")))
+
+(ert-deftest test-claude-agent-permission-match-path-glob ()
+  "Test glob pattern for file paths."
+  :tags '(:unit :fast :stable :isolated :permission)
+  ;; Match any file (** pattern)
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/project/.env") "Read(**)"))
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/home/user/app/.env") "Read(**)"))
+  ;; Match specific directory prefix
+  (should (claude-agent-permission-match-p "Write" '(:file_path "/tmp/foo.txt") "Write(/tmp/*)"))
+  ;; Match files starting with specific path
+  (should (claude-agent-permission-match-p "Read" '(:file_path "/home/user/doc.txt") "Read(/home/*)")))
+
+(ert-deftest test-claude-agent-permission-check-deny-first ()
+  "Test that deny patterns take precedence over allow."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (let ((allow '("Read(**)" "Bash(**)"))
+        (deny '("Bash(rm *)")))
+    ;; Read should be allowed
+    (should (eq 'allow (claude-agent-check-permission
+                        "Read" '(:file_path "/tmp/test") allow deny)))
+    ;; Normal bash should be allowed
+    (should (eq 'allow (claude-agent-check-permission
+                        "Bash" '(:command "ls -la") allow deny)))
+    ;; rm command should be denied (matches deny pattern)
+    (should (eq 'deny (claude-agent-check-permission
+                       "Bash" '(:command "rm -rf /tmp/foo") allow deny)))))
+
+(ert-deftest test-claude-agent-permission-check-default-deny ()
+  "Test that default deny patterns are always checked."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (let ((allow '("Bash(**)"))  ; Allow all bash
+        (deny '()))             ; No user deny patterns
+    ;; sudo should still be denied by default patterns
+    (should (eq 'deny (claude-agent-check-permission
+                       "Bash" '(:command "sudo rm -rf /") allow deny)))
+    ;; chmod 777 should be denied
+    (should (eq 'deny (claude-agent-check-permission
+                       "Bash" '(:command "chmod 777 /etc/passwd") allow deny)))))
+
+(ert-deftest test-claude-agent-permission-check-ask ()
+  "Test that unmatched tools return 'ask."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (let ((allow '("Read(**)"))
+        (deny '()))
+    ;; Write is not in allow list, should ask
+    (should (eq 'ask (claude-agent-check-permission
+                      "Write" '(:file_path "/tmp/new.txt") allow deny)))
+    ;; Unknown tool should ask
+    (should (eq 'ask (claude-agent-check-permission
+                      "CustomTool" '(:arg "value") allow deny)))))
+
+(ert-deftest test-claude-agent-permission-presets ()
+  "Test preset permission configurations."
+  :tags '(:unit :fast :stable :isolated :permission)
+  ;; Readonly preset
+  (let ((claude-agent-permission-preset "readonly"))
+    (let ((perms (claude-agent-get-effective-permissions)))
+      (should (member "Read(**)" (plist-get perms :allow)))
+      (should (member "Glob(**)" (plist-get perms :allow)))
+      (should (member "Grep(**)" (plist-get perms :allow)))
+      (should-not (member "Write(**)" (plist-get perms :allow)))))
+  ;; Accept-edits preset
+  (let ((claude-agent-permission-preset "accept-edits"))
+    (let ((perms (claude-agent-get-effective-permissions)))
+      (should (member "Read(**)" (plist-get perms :allow)))
+      (should (member "Write(**)" (plist-get perms :allow)))
+      (should (member "Edit(**)" (plist-get perms :allow)))))
+  ;; Bypass preset
+  (let ((claude-agent-permission-preset "bypass"))
+    (let ((perms (claude-agent-get-effective-permissions)))
+      (should (member "*" (plist-get perms :allow))))))
+
+(ert-deftest test-claude-agent-permission-custom ()
+  "Test custom permission configuration."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (let ((claude-agent-permission-preset "custom")
+        (claude-agent-permissions
+         '(:allow ("Read(**)" "Bash(git:*)")
+           :deny ("Read(**/.env)"))))
+    (let ((perms (claude-agent-get-effective-permissions)))
+      (should (equal claude-agent-permissions perms)))))
+
+(ert-deftest test-claude-agent-permission-cache-key ()
+  "Test permission cache key generation."
+  :tags '(:unit :fast :stable :isolated :permission)
+  ;; File-based tools use directory
+  (should (equal "Read:/tmp/"
+                 (claude-agent--permission-cache-key "Read" '(:file_path "/tmp/test.txt"))))
+  (should (equal "Write:/home/user/"
+                 (claude-agent--permission-cache-key "Write" '(:file_path "/home/user/doc.txt"))))
+  ;; Bash uses first word of command
+  (should (equal "Bash:git"
+                 (claude-agent--permission-cache-key "Bash" '(:command "git status"))))
+  ;; Tools without special handling use tool name
+  (should (equal "WebSearch"
+                 (claude-agent--permission-cache-key "WebSearch" '(:query "test")))))
+
+(ert-deftest test-claude-agent-describe-tool-use ()
+  "Test tool use description generation."
+  :tags '(:unit :fast :stable :isolated :permission)
+  ;; File tools show filename
+  (should (equal "Read test.txt"
+                 (claude-agent--describe-tool-use "Read" '(:file_path "/tmp/test.txt"))))
+  ;; Bash shows command (truncated if long)
+  (should (equal "Bash: git status"
+                 (claude-agent--describe-tool-use "Bash" '(:command "git status"))))
+  ;; Long commands are truncated
+  (let ((long-cmd (make-string 100 ?x)))
+    (should (string-match-p "\\.\\.\\.$"
+                            (claude-agent--describe-tool-use "Bash" `(:command ,long-cmd))))))
+
+(ert-deftest test-claude-agent-permission-auto-allow ()
+  "Test auto-allow permission callback."
+  :tags '(:unit :fast :stable :isolated :permission)
+  (let ((result (claude-agent-permission-auto-allow "Read" '(:file_path "/tmp/x") nil)))
+    (should (equal "allow" (plist-get result :behavior)))))
+
+(ert-deftest test-claude-agent-get-tool-first-arg ()
+  "Test extraction of primary argument from tool input."
+  :tags '(:unit :fast :stable :isolated :permission)
+  ;; File operations
+  (should (equal "/tmp/test.txt"
+                 (claude-agent--get-tool-first-arg "Read" '(:file_path "/tmp/test.txt"))))
+  (should (equal "/tmp/out.txt"
+                 (claude-agent--get-tool-first-arg "Write" '(:file_path "/tmp/out.txt" :content "data"))))
+  ;; Glob uses pattern
+  (should (equal "**/*.el"
+                 (claude-agent--get-tool-first-arg "Glob" '(:pattern "**/*.el"))))
+  ;; Bash uses command
+  (should (equal "git status"
+                 (claude-agent--get-tool-first-arg "Bash" '(:command "git status"))))
+  ;; WebSearch uses query
+  (should (equal "elisp tutorial"
+                 (claude-agent--get-tool-first-arg "WebSearch" '(:query "elisp tutorial"))))
+  ;; WebFetch uses url
+  (should (equal "https://example.com"
+                 (claude-agent--get-tool-first-arg "WebFetch" '(:url "https://example.com")))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

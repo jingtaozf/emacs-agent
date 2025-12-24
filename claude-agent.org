@@ -418,6 +418,10 @@ If STREAMING-P is non-nil, use streaming input mode."
           (when mode-str
             (setq args (append args (list "--permission-mode" mode-str)))))))
 
+    ;; === Permission Callback (requires streaming mode for control protocol) ===
+    (when (and streaming-p claude-agent-permission-callback)
+      (setq args (append args (list "--permission-prompt-tool" "stdio"))))
+
     ;; === Tool Controls ===
     (let ((allowed-tools (plist-get options :allowed-tools)))
       (when allowed-tools
@@ -626,7 +630,9 @@ Parses complete newline-delimited JSON and invokes callbacks."
                              (claude-agent--process-state-session-key state) message)
                             ;; Call user callback
                             (when callback
-                              (funcall callback message)))))))))
+                              (funcall callback message))))
+                        ;; Close stdin when result is received (streaming mode)
+                        (claude-agent--maybe-close-stdin process parsed))))))
             ((json-parse-error json-readtable-error json-end-of-file)
              ;; Line is not valid JSON - could be plain text error from CLI
              (claude-agent--debug-log "Non-JSON output: %s" line)
@@ -651,6 +657,10 @@ OUTPUT is the data received from the process.
 Uses `process-get' to retrieve state instead of closures (for dynamic binding compat)."
   (let ((state (process-get process 'claude-agent-state)))
     (when (and state (claude-agent--process-state-ready state))
+      ;; Log stdout to verbose buffer for debugging
+      (when-let ((session-key (claude-agent--process-state-session-key state)))
+        (claude-agent--verbose-insert session-key
+                                      (format "<<< STDOUT: %s" output)))
       (let ((json-buf (or (claude-agent--process-state-json-buffer state) "")))
         (setf (claude-agent--process-state-json-buffer state)
               (concat json-buf output))
@@ -713,6 +723,67 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
           (kill-buffer buf))))))
 #+END_SRC
 
+** Streaming Mode Initialization
+
+In streaming mode, we need to:
+1. Send an initialize control request to set up hooks
+2. Send the user prompt as a JSON message
+3. Keep stdin open for bidirectional communication
+4. Close stdin only after receiving the result message
+
+#+BEGIN_SRC elisp
+(defun claude-agent--send-stdin (process json-data session-key)
+  "Send JSON-DATA to PROCESS stdin and log to verbose buffer.
+SESSION-KEY is used for verbose logging."
+  (let* ((json-object-type 'plist)
+         (json-array-type 'list)
+         (json-key-type 'keyword)
+         (json-str (concat (json-encode json-data) "\n")))
+    ;; Log to verbose buffer
+    (when session-key
+      (claude-agent--verbose-insert session-key
+                                    (format ">>> STDIN: %s" json-str)))
+    (claude-agent--debug-log "Sending to stdin: %s"
+                            (substring json-str 0 (min 200 (length json-str))))
+    (process-send-string process json-str)))
+
+(defun claude-agent--streaming-init (process state prompt)
+  "Initialize streaming mode for PROCESS with STATE and send PROMPT.
+Sends initialize control request, waits for response, then sends user message."
+  (let ((session-key (claude-agent--process-state-session-key state)))
+    ;; Step 1: Send initialize control request
+    (let ((init-request (list :type "control_request"
+                              :request_id "init_1"
+                              :request (list :subtype "initialize"
+                                            :hooks nil))))
+      (claude-agent--send-stdin process init-request session-key))
+
+    ;; Step 2: Send user message with prompt
+    ;; The CLI expects: {"type": "user", "message": {"role": "user", "content": "..."}}
+    (let ((user-message (list :type "user"
+                              :message (list :role "user"
+                                            :content prompt))))
+      (claude-agent--send-stdin process user-message session-key))
+
+    ;; Mark state as ready (we don't wait for init response synchronously)
+    (setf (claude-agent--process-state-ready state) t)))
+#+END_SRC
+
+** Closing Stdin After Result
+
+We need to close stdin when we receive the result message to signal completion.
+This is handled in the process filter when a result message is received.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--maybe-close-stdin (process parsed)
+  "Close stdin if PARSED is a result message.
+PROCESS is the CLI process."
+  (when (equal (plist-get parsed :type) "result")
+    (claude-agent--debug-log "Result received, closing stdin")
+    (when (process-live-p process)
+      (process-send-eof process))))
+#+END_SRC
+
 ** Process Creation
 
 #+BEGIN_SRC elisp
@@ -727,11 +798,15 @@ TOKEN-CALLBACK is called with each text token for streaming (optional).
 REQUEST-ID is a unique identifier for this request (optional).
 SESSION-KEY identifies the session for verbose output grouping (optional).
 
+Uses streaming mode by default to enable bidirectional control protocol
+for features like canUseTool permission callback.
+
 Returns a process state object."
   (let* ((cli-path (expand-file-name
                     (or (plist-get options :cli-path)
                         (claude-agent--find-cli))))
-         (args (claude-agent--build-args options nil))
+         ;; Always use streaming mode for bidirectional control protocol
+         (args (claude-agent--build-args options t))
          (cwd (plist-get options :cwd))
          (env-vars (plist-get options :env))
          (req-id (or request-id (claude-agent--generate-request-id)))
@@ -755,9 +830,7 @@ Returns a process state object."
                                         (format "%s=%s" (car pair) (cdr pair)))
                                       env-vars)
                               process-environment)))
-    ;; Add prompt to args
-    (setq args (append args (list "--" prompt)))
-    ;; Build command
+    ;; Build command (prompt sent via stdin in streaming mode)
     (let* ((command (cons cli-path args))
            (process (make-process
                     :name "claude-agent"
@@ -773,16 +846,14 @@ Returns a process state object."
       (process-put process 'claude-agent-state state)
       (setf (claude-agent--process-state-process state) process)
       (setf (claude-agent--process-state-buffer state) (process-buffer process))
-      (setf (claude-agent--process-state-ready state) t)
       ;; Register query for cancellation tracking
       (claude-agent--register-query req-id state)
       ;; Initialize verbose buffer for session if session-key provided
       (when session-key
         (claude-agent--get-session-verbose-buffer session-key)
         (claude-agent--verbose-insert-query-header session-key prompt cli-path args default-directory env-vars))
-      ;; KEY: Close stdin immediately for non-interactive --print mode
-      ;; This signals EOF to the CLI, allowing it to proceed
-      (process-send-eof process)
+      ;; Streaming mode: Send initialization and prompt via stdin
+      (claude-agent--streaming-init process state prompt)
       (push state claude-agent--active-states)
       state)))
 #+END_SRC
@@ -1425,18 +1496,18 @@ Invokes appropriate Emacs hooks and sends control_response."
              process request-id "success"
              (or hook-output (list)))))
 
-         ;; Tool permission (uses PreToolUse hooks)
+         ;; Tool permission (uses PreToolUse hooks, then callback)
          ((equal subtype "can_use_tool")
           (let* ((tool-name (plist-get request-data :tool_name))
                  (tool-input (plist-get request-data :input))
                  (input-data (list :tool_name tool-name
                                   :tool_input tool-input))
-                 (context (list :signal nil))
-                 ;; Run PreToolUse hooks
+                 (hook-context (list :signal nil))
+                 ;; Run PreToolUse hooks first
                  (hook-output (claude-agent--run-hooks-for-event
                               'claude-agent-pre-tool-use-hook
-                              input-data nil context)))
-            ;; Convert hook output to permission response
+                              input-data nil hook-context)))
+            ;; Check hook output
             (if hook-output
                 (let* ((hook-specific (plist-get hook-output :hookSpecificOutput))
                        (decision (plist-get hook-specific :permissionDecision))
@@ -1454,11 +1525,25 @@ Invokes appropriate Emacs hooks and sends control_response."
                      process request-id "success"
                      (list :behavior "allow"
                            :updatedInput (or updated-input tool-input)))))
-              ;; No hooks - allow by default
-              (claude-agent--send-control-response
-               process request-id "success"
-               (list :behavior "allow"
-                     :updatedInput tool-input)))))
+              ;; No hooks decided - use permission callback
+              (if claude-agent-permission-callback
+                  (let* ((session-id (process-get process :session-id))
+                         (org-section (process-get process :org-section))
+                         (context (list :session-id session-id
+                                       :org-section org-section
+                                       :suggestions (plist-get request-data :permission_suggestions)))
+                         (result (funcall claude-agent-permission-callback
+                                         tool-name tool-input context)))
+                    (claude-agent--send-control-response
+                     process request-id "success"
+                     (list :behavior (plist-get result :behavior)
+                           :updatedInput (or (plist-get result :updated-input) tool-input)
+                           :message (plist-get result :message))))
+                ;; No callback - allow by default
+                (claude-agent--send-control-response
+                 process request-id "success"
+                 (list :behavior "allow"
+                       :updatedInput tool-input))))))
 
          (t
           ;; Unsupported subtype
@@ -1523,6 +1608,128 @@ Tests are tagged for selective execution:
 This section provides permission pattern matching for controlling which
 Claude tools are allowed or denied. It ports the permission system from
 the Python backend.
+
+** Permission Callback
+
+When Claude CLI requests permission for a tool (via =acceptEdits= mode),
+the callback function is invoked to decide. Built-in implementations:
+- =claude-agent-permission-prompt= - Interactive y-or-n-p (default)
+- =claude-agent-permission-auto-allow= - Auto-approve everything
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-permission-callback #'claude-agent-permission-prompt
+  "Function called when Claude requests tool permission.
+Receives: TOOL-NAME, TOOL-INPUT, CONTEXT.
+Returns: plist (:behavior \"allow\") or (:behavior \"deny\" :message \"...\").
+
+Built-in:
+  `claude-agent-permission-prompt'     - Interactive y-or-n-p (default)
+  `claude-agent-permission-auto-allow' - Auto-approve everything"
+  :type 'function
+  :group 'claude-agent)
+
+(defcustom claude-agent-permission-cache-dir
+  (expand-file-name "claude-agent/permissions/" user-emacs-directory)
+  "Directory to store per-session permission cache files.
+Each Claude session ID gets a separate file: SESSION-ID.el"
+  :type 'directory
+  :group 'claude-agent)
+#+END_SRC
+
+*** Permission Cache (Per-Session)
+
+Each session's decisions are persisted to a separate file.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--permission-cache-file (session-id)
+  "Return cache file path for SESSION-ID."
+  (when session-id
+    (expand-file-name (concat session-id ".el") claude-agent-permission-cache-dir)))
+
+(defun claude-agent--permission-cache-load (session-id)
+  "Load permission cache for SESSION-ID. Returns hash-table."
+  (let ((file (claude-agent--permission-cache-file session-id)))
+    (if (and file (file-exists-p file))
+        (condition-case nil
+            (with-temp-buffer
+              (insert-file-contents file)
+              (read (current-buffer)))
+          (error (make-hash-table :test 'equal)))
+      (make-hash-table :test 'equal))))
+
+(defun claude-agent--permission-cache-save (session-id cache)
+  "Save CACHE hash-table for SESSION-ID."
+  (when session-id
+    (let ((file (claude-agent--permission-cache-file session-id)))
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file
+        (prin1 cache (current-buffer))))))
+
+(defun claude-agent--permission-cache-key (tool-name tool-input)
+  "Generate cache key from TOOL-NAME and TOOL-INPUT.
+Groups similar operations by directory or command prefix."
+  (let ((file-path (plist-get tool-input :file_path))
+        (command (plist-get tool-input :command)))
+    (cond
+     (file-path (format "%s:%s" tool-name (file-name-directory file-path)))
+     (command (format "%s:%s" tool-name (car (split-string command))))
+     (t tool-name))))
+#+END_SRC
+
+*** Tool Description
+
+#+BEGIN_SRC elisp
+(defun claude-agent--describe-tool-use (tool-name tool-input)
+  "Generate concise description: tool + filename or command."
+  (let ((file-path (plist-get tool-input :file_path))
+        (command (plist-get tool-input :command)))
+    (cond
+     (file-path
+      (format "%s %s" tool-name (file-name-nondirectory file-path)))
+     (command
+      (let ((cmd (string-trim command)))
+        (format "Bash: %s" (if (> (length cmd) 50)
+                               (concat (substring cmd 0 47) "...")
+                             cmd))))
+     (t tool-name))))
+#+END_SRC
+
+*** Default Implementation: Interactive Prompt
+
+#+BEGIN_SRC elisp
+(defun claude-agent-permission-prompt (tool-name tool-input context)
+  "Prompt user with y-or-n-p, cache decision per session."
+  (let* ((session-id (plist-get context :session-id))
+         (cache (claude-agent--permission-cache-load session-id))
+         (key (claude-agent--permission-cache-key tool-name tool-input))
+         (cached (gethash key cache)))
+    (if cached
+        ;; Return cached decision
+        (if (eq (car cached) 'allow)
+            '(:behavior "allow")
+          '(:behavior "deny" :message "Previously denied"))
+      ;; Prompt user
+      (let* ((desc (claude-agent--describe-tool-use tool-name tool-input))
+             (section (plist-get context :org-section))
+             (prompt (if section
+                         (format "[%s] Allow %s? " section desc)
+                       (format "Allow %s? " desc)))
+             (allowed (y-or-n-p prompt)))
+        ;; Cache and save
+        (puthash key (cons (if allowed 'allow 'deny) (current-time)) cache)
+        (claude-agent--permission-cache-save session-id cache)
+        (if allowed
+            '(:behavior "allow")
+          '(:behavior "deny" :message "User denied"))))))
+#+END_SRC
+
+*** Auto-Approve Implementation
+
+#+BEGIN_SRC elisp
+(defun claude-agent-permission-auto-allow (_tool-name _tool-input _context)
+  "Auto-approve all tool requests."
+  '(:behavior "allow"))
+#+END_SRC
 
 ** Permission Presets
 
@@ -2311,7 +2518,7 @@ Returns nil if not set."
 (defun claude-agent-usage-format-reset-time (iso-time)
   "Format ISO-TIME to human readable relative time.
 Shows days and hours for periods >= 24h, otherwise hours and minutes."
-  (if iso-time
+  (if (stringp iso-time)
       (let* ((time (parse-iso8601-time-string iso-time))
              (diff (float-time (time-subtract time (current-time)))))
         (if (> diff 0)
@@ -2475,6 +2682,17 @@ CLI-like output for all queries within a session.
 ** Verbose Buffer Management
 
 #+BEGIN_SRC elisp
+(defun claude-agent--verbose-insert (session-key text)
+  "Insert TEXT into verbose buffer for SESSION-KEY."
+  (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert text)
+          (unless (string-suffix-p "\n" text)
+            (insert "\n")))))))
+
 (defun claude-agent--get-session-verbose-buffer (session-key)
   "Get or create verbose buffer for SESSION-KEY."
   (or (let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
