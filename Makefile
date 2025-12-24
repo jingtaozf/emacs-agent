@@ -9,7 +9,7 @@ SOURCES = claude-agent.org claude-org.org
 
 # Test files
 UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el
-INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-hooks.el tests/test-mcp-ide-integration.el
+INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el
 ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
@@ -36,7 +36,7 @@ help:
 	@echo "  make test-integration - Run integration tests (requires API key)"
 	@echo "  make test-agent-unit  - Run claude-agent unit tests"
 	@echo "  make test-org-unit    - Run claude-org unit tests"
-	@echo "  make test-hooks       - Run hook system tests"
+	@echo "  make test-permissions - Run permission functions tests"
 	@echo "  make test-mcp-ide     - Run MCP IDE diagnostics tests"
 	@echo "  make test-mcp-ide-unit - Run MCP IDE unit tests only"
 	@echo ""
@@ -130,23 +130,24 @@ test-org-integration:
 		-l tests/test-claude-org-integration.el \
 		-f ert-run-tests-batch-and-exit
 
-.PHONY: test-hooks
-test-hooks:
-	@echo "Running hook system tests..."
-	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		-l tests/test-claude-agent-hooks.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :hooks))"
-
-.PHONY: test-org-hooks
-test-org-hooks:
-	@echo "Running org file protection hook tests..."
+.PHONY: test-permissions
+test-permissions:
+	@echo "Running permission functions tests..."
 	$(BATCH) $(LOAD_PATH) \
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
-		-l tests/test-claude-agent-hooks.el \
+		-l tests/test-claude-agent-permissions.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :permissions))"
+
+.PHONY: test-org-permissions
+test-org-permissions:
+	@echo "Running org file protection permission tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/test-claude-agent-permissions.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
 
 .PHONY: test-mcp-ide

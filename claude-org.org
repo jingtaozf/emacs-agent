@@ -2398,7 +2398,7 @@ to send the query and stream the response.
         ;; Auto-start MCP server
         (claude-org--ensure-mcp-server)
         ;; Install org file protection hook (prevents Edit/Write on .org files)
-        (claude-org--install-protection-hook)
+        (claude-org--install-protection)
         ;; Add company backend for slash commands (buffer-local, high priority)
         (when (boundp 'company-backends)
           (set (make-local-variable 'company-backends)
@@ -2413,7 +2413,7 @@ to send the query and stream the response.
     ;; Cancel any active queries
     (claude-org-cancel-all)
     ;; Remove org file protection hook
-    (claude-org--remove-protection-hook)
+    (claude-org--remove-protection)
     ;; Stop header timer if no more claude-org buffers
     (claude-org--stop-header-timer)
     ;; Company backends will be cleaned up automatically (buffer-local)
@@ -2568,49 +2568,43 @@ to send the query and stream the response.
 *NOTE: This hook does NOT work as intended.* It is kept for documentation purposes
 and potential future use if Claude Code CLI changes its architecture.
 
-** Why This Hook Cannot Intercept Edit/Write Tools
+** How Permission Functions Work
 
-The =claude-agent-pre-tool-use-hook= is triggered when Claude Code CLI sends a
-=can_use_tool= control request to Emacs. However, Claude Code's built-in Edit/Write
-tools are *not* routed through this mechanism:
+When Claude Code CLI is in =acceptEdits= mode, it sends =can_use_tool= control
+requests to Emacs before executing Edit/Write tools. The
+=claude-agent-permission-functions= hook processes these requests:
 
-| Tool Type | Execution Path | Hook Intercept? |
-|-----------+----------------+-----------------|
-| Claude Code's Edit/Write | Claude CLI → filesystem directly | ❌ No |
-| MCP tools (evalElisp, org_*) | Claude CLI → HTTP → Emacs MCP server | ❌ No (MCP protocol) |
-| Emacs-delegated tools | Claude CLI → control_request → Emacs | ✅ Yes |
+| Permission Mode | Edit/Write Flow | Protection? |
+|-----------------+-----------------+-------------|
+| bypassPermissions | CLI auto-approves | ❌ No prompts |
+| acceptEdits | CLI → can_use_tool → Emacs | ✅ Permission functions run |
+| default | CLI prompts user | ⚠️ CLI UI (not Emacs) |
 
-In =bypassPermissions= mode (which we use for efficiency), the CLI auto-approves
-Edit/Write without asking Emacs. Even in other modes, the CLI handles these tools
-internally rather than delegating to Emacs.
+To protect org files, add =claude-org-permission-protect-org= to
+=claude-agent-permission-functions=. This only works in =acceptEdits= mode.
 
-*Current Solution:* System prompt instructions tell Claude to use MCP org_* tools
-for .org files. This relies on prompt compliance rather than enforcement.
+** Org File Protection (Permission Function)
 
-** Hook Implementation (Non-Functional)
+This permission function denies Edit/Write on .org files, suggesting MCP tools.
+Add it to =claude-agent-permission-functions= to enable protection.
 
-This code remains as reference for the intended behavior. If Claude Code CLI
-ever adds a hook mechanism for built-in tools, this pattern could be adapted.
-
-#+NAME: org-protect-hook
+#+NAME: org-protect-permission
 #+BEGIN_SRC elisp
-(defun claude-org--protect-org-files (input-data tool-use-id context)
-  "Hook to prevent Edit/Write tools on .org files.
+(defun claude-org-permission-protect-org (tool-name tool-input _context)
+  "Permission function to protect .org files from Edit/Write.
 
-INPUT-DATA: plist with :tool_name and :tool_input
-TOOL-USE-ID: string ID (may be nil)
-CONTEXT: plist with :signal
+TOOL-NAME: string like \"Edit\", \"Write\"
+TOOL-INPUT: plist with :file_path and other parameters
+CONTEXT: plist with :session-id, :org-section
 
-Returns nil to allow, or a hook output plist to deny with error message."
-  (let* ((tool-name (plist-get input-data :tool_name))
-         (tool-input (plist-get input-data :tool_input))
-         (file-path (plist-get tool-input :file_path)))
+Returns nil to pass through, or permission result to deny.
+Should be added to `claude-agent-permission-functions'."
+  (let ((file-path (plist-get tool-input :file_path)))
     (when (and (member tool-name '("Edit" "Write"))
                file-path
                (string-match-p "\\.org$" file-path))
-      ;; Deny with helpful error message
-      (list :reason "Org files require Emacs MCP tools for proper structure handling"
-            :systemMessage
+      (list :behavior "deny"
+            :message
             (concat "🚫 Cannot use " tool-name " on .org files.\n\n"
                     "Use Emacs MCP tools instead:\n"
                     "- mcp__emacs__org_read_section - Read section by path\n"
@@ -2619,46 +2613,32 @@ Returns nil to allow, or a hook output plist to deny with error message."
                     "- mcp__emacs__org_delete_section - Delete section\n"
                     "- mcp__emacs__org_set_property - Set property value\n"
                     "- mcp__emacs__org_set_tags - Set section tags\n\n"
-                    "These tools preserve org structure and work with Emacs directly.")
-            :hookSpecificOutput
-            (list :hookEventName "PreToolUse"
-                  :permissionDecision "deny"
-                  :permissionDecisionReason
-                  (format "Use Emacs MCP org_* tools for %s" file-path))))))
-
+                    "These tools preserve org structure and work with Emacs directly.")))))
 #+END_SRC
 
-** Hook Installation (Non-Functional)
+** Protection Installation
 
-These functions install/remove the hook, but since the hook never triggers for
-Edit/Write tools, they have no practical effect. Kept for potential future use.
+Install/remove org protection in the permission hook.
 
-#+NAME: org-protect-hook-install
+#+NAME: org-protect-install
 #+BEGIN_SRC elisp
-(defun claude-org--install-protection-hook ()
-  "Install the org file protection hook globally.
-The hook must be global because it runs in process filter context,
-not in the org buffer where the query originated.
+(defun claude-org--install-protection ()
+  "Install org file protection in permission functions.
+The protection must be global because it runs in process filter context."
+  (add-hook 'claude-agent-permission-functions
+            #'claude-org-permission-protect-org))
 
-NOTE: This hook does not actually intercept Edit/Write tools.
-See documentation in 'Org File Protection Hook' section."
-  (add-hook 'claude-agent-pre-tool-use-hook
-            #'claude-org--protect-org-files))
-
-(defun claude-org--remove-protection-hook ()
-  "Remove the org file protection hook if no claude-org buffers remain.
-
-NOTE: This hook does not actually intercept Edit/Write tools.
-See documentation in 'Org File Protection Hook' section."
-  ;; Only remove if no other claude-org-mode buffers exist
+(defun claude-org--remove-protection ()
+  "Remove org file protection if no claude-org buffers remain."
   (unless (cl-some (lambda (buf)
                      (and (not (eq buf (current-buffer)))
                           (buffer-live-p buf)
                           (with-current-buffer buf
                             claude-org-mode)))
                    (buffer-list))
-    (remove-hook 'claude-agent-pre-tool-use-hook
-                 #'claude-org--protect-org-files)))
+    (setq claude-agent-permission-functions
+          (delq #'claude-org-permission-protect-org
+                claude-agent-permission-functions))))
 #+END_SRC
 
 * Package Footer

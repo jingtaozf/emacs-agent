@@ -419,7 +419,7 @@ If STREAMING-P is non-nil, use streaming input mode."
             (setq args (append args (list "--permission-mode" mode-str)))))))
 
     ;; === Permission Callback (requires streaming mode for control protocol) ===
-    (when (and streaming-p claude-agent-permission-callback)
+    (when (and streaming-p claude-agent-permission-functions)
       (setq args (append args (list "--permission-prompt-tool" "stdio"))))
 
     ;; === Tool Controls ===
@@ -1248,198 +1248,6 @@ Returns nil if not yet available."
   (claude-agent-client-session-id client))
 #+END_SRC
 
-* Hook System
-
-Claude Agent SDK integrates with Emacs's native hook system to intercept and
-control Claude's tool use via the bidirectional control protocol. This allows
-you to use familiar =add-hook= and =remove-hook= functions to customize Claude's
-behavior.
-
-** Hook Variables
-
-Define Emacs-style hooks for each Claude control protocol event.
-
-#+BEGIN_SRC elisp
-(defvar claude-agent-pre-tool-use-hook nil
-  "Hook run before Claude executes a tool via control protocol.
-
-Functions are called with three arguments:
-  INPUT-DATA: plist with :tool_name and :tool_input
-  TOOL-USE-ID: string ID of the tool use (may be nil)
-  CONTEXT: plist with :signal for cancellation
-
-Each function should return nil to allow the tool, or a plist with
-hook output to modify or deny the tool execution.
-
-Hook output plist format:
-  :reason                  - String explaining the decision
-  :systemMessage           - String shown to Claude in conversation
-  :hookSpecificOutput      - Plist with event-specific fields:
-    :hookEventName         - \"PreToolUse\"
-    :permissionDecision    - \"allow\" or \"deny\"
-    :permissionDecisionReason - String explaining permission decision
-    :updatedInput          - Modified tool input (if allowing with changes)
-
-Example - Block dangerous bash commands:
-  (defun my-block-rm-rf (input-data tool-use-id context)
-    (let ((tool-name (plist-get input-data :tool_name))
-          (tool-input (plist-get input-data :tool_input)))
-      (when (and (equal tool-name \"Bash\")
-                 (string-match-p \"rm -rf\"
-                               (plist-get tool-input :command)))
-        (list :reason \"Dangerous command blocked\"
-              :systemMessage \"🚫 'rm -rf' commands are not allowed\"
-              :hookSpecificOutput
-                (list :hookEventName \"PreToolUse\"
-                      :permissionDecision \"deny\"
-                      :permissionDecisionReason
-                        \"rm -rf is blocked for safety\")))))
-
-  (add-hook 'claude-agent-pre-tool-use-hook #'my-block-rm-rf)
-
-This hook is made buffer-local automatically when used in minor modes.")
-
-(defvar claude-agent-post-tool-use-hook nil
-  "Hook run after Claude executes a tool via control protocol.
-
-Functions are called with the same arguments as pre-tool-use-hook, but
-INPUT-DATA also contains :tool_response with the tool's output.
-
-Hook output plist format:
-  :reason                  - String explaining feedback
-  :systemMessage           - String shown to Claude
-  :continue_               - Boolean (if false, stops execution)
-  :stopReason              - String explaining why execution stopped
-  :hookSpecificOutput      - Plist with:
-    :hookEventName         - \"PostToolUse\"
-    :additionalContext     - String with extra context for Claude
-
-Example - Stop on critical errors:
-  (defun my-stop-on-critical-error (input-data tool-use-id context)
-    (let ((response (plist-get input-data :tool_response)))
-      (when (string-match-p \"CRITICAL\" response)
-        (list :continue_ nil
-              :stopReason \"Critical error detected\"
-              :systemMessage \"🛑 Execution stopped due to critical error\"))))
-
-  (add-hook 'claude-agent-post-tool-use-hook
-            #'my-stop-on-critical-error)
-
-This hook is made buffer-local automatically when used in minor modes.")
-
-(defvar claude-agent-user-prompt-submit-hook nil
-  "Hook run when user submits a prompt to Claude.
-
-Functions are called with three arguments (tool-use-id will be nil).
-
-Hook output plist format:
-  :hookSpecificOutput      - Plist with:
-    :hookEventName         - \"UserPromptSubmit\"
-    :additionalContext     - String with context to inject
-
-Example - Add project-specific context:
-  (defun my-add-project-context (input-data tool-use-id context)
-    (list :hookSpecificOutput
-          (list :hookEventName \"UserPromptSubmit\"
-                :additionalContext
-                  \"This project uses Python 3.11 and pytest.\")))
-
-  (add-hook 'claude-agent-user-prompt-submit-hook
-            #'my-add-project-context)
-
-This hook is made buffer-local automatically when used in minor modes.")
-
-(defvar claude-agent-session-start-hook nil
-  "Hook run when a Claude session starts.
-
-Functions are called with three arguments (tool-use-id will be nil).
-
-Hook output plist format:
-  :hookSpecificOutput      - Plist with:
-    :hookEventName         - \"SessionStart\"
-    :additionalContext     - String with session-wide context
-
-This hook is made buffer-local automatically when used in minor modes.")
-#+END_SRC
-
-** Hook Invocation
-
-Run Emacs hooks and merge results for control protocol responses.
-
-#+BEGIN_SRC elisp
-(defun claude-agent--run-hooks-for-event (hook-symbol input-data tool-use-id context)
-  "Run Emacs hooks in HOOK-SYMBOL and merge results.
-
-HOOK-SYMBOL: Symbol like 'claude-agent-pre-tool-use-hook
-INPUT-DATA: plist with :tool_name, :tool_input, etc.
-TOOL-USE-ID: string ID or nil
-CONTEXT: plist with :signal
-
-Returns: Merged hook output plist, or nil if all hooks allow."
-  (let ((results '())
-        (denied nil)
-        (hooks (symbol-value hook-symbol)))
-    ;; Run all hook functions, stop at first deny
-    (catch 'hook-denied
-      (dolist (hook-fn hooks)
-        (when (functionp hook-fn)
-          (condition-case err
-              (let ((result (funcall hook-fn input-data tool-use-id context)))
-                (when result
-                  (push result results)
-                  ;; Check for deny decision
-                  (when (equal "deny"
-                              (plist-get
-                                (plist-get result :hookSpecificOutput)
-                                :permissionDecision))
-                    (setq denied t)
-                    ;; Stop at first deny
-                    (throw 'hook-denied nil))))
-            (error
-             (claude-agent--debug-log "Hook error: %s"
-                                      (error-message-string err)))))))
-
-    ;; Merge results
-    (cond
-     ;; If any hook denied, return first deny
-     (denied
-      (cl-find-if (lambda (r)
-                    (equal "deny"
-                           (plist-get
-                             (plist-get r :hookSpecificOutput)
-                             :permissionDecision)))
-                  results))
-     ;; Otherwise merge all results
-     (results
-      (let ((merged '()))
-        (dolist (result (nreverse results))
-          (setq merged (append merged result)))
-        merged))
-     ;; No results - allow by default
-     (t nil))))
-
-(defun claude-agent--hook-event-name-to-symbol (event-name)
-  "Convert EVENT-NAME string to hook symbol.
-PreToolUse -> claude-agent-pre-tool-use-hook
-PostToolUse -> claude-agent-post-tool-use-hook
-MCPToolUse -> claude-agent-mcp-tool-use-hook"
-  ;; Convert CamelCase to kebab-case (handles acronyms correctly)
-  ;; 1. Insert dash before uppercase that follows lowercase: PreToolUse -> Pre-ToolUse
-  ;; 2. Insert dash before uppercase that precedes lowercase (acronyms): MCPToolUse -> MCP-ToolUse
-  ;; 3. Downcase: Pre-Tool-Use -> pre-tool-use
-  (let* ((case-fold-search nil)  ; Disable case-insensitive matching
-         ;; Step 1: lowercase followed by uppercase
-         (step1 (replace-regexp-in-string
-                 "\\([a-z]\\)\\([A-Z]\\)" "\\1-\\2"
-                 event-name))
-         ;; Step 2: uppercase followed by uppercase+lowercase (for acronyms)
-         (step2 (replace-regexp-in-string
-                 "\\([A-Z]+\\)\\([A-Z][a-z]\\)" "\\1-\\2"
-                 step1))
-         (kebab-case (downcase step2)))
-    (intern (concat "claude-agent-" kebab-case "-hook"))))
-#+END_SRC
-
 ** Control Request Handling
 
 Handle incoming control requests from Claude CLI and send responses.
@@ -1478,72 +1286,29 @@ Invokes appropriate Emacs hooks and sends control_response."
 
     (condition-case err
         (cond
-         ;; Hook callback
+         ;; Hook callback (reserved for future use)
          ((equal subtype "hook_callback")
-          (let* ((callback-id (plist-get request-data :callback_id))
-                 (input-data (plist-get request-data :input))
-                 (tool-use-id (plist-get request-data :tool_use_id))
-                 (context (list :signal nil))
-                 ;; Extract hook event name from input
-                 (hook-event (plist-get input-data :hook_event_name))
-                 ;; Convert to hook symbol
-                 (hook-symbol (claude-agent--hook-event-name-to-symbol hook-event))
-                 ;; Run hooks
-                 (hook-output (claude-agent--run-hooks-for-event
-                              hook-symbol input-data tool-use-id context)))
-            ;; Send response
-            (claude-agent--send-control-response
-             process request-id "success"
-             (or hook-output (list)))))
+          ;; Currently not used - return empty success response
+          (claude-agent--send-control-response
+           process request-id "success"
+           (list)))
 
-         ;; Tool permission (uses PreToolUse hooks, then callback)
+         ;; Tool permission - run permission functions hook
          ((equal subtype "can_use_tool")
           (let* ((tool-name (plist-get request-data :tool_name))
                  (tool-input (plist-get request-data :input))
-                 (input-data (list :tool_name tool-name
-                                  :tool_input tool-input))
-                 (hook-context (list :signal nil))
-                 ;; Run PreToolUse hooks first
-                 (hook-output (claude-agent--run-hooks-for-event
-                              'claude-agent-pre-tool-use-hook
-                              input-data nil hook-context)))
-            ;; Check hook output
-            (if hook-output
-                (let* ((hook-specific (plist-get hook-output :hookSpecificOutput))
-                       (decision (plist-get hook-specific :permissionDecision))
-                       (updated-input (plist-get hook-specific :updatedInput)))
-                  (if (equal decision "deny")
-                      ;; Deny with message
-                      (claude-agent--send-control-response
-                       process request-id "success"
-                       (list :behavior "deny"
-                             :message (or (plist-get hook-output :systemMessage)
-                                         (plist-get hook-output :reason)
-                                         "Tool use denied by hook")))
-                    ;; Allow (possibly with modified input)
-                    (claude-agent--send-control-response
-                     process request-id "success"
-                     (list :behavior "allow"
-                           :updatedInput (or updated-input tool-input)))))
-              ;; No hooks decided - use permission callback
-              (if claude-agent-permission-callback
-                  (let* ((session-id (process-get process :session-id))
-                         (org-section (process-get process :org-section))
-                         (context (list :session-id session-id
-                                       :org-section org-section
-                                       :suggestions (plist-get request-data :permission_suggestions)))
-                         (result (funcall claude-agent-permission-callback
-                                         tool-name tool-input context)))
-                    (claude-agent--send-control-response
-                     process request-id "success"
-                     (list :behavior (plist-get result :behavior)
-                           :updatedInput (or (plist-get result :updated-input) tool-input)
-                           :message (plist-get result :message))))
-                ;; No callback - allow by default
-                (claude-agent--send-control-response
-                 process request-id "success"
-                 (list :behavior "allow"
-                       :updatedInput tool-input))))))
+                 (session-id (process-get process :session-id))
+                 (org-section (process-get process :org-section))
+                 (context (list :session-id session-id
+                               :org-section org-section
+                               :suggestions (plist-get request-data :permission_suggestions)))
+                 (result (claude-agent--run-permission-functions
+                         tool-name tool-input context)))
+            (claude-agent--send-control-response
+             process request-id "success"
+             (list :behavior (or (plist-get result :behavior) "allow")
+                   :updatedInput (or (plist-get result :updated-input) tool-input)
+                   :message (plist-get result :message)))))
 
          (t
           ;; Unsupported subtype
@@ -1609,24 +1374,80 @@ This section provides permission pattern matching for controlling which
 Claude tools are allowed or denied. It ports the permission system from
 the Python backend.
 
-** Permission Callback
+** Permission Hook
 
 When Claude CLI requests permission for a tool (via =acceptEdits= mode),
-the callback function is invoked to decide. Built-in implementations:
-- =claude-agent-permission-prompt= - Interactive y-or-n-p (default)
+functions in =claude-agent-permission-functions= are called in order.
+Each function can return:
+- =nil= - No decision, continue to next function
+- =(:behavior "allow")= - Allow the tool
+- =(:behavior "deny" :message "...")= - Deny with message
+
+Built-in functions:
+- =claude-agent-permission-check-patterns= - Pattern-based allow/deny
+- =claude-agent-permission-prompt= - Interactive y-or-n-p
 - =claude-agent-permission-auto-allow= - Auto-approve everything
 
 #+BEGIN_SRC elisp
-(defcustom claude-agent-permission-callback #'claude-agent-permission-prompt
-  "Function called when Claude requests tool permission.
-Receives: TOOL-NAME, TOOL-INPUT, CONTEXT.
-Returns: plist (:behavior \"allow\") or (:behavior \"deny\" :message \"...\").
+(defvar claude-agent-permission-functions
+  '(claude-agent-permission-check-patterns
+    claude-agent-permission-prompt)
+  "Hook for permission checking when Claude requests tool access.
 
-Built-in:
-  `claude-agent-permission-prompt'     - Interactive y-or-n-p (default)
-  `claude-agent-permission-auto-allow' - Auto-approve everything"
-  :type 'function
-  :group 'claude-agent)
+Functions are called with three arguments:
+  TOOL-NAME: string like \"Read\", \"Write\", \"Bash\"
+  TOOL-INPUT: plist with tool-specific parameters
+  CONTEXT: plist with :session-id, :org-section, :suggestions
+
+Each function should return:
+  nil                            - No decision, try next function
+  (:behavior \"allow\")           - Allow the tool
+  (:behavior \"deny\" :message ..) - Deny with message
+
+The first non-nil result is used. If all return nil, tool is allowed.
+
+Example - Add custom protection:
+  (add-hook 'claude-agent-permission-functions
+            #'my-protect-sensitive-files t)  ; append
+
+Example - Replace default behavior:
+  (setq claude-agent-permission-functions
+        '(my-custom-checker claude-agent-permission-auto-allow))")
+(defun claude-agent--run-permission-functions (tool-name tool-input context)
+  "Run permission functions hook and return first non-nil result.
+
+TOOL-NAME: string like \"Read\", \"Write\", \"Bash\"
+TOOL-INPUT: plist with tool-specific parameters
+CONTEXT: plist with :session-id, :org-section, :suggestions
+
+Returns: plist with :behavior (\"allow\" or \"deny\") and optional :message"
+  (catch 'permission-result
+    (dolist (fn claude-agent-permission-functions)
+      (when (functionp fn)
+        (condition-case err
+            (let ((result (funcall fn tool-name tool-input context)))
+              (when result
+                (throw 'permission-result result)))
+          (error
+           (message "Permission function error: %s" (error-message-string err))))))
+    ;; Default: allow
+    (list :behavior "allow")))
+(defun claude-agent-permission-check-patterns (tool-name tool-input _context)
+  "Check TOOL-NAME against allow/deny patterns.
+Uses `claude-agent-allow-patterns' and `claude-agent-deny-patterns'.
+Returns permission result or nil to pass to next function."
+  (let ((result (claude-agent-check-permission
+                 tool-name tool-input
+                 claude-agent-allow-patterns
+                 claude-agent-deny-patterns)))
+    (pcase result
+      ('allow (list :behavior "allow"))
+      ('deny (list :behavior "deny"
+                   :message (format "Tool %s denied by pattern" tool-name)))
+      ;; 'ask or nil -> return nil to let next function decide
+      (_ nil))))
+
+
 
 (defcustom claude-agent-permission-cache-dir
   (expand-file-name "claude-agent/permissions/" user-emacs-directory)
@@ -1634,6 +1455,28 @@ Built-in:
 Each Claude session ID gets a separate file: SESSION-ID.el"
   :type 'directory
   :group 'claude-agent)
+(defcustom claude-agent-allow-patterns nil
+  "List of tool patterns to automatically allow.
+Patterns are checked after deny patterns.
+See `claude-agent-permission-match-p' for pattern syntax.
+
+Example:
+  (setq claude-agent-allow-patterns
+        \='(\"Read\" \"Grep\" \"Glob\" \"mcp__emacs__*\"))"
+  :type '(repeat string)
+  :group 'claude-agent)
+
+(defcustom claude-agent-deny-patterns nil
+  "List of tool patterns to automatically deny.
+Deny patterns are checked first and take precedence over allow.
+See `claude-agent-permission-match-p' for pattern syntax.
+
+Example:
+  (setq claude-agent-deny-patterns
+        \='(\"Bash(rm -rf *)\" \"Write(/etc/*)\"))"
+  :type '(repeat string)
+  :group 'claude-agent)
+
 #+END_SRC
 
 *** Permission Cache (Per-Session)
