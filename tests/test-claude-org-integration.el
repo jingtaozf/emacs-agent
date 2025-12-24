@@ -493,5 +493,76 @@ FLAKY: Response capture sometimes returns empty in batch mode."
                    (string-match-p "org_read_section" response)
                    (string-match-p "getDiagnostics" response)))))))
 
+;;; Auto-Title Generation Tests
+
+(ert-deftest test-org-integration-auto-generate-title ()
+  "Test that Instruction N headings are auto-replaced with generated titles.
+When executing an AI block under an 'Instruction N' heading, a title should be
+generated in parallel using Haiku and the heading should be updated."
+  :tags '(:integration :slow :api :org :title)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (claude-org-mode 1)
+       ;; Ensure auto-title is enabled
+       (let ((claude-org-auto-generate-title t))
+         ;; Execute instruction 1 (asks 2+2) - has generic "Instruction 1" heading
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 1\\b" nil t)
+         (let ((heading-pos (match-beginning 0)))
+           (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+           (let ((session-key (claude-org--current-session-key)))
+             (claude-org-execute)
+             ;; Wait for main query to complete
+             (test-claude-wait-for-completion session-key 30)
+             ;; Wait a bit more for title generation (runs in parallel, may finish after)
+             (sleep-for 2.0)
+             (accept-process-output nil 1.0)
+             ;; Check that heading has been changed from "Instruction 1"
+             (goto-char heading-pos)
+             (let ((new-heading (org-get-heading t t t t)))
+               ;; The heading should no longer be "Instruction 1"
+               ;; It should have been replaced with a generated title
+               (should (not (string-match-p "^Instruction 1$" new-heading)))
+               ;; The new heading should not be empty
+               (should (> (length new-heading) 0))))))))))
+
+(ert-deftest test-org-integration-auto-title-preserves-custom-headings ()
+  "Test that custom headings (not matching pattern) are preserved.
+Headings that don't match 'Instruction N' pattern should not be changed."
+  :tags '(:integration :slow :api :org :title)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (claude-org-mode 1)
+       ;; Find a session with custom heading (Session A - Numbers)
+       (goto-char (point-min))
+       (when (re-search-forward "^\\*+ Session A - Numbers" nil t)
+         ;; Get the actual heading text at this position
+         (org-back-to-heading t)
+         (let ((original-heading (org-get-heading t t t t)))
+           ;; Find the ai block in this section (Instruction 3)
+           (when (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+             (let ((session-key (claude-org--current-session-key))
+                   (claude-org-auto-generate-title t))
+               (claude-org-execute)
+               (test-claude-wait-for-completion session-key 30)
+               ;; Wait for potential title generation
+               (sleep-for 2.0)
+               (accept-process-output nil 1.0)
+               ;; Go back and check parent heading is unchanged
+               ;; (The Instruction 3 inside may have changed, but Session A - Numbers should not)
+               (goto-char (point-min))
+               (re-search-forward "^\\*+ Session A - Numbers" nil t)
+               (org-back-to-heading t)
+               (let ((current-heading (org-get-heading t t t t)))
+                 ;; "Session A - Numbers" doesn't match "Instruction N" pattern
+                 ;; so it should remain unchanged
+                 (should (string= current-heading original-heading)))))))))))
+
 (provide 'test-claude-org-integration)
 ;;; test-claude-org-integration.el ends here

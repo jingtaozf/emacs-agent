@@ -250,6 +250,21 @@ Valid values: \"user\", \"project\", \"local\".
 Can be overridden per-section via CLAUDE_SETTING_SOURCES property."
   :type '(repeat string)
   :group 'claude-org)
+
+(defcustom claude-org-auto-generate-title t
+  "Whether to auto-generate titles for AI blocks with generic headings.
+When non-nil, headings matching `claude-org-auto-title-heading-pattern'
+(e.g., \"Instruction 1\") will be replaced with AI-generated titles
+using the Haiku model in parallel with the main query."
+  :type 'boolean
+  :group 'claude-org)
+
+(defcustom claude-org-auto-title-heading-pattern "^Instruction [0-9]+$"
+  "Regexp pattern for headings that should be auto-titled.
+Only headings matching this pattern will have their titles replaced.
+Default matches \"Instruction 1\", \"Instruction 2\", etc."
+  :type 'regexp
+  :group 'claude-org)
 #+END_SRC
 
 ** Slash Commands
@@ -1452,6 +1467,51 @@ Moves point to after the output section's subtree, ready to insert sibling."
     (org-back-to-heading t)
     ;; Move to the end of this subtree
     (org-end-of-subtree t t)))
+
+(defun claude-org--heading-matches-auto-title-pattern-p ()
+  "Check if current heading matches the auto-title pattern.
+Returns the heading text (without stars and tags) if it matches, nil otherwise."
+  (save-excursion
+    (when (ignore-errors (org-back-to-heading t))
+      (let ((heading (org-get-heading t t t t)))  ; no tags, no todo, no priority, no comment
+        (when (and heading
+                   (string-match-p claude-org-auto-title-heading-pattern heading))
+          heading)))))
+
+(defun claude-org--replace-heading-at-marker (marker new-title)
+  "Replace heading text at MARKER with NEW-TITLE.
+Preserves heading level (stars), tags, and properties."
+  (when (and marker (marker-buffer marker) (buffer-live-p (marker-buffer marker)))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (goto-char marker)
+        (when (ignore-errors (org-back-to-heading t))
+          (let* ((tags (org-get-tags nil t))
+                 (level (org-current-level))
+                 (stars (make-string level ?*))
+                 ;; Build tag string manually
+                 (tag-str (if tags
+                              (concat " :" (mapconcat #'identity tags ":") ":")
+                            "")))
+            ;; Delete the current heading line (including newline)
+            (beginning-of-line)
+            (let ((line-start (point)))
+              (forward-line 1)
+              (delete-region line-start (point)))
+            ;; Insert new heading with title and tags on same line
+            (insert stars " " new-title tag-str "\n")))))))
+
+(defun claude-org--maybe-auto-generate-title (query heading-marker)
+  "Generate title for QUERY and update heading at HEADING-MARKER.
+Only runs if `claude-org-auto-generate-title' is non-nil."
+  (when claude-org-auto-generate-title
+    (lexical-let ((marker heading-marker))
+      (claude-agent-generate-title
+       `((user . ,query))
+       :on-title (lambda (title)
+                   (claude-org--replace-heading-at-marker marker title))
+       :on-error (lambda (err)
+                   (message "Auto-title generation failed: %s" err))))))
 #+END_SRC
 
 * Block Insertion
@@ -1967,12 +2027,22 @@ Execution and request handling.
 Must be called when point is inside a #+begin_src ai block.
 Sends the query to Claude and streams the response below the block.
 When `claude-org-auto-create-response-section' is non-nil, creates a Response
-section with :ai_output: tag for flat pattern organization."
+section with :ai_output: tag for flat pattern organization.
+When `claude-org-auto-generate-title' is non-nil, generates a title for
+headings matching `claude-org-auto-title-heading-pattern' using Haiku."
   (interactive)
   (unless (claude-org--in-ai-block-p)
     (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
   (let* ((content (claude-org--get-block-content))
-         (session-key (claude-org--current-session-key)))
+         (session-key (claude-org--current-session-key))
+         ;; Check for auto-title BEFORE any buffer modifications
+         (should-auto-title (and claude-org-auto-generate-title
+                                 (claude-org--heading-matches-auto-title-pattern-p)))
+         ;; Create marker at heading position for title update
+         (heading-marker (when should-auto-title
+                           (save-excursion
+                             (org-back-to-heading t)
+                             (copy-marker (point))))))
     (unless content
       (user-error "Empty ai block"))
     (when (claude-org--session-get session-key :busy)
@@ -2000,6 +2070,9 @@ section with :ai_output: tag for flat pattern organization."
           (claude-org--session-put session-key :busy t)))
       ;; Start spinner and send request
       (claude-org--start-spinner session-key)
+      ;; Auto-generate title in parallel (using Haiku, separate session)
+      (when heading-marker
+        (claude-org--maybe-auto-generate-title content heading-marker))
       (claude-org--send-request content))))
 
 (defun org-babel-execute:ai (body _params)

@@ -3377,15 +3377,19 @@ Example:
      (user . \"Parse JSON files\"))
    :on-title (lambda (title) (message \"Title: %s\" title)))"
   (let* ((formatted-messages (claude-agent--format-messages-for-title messages))
-         (prompt (format "Please write a %d character or less title for the following conversation. \
-Output ONLY the title, nothing else - no quotes, no explanation, no punctuation at the end.
+         (prompt (format "Generate a short title (%d chars max) for this conversation:
 
-%s"
+%s
+
+IMPORTANT: Output ONLY the title text. No quotes, no explanation, no response to the conversation.
+Example good outputs: \"Python JSON Parsing\" or \"Fix Login Bug\" or \"Database Schema Design\"
+Example bad outputs: \"I'll help you with...\" or \"Here's a title:\" or \"The title is:\""
                          claude-agent-title-max-chars
                          formatted-messages))
-         (system-prompt (format "You are a conversation title generator. \
-Generate concise, descriptive titles that capture the main topic. \
-Keep titles under %d characters. Output only the title text."
+         (system-prompt (format "You are a title generator. Your ONLY job is to output a short descriptive title.
+NEVER respond to or engage with the conversation content.
+NEVER start with \"I'll\", \"I can\", \"Here's\", \"The title\", or similar phrases.
+Output ONLY the title text, nothing else. Maximum %d characters."
                                 claude-agent-title-max-chars))
          (options (claude-agent-options
                    :model claude-agent-title-model
@@ -3413,10 +3417,15 @@ Keep titles under %d characters. Output only the title text."
                           (when (and (>= (length title) 2)
                                      (string-match-p "^[\"'].*[\"']$" title))
                             (setq title (substring title 1 -1)))
-                          ;; Truncate if too long
-                          (when (> (length title) max-chars)
-                            (setq title (concat (substring title 0 (- max-chars 3)) "...")))
-                          (funcall on-title-cb title))))))))
+                          ;; Remove common bad prefixes (model didn't follow instructions)
+                          (when (string-match "^\\(?:Title:\\s-*\\|Here's\\s-*\\(?:a\\|the\\)\\s-*title:\\s-*\\)" title)
+                            (setq title (substring title (match-end 0))))
+                          ;; If title looks like a response (starts with I'll, I can, etc.), skip it
+                          (unless (string-match-p "^I'\\(?:ll\\|m\\|ve\\)\\s-\\|^I\\s-+\\(?:can\\|will\\|would\\)" title)
+                            ;; Truncate if too long
+                            (when (> (length title) max-chars)
+                              (setq title (concat (substring title 0 (- max-chars 3)) "...")))
+                            (funcall on-title-cb title)))))))))
 
 (defun claude-agent-generate-title-from-text (text &optional callback)
   "Generate a title for TEXT content.
