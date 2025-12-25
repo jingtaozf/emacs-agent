@@ -31,9 +31,11 @@ help:
 	@echo "  make reload           - Reload org files in running Emacs"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test             - Run all tests (unit + integration)"
+	@echo "  make test             - Run all tests (unit + parallel integration)"
 	@echo "  make test-unit        - Run unit tests only (fast, no API)"
-	@echo "  make test-integration - Run integration tests (requires API key)"
+	@echo "  make test-integration - Run integration tests in parallel (6 jobs, default)"
+	@echo "  make test-integration-seq     - Run integration tests sequentially"
+	@echo "  make test-integration PARALLEL_JOBS=N  - Custom parallelism"
 	@echo "  make test-agent-unit  - Run claude-agent unit tests"
 	@echo "  make test-org-unit    - Run claude-org unit tests"
 	@echo "  make test-permissions - Run permission functions tests"
@@ -84,8 +86,114 @@ test: test-unit test-integration
 .PHONY: test-unit
 test-unit: test-agent-unit test-org-unit
 
+# Parallel integration testing configuration
+PARALLEL_JOBS ?= 8
+PARALLEL := $(shell which parallel 2>/dev/null)
+BREW := $(shell which brew 2>/dev/null)
+
+# Main integration target - now uses parallel by default
 .PHONY: test-integration
-test-integration: test-agent-integration test-org-integration
+test-integration: _ensure-parallel
+	@if which parallel >/dev/null 2>&1; then \
+		echo "Running integration tests with $(PARALLEL_JOBS) parallel jobs (GNU parallel)..."; \
+		$(MAKE) _run-sharded-tests-parallel TOTAL_SHARDS=$(PARALLEL_JOBS); \
+	else \
+		echo "Running integration tests with $(PARALLEL_JOBS) parallel jobs (bash background)..."; \
+		$(MAKE) _run-sharded-tests-bash TOTAL_SHARDS=$(PARALLEL_JOBS); \
+	fi
+
+# Sequential integration tests (old behavior)
+.PHONY: test-integration-seq
+test-integration-seq: test-agent-integration test-org-integration
+
+# Ensure GNU parallel is installed (auto-install via brew if missing)
+.PHONY: _ensure-parallel
+_ensure-parallel:
+ifndef PARALLEL
+ifdef BREW
+	@echo "GNU parallel not found. Installing via Homebrew..."
+	@brew install parallel
+	@echo "GNU parallel installed successfully."
+else
+	@echo "Note: GNU parallel not found. Using bash background jobs."
+	@echo "For better output, install: brew install parallel (macOS) or apt install parallel (Linux)"
+endif
+endif
+
+# Internal: run shards using GNU parallel
+.PHONY: _run-sharded-tests-parallel
+_run-sharded-tests-parallel:
+	@seq 0 $$(($(TOTAL_SHARDS) - 1)) | $(PARALLEL) -j$(TOTAL_SHARDS) --group --tag \
+		'$(BATCH) $(LOAD_PATH) \
+			--eval "(require '\''literate-elisp)" \
+			--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+			--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+			--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+			-l tests/fixtures/test-config.el \
+			-l tests/fixtures/test-parallel.el \
+			-l tests/test-claude-agent-integration.el \
+			-l tests/test-claude-org-integration.el \
+			--eval "(test-claude-run-shard $(TOTAL_SHARDS) {})"'
+
+# Internal: run shards using bash background jobs (portable fallback)
+.PHONY: _run-sharded-tests-bash
+_run-sharded-tests-bash:
+	@mkdir -p .test-results
+	@rm -f .test-results/shard-*.log .test-results/shard-*.exit
+	@echo "Starting $(TOTAL_SHARDS) test shards..."
+	@for i in $$(seq 0 $$(($(TOTAL_SHARDS) - 1))); do \
+		( $(BATCH) $(LOAD_PATH) \
+			--eval "(require 'literate-elisp)" \
+			--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+			--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+			--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+			-l tests/fixtures/test-config.el \
+			-l tests/fixtures/test-parallel.el \
+			-l tests/test-claude-agent-integration.el \
+			-l tests/test-claude-org-integration.el \
+			--eval "(test-claude-run-shard $(TOTAL_SHARDS) $$i)" \
+			> .test-results/shard-$$i.log 2>&1; \
+			echo $$? > .test-results/shard-$$i.exit ) & \
+	done; \
+	echo "Waiting for all shards to complete..."; \
+	wait; \
+	echo ""; \
+	echo "=== Test Results by Shard ==="; \
+	failed=0; \
+	for i in $$(seq 0 $$(($(TOTAL_SHARDS) - 1))); do \
+		exit_code=$$(cat .test-results/shard-$$i.exit 2>/dev/null || echo 1); \
+		if [ "$$exit_code" = "0" ]; then \
+			echo "Shard $$i: PASSED"; \
+		else \
+			echo "Shard $$i: FAILED (exit $$exit_code)"; \
+			failed=1; \
+		fi; \
+	done; \
+	echo ""; \
+	if [ "$$failed" = "1" ]; then \
+		echo "=== Failed Shard Logs ==="; \
+		for i in $$(seq 0 $$(($(TOTAL_SHARDS) - 1))); do \
+			exit_code=$$(cat .test-results/shard-$$i.exit 2>/dev/null || echo 1); \
+			if [ "$$exit_code" != "0" ]; then \
+				echo "--- Shard $$i ---"; \
+				tail -50 .test-results/shard-$$i.log; \
+			fi; \
+		done; \
+		exit 1; \
+	fi
+
+# View test logs from parallel run
+.PHONY: test-logs
+test-logs:
+	@if [ -d .test-results ]; then \
+		for f in .test-results/shard-*.log; do \
+			echo "=== $$f ==="; \
+			cat "$$f"; \
+			echo ""; \
+		done; \
+	else \
+		echo "No test results found. Run 'make test-integration' first."; \
+	fi
 
 .PHONY: test-agent-unit
 test-agent-unit:

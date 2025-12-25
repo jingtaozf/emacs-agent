@@ -1018,6 +1018,40 @@ STATE is the process state returned by `claude-agent-query'."
     (when (process-live-p process)
       (interrupt-process process))))
 
+(defun claude-agent-query-kill (state)
+  "Kill an ongoing query by STATE.
+Unlike `claude-agent-query-interrupt', this sends SIGKILL which cannot be ignored.
+STATE is the process state returned by `claude-agent-query'."
+  (when-let ((process (claude-agent--process-state-process state)))
+    (when (process-live-p process)
+      (kill-process process))))
+
+(defun claude-agent-kill-all-processes ()
+  "Kill all active Claude agent processes.
+This is useful for cleanup after tests or when processes are stuck.
+Returns the number of processes killed."
+  (interactive)
+  (let ((killed 0))
+    ;; Kill via active-states tracking
+    (dolist (state claude-agent--active-states)
+      (when-let ((process (claude-agent--process-state-process state)))
+        (when (process-live-p process)
+          (kill-process process)
+          (cl-incf killed))))
+    ;; Also kill via active-queries hash table
+    (maphash (lambda (_req-id state)
+               (when-let ((process (claude-agent--process-state-process state)))
+                 (when (process-live-p process)
+                   (kill-process process)
+                   (cl-incf killed))))
+             claude-agent--active-queries)
+    ;; Clear state tracking
+    (setq claude-agent--active-states nil)
+    (clrhash claude-agent--active-queries)
+    (when (called-interactively-p 'any)
+      (message "Killed %d Claude process(es)" killed))
+    killed))
+
 (defun claude-agent-query-request-id (state)
   "Get the request ID from query STATE.
 Returns the unique request-id that can be used with `claude-agent-cancel-query'."

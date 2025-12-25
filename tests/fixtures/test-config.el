@@ -77,11 +77,14 @@ Returns the path to the temporary file."
 (defun test-claude-with-fixture (body-fn)
   "Execute BODY-FN with a fresh fixture file.
 BODY-FN is called with the temporary file path as argument.
-Cleans up automatically after execution."
+Cleans up automatically after execution, including killing any spawned processes."
   (let ((temp-file (test-claude-copy-fixture)))
     (unwind-protect
         (funcall body-fn temp-file)
-      (test-claude-clean-fixture temp-file))))
+      ;; Clean up fixture file
+      (test-claude-clean-fixture temp-file)
+      ;; Kill any Claude processes spawned during this test
+      (test-claude-cleanup-all))))
 
 ;;; Test Execution Helpers
 
@@ -184,13 +187,20 @@ Automatically sets org-mode and refreshes property cache."
 ;;; Cleanup
 
 (defun test-claude-cleanup-all ()
-  "Clean up all test resources."
-  ;; Cancel any active queries
+  "Clean up all test resources.
+Kills active Claude processes tracked by claude-agent.
+Only kills processes registered in `claude-agent--active-states' and
+`claude-agent--active-queries' - does NOT kill other Claude instances."
+  ;; First, try graceful cancellation via claude-org sessions
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (bound-and-true-p claude-org-mode)
-          (claude-org-cancel-all))))))
+          (ignore-errors (claude-org-cancel-all))))))
+  ;; Then forcefully kill any remaining tracked processes
+  ;; This only kills processes registered by claude-agent, NOT other sessions
+  (when (fboundp 'claude-agent-kill-all-processes)
+    (claude-agent-kill-all-processes)))
 
 (provide 'test-config)
 ;;; test-config.el ends here
