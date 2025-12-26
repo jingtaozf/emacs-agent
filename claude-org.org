@@ -282,237 +282,67 @@ These are embedded commands in the Claude Code CLI."
   :group 'claude-org)
 #+END_SRC
 
-** System Prompts
+** File-Based Prompt Templates
 
-Default system prompts establish Claude's persona and org-mode awareness.
-These are prepended to every query. Add domain-specific prompts via
-=add-to-list= rather than replacing these defaults.
+Prompt templates are stored as org files under =docs/prompts/= for easier
+editing and hot-reloading. Changes to template files take effect immediately
+without restarting Emacs or reloading code.
 
-#+NAME: custom-system-prompts
+Directory structure:
+#+begin_example
+docs/prompts/
+├── system/          # System prompts (loaded in sorted order)
+│   ├── 00-base.org  # Core org-mode instructions
+│   └── 10-links.org # Link resolution prompt
+├── tags/            # Tag-based behaviors (one file per tag)
+│   ├── explore.org, plan.org, code.org, test.org, review.org, commit.org
+│   └── strict.org, security.org, no_edit.org, parallel.org
+└── headers/         # Header argument behaviors
+    ├── phase/       # Enum-style (subdirectory with value files)
+    └── *.org        # Template files (tests.org, coverage.org, etc.)
+#+end_example
+
+*** Prompts Directory Configuration
+
+#+NAME: custom-prompts-directory
 #+BEGIN_SRC elisp
-(defcustom claude-org-default-system-prompts
-  '("You are a Claude agent, built on Anthropic's Claude Agent SDK.You are communicating with a senior developer through Emacs org-mode.
+(defcustom claude-org-prompts-directory
+  (expand-file-name "docs/prompts"
+                    (file-name-directory (or load-file-name
+                                             (locate-library "claude-org")
+                                             buffer-file-name
+                                             default-directory)))
+  "Directory containing prompt template files.
+Templates are loaded at runtime, so changes take effect immediately.
 
-User Workflow:
-- The user writes instructions in #+begin_src ai blocks within an org file
-- Your response is streamed and appended directly after the ai block
-- The conversation history is preserved in the same org file, visible above
-- This works like a computational notebook where code and responses interleave
-
-Working with Org Files:
-- Treat org sections as a hierarchical filesystem (like directories and files)
-- Section paths use slash notation: /Project/Tasks/Todo
-- CRITICAL: For .org files, you MUST use MCP org_* tools. NEVER use Edit/Write tools on .org files.
-  The Edit/Write tools will corrupt org structure (headings, properties, tags).
-  Only MCP org_* tools preserve org-mode structure correctly:
-  - org_list_sections: Browse structure (like ls)
-  - org_read_section: Read content by path (like cat)
-  - org_update_section: Modify section content (preserves heading, properties, tags)
-  - org_create_section: Add new subsections with proper level
-  - org_delete_section: Remove section and children
-  - org_get/set_property: Manage org properties (metadata in :PROPERTIES: drawers)
-  - org_get/set/add/remove_tag: Manage org tags (the :tag: syntax on headings)
-- For non-org operations, use evalElisp to execute any Emacs Lisp
-- IMPORTANT: Buffer position management for org edit tasks:
-  - Before starting an org edit task, save current buffer and position using evalElisp
-  - An org edit task may involve multiple MCP tool calls (read, update, create, etc.)
-  - Only restore buffer and position ONCE after the entire task is complete
-  - Do NOT save/restore for each individual MCP call within the same task
-  - Example pattern:
-    1. evalElisp: (setq my--saved-buf (current-buffer) my--saved-pos (point))
-    2. Multiple org_* tool calls for the edit task...
-    3. evalElisp: (when (buffer-live-p my--saved-buf) (switch-to-buffer my--saved-buf) (goto-char my--saved-pos))
-
-Response Format:
-- Your output appears directly in the org file
-- Use org-mode syntax, NOT markdown:
-  - Headers: MUST have space after asterisks: '* Title' (not '*Title'), '** Section' (not '**Section')
-  - Bold: *bold* (not **bold**)
-  - Italic: /italic/ (not _italic_)
-  - Code inline: =code= or ~code~ (not backticks)
-  - Code blocks: #+begin_src lang / #+end_src (not triple backticks)
-  - Tables: | col1 | col2 | with |-+-| separator rows
-  - Links: [[url][description]]
-- Lists work the same: - or + for unordered, 1. for ordered
-- Be concise - the response becomes part of the document
-
-Important: When showing org-mode syntax examples in your response:
-- NEVER use markdown code fences (```org```)
-- Instead, use #+begin_example and #+end_example blocks
-- Prefix org special lines (like #+BEGIN_SRC, #+PROPERTY) with a comma
-- Example of correct way to show org syntax:
-  #+begin_example
-  ,#+PROPERTY: PROJECT_ROOT /path/to/project
-  ,* My Section
-  ,#+begin_src ai
-  query here
-  ,#+end_src
-  #+end_example")
-  "List of default system prompt strings for claude-org queries.
-Each string in the list will be concatenated with newlines and prepended
-to any user-defined :system_prompt: sections.
-
-You can customize this by adding domain-specific prompts:
-  (add-to-list \\='claude-org-default-system-prompts
-               \"Always use Python 3.11 with type hints.\")"
-  :type '(repeat string)
+Structure:
+  system/  - System prompts loaded in sorted order
+  tags/    - Tag behavior prompts (TAG.org)
+  headers/ - Header argument prompts (HEADER.org or HEADER/VALUE.org)"
+  :type 'directory
   :group 'claude-org)
 #+END_SRC
 
-** Org Link Resolution Prompt
+*** Prompt File Loader
 
-When users include org links in AI blocks, Claude should resolve them autonomously
-using MCP tools. This prompt instructs Claude on how to recognize and fetch context
-from various org link types.
-
-#+NAME: link-resolution-prompt
+#+NAME: prompt-file-loader
 #+BEGIN_SRC elisp
-(defconst claude-org-link-resolution-prompt
-  "Org Link Resolution:
+(defun claude-org--load-prompt-file (file)
+  "Load prompt content from FILE.
+Returns file content as trimmed string, or nil if file doesn't exist."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (string-trim (buffer-string)))))
 
-When you see org-mode links in user queries (like [[file:path][desc]]), resolve them
-using existing MCP tools to fetch context:
-
-| Link Format | Tool | Parameters |
-|-------------+------+------------|
-| [[*Heading]] | org_read_section | file_path=notebook, section_path=/Heading |
-| [[file:path.org::*Heading][desc]] | org_read_section | file_path=path.org, section_path=/Heading |
-| [[file:path.el::42][desc]] | Read | file_path=path.el, offset/limit around line 42 |
-| [[https://url][desc]] | WebFetch | url=https://url |
-
-Examples:
-
-1. [[file:/path/notes.org::*Setup][Setup]] → org_read_section(file_path=/path/notes.org, section_path=/Setup)
-
-2. [[*Local Section]] → org_read_section(file_path=<notebook path>, section_path=/Local Section)
-
-3. [[file:code.py::150][line]] → Read(file_path=code.py, offset=140, limit=20)
-
-When to resolve:
-- Resolve when context would help answer the query
-- Skip links that are just examples or illustrative
-- Resolve multiple links in parallel when independent"
-  "System prompt section explaining org link resolution to Claude.")
-
-;; Add link resolution prompt to defaults
-(add-to-list 'claude-org-default-system-prompts claude-org-link-resolution-prompt t)
-#+END_SRC
-
-** Tag-Based Behaviors
-
-Org tags (like =:explore:=, =:review:=) trigger specific behavior prompts.
-This enables workflow phases: explore → plan → code → test → review → commit.
-
-Phase tags define development workflow stages. Modifier tags (=strict=,
-=security=, =no_edit=, =parallel=) adjust behavior within any phase.
-
-#+NAME: custom-tag-behaviors
-#+BEGIN_SRC elisp
-(defcustom claude-org-tag-behaviors
-  '((explore . "## EXPLORE PHASE
-Focus on understanding. Use Read/Grep/Glob/LSP tools. Do NOT modify files.
-Summarize findings clearly. Ask clarifying questions if needed.")
-
-    (plan . "## PLAN PHASE
-Design approach before implementing. Present 2-3 options with trade-offs.
-Recommend one approach with rationale. Wait for human approval.")
-
-    (code . "## CODE PHASE
-Implement solution. Track progress with TodoWrite for complex tasks.
-Run tests as you go. Keep changes focused and minimal.")
-
-    (test . "## TEST PHASE
-Write comprehensive tests: happy path, edge cases, error conditions.
-Run tests and report results. Tests should be independent and deterministic.")
-
-    (review . "## REVIEW PHASE
-Find bugs, security issues, edge cases. Do NOT write new code.
-Report findings with severity: CRITICAL/HIGH/MEDIUM/LOW.
-Check: logic errors, null handling, exceptions, pattern compliance.")
-
-    (commit . "## COMMIT PHASE
-Stage and commit changes. Write semantic commit message explaining WHY.
-Verify clean state with git status. Do NOT push unless explicitly asked.")
-
-    ;; Modifier tags
-    (strict . "## STRICT MODE
-Zero tolerance: Any bug, security issue, or pattern violation blocks progress.")
-
-    (security . "## SECURITY FOCUS
-Check: injection, auth, secrets, input validation, CSRF, XSS, path traversal.")
-
-    (no_edit . "## READ-ONLY MODE
-Analysis only. Do NOT modify or create any files.")
-
-    (parallel . "## PARALLEL EXECUTION
-Use Task agents concurrently for independent subtasks."))
-
-  "Alist mapping org tags to behavior prompt text.
-Each entry: (TAG-SYMBOL . PROMPT-STRING)
-
-Tags activate via org section tags like :explore: or :review:.
-Multiple tags combine (alphabetically for consistency).
-
-To add custom tags:
-  (add-to-list \\='claude-org-tag-behaviors
-               \\='(my-tag . \"My custom behavior prompt\"))"
-  :type '(alist :key-type symbol :value-type string)
-  :group 'claude-org)
-#+END_SRC
-
-** Header Argument Behaviors
-
-Header arguments (=#+begin_src ai :phase plan :strict t=) provide inline
-behavior control. Unlike tags which apply to whole sections, header args
-apply only to that specific block.
-
-Values can be:
-- Template strings with =%s= for value substitution
-- Fixed strings for boolean flags
-- Alists for enum-style mappings (like =:phase=)
-
-#+NAME: custom-header-behaviors
-#+BEGIN_SRC elisp
-(defcustom claude-org-header-behaviors
-  '((:phase . (("explore" . "## EXPLORE PHASE\nFocus on understanding. Do NOT modify files.")
-               ("plan" . "## PLAN PHASE\nDesign approach. Wait for approval before coding.")
-               ("code" . "## CODE PHASE\nImplement solution. Track progress. Run tests.")
-               ("test" . "## TEST PHASE\nWrite and run comprehensive tests.")
-               ("review" . "## REVIEW PHASE\nFind issues. Do NOT write new code.")
-               ("commit" . "## COMMIT PHASE\nCommit with semantic message.")))
-
-    (:tests . "## TEST GENERATION
-Generate tests: unit tests, edge cases, error conditions. Run to verify.")
-
-    (:coverage . "## COVERAGE REQUIREMENT
-Minimum test coverage: %s%%. Coverage below this blocks completion.")
-
-    (:strict . "## STRICT MODE
-Zero tolerance: Any issue blocks progress.")
-
-    (:files . "## FILE SCOPE
-Focus only on: %s. Do not modify other files.")
-
-    (:context . "## ADDITIONAL CONTEXT\n%s")
-
-    (:agent . "## AGENT MODE
-Delegate to specialized %s agent via Task tool."))
-
-  "Alist mapping header arguments to prompt templates.
-Each entry: (HEADER-KEYWORD . VALUE) where VALUE is:
-  - STRING with %s: Template, value substituted at %s
-  - STRING without %s: Fixed prompt (for boolean headers like :tests t)
-  - ALIST: Map specific values to prompts (for enum headers like :phase)
-
-Headers activate via #+begin_src ai :header value syntax.
-
-To add custom headers:
-  (add-to-list \\='claude-org-header-behaviors
-               \\='(:timeout . \"Complete within %s minutes.\"))"
-  :type '(alist :key-type keyword
-                :value-type (choice string
-                                    (alist :key-type string :value-type string)))
-  :group 'claude-org)
+(defun claude-org--load-system-prompts ()
+  "Load all system prompts from system/ directory.
+Files are loaded in sorted order (use numeric prefix for ordering).
+Returns list of prompt strings."
+  (let ((dir (expand-file-name "system" claude-org-prompts-directory)))
+    (when (file-directory-p dir)
+      (let ((files (directory-files dir t "\\.org\\'" t)))
+        (delq nil (mapcar #'claude-org--load-prompt-file (sort files #'string<)))))))
 #+END_SRC
 
 ** Property Name Constants
@@ -1211,21 +1041,21 @@ Usage in org file:
           (mapconcat #'identity (nreverse prompts) "\n\n"))))))
 
 (defun claude-org--build-system-prompt ()
-  "Build complete system prompt from defaults, org sections, and behaviors.
+  "Build complete system prompt from file-based templates and org sections.
 Combines:
-1. `claude-org-default-system-prompts' (base prompts)
-2. :system_prompt: tagged org sections
+1. System prompts from docs/prompts/system/*.org (loaded in sorted order)
+2. :system_prompt: tagged org sections in the current file
 3. Behavior prompts from tags and header arguments
 4. Line width instruction based on `claude-org-line-width'"
-  (let ((defaults (when claude-org-default-system-prompts
-                    (mapconcat #'identity claude-org-default-system-prompts "\n\n")))
+  (let ((file-prompts (claude-org--load-system-prompts))
         (org-prompts (claude-org--collect-system-prompts))
         (behavior-prompt (claude-org--build-behavior-prompt))
         (line-width-hint (when (and claude-org-line-width (> claude-org-line-width 0))
                            (format "Keep output lines under %d characters, break long lines naturally."
                                    claude-org-line-width))))
-    ;; Combine all parts: defaults + org-prompts + behaviors + line-width
-    (let ((parts (delq nil (list defaults org-prompts behavior-prompt line-width-hint))))
+    ;; Combine all parts: file prompts + org-prompts + behaviors + line-width
+    (let ((parts (append file-prompts
+                         (delq nil (list org-prompts behavior-prompt line-width-hint)))))
       (when parts
         (string-join parts "\n\n")))))
 #+END_SRC
@@ -1314,33 +1144,52 @@ Uses verbose format for header-line display."
 * Behavior Prompts
 
 Tag and header argument based behavior injection system.
+Prompts are loaded from =docs/prompts/= directory at runtime.
 
 ** Tag Prompt Lookup
 
+Loads prompt from =docs/prompts/tags/TAG.org=.
+
 #+BEGIN_SRC elisp
 (defun claude-org--tag-prompt (tag)
-  "Get behavior prompt for TAG symbol."
-  (alist-get tag claude-org-tag-behaviors))
+  "Get behavior prompt for TAG symbol.
+Loads from docs/prompts/tags/TAG.org at runtime."
+  (claude-org--load-prompt-file
+   (expand-file-name (format "tags/%s.org" (symbol-name tag))
+                     claude-org-prompts-directory)))
 #+END_SRC
 
 ** Header Prompt Lookup
 
+Loads prompt from =docs/prompts/headers/=. Supports:
+- Enum-style: =headers/phase/code.org= for =:phase code=
+- Template-style: =headers/coverage.org= with =%s= placeholder
+
 #+BEGIN_SRC elisp
 (defun claude-org--header-prompt (header value)
   "Get behavior prompt for HEADER keyword with VALUE.
-Returns nil if header not found or value is nil/empty."
+Loads from docs/prompts/headers/ at runtime.
+
+Supports two patterns:
+- Enum: headers/HEADER/VALUE.org (e.g., headers/phase/code.org)
+- Template: headers/HEADER.org with %s placeholder"
   (when value
-    (when-let ((entry (alist-get header claude-org-header-behaviors)))
+    (let* ((name (substring (symbol-name header) 1))  ; strip leading :
+           (dir (expand-file-name "headers" claude-org-prompts-directory))
+           ;; Try enum-style first: headers/phase/code.org
+           (enum-file (expand-file-name (format "%s/%s.org" name value) dir))
+           ;; Fallback to template: headers/coverage.org
+           (template-file (expand-file-name (format "%s.org" name) dir)))
       (cond
-       ;; Alist: lookup value directly (for enum headers like :phase)
-       ((and (consp entry) (consp (car entry)))
-        (alist-get value entry nil nil #'equal))
-       ;; Template with %s: format with value
-       ((and (stringp entry) (string-match-p "%s" entry))
-        (format entry value))
-       ;; Fixed string: return if value is truthy (for boolean headers)
-       ((stringp entry)
-        entry)))))
+       ;; Enum-style: subdirectory with value files
+       ((file-readable-p enum-file)
+        (claude-org--load-prompt-file enum-file))
+       ;; Template-style: single file with %s placeholder
+       ((file-readable-p template-file)
+        (let ((tpl (claude-org--load-prompt-file template-file)))
+          (if (and tpl (string-match-p "%s" tpl))
+              (format tpl value)
+            tpl)))))))
 #+END_SRC
 
 ** Collect Current Context
@@ -1385,15 +1234,34 @@ Returns plist with :tags and :header-args."
   (list :tags (claude-org--get-current-tags)
         :header-args (claude-org--get-block-header-args)))
 
+(defun claude-org--sdd-tag-priority (tag)
+  "Return priority for TAG in SDD workflow (lower = first).
+Container tags come before phase tags."
+  (pcase tag
+    ("sdd" 0)        ; Container first
+    ("spec" 1)       ; Documentation sections
+    ("features" 2)
+    ("research" 10)  ; Phases in order
+    ("design" 11)
+    ("planning" 12)
+    ("implementation" 13)
+    (_ 50)))          ; Other tags last
+
 (defun claude-org--build-behavior-prompt ()
   "Build behavior prompt from current tags and header arguments.
-Returns combined prompt string or nil if no behaviors active."
+Returns combined prompt string or nil if no behaviors active.
+
+For SDD workflow, tags are ordered: container (sdd) first, then phase tags.
+This ensures the workflow context is established before phase-specific behavior."
   (let* ((config (claude-org--collect-behavior-config))
          (tags (plist-get config :tags))
          (header-args (plist-get config :header-args))
          (parts '()))
-    ;; Collect tag prompts (sorted alphabetically for consistency)
-    (dolist (tag-str (sort (copy-sequence tags) #'string<))
+    ;; Collect tag prompts (ordered by SDD priority for proper context)
+    (dolist (tag-str (sort (copy-sequence tags)
+                           (lambda (a b)
+                             (< (claude-org--sdd-tag-priority a)
+                                (claude-org--sdd-tag-priority b)))))
       (when-let ((prompt (claude-org--tag-prompt (intern tag-str))))
         (push prompt parts)))
     ;; Collect header argument prompts
@@ -1676,6 +1544,89 @@ Aligns section level with previous story if any exists, otherwise uses top level
     (insert ":END:\n\n")
     ;; Position cursor for content
     (message "Created story '%s' with session ID: %s" title session-id)))
+
+(defun claude-org--find-previous-sdd-level ()
+  "Find the level of the most recent SDD section before point.
+Searches backwards from current position for a heading with CLAUDE_SESSION_ID
+property starting with 'sdd-'. Returns the level (integer) or nil if not found."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((start-pos (point))
+            (found-level nil))
+        ;; Search backwards through all headings
+        (while (and (not found-level)
+                    (re-search-backward "^\\*+ " nil t))
+          (when (string-prefix-p "sdd-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
+            (setq found-level (org-current-level))))
+        ;; If not found before point, search from beginning (for SDDs after point)
+        (unless found-level
+          (goto-char (point-min))
+          (while (and (not found-level)
+                      (re-search-forward "^\\*+ " start-pos t))
+            (when (string-prefix-p "sdd-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
+              (setq found-level (org-current-level)))))
+        found-level))))
+
+(defun claude-org-insert-sdd ()
+  "Insert an SDD (Spec-Driven Development) structure.
+Creates four sections in order:
+1. Workflow :sdd: with Research/Design/Planning/Implementation phases
+2. Research Output :research_output: with Patterns/Files/External subsections
+3. Spec :spec: with Goals/Non-Goals/Proposed Solution/Technical Design
+4. Features :features: with ORDERED property for TODO tracking
+
+The structure follows the Atomic workflow pattern:
+- Workflow: AI interaction happens here (parallel research → design → implementation)
+- Research Output: Synthesized findings from parallel research agents
+- Spec: Living RFC document that evolves with the project
+- Features: Atomic TODO items, each small enough to complete in one session
+
+Prompts for feature name and sets up unique CLAUDE_SESSION_ID.
+Aligns section level with previous SDD if any exists, otherwise uses top level."
+  (interactive)
+  (let* ((name (read-string "Feature name: "))
+         (session-id (format "sdd-%s" (format-time-string "%Y%m%d-%H%M%S")))
+         ;; Align with previous SDD level, or use top level (1) if none exists
+         (level (or (claude-org--find-previous-sdd-level) 1))
+         (stars (make-string level ?*))
+         (stars2 (make-string (1+ level) ?*))
+         (stars3 (make-string (+ 2 level) ?*)))
+    ;; Insert top-level heading with session
+    (insert stars " " name "\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: " session-id "\n")
+    (insert ":END:\n\n")
+
+    ;; 1. Insert Workflow section with phases
+    (insert stars2 " Workflow :sdd:\n\n")
+    (dolist (phase '(("Research" . "research")
+                     ("Design" . "design")
+                     ("Planning" . "planning")
+                     ("Implementation" . "implementation")))
+      (insert stars3 " " (car phase) " :" (cdr phase) ":\n\n"))
+
+    ;; 2. Insert Research Output section for parallel agent findings
+    (insert stars2 " Research Output :research_output:\n\n")
+    (dolist (section '("Codebase Patterns" "Relevant Files" "External References"))
+      (insert stars3 " " section "\n\n"))
+
+    ;; 3. Insert Spec section with subsections
+    (insert stars2 " Spec :spec:\n\n")
+    (dolist (section '("Goals" "Non-Goals" "Proposed Solution" "Technical Design"))
+      (insert stars3 " " section "\n\n"))
+
+    ;; 4. Insert Features section with ORDERED property
+    (insert stars2 " Features :features:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":ORDERED: t\n")
+    (insert ":END:\n\n")
+
+    ;; Position cursor at Research section (search backwards)
+    (re-search-backward "^\\*+ Research :research:")
+    (end-of-line)
+    (insert "\n")
+    (message "Created SDD '%s' with session ID: %s" name session-id)))
 #+END_SRC
 
 ** Session Info Display
@@ -2457,29 +2408,49 @@ Dynamic header line showing session status, IDE context, and thinking state.
 
 * Mode Definition
 
-** Keymap
+** Transient Menu System
+
+Transient provides a visual command menu with temporary keybindings.
+Built into Emacs since v28, or install via =M-x package-install RET transient RET=.
+
+*** Transient Prefix
+
+#+BEGIN_SRC elisp
+(require 'transient)
+
+(transient-define-prefix claude-org-menu ()
+  "Claude Org-mode command menu."
+  ["Claude Org"
+   ["Execute"
+    ("c" "Execute (C-c C-c)" claude-org-execute)
+    ("k" "Cancel query" claude-org-cancel)
+    ("v" "Verbose output" claude-org-show-verbose)]
+   ["Insert"
+    ("n" "New AI block" claude-org-insert-block)
+    ("s" "Story section" claude-org-insert-story)
+    ("d" "SDD structure" claude-org-insert-sdd)]
+   ["Session"
+    ("i" "Session info" claude-org-show-session-info)
+    ("l" "List sessions" claude-org-list-sessions)
+    ("p" "Permission mode" claude-org-switch-permission-mode)]])
+#+END_SRC
+
+*** Keymap
+
+The keymap binds a single key to open the transient menu.
+Per Emacs convention, =C-c= followed by non-letter is reserved for minor modes.
 
 #+BEGIN_SRC elisp
 (defvar claude-org-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'claude-org-maybe-execute)
+    ;; Primary: Transient menu (C-c C-/ is safe for minor modes per Emacs convention)
+    (define-key map (kbd "C-c C-/") #'claude-org-menu)
+    ;; Note: C-c C-c is handled by org-babel, not bound here
+    ;; Direct keybindings for frequently used commands
     (define-key map (kbd "C-c C-k") #'claude-org-cancel)
-    (define-key map (kbd "C-c C-l") #'claude-org-list-sessions)
-    (define-key map (kbd "C-c C-n") #'claude-org-insert-block)
-    (define-key map (kbd "C-c C-s") #'claude-org-insert-story)
-    (define-key map (kbd "C-c C-i") #'claude-org-show-session-info)
-    (define-key map (kbd "C-c C-v") #'claude-org-show-verbose)
-    (define-key map (kbd "C-c C-p") #'claude-org-switch-permission-mode)
     map)
-  "Keymap for `claude-org-mode'.")
-
-(defun claude-org-maybe-execute ()
-  "Execute AI query if in ai block, otherwise run org default."
-  (interactive)
-  (if (claude-org--in-ai-block-p)
-      (claude-org-execute)
-    ;; Fall back to org-mode's C-c C-c
-    (org-ctrl-c-ctrl-c)))
+  "Keymap for `claude-org-mode'.
+Use \\[claude-org-menu] to open the transient command menu.")
 #+END_SRC
 
 ** Minor Mode
@@ -2496,8 +2467,12 @@ Dynamic header line showing session status, IDE context, and thinking state.
 (define-minor-mode claude-org-mode
   "Minor mode for streaming Claude AI queries in org-mode.
 
-Use #+begin_src ai blocks to query Claude. Press C-c C-c inside a block
-to send the query and stream the response.
+Use #+begin_src ai blocks to query Claude. Use org-babel's C-c C-c
+to execute the block and stream the response.
+
+Key bindings:
+  \\[claude-org-menu]     Open transient command menu
+  \\[claude-org-cancel]   Cancel active query
 
 \\{claude-org-mode-map}"
   :lighter " ClaudeOrg"
