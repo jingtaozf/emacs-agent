@@ -381,7 +381,7 @@ should be able to execute in parallel without interference."
    (lambda (org-file)
      ;; The fixture has PROJECT_ROOT set to ~/projects/claude-agent
      ;; Instruction 7 asks to read README.md from project root
-     (let ((response (test-claude-execute-and-wait org-file 7 60)))
+     (let ((response (test-claude-execute-and-wait org-file 7 90)))
        (should (stringp response))
        (should (> (length (string-trim response)) 0))))))
 
@@ -456,14 +456,14 @@ should be able to execute in parallel without interference."
 
   (test-claude-with-fixture
    (lambda (org-file)
-     ;; Execute 3 sequential queries
-     (let ((response1 (test-claude-execute-and-wait org-file 1 30)))
+     ;; Execute 3 sequential queries (45s each for API latency)
+     (let ((response1 (test-claude-execute-and-wait org-file 1 45)))
        (should (stringp response1))
        (should (string-match-p "4" response1)))
-     (let ((response2 (test-claude-execute-and-wait org-file 2 30)))
+     (let ((response2 (test-claude-execute-and-wait org-file 2 45)))
        (should (stringp response2))
        (should (> (length (string-trim response2)) 0)))
-     (let ((response3 (test-claude-execute-and-wait org-file 3 30)))
+     (let ((response3 (test-claude-execute-and-wait org-file 3 45)))
        (should (stringp response3))
        (should (> (length (string-trim response3)) 0))))))
 
@@ -480,7 +480,7 @@ FLAKY: Response capture sometimes returns empty in batch mode."
 
   (test-claude-with-fixture
    (lambda (org-file)
-     (let ((response (test-claude-execute-and-wait org-file 16 60)))
+     (let ((response (test-claude-execute-and-wait org-file 16 90)))
        ;; Response may be empty due to timing issues in batch mode
        ;; Skip if empty rather than fail
        (when (or (null response) (string-empty-p (string-trim response)))
@@ -658,7 +658,7 @@ Instruction 17 asks Claude to read [[*Important Config]] and find the value."
 
   (test-claude-with-fixture
    (lambda (org-file)
-     (let ((response (test-claude-execute-and-wait org-file 17 60)))
+     (let ((response (test-claude-execute-and-wait org-file 17 90)))
        ;; Response may be empty due to timing issues in batch mode
        (when (or (null response) (string-empty-p (string-trim response)))
          (ert-skip "Empty response - flaky in batch mode"))
