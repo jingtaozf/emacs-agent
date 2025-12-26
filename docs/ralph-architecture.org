@@ -1,0 +1,478 @@
+# -*- mode: org; -*-
+#+TITLE: Ralph Architecture Design for claude-agent
+#+SUBTITLE: Overnight Autonomous AI Coding Pipeline Integration
+#+AUTHOR: Claude Agent SDK
+#+DATE: 2024
+#+OPTIONS: toc:2
+
+* Introduction
+
+This document captures research and design for integrating overnight autonomous AI coding
+patterns (the "Ralph" method) into claude-agent and claude-org. This is a future feature
+that has been analyzed but not yet implemented.
+
+* Research Summary
+
+** Source Materials
+
+The research synthesizes patterns from:
+
+- [[https://ghuntley.com/ralph/][Ralph Wiggum Method]] - Geoffrey Huntley's original technique
+- [[https://github.com/smtg-ai/claude-squad][Claude Squad]] (5.1k stars) - Multi-session TUI with tmux + git worktrees
+- [[https://github.com/AnandChowdhary/continuous-claude][Continuous Claude]] (825 stars) - Autonomous PR workflow
+- [[https://alexlavaee.me/blog/ai-coding-infrastructure/][flora131/agent-instructions]] - 100k LOC case study
+- [[https://github.com/VoltAgent/awesome-claude-code-subagents][VoltAgent Subagents]] (5.9k stars) - 100+ specialized agents
+- [[https://github.com/mkreyman/mcp-memory-keeper][mcp-memory-keeper]] - Persistent context via SQLite
+- [[https://github.com/daaain/claude-code-log][claude-code-log]] - JSONL transcript visualization
+- =frankbria/ralph-claude-code= - Production implementation with circuit breaker
+
+** Key Insight
+
+Success depends on *infrastructure*, not model capability:
+- Project memory (CLAUDE.md, AGENTS.md)
+- Mandatory workflows (TDD, code review)
+- Verification loops (tests, linting)
+- Human review gates
+
+Organizations report *40-60% time savings* with documented cases of shipping
+100,000 lines of production code in two weeks using up to 50 concurrent agents.
+
+* The Ralph Method
+
+** Core Pattern
+
+The simplest production pattern is remarkably direct:
+
+#+begin_src bash
+while :; do cat PROMPT.md | claude ; done
+#+end_src
+
+Geoffrey Huntley ran this for 3 months and built an LLVM-compiled programming language.
+YC hackathon teams shipped 6 repos overnight for $297.
+
+** frankbria/ralph-claude-code Implementation
+
+The =frankbria/ralph-claude-code= implementation adds production infrastructure:
+
+| Component | File | Purpose |
+|-----------+------+---------|
+| Main Loop | =ralph_loop.sh= | Orchestrates execution cycles with rate limiting |
+| Response Analyzer | =lib/response_analyzer.sh= | Semantic analysis for completion signals |
+| Circuit Breaker | =lib/circuit_breaker.sh= | Prevents runaway loops (Michael Nygard pattern) |
+| Monitor | =ralph_monitor.sh= | tmux-based live dashboard |
+| Templates | =templates/PROMPT.md= | Structured status reporting protocol |
+
+** Structured Status Protocol
+
+The most valuable pattern—Claude outputs structured blocks:
+
+#+begin_example
+---RALPH_STATUS---
+STATUS: IN_PROGRESS | COMPLETE | BLOCKED
+TASKS_COMPLETED_THIS_LOOP: 3
+FILES_MODIFIED: 7
+TESTS_STATUS: PASSING
+WORK_TYPE: IMPLEMENTATION
+EXIT_SIGNAL: false
+RECOMMENDATION: Continue with next task
+---END_RALPH_STATUS---
+#+end_example
+
+This enables machine-parseable output for intelligent loop decisions.
+
+** Circuit Breaker Pattern
+
+Three-state machine preventing token waste:
+
+| State | Meaning | Transition |
+|-------+---------+------------|
+| =CLOSED= | Normal operation | → HALF_OPEN after 2 no-progress loops |
+| =HALF_OPEN= | Monitoring | → CLOSED if progress, OPEN if not |
+| =OPEN= | Halted | Requires manual reset |
+
+Thresholds:
+- =CB_NO_PROGRESS_THRESHOLD=3= — Open after 3 loops without file changes
+- =CB_SAME_ERROR_THRESHOLD=5= — Open after 5 loops with same error
+- =CB_OUTPUT_DECLINE_THRESHOLD=70= — Open if output drops 70%
+
+** Response Analyzer
+
+Semantic analysis detecting:
+- Completion keywords ("done", "complete", "all tasks complete")
+- Test-only loops (running tests but no implementation)
+- Stuck indicators (repeated errors)
+- No-work patterns ("nothing to do", "already implemented")
+- Git file changes (actual progress signal)
+
+Confidence scoring:
+- +10 for completion keywords
+- +15 for no-work patterns
+- +20 for file changes
+- Exit if score >= 40
+
+* Architecture Design
+
+** Core Principle: Separation of Concerns
+
+| Layer | File | Responsibility |
+|-------+------+----------------|
+| *SDK Layer* | =claude-agent.org= | Loop execution, circuit breaker, response analysis, rate limiting |
+| *UI Layer* | =claude-org.org= | Org-mode integration, block handling, visual presentation |
+
+The SDK should be UI-agnostic—it could drive org-mode, comint, or any other interface.
+
+** Org Structure Options for Multiple Iterations
+
+*** Option A: Single ai_output Section (Append Mode)
+
+#+begin_example
+,* Task :ralph:
+,#+begin_src ai
+Implement OAuth login
+,#+end_src
+
+,** AI Output :ai_output:
+[Iteration 1 response...]
+
+---ITERATION 2---
+[Iteration 2 response...]
+
+---RALPH_COMPLETE---
+STATUS: COMPLETE after 3 iterations
+#+end_example
+
+Pros: Simple, all context visible
+Cons: Can get very long
+
+*** Option B: Multiple ai_output Sections (Recommended)
+
+#+begin_example
+,* Task :ralph:
+,#+begin_src ai
+Implement OAuth login
+,#+end_src
+
+,** Iteration 1 :ai_output:ralph_iter:
+[Response 1...]
+
+,** Iteration 2 :ai_output:ralph_iter:
+[Response 2...]
+
+,** Iteration 3 :ai_output:ralph_iter:
+[Response 3...]
+#+end_example
+
+Pros: Each iteration foldable, clear boundaries, can link iterations
+Cons: More complex structure
+
+*** Option C: Progress Section + Final Output
+
+#+begin_example
+,* Task :ralph:
+,#+PROPERTY: RALPH_ITERATIONS 3
+,#+PROPERTY: RALPH_STATUS COMPLETE
+
+,** Progress Log :ralph_log:
+| Iter | Status | Files | Exit |
+|------+--------+-------+------|
+| 1    | IN_PROGRESS | 3 | false |
+| 2    | IN_PROGRESS | 5 | false |
+| 3    | COMPLETE | 1 | true |
+
+,** Final Output :ai_output:
+[Only the final iteration's response]
+#+end_example
+
+Pros: Clean final output, compact progress
+Cons: Loses intermediate context
+
+** Component Distribution
+
+*** claude-agent.org (SDK Layer)
+
+#+begin_example
+,* Ralph Loop Engine
+,** Loop State Management
+- claude-agent-ralph-state structure (defstruct)
+- State: loop-count, circuit-state, last-progress-loop, etc.
+
+,** Circuit Breaker
+- claude-agent-circuit-breaker-state (CLOSED/HALF_OPEN/OPEN)
+- claude-agent-circuit-breaker-record-result
+- claude-agent-circuit-breaker-should-halt-p
+- claude-agent-circuit-breaker-reset
+
+,** Response Analyzer
+- claude-agent-analyze-response → plist with :confidence, :exit-signal, etc.
+- claude-agent-parse-ralph-status-block
+- claude-agent-detect-completion-keywords
+- claude-agent-detect-stuck-loop
+
+,** Ralph Query API
+- claude-agent-ralph-query (single iteration with analysis)
+- claude-agent-ralph-loop (full loop until completion)
+- Callbacks: :on-iteration, :on-complete, :on-circuit-open
+
+,** Rate Limiting
+- claude-agent-rate-limit-state
+- claude-agent-rate-limit-can-call-p
+- claude-agent-rate-limit-wait
+#+end_example
+
+*** claude-org.org (UI Layer)
+
+#+begin_example
+,* Ralph Org Integration
+,** Ralph Mode Detection
+- Detect :ralph: tag on heading
+- Parse RALPH_* properties
+
+,** Iteration Section Management
+- claude-org-ralph-create-iteration-section
+- claude-org-ralph-fold-completed-iterations
+- claude-org-ralph-get-iteration-count
+
+,** Progress Tracking UI
+- Update properties after each iteration
+- Show progress in header-line
+- Visual circuit breaker indicator
+
+,** Task Completion Detection
+- Parse org checkboxes as task list
+- claude-org-ralph-all-tasks-complete-p
+
+,** Ralph Execution Commands
+- claude-org-ralph-execute (start loop)
+- claude-org-ralph-pause
+- claude-org-ralph-resume
+- claude-org-ralph-reset-circuit
+#+end_example
+
+** Interaction Flow
+
+#+begin_example
+┌─────────────────────────────────────────────────────────────────┐
+│                        claude-org.org                           │
+│                                                                 │
+│  User presses C-c C-c on :ralph: block                         │
+│         │                                                       │
+│         ▼                                                       │
+│  claude-org-ralph-execute                                       │
+│         │                                                       │
+│         │  Creates iteration section                            │
+│         │  Calls SDK with callbacks                             │
+│         ▼                                                       │
+├─────────────────────────────────────────────────────────────────┤
+│                        claude-agent.org                         │
+│                                                                 │
+│  claude-agent-ralph-loop                                        │
+│         │                                                       │
+│         ├──► Check circuit breaker                              │
+│         ├──► Check rate limit                                   │
+│         ├──► claude-agent-query (single iteration)              │
+│         │         │                                             │
+│         │         ▼                                             │
+│         │    [Claude CLI subprocess]                            │
+│         │         │                                             │
+│         │         ▼                                             │
+│         │    claude-agent-analyze-response                      │
+│         │         │                                             │
+│         │         ▼                                             │
+│         │    Update circuit breaker state                       │
+│         │                                                       │
+│         ├──► Call :on-iteration callback ──────────────────────►│
+│         ├──► Call :on-complete callback ───────────────────────►│
+│         ├──► Call :on-circuit-open callback ───────────────────►│
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+#+end_example
+
+** Data Structures
+
+*** SDK Layer (claude-agent.org)
+
+#+begin_src elisp :eval no
+;; Ralph loop state
+(cl-defstruct claude-agent-ralph-state
+  loop-count
+  max-iterations
+  circuit-state          ; 'closed, 'half-open, 'open
+  consecutive-no-progress
+  consecutive-same-error
+  last-progress-loop
+  start-time
+  total-tokens-used)
+
+;; Circuit breaker state
+(cl-defstruct claude-agent-circuit-breaker
+  state                  ; 'closed, 'half-open, 'open
+  no-progress-threshold  ; default 3
+  same-error-threshold   ; default 5
+  last-change-time
+  reason)
+
+;; Response analysis result
+(cl-defstruct claude-agent-response-analysis
+  confidence-score       ; 0-100
+  has-completion-signal  ; bool
+  is-test-only          ; bool
+  is-stuck              ; bool
+  has-progress          ; bool (based on git diff or file changes)
+  exit-signal           ; bool
+  work-type             ; 'implementation, 'testing, 'documentation
+  recommendation        ; string
+  raw-status-block)     ; parsed RALPH_STATUS block as plist
+#+end_src
+
+*** UI Layer (claude-org.org)
+
+#+begin_src elisp :eval no
+;; Ralph org context
+(cl-defstruct claude-org-ralph-context
+  heading-marker        ; marker to :ralph: heading
+  prompt-text           ; the ai block content
+  iteration-sections    ; list of markers to iteration headings
+  current-iteration     ; integer
+  properties            ; plist of RALPH_* properties
+  task-checkboxes)      ; list of (text . complete-p) for task tracking
+#+end_src
+
+** Sample Org Structure After Ralph Execution
+
+#+begin_example
+,* Implement OAuth :ralph:
+:PROPERTIES:
+:RALPH_STATUS: COMPLETE
+:RALPH_ITERATIONS: 3
+:RALPH_TOTAL_TOKENS: 45230
+:RALPH_DURATION: 12m34s
+:CIRCUIT_STATE: CLOSED
+:END:
+
+,#+begin_src ai
+Implement OAuth2 login with Google provider.
+Requirements:
+- [ ] Add OAuth routes
+- [ ] Create login button
+- [ ] Handle callback
+- [ ] Store tokens securely
+,#+end_src
+
+,** Iteration 1 :ralph_iter:
+:PROPERTIES:
+:ITER_STATUS: IN_PROGRESS
+:ITER_EXIT_SIGNAL: false
+:ITER_FILES_MODIFIED: 3
+:END:
+
+I'll start by implementing the OAuth routes...
+[... response content ...]
+
+---RALPH_STATUS---
+STATUS: IN_PROGRESS
+EXIT_SIGNAL: false
+RECOMMENDATION: Continue with login button
+---END_RALPH_STATUS---
+
+,** Iteration 2 :ralph_iter:
+:PROPERTIES:
+:ITER_STATUS: IN_PROGRESS
+:ITER_EXIT_SIGNAL: false
+:ITER_FILES_MODIFIED: 2
+:END:
+
+Now implementing the login button component...
+[... response content ...]
+
+,** Iteration 3 :ralph_iter:
+:PROPERTIES:
+:ITER_STATUS: COMPLETE
+:ITER_EXIT_SIGNAL: true
+:ITER_FILES_MODIFIED: 1
+:END:
+
+All tasks complete. Final verification...
+[... response content ...]
+
+---RALPH_STATUS---
+STATUS: COMPLETE
+EXIT_SIGNAL: true
+RECOMMENDATION: All requirements met
+---END_RALPH_STATUS---
+#+end_example
+
+** Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------+--------+-----------|
+| Loop execution | SDK layer | Reusable for non-org interfaces |
+| Section creation | UI layer | Org-specific formatting |
+| Circuit breaker | SDK layer | Core safety mechanism |
+| Response analysis | SDK layer | Text parsing, not UI-dependent |
+| Property updates | UI layer | Org properties are UI concern |
+| Rate limiting | SDK layer | API concern, not UI |
+| Progress display | UI layer | Visual presentation |
+| Task checkbox parsing | UI layer | Org-specific syntax |
+
+** System Prompt Injection
+
+The SDK layer should inject RALPH_STATUS instruction when in ralph mode:
+
+#+begin_src elisp :eval no
+(defun claude-agent-ralph-build-system-prompt (user-prompt)
+  "Wrap USER-PROMPT with Ralph status reporting instructions."
+  (concat user-prompt "\n\n"
+          "IMPORTANT: At the end of your response, include:\n\n"
+          "---RALPH_STATUS---\n"
+          "STATUS: IN_PROGRESS | COMPLETE | BLOCKED\n"
+          "TASKS_COMPLETED: <count>\n"
+          "FILES_MODIFIED: <count>\n"
+          "EXIT_SIGNAL: false | true\n"
+          "RECOMMENDATION: <next action>\n"
+          "---END_RALPH_STATUS---\n\n"
+          "Set EXIT_SIGNAL: true when all tasks are complete."))
+#+end_src
+
+* Implementation Priority
+
+| Priority | Feature | Layer | Effort | Impact |
+|----------+---------+-------+--------+--------|
+| 1 | Structured status protocol | SDK | Low | Critical |
+| 2 | Response analyzer | SDK | Medium | High |
+| 3 | Circuit breaker | SDK | Medium | High |
+| 4 | Task completion via checkboxes | UI | Low | High |
+| 5 | Ralph loop mode (=:ralph:= tag) | Both | Medium | High |
+| 6 | Rate limiting/API limit handling | SDK | Low | Medium |
+| 7 | Session dashboard | UI | High | Medium |
+
+* Implementation Steps (When Ready)
+
+1. *Define structures* in =claude-agent.org= (ralph-state, circuit-breaker, response-analysis)
+2. *Implement response analyzer* with RALPH_STATUS parsing
+3. *Implement circuit breaker* with state machine
+4. *Add ralph-query* function that wraps regular query with analysis
+5. *Add ralph-loop* function that iterates with callbacks
+6. *UI integration* in =claude-org.org= for iteration sections
+7. *Commands* for ralph-execute, pause, resume, reset
+
+* References
+
+** GitHub Repositories
+
+- https://github.com/smtg-ai/claude-squad
+- https://github.com/AnandChowdhary/continuous-claude
+- https://github.com/VoltAgent/awesome-claude-code-subagents
+- https://github.com/mkreyman/mcp-memory-keeper
+- https://github.com/daaain/claude-code-log
+- https://github.com/frankbria/ralph-claude-code
+- https://github.com/mikeyobrien/ralph-orchestrator
+
+** Articles
+
+- https://ghuntley.com/ralph/ - Original Ralph Wiggum technique
+- https://alexlavaee.me/blog/ai-coding-infrastructure/ - 100k LOC case study
+- https://anandchowdhary.com/blog/2025/running-claude-code-in-a-loop
+
+** Local Reference
+
+- =/Users/jingtao/projects/mind-ai/agents/code/ralph-claude-code/= - Full implementation study

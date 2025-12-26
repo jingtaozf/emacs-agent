@@ -31,14 +31,12 @@
     (goto-char (point-min))
     ;; Top-level heading
     (should (re-search-forward "^\\* Test Feature" nil t))
-    ;; Workflow section with :sdd: tag
+    ;; Workflow section with :sdd: tag and single AI block
     (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
-    ;; Four phases
-    (should (re-search-forward "^\\*\\*\\* Research :research:" nil t))
-    (should (re-search-forward "^\\*\\*\\* Design :design:" nil t))
-    (should (re-search-forward "^\\*\\*\\* Planning :planning:" nil t))
-    (should (re-search-forward "^\\*\\*\\* Implementation :implementation:" nil t))
-    ;; Research Output section (new)
+    (let ((tag-pattern (format ":%s:" claude-org-heading-tag)))
+      (should (re-search-forward (format "^\\*\\*\\* Instruction 1 %s" tag-pattern) nil t))
+      (should (re-search-forward "^#\\+begin_src ai" nil t)))
+    ;; Research Output section
     (should (re-search-forward "^\\*\\* Research Output :research_output:" nil t))
     (should (re-search-forward "^\\*\\*\\* Codebase Patterns" nil t))
     (should (re-search-forward "^\\*\\*\\* Relevant Files" nil t))
@@ -96,6 +94,96 @@
     (goto-char (point-min))
     (re-search-forward "^\\*\\* Second Feature")
     (should (= 2 (org-current-level)))))
+
+(ert-deftest test-sdd-cursor-in-first-ai-block ()
+  "Test that cursor is positioned inside the first AI block after insert."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd.org")
+    (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
+      (claude-org-insert-sdd))
+    ;; Cursor should be between begin_src and end_src
+    (let ((line (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+      ;; Should be on empty line inside the src block
+      (should (string= "" line)))
+    ;; Previous line should be #+begin_src ai
+    (forward-line -1)
+    (should (looking-at "^#\\+begin_src ai"))
+    ;; Next line (from original pos) should be #+end_src
+    (forward-line 2)
+    (should (looking-at "^#\\+end_src"))))
+
+(ert-deftest test-sdd-single-ai-block ()
+  "Test that simplified SDD has exactly one AI block under Workflow."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd.org")
+    (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
+      (claude-org-insert-sdd))
+    (goto-char (point-min))
+    ;; Count AI blocks - should be 1 (only under Workflow, no phase subsections)
+    (let ((count 0))
+      (while (re-search-forward "^#\\+begin_src ai" nil t)
+        (setq count (1+ count)))
+      (should (= 1 count)))))
+
+;;; Unit Tests - Tag Selection
+
+(ert-deftest test-sdd-tag-toggle ()
+  "Test tag toggling for block insertion."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  ;; Clear any previous state
+  (setq claude-org--selected-tags nil)
+  ;; Toggle on
+  (claude-org--toggle-tag "research")
+  (should (member "research" claude-org--selected-tags))
+  ;; Toggle off
+  (claude-org--toggle-tag "research")
+  (should-not (member "research" claude-org--selected-tags))
+  ;; Multiple tags
+  (claude-org--toggle-tag "research")
+  (claude-org--toggle-tag "design")
+  (should (member "research" claude-org--selected-tags))
+  (should (member "design" claude-org--selected-tags))
+  ;; Cleanup
+  (setq claude-org--selected-tags nil))
+
+(ert-deftest test-sdd-block-with-workflow-tags ()
+  "Test inserting block with workflow tags."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd.org")
+    (insert "* Feature\n** Workflow :sdd:\n")
+    (goto-char (point-max))
+    ;; Insert block with research and design tags
+    (claude-org--do-insert-block '("research" "design"))
+    (goto-char (point-min))
+    ;; Verify tags are present
+    (should (re-search-forward ":research:" nil t))
+    (goto-char (point-min))
+    (should (re-search-forward ":design:" nil t))
+    (goto-char (point-min))
+    (should (re-search-forward (format ":%s:" claude-org-heading-tag) nil t))))
+
+(ert-deftest test-sdd-block-without-tags ()
+  "Test inserting block without workflow tags."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd.org")
+    (insert "* Feature\n** Workflow :sdd:\n")
+    (goto-char (point-max))
+    ;; Insert block with no workflow tags
+    (claude-org--do-insert-block nil)
+    (goto-char (point-min))
+    ;; Should only have claude-org-heading-tag, not workflow tags
+    (should (re-search-forward (format ":%s:" claude-org-heading-tag) nil t))
+    (goto-char (point-min))
+    (should-not (re-search-forward ":research:" nil t))
+    (should-not (re-search-forward ":design:" nil t))))
 
 ;;; Unit Tests - Tag Inheritance
 
@@ -190,6 +278,35 @@ Note: research_output is a storage section, not an AI block container, so no pro
       (should (string-match-p "SDD" prompt))
       (should (string-match-p "RESEARCH" prompt)))))
 
+(ert-deftest test-sdd-tag-inheritance-for-behavior-prompt ()
+  "Test that tags are inherited from parent headings for behavior prompts.
+This is the critical test for the bug where :sdd: and :research: tags
+were not inherited because org-get-tags was called with LOCAL=t."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    ;; Create nested structure with tags at different levels
+    (insert "* Feature\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Research :research:\n")
+    (insert "**** Instruction 1 :claude_chat:\n")
+    (insert "#+begin_src ai\ntest query\n#+end_src\n")
+    ;; Position inside the ai block
+    (goto-char (point-min))
+    (re-search-forward "test query")
+    ;; Verify tag inheritance
+    (let ((tags (claude-org--get-current-tags)))
+      ;; Should have all THREE tags: sdd (from Workflow), research (from Research),
+      ;; and claude_chat (from Instruction 1)
+      (should (member "sdd" tags))
+      (should (member "research" tags))
+      (should (member "claude_chat" tags)))
+    ;; Verify behavior prompt includes both SDD and RESEARCH content
+    (let ((prompt (claude-org--build-behavior-prompt)))
+      (should (stringp prompt))
+      (should (string-match-p "SDD" prompt))
+      (should (string-match-p "RESEARCH" prompt)))))
+
 ;;; Unit Tests - Find Previous SDD Level
 
 (ert-deftest test-find-previous-sdd-level ()
@@ -218,8 +335,8 @@ Note: research_output is a storage section, not an AI block container, so no pro
 
 ;;; Integration Tests (require API)
 
-(ert-deftest test-sdd-integration-research-phase ()
-  "Test that Research phase uses documentarian behavior."
+(ert-deftest test-sdd-integration-workflow ()
+  "Test that SDD workflow uses correct behavior prompt."
   :tags '(:integration :slow :api :org :sdd)
   (require 'test-config)
   (test-claude-skip-unless-cli-available)
@@ -229,11 +346,11 @@ Note: research_output is a storage section, not an AI block container, so no pro
     (setq buffer-file-name (make-temp-file "sdd-test-" nil ".org"))
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
       (claude-org-insert-sdd))
-    ;; Navigate to Research section and add a query
+    ;; Navigate to Workflow section and add a query
     (goto-char (point-min))
-    (re-search-forward "^\\*\\*\\* Research :research:")
-    (end-of-line)
-    (insert "\n#+begin_src ai\nWhat is 2+2?\n#+end_src")
+    (re-search-forward "^#\\+begin_src ai")
+    (forward-line 1)
+    (insert "What is 2+2?")
     (save-buffer)
     ;; Execute the query
     (re-search-backward "What is 2+2")

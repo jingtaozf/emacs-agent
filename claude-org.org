@@ -1196,8 +1196,9 @@ Supports two patterns:
 
 #+BEGIN_SRC elisp
 (defun claude-org--get-current-tags ()
-  "Get list of tag strings for current section (inherited)."
-  (when-let ((tags (org-get-tags nil t)))
+  "Get list of tag strings for current section (inherited).
+Uses org-get-tags with LOCAL=nil to include inherited tags from ancestors."
+  (when-let* ((tags (org-get-tags nil nil)))  ; nil = include inherited tags
     (mapcar #'downcase tags)))
 
 (defun claude-org--get-block-header-args ()
@@ -1450,14 +1451,110 @@ The primary insertion command. Key behaviors:
 - Skips past output sections to maintain the flat Instruction/Response pattern
 - Matches heading level of existing instructions (or uses current level)
 - Auto-generates the next instruction number
+- Optionally prompts for workflow tags via transient menu
+
+*** Tag Selection State
+
+#+NAME: block-insert-tag-state
+#+BEGIN_SRC elisp
+(defvar claude-org--selected-tags nil
+  "Currently selected workflow tags for block insertion.")
+
+(defconst claude-org--workflow-tags
+  '(("r" "research" "Research - codebase exploration")
+    ("d" "design" "Design - architecture/API design")
+    ("p" "planning" "Planning - implementation steps")
+    ("i" "implementation" "Implementation - writing code"))
+  "Available workflow tags: (key tag description).")
+#+END_SRC
+
+*** Tag Toggle Functions
+
+#+NAME: block-insert-tag-toggle
+#+BEGIN_SRC elisp
+(defun claude-org--toggle-tag (tag)
+  "Toggle TAG in selected tags list."
+  (if (member tag claude-org--selected-tags)
+      (setq claude-org--selected-tags (delete tag claude-org--selected-tags))
+    (push tag claude-org--selected-tags)))
+
+(defun claude-org--tag-selected-p (tag)
+  "Return non-nil if TAG is currently selected."
+  (member tag claude-org--selected-tags))
+
+(defun claude-org--toggle-research ()
+  "Toggle research tag." (interactive)
+  (claude-org--toggle-tag "research"))
+
+(defun claude-org--toggle-design ()
+  "Toggle design tag." (interactive)
+  (claude-org--toggle-tag "design"))
+
+(defun claude-org--toggle-planning ()
+  "Toggle planning tag." (interactive)
+  (claude-org--toggle-tag "planning"))
+
+(defun claude-org--toggle-implementation ()
+  "Toggle implementation tag." (interactive)
+  (claude-org--toggle-tag "implementation"))
+#+END_SRC
+
+*** Transient Tag Selection Menu
+
+#+NAME: block-insert-transient-menu
+#+BEGIN_SRC elisp
+(require 'transient)
+
+(transient-define-prefix claude-org-insert-block-menu ()
+  "Select workflow tags for new AI block."
+  :value (lambda () claude-org--selected-tags)
+  ["Workflow Tags (toggle to select)"
+   ("r" claude-org--toggle-research
+    :transient t
+    :description (lambda ()
+                   (concat (if (claude-org--tag-selected-p "research") "[X] " "[ ] ")
+                           "Research - codebase exploration")))
+   ("d" claude-org--toggle-design
+    :transient t
+    :description (lambda ()
+                   (concat (if (claude-org--tag-selected-p "design") "[X] " "[ ] ")
+                           "Design - architecture/API design")))
+   ("p" claude-org--toggle-planning
+    :transient t
+    :description (lambda ()
+                   (concat (if (claude-org--tag-selected-p "planning") "[X] " "[ ] ")
+                           "Planning - implementation steps")))
+   ("i" claude-org--toggle-implementation
+    :transient t
+    :description (lambda ()
+                   (concat (if (claude-org--tag-selected-p "implementation") "[X] " "[ ] ")
+                           "Implementation - writing code")))]
+  ["Actions"
+   ("RET" "Create block with tags" claude-org--insert-block-with-tags)
+   ("n" "Create block (no tags)" claude-org--insert-block-no-tags)
+   ("q" "Cancel" transient-quit-one)])
+
+(defun claude-org--insert-block-with-tags ()
+  "Insert block with currently selected tags, then clear selection."
+  (interactive)
+  (let ((tags claude-org--selected-tags))
+    (setq claude-org--selected-tags nil)
+    (claude-org--do-insert-block tags)))
+
+(defun claude-org--insert-block-no-tags ()
+  "Insert block without any workflow tags."
+  (interactive)
+  (setq claude-org--selected-tags nil)
+  (claude-org--do-insert-block nil))
+#+END_SRC
+
+*** Core Block Insertion
 
 #+NAME: block-insert-standard
 #+BEGIN_SRC elisp
-(defun claude-org-insert-block ()
-  "Insert an AI query block with auto-numbered Instruction heading.
-Smart insertion that skips :ai_output: sections to maintain flat pattern.
-Inserts at the same level as the last Instruction heading, or current level if no Instructions exist."
-  (interactive)
+(defun claude-org--do-insert-block (workflow-tags)
+  "Insert an AI block with optional WORKFLOW-TAGS.
+WORKFLOW-TAGS is a list of tag strings like (\"research\" \"design\")."
   ;; If inside an output section, skip to after it
   (claude-org--skip-to-after-output-section)
   ;; Find the level by looking for the last Instruction heading
@@ -1467,10 +1564,22 @@ Inserts at the same level as the last Instruction heading, or current level if n
                     (org-current-level)
                     1))
          (stars (make-string level ?*))
-         (num (claude-org--next-instruction-number)))
-    (insert stars " Instruction " (number-to-string num) " :" claude-org-heading-tag ":\n\n")
+         (num (claude-org--next-instruction-number))
+         ;; Build tag string: workflow tags + claude-org-heading-tag
+         ;; Org format is :tag1:tag2:tag3: - single colons between tags
+         (all-tags (append workflow-tags (list claude-org-heading-tag)))
+         (tag-str (concat ":" (mapconcat #'identity all-tags ":") ":")))
+    (insert stars " Instruction " (number-to-string num) " " tag-str "\n\n")
     (insert "#+begin_src ai\n\n#+end_src\n")
     (forward-line -2)))
+
+(defun claude-org-insert-block ()
+  "Insert an AI query block with optional workflow tags.
+Shows a transient menu to select tags (research, design, planning, implementation).
+Press RET to create with selected tags, or 'n' for no tags."
+  (interactive)
+  (setq claude-org--selected-tags nil)
+  (claude-org-insert-block-menu))
 #+END_SRC
 
 ** Session and Story Blocks
@@ -1571,14 +1680,14 @@ property starting with 'sdd-'. Returns the level (integer) or nil if not found."
 (defun claude-org-insert-sdd ()
   "Insert an SDD (Spec-Driven Development) structure.
 Creates four sections in order:
-1. Workflow :sdd: with Research/Design/Planning/Implementation phases
+1. Workflow :sdd: with a single AI block (user adds phase tags manually)
 2. Research Output :research_output: with Patterns/Files/External subsections
 3. Spec :spec: with Goals/Non-Goals/Proposed Solution/Technical Design
 4. Features :features: with ORDERED property for TODO tracking
 
 The structure follows the Atomic workflow pattern:
-- Workflow: AI interaction happens here (parallel research → design → implementation)
-- Research Output: Synthesized findings from parallel research agents
+- Workflow: AI interaction happens here (user selects phase tags per block)
+- Research Output: Synthesized findings from exploration
 - Spec: Living RFC document that evolves with the project
 - Features: Atomic TODO items, each small enough to complete in one session
 
@@ -1598,15 +1707,12 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":CLAUDE_SESSION_ID: " session-id "\n")
     (insert ":END:\n\n")
 
-    ;; 1. Insert Workflow section with phases
+    ;; 1. Insert Workflow section with single AI block (no phase tags)
     (insert stars2 " Workflow :sdd:\n\n")
-    (dolist (phase '(("Research" . "research")
-                     ("Design" . "design")
-                     ("Planning" . "planning")
-                     ("Implementation" . "implementation")))
-      (insert stars3 " " (car phase) " :" (cdr phase) ":\n\n"))
+    (insert stars3 " Instruction 1 :" claude-org-heading-tag ":\n\n")
+    (insert "#+begin_src ai\n\n#+end_src\n\n")
 
-    ;; 2. Insert Research Output section for parallel agent findings
+    ;; 2. Insert Research Output section for findings
     (insert stars2 " Research Output :research_output:\n\n")
     (dolist (section '("Codebase Patterns" "Relevant Files" "External References"))
       (insert stars3 " " section "\n\n"))
@@ -1622,10 +1728,9 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":ORDERED: t\n")
     (insert ":END:\n\n")
 
-    ;; Position cursor at Research section (search backwards)
-    (re-search-backward "^\\*+ Research :research:")
-    (end-of-line)
-    (insert "\n")
+    ;; Position cursor inside the AI block
+    (re-search-backward "^#\\+begin_src ai")
+    (forward-line 1)
     (message "Created SDD '%s' with session ID: %s" name session-id)))
 #+END_SRC
 
