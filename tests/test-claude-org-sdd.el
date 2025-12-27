@@ -366,5 +366,204 @@ were not inherited because org-get-tags was called with LOCAL=t."
     ;; Cleanup
     (delete-file buffer-file-name)))
 
+;;; Unit Tests - Tag-Based Prompt Dispatch
+
+(ert-deftest test-sdd-tag-prompt-generic-dispatch ()
+  "Test that cl-defgeneric claude-org-tag-prompt dispatches correctly."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  ;; Default method should load from file
+  (let ((prompt (claude-org-tag-prompt 'explore nil)))
+    (should (or (null prompt)  ; File may not exist
+                (stringp prompt)))))
+
+(ert-deftest test-sdd-tag-prompt-sdd-method ()
+  "Test that SDD tag method returns combined prompt with links."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let* ((context (list :file-path "/tmp/test.org"
+                        :sdd-root "My Feature"
+                        :current-tags '("sdd" "research")))
+         (prompt (claude-org-tag-prompt 'sdd context)))
+    (should (stringp prompt))
+    ;; Should contain SDD workflow content
+    (should (string-match-p "SDD" prompt))
+    ;; Should contain dynamic links section
+    (should (string-match-p "SDD Section Links" prompt))
+    (should (string-match-p "Research Output" prompt))
+    (should (string-match-p "Spec" prompt))
+    (should (string-match-p "Features" prompt))))
+
+(ert-deftest test-sdd-tag-prompt-sdd-without-context ()
+  "Test SDD method gracefully handles nil context."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((prompt (claude-org-tag-prompt 'sdd nil)))
+    (should (stringp prompt))
+    ;; Should still have static SDD content
+    (should (string-match-p "SDD" prompt))
+    ;; But no dynamic links (no file-path/sdd-root)
+    (should-not (string-match-p "SDD Section Links" prompt))))
+
+(ert-deftest test-sdd-find-sdd-root ()
+  "Test claude-org--find-sdd-root finds correct parent."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* My Feature\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Research :research:\n")
+    (insert "**** Instruction 1 :claude_chat:\n")
+    (insert "#+begin_src ai\ntest\n#+end_src\n")
+    (goto-char (point-min))
+    (re-search-forward "test")
+    (should (equal "My Feature" (claude-org--find-sdd-root)))))
+
+(ert-deftest test-sdd-find-sdd-root-not-in-sdd ()
+  "Test claude-org--find-sdd-root returns nil when not in SDD."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Regular Section\n")
+    (insert "** Subsection\n")
+    (goto-char (point-max))
+    (should-not (claude-org--find-sdd-root))))
+
+(ert-deftest test-sdd-generate-links ()
+  "Test claude-org--generate-sdd-links creates valid org links."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((links (claude-org--generate-sdd-links "/tmp/test.org" "My Feature")))
+    (should (stringp links))
+    (should (string-match-p "SDD Section Links" links))
+    ;; Should contain org links in format [[file:path::*Heading][desc]]
+    (should (string-match-p "\\[\\[file:/tmp/test.org::\\*Research Output\\]\\[Research Output\\]\\]" links))
+    (should (string-match-p "\\[\\[file:/tmp/test.org::\\*Spec\\]\\[Spec\\]\\]" links))
+    (should (string-match-p "\\[\\[file:/tmp/test.org::\\*Features\\]\\[Features\\]\\]" links))))
+
+(ert-deftest test-sdd-generate-links-nil-args ()
+  "Test claude-org--generate-sdd-links handles nil arguments."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (should-not (claude-org--generate-sdd-links nil "Root"))
+  (should-not (claude-org--generate-sdd-links "/tmp/test.org" nil))
+  (should-not (claude-org--generate-sdd-links nil nil)))
+
+(ert-deftest test-sdd-build-behavior-context ()
+  "Test claude-org--build-behavior-context builds correct plist."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-context.org")
+    (insert "* Feature\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Research :research:\n")
+    (goto-char (point-max))
+    (let ((context (claude-org--build-behavior-context)))
+      (should (plistp context))
+      (should (equal "/tmp/test-context.org" (plist-get context :file-path)))
+      (should (equal "Feature" (plist-get context :sdd-root)))
+      (should (member "sdd" (plist-get context :current-tags)))
+      (should (member "research" (plist-get context :current-tags))))))
+
+;;; Integration Tests - SDD Prompt Building
+
+(ert-deftest test-sdd-integration-behavior-prompt-with-links ()
+  "Test that behavior prompt includes dynamic SDD links."
+  :tags '(:integration :fast :stable :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd-links.org")
+    (insert "* My Feature\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Research :research:\n")
+    (insert "**** Instruction 1 :claude_chat:\n")
+    (insert "#+begin_src ai\ntest query\n#+end_src\n")
+    (goto-char (point-min))
+    (re-search-forward "test query")
+    (let ((prompt (claude-org--build-behavior-prompt)))
+      (should (stringp prompt))
+      ;; Should have SDD content
+      (should (string-match-p "SDD" prompt))
+      ;; Should have dynamic links
+      (should (string-match-p "SDD Section Links" prompt))
+      (should (string-match-p "file:/tmp/test-sdd-links.org" prompt)))))
+
+(ert-deftest test-sdd-integration-multiple-tags-ordered ()
+  "Test that multiple tags are processed in correct order with context."
+  :tags '(:integration :fast :stable :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd-order.org")
+    (insert "* Feature\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Research :research:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (goto-char (point-min))
+    (re-search-forward "query")
+    (let ((prompt (claude-org--build-behavior-prompt)))
+      (should (stringp prompt))
+      ;; SDD should appear before RESEARCH (sdd priority 0, research priority 10)
+      (let ((sdd-pos (string-match "SDD WORKFLOW" prompt))
+            (research-pos (string-match "RESEARCH" prompt)))
+        (when (and sdd-pos research-pos)
+          (should (< sdd-pos research-pos)))))))
+
+;;; End-to-End Tests - Full SDD Workflow
+
+(ert-deftest test-sdd-e2e-create-and-verify-links ()
+  "End-to-end: Create SDD, verify dynamic links in system prompt."
+  :tags '(:e2e :slow :org :sdd)
+  (let ((test-file (make-temp-file "sdd-e2e-" nil ".org")))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (setq buffer-file-name test-file)
+          ;; Create SDD structure
+          (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Test Feature")))
+            (claude-org-insert-sdd))
+          (save-buffer)
+          ;; Navigate to first AI block
+          (goto-char (point-min))
+          (re-search-forward "^#\\+begin_src ai")
+          (forward-line 1)
+          ;; Verify context and links
+          (let* ((context (claude-org--build-behavior-context))
+                 (prompt (claude-org--build-behavior-prompt)))
+            ;; Context should have correct values
+            (should (equal "E2E Test Feature" (plist-get context :sdd-root)))
+            (should (member "sdd" (plist-get context :current-tags)))
+            ;; Prompt should have dynamic links pointing to this file
+            (should (string-match-p "SDD Section Links" prompt))
+            (should (string-match-p (regexp-quote test-file) prompt))
+            ;; Links should reference actual sections we created
+            (should (string-match-p "Research Output" prompt))
+            (should (string-match-p "Spec" prompt))
+            (should (string-match-p "Features" prompt))))
+      ;; Cleanup
+      (when (file-exists-p test-file)
+        (delete-file test-file)))))
+
+(ert-deftest test-sdd-e2e-links-resolve-correctly ()
+  "End-to-end: Verify generated links point to actual sections."
+  :tags '(:e2e :slow :org :sdd)
+  (let ((test-file (make-temp-file "sdd-links-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (org-mode)
+            (setq buffer-file-name test-file)
+            (cl-letf (((symbol-function 'read-string) (lambda (_) "Link Test")))
+              (claude-org-insert-sdd))
+            (save-buffer))
+          ;; Reopen file and verify links work
+          (with-current-buffer (find-file-noselect test-file)
+            (goto-char (point-min))
+            ;; Verify all linked sections exist
+            (should (re-search-forward "^\\*\\* Research Output" nil t))
+            (goto-char (point-min))
+            (should (re-search-forward "^\\*\\* Spec" nil t))
+            (goto-char (point-min))
+            (should (re-search-forward "^\\*\\* Features" nil t))
+            (kill-buffer)))
+      ;; Cleanup
+      (when (file-exists-p test-file)
+        (delete-file test-file)))))
+
 (provide 'test-claude-org-sdd)
 ;;; test-claude-org-sdd.el ends here

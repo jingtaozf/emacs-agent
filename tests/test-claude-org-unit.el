@@ -580,5 +580,106 @@
       (setq output (concat output (claude-org--normalize-headers-in-text token 4))))
     (should (equal "Here is the answer:\n**** Summary\nText\n" output))))
 
+;;; Chat Level Detection Tests
+
+(ert-deftest test-claude-org-find-previous-chat-level-with-tag ()
+  "Test finding level from heading with :claude_chat: tag."
+  :tags '(:unit :fast :stable :isolated :org :insertion)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Top Level\n")
+    (insert "** My Query :claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "** Response 1 :ai_output:\n")
+    (insert "Output content\n")
+    ;; Position at end of buffer (after Response)
+    (goto-char (point-max))
+    ;; Should find level 2 from heading with :claude_chat: tag
+    (should (= 2 (claude-org--find-previous-chat-level)))))
+
+(ert-deftest test-claude-org-find-previous-chat-level-custom-title ()
+  "Test finding level from custom titled headings with :claude_chat: tag."
+  :tags '(:unit :fast :stable :isolated :org :insertion)
+  (with-temp-buffer
+    (org-mode)
+    (insert "** refactoring emacs mcp server\n")
+    (insert "*** Workflow :sdd:\n")
+    (insert "**** Emacs MCP Server Buffer State Fixes :design:research:claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "**** Response 194 :ai_output:\n")
+    (insert "Output with many subsections\n")
+    (insert "***** Research Complete\n")
+    (insert "****** Key Findings\n")
+    ;; Position at end of buffer (deep in output subsections)
+    (goto-char (point-max))
+    ;; Should find level 4 from "Emacs MCP Server Buffer State Fixes"
+    (should (= 4 (claude-org--find-previous-chat-level)))))
+
+(ert-deftest test-claude-org-find-previous-chat-level-no-tag ()
+  "Test that Instruction N without :claude_chat: tag is NOT found."
+  :tags '(:unit :fast :stable :isolated :org :insertion)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Top Level\n")
+    (insert "** Instruction 1\n")  ;; No :claude_chat: tag!
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "** Response 1 :ai_output:\n")
+    (insert "Output content\n")
+    (goto-char (point-max))
+    ;; Should return nil since there's no :claude_chat: tag
+    (should-not (claude-org--find-previous-chat-level))))
+
+(ert-deftest test-claude-org-find-previous-chat-level-no-match ()
+  "Test returning nil when no chat section exists."
+  :tags '(:unit :fast :stable :isolated :org :insertion)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Regular Section\n")
+    (insert "** Another Section\n")
+    (insert "Some content without any chat blocks\n")
+    (goto-char (point-max))
+    ;; Should return nil (no chat sections found)
+    (should-not (claude-org--find-previous-chat-level))))
+
+(ert-deftest test-claude-org-find-previous-chat-level-multiple ()
+  "Test finding level from most recent :claude_chat: heading."
+  :tags '(:unit :fast :stable :isolated :org :insertion)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Top\n")
+    (insert "** First Query :claude_chat:\n")
+    (insert "First query\n")
+    (insert "** Response 1 :ai_output:\n")
+    (insert "First output\n")
+    (insert "** Second Query :planning:claude_chat:\n")
+    (insert "#+begin_src ai\nSecond query\n#+end_src\n")
+    (insert "** Response 2 :ai_output:\n")
+    (insert "Second output\n")
+    ;; Position at end - should find the most recent chat heading
+    (goto-char (point-max))
+    ;; Should find level 2 from "Second Query"
+    (should (= 2 (claude-org--find-previous-chat-level)))))
+
+(ert-deftest test-claude-org-do-insert-block-uses-chat-level ()
+  "Test that insert-block uses the correct level from previous chat section."
+  :tags '(:unit :fast :stable :isolated :org :insertion)
+  (with-temp-buffer
+    (org-mode)
+    (insert "** refactoring emacs mcp server\n")
+    (insert "*** Workflow :sdd:\n")
+    (insert "**** My Custom Title :research:claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "**** Response 1 :ai_output:\n")
+    (insert "Output content\n")
+    ;; Position at end
+    (goto-char (point-max))
+    ;; Insert a new block
+    (claude-org--do-insert-block nil)
+    ;; Find the newly inserted Instruction heading
+    (goto-char (point-min))
+    (re-search-forward "^\\(\\*+\\) Instruction [0-9]+" nil t)
+    ;; Should be level 4 (same as "My Custom Title")
+    (should (= 4 (length (match-string 1))))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

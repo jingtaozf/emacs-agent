@@ -1148,15 +1148,99 @@ Prompts are loaded from =docs/prompts/= directory at runtime.
 
 ** Tag Prompt Lookup
 
-Loads prompt from =docs/prompts/tags/TAG.org=.
+Tag-based prompt generation using =cl-defgeneric= / =cl-defmethod=.
+This allows specialized behavior per tag (e.g., SDD injects dynamic links).
+
+*** Generic Function
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-tag-prompt (tag context)
+  "Generate prompt content for TAG with CONTEXT.
+TAG is a symbol (e.g., 'sdd, 'research).
+CONTEXT is a plist with keys:
+  :file-path   - Absolute path to the org file
+  :sdd-root    - SDD root section name (e.g., \"Feature Name\") or nil
+  :current-tags - List of all inherited tags
+Returns a prompt string or nil.")
+#+END_SRC
+
+*** Default Method (File-Based Loading)
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-org-tag-prompt (tag _context)
+  "Default: load prompt from docs/prompts/tags/TAG.org."
+  (claude-org--load-prompt-file
+   (expand-file-name (format "tags/%s.org" (symbol-name tag))
+                     claude-org-prompts-directory)))
+#+END_SRC
+
+*** Legacy Wrapper
+
+Backward-compatible wrapper for existing callers.
 
 #+BEGIN_SRC elisp
 (defun claude-org--tag-prompt (tag)
   "Get behavior prompt for TAG symbol.
-Loads from docs/prompts/tags/TAG.org at runtime."
-  (claude-org--load-prompt-file
-   (expand-file-name (format "tags/%s.org" (symbol-name tag))
-                     claude-org-prompts-directory)))
+Legacy wrapper - calls `claude-org-tag-prompt' with minimal context."
+  (claude-org-tag-prompt tag nil))
+#+END_SRC
+
+*** SDD Root Detection
+
+#+BEGIN_SRC elisp
+(defun claude-org--find-sdd-root ()
+  "Find the root section name for current SDD.
+Returns the heading text (e.g., \"Feature Name\") of the parent section
+that contains the :sdd: tagged Workflow section, or nil if not in SDD."
+  (save-excursion
+    (when (member "sdd" (claude-org--get-current-tags))
+      ;; Walk up to find section with :sdd: tag
+      (while (and (org-up-heading-safe)
+                  (not (member "sdd" (org-get-tags nil t)))))
+      ;; Now at the :sdd: section (Workflow), go up one more to get parent
+      (when (org-up-heading-safe)
+        (org-get-heading t t t t)))))
+#+END_SRC
+
+*** SDD Link Generation
+
+#+BEGIN_SRC elisp
+(defun claude-org--generate-sdd-links (file-path sdd-root)
+  "Generate org links to SDD sibling sections.
+FILE-PATH is the absolute path to the org file.
+SDD-ROOT is the parent section name (e.g., \"Feature Name\").
+Returns a formatted string with links to Research Output, Spec, Features."
+  (when (and file-path sdd-root)
+    (let ((sections '(("Research Output" . "research_output")
+                      ("Spec" . "spec")
+                      ("Features" . "features"))))
+      (concat
+       "** SDD Section Links\n\n"
+       "Use these links to navigate and update SDD sections:\n\n"
+       (mapconcat
+        (lambda (sec)
+          (let* ((name (car sec))
+                 (link (org-link-make-string
+                        (format "file:%s::*%s" file-path name)
+                        name)))
+            (format "- *%s*: %s" name link)))
+        sections "\n")))))
+#+END_SRC
+
+*** SDD-Specific Method
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-org-tag-prompt ((tag (eql 'sdd)) context)
+  "SDD tag: combine static prompt with dynamic section links."
+  (let* ((file-path (plist-get context :file-path))
+         (sdd-root (plist-get context :sdd-root))
+         (static-prompt (claude-org--load-prompt-file
+                         (expand-file-name "tags/sdd.org"
+                                           claude-org-prompts-directory)))
+         (links (claude-org--generate-sdd-links file-path sdd-root)))
+    (if links
+        (concat static-prompt "\n\n" links)
+      static-prompt)))
 #+END_SRC
 
 ** Header Prompt Lookup
@@ -1248,22 +1332,31 @@ Container tags come before phase tags."
     ("implementation" 13)
     (_ 50)))          ; Other tags last
 
+(defun claude-org--build-behavior-context ()
+  "Build context plist for tag prompt generation.
+Returns plist with :file-path, :sdd-root, :current-tags."
+  (list :file-path (buffer-file-name)
+        :sdd-root (claude-org--find-sdd-root)
+        :current-tags (claude-org--get-current-tags)))
+
 (defun claude-org--build-behavior-prompt ()
   "Build behavior prompt from current tags and header arguments.
 Returns combined prompt string or nil if no behaviors active.
 
 For SDD workflow, tags are ordered: container (sdd) first, then phase tags.
-This ensures the workflow context is established before phase-specific behavior."
+This ensures the workflow context is established before phase-specific behavior.
+Context is passed to tag methods for dynamic prompt generation (e.g., SDD links)."
   (let* ((config (claude-org--collect-behavior-config))
          (tags (plist-get config :tags))
          (header-args (plist-get config :header-args))
+         (context (claude-org--build-behavior-context))
          (parts '()))
     ;; Collect tag prompts (ordered by SDD priority for proper context)
     (dolist (tag-str (sort (copy-sequence tags)
                            (lambda (a b)
                              (< (claude-org--sdd-tag-priority a)
                                 (claude-org--sdd-tag-priority b)))))
-      (when-let ((prompt (claude-org--tag-prompt (intern tag-str))))
+      (when-let ((prompt (claude-org-tag-prompt (intern tag-str) context)))
         (push prompt parts)))
     ;; Collect header argument prompts
     (cl-loop for (header value) on header-args by #'cddr
@@ -1550,6 +1643,36 @@ The primary insertion command. Key behaviors:
 
 *** Core Block Insertion
 
+**** Finding Previous Chat Level
+
+To insert a new AI block at the correct level, we need to find the most recent
+chat section - any heading with =:claude_chat:= tag.
+
+#+NAME: block-find-chat-level
+#+BEGIN_SRC elisp
+(defun claude-org--find-previous-chat-level ()
+  "Find the level of the most recent :claude_chat: section before point.
+Searches backwards for any heading with :claude_chat: tag.
+Returns the level (integer) or nil if not found."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((found-level nil)
+            (chat-tag-pattern (format ":%s:" claude-org-heading-tag)))
+        ;; Search backwards through all headings
+        (while (and (not found-level)
+                    (re-search-backward "^\\(\\*+\\) " nil t))
+          (let* ((level (length (match-string 1)))
+                 (line (buffer-substring-no-properties
+                        (point) (line-end-position))))
+            ;; Check for :claude_chat: tag only
+            (when (string-match-p chat-tag-pattern line)
+              (setq found-level level))))
+        found-level))))
+#+END_SRC
+
+**** Inserting the Block
+
 #+NAME: block-insert-standard
 #+BEGIN_SRC elisp
 (defun claude-org--do-insert-block (workflow-tags)
@@ -1557,10 +1680,8 @@ The primary insertion command. Key behaviors:
 WORKFLOW-TAGS is a list of tag strings like (\"research\" \"design\")."
   ;; If inside an output section, skip to after it
   (claude-org--skip-to-after-output-section)
-  ;; Find the level by looking for the last Instruction heading
-  (let* ((level (or (save-excursion
-                      (when (re-search-backward "^\\(\\*+\\) Instruction [0-9]+" nil t)
-                        (length (match-string 1))))
+  ;; Find the level by looking for the last chat section (heading with :claude_chat: tag)
+  (let* ((level (or (claude-org--find-previous-chat-level)
                     (org-current-level)
                     1))
          (stars (make-string level ?*))
