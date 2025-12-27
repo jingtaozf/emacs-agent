@@ -27,28 +27,39 @@
     ;; Simulate user input
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
       (claude-org-insert-sdd))
-    ;; Verify structure
+    ;; Verify structure - use separate searches from point-min for each major section
     (goto-char (point-min))
     ;; Top-level heading
     (should (re-search-forward "^\\* Test Feature" nil t))
-    ;; Workflow section with :sdd: tag and single AI block
+    ;; Workflow section with :sdd: tag and CUSTOM_ID
+    (goto-char (point-min))
     (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
+    (should (org-entry-get nil "CUSTOM_ID"))  ; Check CUSTOM_ID via org API
+    ;; AI block under Workflow
+    (goto-char (point-min))
     (let ((tag-pattern (format ":%s:" claude-org-heading-tag)))
-      (should (re-search-forward (format "^\\*\\*\\* Instruction 1 %s" tag-pattern) nil t))
+      ;; Pattern includes :research: before :claude_chat:
+      (should (re-search-forward (format "^\\*\\*\\* Instruction 1 .*%s" tag-pattern) nil t))
       (should (re-search-forward "^#\\+begin_src ai" nil t)))
-    ;; Research Output section
+    ;; Research Output section with CUSTOM_ID
+    (goto-char (point-min))
     (should (re-search-forward "^\\*\\* Research Output :research_output:" nil t))
+    (should (org-entry-get nil "CUSTOM_ID"))
     (should (re-search-forward "^\\*\\*\\* Codebase Patterns" nil t))
     (should (re-search-forward "^\\*\\*\\* Relevant Files" nil t))
     (should (re-search-forward "^\\*\\*\\* External References" nil t))
-    ;; Spec section
+    ;; Spec section with CUSTOM_ID
+    (goto-char (point-min))
     (should (re-search-forward "^\\*\\* Spec :spec:" nil t))
+    (should (org-entry-get nil "CUSTOM_ID"))
     (should (re-search-forward "^\\*\\*\\* Goals" nil t))
     (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
     (should (re-search-forward "^\\*\\*\\* Proposed Solution" nil t))
     (should (re-search-forward "^\\*\\*\\* Technical Design" nil t))
-    ;; Features section
-    (should (re-search-forward "^\\*\\* Features :features:" nil t))))
+    ;; Features section with CUSTOM_ID
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\* Features :features:" nil t))
+    (should (org-entry-get nil "CUSTOM_ID"))))
 
 (ert-deftest test-sdd-insert-sets-session-id ()
   "Test that SDD structure has unique CLAUDE_SESSION_ID."
@@ -338,6 +349,8 @@ were not inherited because org-get-tags was called with LOCAL=t."
 (ert-deftest test-sdd-integration-workflow ()
   "Test that SDD workflow uses correct behavior prompt."
   :tags '(:integration :slow :api :org :sdd)
+  ;; Ensure test-config is loadable
+  (add-to-list 'load-path (expand-file-name "fixtures" (file-name-directory load-file-name)))
   (require 'test-config)
   (test-claude-skip-unless-cli-available)
 
@@ -350,19 +363,20 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (goto-char (point-min))
     (re-search-forward "^#\\+begin_src ai")
     (forward-line 1)
-    (insert "What is 2+2?")
-    (save-buffer)
-    ;; Execute the query
-    (re-search-backward "What is 2+2")
-    (claude-org-mode 1)
-    (let ((session-key (claude-org--current-session-key)))
-      (claude-org-execute)
-      ;; Wait for completion
-      (when (test-claude-wait-for-completion session-key 30)
-        ;; Verify we got a response
-        (goto-char (point-min))
-        (should (or (re-search-forward "4" nil t)
-                    (re-search-forward "four" nil t)))))
+    (let ((query-start (point)))
+      (insert "What is 2+2?")
+      (save-buffer)
+      ;; Position inside the query for execution
+      (goto-char query-start)
+      (claude-org-mode 1)
+      (let ((session-key (claude-org--current-session-key)))
+        (claude-org-execute)
+        ;; Wait for completion
+        (when (test-claude-wait-for-completion session-key 30)
+          ;; Verify we got a response
+          (goto-char (point-min))
+          (should (or (re-search-forward "4" nil t)
+                      (re-search-forward "four" nil t))))))
     ;; Cleanup
     (delete-file buffer-file-name)))
 
@@ -561,6 +575,119 @@ were not inherited because org-get-tags was called with LOCAL=t."
             (goto-char (point-min))
             (should (re-search-forward "^\\*\\* Features" nil t))
             (kill-buffer)))
+      ;; Cleanup
+      (when (file-exists-p test-file)
+        (delete-file test-file)))))
+
+;;; CUSTOM_ID Tests - Stable Link Support
+
+(ert-deftest test-sdd-generate-custom-id ()
+  "Test claude-org--generate-custom-id creates valid IDs."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  ;; SDD section IDs without file-base (legacy format)
+  (should (equal "sdd-12345-workflow"
+                 (claude-org--generate-custom-id "sdd-12345" "Workflow")))
+  (should (equal "sdd-12345-research-output"
+                 (claude-org--generate-custom-id "sdd-12345" "Research Output")))
+  ;; SDD section IDs with file-base (new format for cross-file uniqueness)
+  (should (equal "my-notes-workflow-sdd-12345"
+                 (claude-org--generate-custom-id "sdd-12345" "Workflow" "my-notes")))
+  (should (equal "claude-agent-dev-research-output-sdd-12345"
+                 (claude-org--generate-custom-id "sdd-12345" "Research Output" "claude-agent-dev")))
+  (should (equal "claude-agent-dev-spec-sdd-12345"
+                 (claude-org--generate-custom-id "sdd-12345" "Spec" "claude-agent-dev")))
+  ;; Handle special characters
+  (should (equal "sdd-12345-non-goals"
+                 (claude-org--generate-custom-id "sdd-12345" "Non-Goals"))))
+
+(ert-deftest test-sdd-generate-custom-id-nil-handling ()
+  "Test claude-org--generate-custom-id handles nil inputs."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (should-not (claude-org--generate-custom-id nil "Workflow"))
+  (should-not (claude-org--generate-custom-id "sdd-12345" nil))
+  (should-not (claude-org--generate-custom-id nil nil)))
+
+(ert-deftest test-sdd-insert-adds-custom-id ()
+  "Test that claude-org-insert-sdd adds CUSTOM_ID to all sections."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-custom-id.org")
+    (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
+      (claude-org-insert-sdd))
+    ;; Verify CUSTOM_ID on Workflow section - format: file-base-section-session
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* Workflow :sdd:")
+    (should (org-entry-get nil "CUSTOM_ID"))
+    (should (string-match-p "^test-custom-id-workflow-sdd-" (org-entry-get nil "CUSTOM_ID")))
+    ;; Verify CUSTOM_ID on Research Output section
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* Research Output")
+    (should (org-entry-get nil "CUSTOM_ID"))
+    (should (string-match-p "^test-custom-id-research-output-sdd-" (org-entry-get nil "CUSTOM_ID")))
+    ;; Verify CUSTOM_ID on Spec section
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* Spec")
+    (should (org-entry-get nil "CUSTOM_ID"))
+    (should (string-match-p "^test-custom-id-spec-sdd-" (org-entry-get nil "CUSTOM_ID")))
+    ;; Verify CUSTOM_ID on Features section
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* Features")
+    (should (org-entry-get nil "CUSTOM_ID"))
+    (should (string-match-p "^test-custom-id-features-sdd-" (org-entry-get nil "CUSTOM_ID")))))
+
+(ert-deftest test-sdd-generate-links-uses-custom-id ()
+  "Test claude-org--generate-sdd-links uses #custom-id format with file-base."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((links (claude-org--generate-sdd-links "/tmp/test.org" "My Feature" "sdd-12345")))
+    (should (stringp links))
+    ;; Should use #custom-id format with file-base-section-session pattern
+    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-research-output-sdd-12345\\]\\[Research Output\\]\\]" links))
+    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-spec-sdd-12345\\]\\[Spec\\]\\]" links))
+    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-features-sdd-12345\\]\\[Features\\]\\]" links))
+    ;; Should NOT use *heading format
+    (should-not (string-match-p "::\\*Research Output" links))))
+
+(ert-deftest test-sdd-links-resolve-via-custom-id ()
+  "Test that CUSTOM_ID links can be resolved via org-link-search."
+  :tags '(:integration :fast :stable :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-resolve.org")
+    (insert "* Test Feature\n")
+    (insert "** Research Output :research_output:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: sdd-12345-research-output\n")
+    (insert ":END:\n")
+    (insert "Research content here.\n")
+    (goto-char (point-min))
+    ;; org-link-search with #custom-id should find the heading
+    (let ((result (org-link-search "#sdd-12345-research-output")))
+      (should (eq result 'dedicated))
+      (should (string-match-p "Research Output" (org-get-heading t t t t))))))
+
+(ert-deftest test-sdd-e2e-custom-id-workflow ()
+  "End-to-end: Create SDD, verify CUSTOM_ID links work."
+  :tags '(:e2e :slow :org :sdd)
+  (let ((test-file (make-temp-file "sdd-customid-" nil ".org")))
+    (unwind-protect
+        (with-temp-buffer
+          (org-mode)
+          (setq buffer-file-name test-file)
+          ;; Create SDD structure
+          (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Custom ID")))
+            (claude-org-insert-sdd))
+          (save-buffer)
+          ;; Verify sections have CUSTOM_ID
+          (goto-char (point-min))
+          (re-search-forward "^\\*\\* Research Output")
+          (let ((custom-id (org-entry-get nil "CUSTOM_ID")))
+            (should custom-id)
+            ;; Verify link can be resolved
+            (goto-char (point-max))
+            (let ((result (org-link-search (concat "#" custom-id))))
+              (should (eq result 'dedicated))
+              (should (string-match-p "Research Output" (org-get-heading t t t t))))))
       ;; Cleanup
       (when (file-exists-p test-file)
         (delete-file test-file)))))

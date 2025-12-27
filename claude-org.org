@@ -267,6 +267,75 @@ Default matches \"Instruction 1\", \"Instruction 2\", etc."
   :group 'claude-org)
 #+END_SRC
 
+** Execution Hooks
+
+Hooks that run at key points during AI block execution, enabling extensions
+like block history tracking without modifying core code.
+
+#+NAME: custom-hooks
+#+BEGIN_SRC elisp
+(defvar claude-org-execute-hook nil
+  "Hook run before AI block execution begins.
+Functions receive (SESSION-KEY QUERY MARKER).
+Run after validation but before any buffer modifications.")
+
+(defvar claude-org-execute-after-hook nil
+  "Hook run after AI block execution starts (query sent).
+Functions receive (SESSION-KEY QUERY MARKER).
+Default: includes `claude-org--record-block-execution'.")
+
+(defvar claude-org-complete-hook nil
+  "Hook run when AI block execution completes or errors.
+Functions receive (SESSION-KEY RESULT STATUS).
+STATUS is symbol: `completed' or `error'.
+Default: includes `claude-org--update-block-status'.")
+#+END_SRC
+
+** Block History
+
+Persistent tracking of executed AI blocks, enabling quick navigation to
+recent blocks across Emacs sessions.
+
+*** Configuration
+
+#+NAME: history-config
+#+BEGIN_SRC elisp
+(defcustom claude-org-history-directory
+  (expand-file-name "claude-org" user-emacs-directory)
+  "Directory for persistent block history files.
+Each org file gets its own history file named <basename>--<hash>.el."
+  :type 'directory
+  :group 'claude-org)
+
+(defcustom claude-org-history-max-entries 100
+  "Maximum number of block entries to keep per org file."
+  :type 'integer
+  :group 'claude-org)
+
+(defconst claude-org--history-save-delay 2.0
+  "Seconds to wait before saving history after changes.")
+#+END_SRC
+
+*** State Variables
+
+#+NAME: history-state
+#+BEGIN_SRC elisp
+(defvar-local claude-org--block-history nil
+  "In-memory cache of block history for current buffer.
+Alist of (BLOCK-ID . PLIST) where PLIST contains:
+  :timestamp  - float-time of execution start
+  :status     - symbol: `in-progress', `completed', `error'
+  :title      - string heading text
+  :line       - integer line number
+  :marker     - marker (transient, not persisted)")
+
+(defvar-local claude-org--history-loaded nil
+  "Non-nil if history has been loaded from disk for this buffer.")
+
+(defvar claude-org--history-save-timer nil
+  "Debounce timer for saving history to disk.")
+#+END_SRC
+
 ** Slash Commands
 
 Built-in CLI commands that can be used in AI blocks. These are passed
@@ -1202,27 +1271,54 @@ that contains the :sdd: tagged Workflow section, or nil if not in SDD."
         (org-get-heading t t t t)))))
 #+END_SRC
 
+*** CUSTOM_ID Generation
+
+#+BEGIN_SRC elisp
+(defun claude-org--generate-custom-id (session-id section-name &optional file-base)
+  "Generate a CUSTOM_ID for SDD sections.
+SESSION-ID is the session identifier (e.g., \"sdd-20251227-180147\").
+SECTION-NAME is the heading text (e.g., \"Research Output\").
+FILE-BASE is optional file name without extension for cross-file uniqueness.
+Returns a slug like \"claude-agent-dev-research-output-sdd-20251227-180147\"."
+  (when (and session-id section-name)
+    (let ((slug (downcase (replace-regexp-in-string "[^[:alnum:]]+" "-" section-name))))
+      ;; Remove leading/trailing hyphens
+      (setq slug (replace-regexp-in-string "^-+\\|-+$" "" slug))
+      (if file-base
+          (format "%s-%s-%s" file-base slug session-id)
+        (format "%s-%s" session-id slug)))))
+#+END_SRC
+
 *** SDD Link Generation
 
 #+BEGIN_SRC elisp
-(defun claude-org--generate-sdd-links (file-path sdd-root)
+(defun claude-org--generate-sdd-links (file-path sdd-root &optional session-id)
   "Generate org links to SDD sibling sections.
 FILE-PATH is the absolute path to the org file.
 SDD-ROOT is the parent section name (e.g., \"Feature Name\").
+SESSION-ID is optional; if provided, uses #custom-id format for stable links.
 Returns a formatted string with links to Research Output, Spec, Features."
   (when (and file-path sdd-root)
     (let ((sections '(("Research Output" . "research_output")
                       ("Spec" . "spec")
-                      ("Features" . "features"))))
+                      ("Features" . "features")))
+          (file-base (when file-path (file-name-base file-path))))
       (concat
        "** SDD Section Links\n\n"
        "Use these links to navigate and update SDD sections:\n\n"
        (mapconcat
         (lambda (sec)
           (let* ((name (car sec))
-                 (link (org-link-make-string
-                        (format "file:%s::*%s" file-path name)
-                        name)))
+                 (link (if session-id
+                           ;; Use stable #custom-id format with file-base for uniqueness
+                           (org-link-make-string
+                            (format "file:%s::#%s" file-path
+                                    (claude-org--generate-custom-id session-id name file-base))
+                            name)
+                         ;; Fallback to *heading format for legacy SDDs without session-id
+                         (org-link-make-string
+                          (format "file:%s::*%s" file-path name)
+                          name))))
             (format "- *%s*: %s" name link)))
         sections "\n")))))
 #+END_SRC
@@ -1234,10 +1330,11 @@ Returns a formatted string with links to Research Output, Spec, Features."
   "SDD tag: combine static prompt with dynamic section links."
   (let* ((file-path (plist-get context :file-path))
          (sdd-root (plist-get context :sdd-root))
+         (session-id (plist-get context :session-id))
          (static-prompt (claude-org--load-prompt-file
                          (expand-file-name "tags/sdd.org"
                                            claude-org-prompts-directory)))
-         (links (claude-org--generate-sdd-links file-path sdd-root)))
+         (links (claude-org--generate-sdd-links file-path sdd-root session-id)))
     (if links
         (concat static-prompt "\n\n" links)
       static-prompt)))
@@ -1334,9 +1431,10 @@ Container tags come before phase tags."
 
 (defun claude-org--build-behavior-context ()
   "Build context plist for tag prompt generation.
-Returns plist with :file-path, :sdd-root, :current-tags."
+Returns plist with :file-path, :sdd-root, :session-id, :current-tags."
   (list :file-path (buffer-file-name)
         :sdd-root (claude-org--find-sdd-root)
+        :session-id (claude-org--get-session-id)
         :current-tags (claude-org--get-current-tags)))
 
 (defun claude-org--build-behavior-prompt ()
@@ -1624,7 +1722,7 @@ The primary insertion command. Key behaviors:
                            "Implementation - writing code")))]
   ["Actions"
    ("RET" "Create block with tags" claude-org--insert-block-with-tags)
-   ("i" "Create block (no tags)" claude-org--insert-block-no-tags)
+   ("n" "Create block (no tags)" claude-org--insert-block-no-tags)
    ("q" "Cancel" transient-quit-one)])
 
 (defun claude-org--insert-block-with-tags ()
@@ -1677,7 +1775,8 @@ Returns the level (integer) or nil if not found."
 #+BEGIN_SRC elisp
 (defun claude-org--do-insert-block (workflow-tags)
   "Insert an AI block with optional WORKFLOW-TAGS.
-WORKFLOW-TAGS is a list of tag strings like (\"research\" \"design\")."
+WORKFLOW-TAGS is a list of tag strings like (\"research\" \"design\").
+Automatically generates a CUSTOM_ID for stable navigation."
   ;; If inside an output section, skip to after it
   (claude-org--skip-to-after-output-section)
   ;; Find the level by looking for the last chat section (heading with :claude_chat: tag)
@@ -1689,10 +1788,31 @@ WORKFLOW-TAGS is a list of tag strings like (\"research\" \"design\")."
          ;; Build tag string: workflow tags + claude-org-heading-tag
          ;; Org format is :tag1:tag2:tag3: - single colons between tags
          (all-tags (append workflow-tags (list claude-org-heading-tag)))
-         (tag-str (concat ":" (mapconcat #'identity all-tags ":") ":")))
-    (insert stars " Instruction " (number-to-string num) " " tag-str "\n\n")
-    (insert "#+begin_src ai\n\n#+end_src\n")
+         (tag-str (concat ":" (mapconcat #'identity all-tags ":") ":"))
+         ;; Generate CUSTOM_ID for stable navigation
+         (file-base (when buffer-file-name (file-name-base buffer-file-name)))
+         ;; Wrap session-id lookup to handle edge cases in batch testing
+         (session-id (ignore-errors (claude-org--get-session-id)))
+         (custom-id (claude-org--generate-instruction-custom-id file-base num session-id)))
+    (insert stars " Instruction " (number-to-string num) " " tag-str "\n")
+    ;; Add PROPERTIES drawer with CUSTOM_ID
+    (when custom-id
+      (insert ":PROPERTIES:\n")
+      (insert ":CUSTOM_ID: " custom-id "\n")
+      (insert ":END:\n"))
+    (insert "\n#+begin_src ai\n\n#+end_src\n")
     (forward-line -2)))
+
+(defun claude-org--generate-instruction-custom-id (file-base num session-id)
+  "Generate a CUSTOM_ID for an instruction block.
+FILE-BASE is the org file name without extension.
+NUM is the instruction number.
+SESSION-ID is the parent section's CLAUDE_SESSION_ID (can be nil).
+Returns a string like \"file-instruction-N-session-id\" or \"file-instruction-N\"."
+  (when file-base
+    (if session-id
+        (format "%s-instruction-%d-%s" file-base num session-id)
+      (format "%s-instruction-%d" file-base num))))
 
 (defun claude-org-insert-block ()
   "Insert an AI query block with optional workflow tags.
@@ -1812,11 +1932,15 @@ The structure follows the Atomic workflow pattern:
 - Spec: Living RFC document that evolves with the project
 - Features: Atomic TODO items, each small enough to complete in one session
 
+Each section gets a CUSTOM_ID property for stable cross-file linking.
+Format: file-base-section-slug-session-id (e.g., claude-agent-dev-research-output-sdd-20251227-180147)
+
 Prompts for feature name and sets up unique CLAUDE_SESSION_ID.
 Aligns section level with previous SDD if any exists, otherwise uses top level."
   (interactive)
   (let* ((name (read-string "Feature name: "))
          (session-id (format "sdd-%s" (format-time-string "%Y%m%d-%H%M%S")))
+         (file-base (when buffer-file-name (file-name-base buffer-file-name)))
          ;; Align with previous SDD level, or use top level (1) if none exists
          (level (or (claude-org--find-previous-sdd-level) 1))
          (stars (make-string level ?*))
@@ -1829,23 +1953,37 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":END:\n\n")
 
     ;; 1. Insert Workflow section with single AI block (no phase tags)
-    (insert stars2 " Workflow :sdd:\n\n")
-    (insert stars3 " Instruction 1 :" claude-org-heading-tag ":\n\n")
+    (insert stars2 " Workflow :sdd:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Workflow" file-base) "\n")
+    (insert ":END:\n\n")
+    ;; Insert Instruction 1 with CUSTOM_ID for stable navigation
+    (insert stars3 " Instruction 1 :research:" claude-org-heading-tag ":\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: " (claude-org--generate-instruction-custom-id file-base 1 session-id) "\n")
+    (insert ":END:\n\n")
     (insert "#+begin_src ai\n\n#+end_src\n\n")
 
     ;; 2. Insert Research Output section for findings
-    (insert stars2 " Research Output :research_output:\n\n")
+    (insert stars2 " Research Output :research_output:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Research Output" file-base) "\n")
+    (insert ":END:\n\n")
     (dolist (section '("Codebase Patterns" "Relevant Files" "External References"))
       (insert stars3 " " section "\n\n"))
 
     ;; 3. Insert Spec section with subsections
-    (insert stars2 " Spec :spec:\n\n")
+    (insert stars2 " Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Spec" file-base) "\n")
+    (insert ":END:\n\n")
     (dolist (section '("Goals" "Non-Goals" "Proposed Solution" "Technical Design"))
       (insert stars3 " " section "\n\n"))
 
-    ;; 4. Insert Features section with ORDERED property
+    ;; 4. Insert Features section with ORDERED property and CUSTOM_ID
     (insert stars2 " Features :features:\n")
     (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Features" file-base) "\n")
     (insert ":ORDERED: t\n")
     (insert ":END:\n\n")
 
@@ -2177,7 +2315,9 @@ Extracts session ID from result messages and stores it."
           (goto-char marker)
           (insert "\n")))))
   ;; Update header line
-  (claude-org--refresh-header-line))
+  (claude-org--refresh-header-line)
+  ;; Run completion hook
+  (run-hook-with-args 'claude-org-complete-hook session-key result 'completed))
 #+END_SRC
 
 ** Error Handling
@@ -2228,7 +2368,274 @@ Attempts session recovery if error indicates expired session or context too long
           (goto-char marker)
           (insert (format "\n[Error: %s]\n" error-msg))
           (set-marker marker (point))))))
-  (claude-org--refresh-header-line))
+  (claude-org--refresh-header-line)
+  ;; Run completion hook with error status
+  (run-hook-with-args 'claude-org-complete-hook session-key error-msg 'error))
+#+END_SRC
+
+* Block History
+
+Functions for tracking and navigating executed AI blocks. History persists
+to disk so it survives Emacs restarts.
+
+** Persistence Functions
+
+#+NAME: history-persistence
+#+BEGIN_SRC elisp
+(defun claude-org--history-file-path ()
+  "Return path to history file for current buffer.
+Uses format: <basename>--<short-hash>.el for readability."
+  (let* ((org-path (buffer-file-name))
+         (basename (file-name-sans-extension
+                    (file-name-nondirectory org-path)))
+         (hash (substring (md5 org-path) 0 8))
+         (dir claude-org-history-directory))
+    (expand-file-name (format "%s--%s.el" basename hash) dir)))
+
+(defun claude-org--ensure-history-directory ()
+  "Ensure the history directory exists."
+  (unless (file-directory-p claude-org-history-directory)
+    (make-directory claude-org-history-directory t)))
+
+(defun claude-org--load-history ()
+  "Load history from disk for current buffer."
+  (when (and (buffer-file-name)
+             (not claude-org--history-loaded))
+    (let ((history-file (claude-org--history-file-path)))
+      (when (file-exists-p history-file)
+        (condition-case err
+            (with-temp-buffer
+              (insert-file-contents history-file)
+              (let ((data (read (current-buffer))))
+                (when (and (plist-get data :blocks)
+                           (string= (plist-get data :org-file)
+                                    (buffer-file-name)))
+                  (setq claude-org--block-history
+                        (plist-get data :blocks)))))
+          (error
+           (message "claude-org: Failed to load history: %s" err)))))
+    (setq claude-org--history-loaded t)))
+
+(defun claude-org--save-history ()
+  "Save history to disk for current buffer (debounced)."
+  (when (buffer-file-name)
+    ;; Cancel existing timer
+    (when claude-org--history-save-timer
+      (cancel-timer claude-org--history-save-timer))
+    ;; Schedule save
+    (setq claude-org--history-save-timer
+          (run-with-timer
+           claude-org--history-save-delay nil
+           (lambda (buf)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (claude-org--save-history-now))))
+           (current-buffer)))))
+
+(defun claude-org--save-history-now ()
+  "Immediately save history to disk."
+  (when (and (buffer-file-name) claude-org--block-history)
+    (claude-org--ensure-history-directory)
+    (let ((history-file (claude-org--history-file-path))
+          (data `(:version 2  ; Version 2: Added :custom-id for stable navigation
+                  :org-file ,(buffer-file-name)
+                  :updated ,(float-time)
+                  :blocks ,(claude-org--prepare-history-for-save))))
+      (with-temp-file history-file
+        (insert ";; -*- mode: lisp-data -*-\n")
+        (insert ";; Claude-org block history - do not edit\n")
+        (pp data (current-buffer))))))
+
+(defun claude-org--prepare-history-for-save ()
+  "Prepare history for saving by removing transient data.
+Keeps only the most recent `claude-org-history-max-entries' entries.
+Includes :custom-id for stable navigation across sessions."
+  (let ((entries (mapcar
+                  (lambda (entry)
+                    (let ((id (car entry))
+                          (plist (cdr entry)))
+                      ;; Remove :marker (not persistent), keep :custom-id
+                      (cons id (cl-list* :timestamp (plist-get plist :timestamp)
+                                         :status (plist-get plist :status)
+                                         :title (plist-get plist :title)
+                                         :custom-id (plist-get plist :custom-id)
+                                         :line (plist-get plist :line)
+                                         nil))))
+                  claude-org--block-history)))
+    ;; Sort by timestamp, keep most recent
+    (setq entries (sort entries
+                        (lambda (a b)
+                          (> (or (plist-get (cdr a) :timestamp) 0)
+                             (or (plist-get (cdr b) :timestamp) 0)))))
+    (seq-take entries claude-org-history-max-entries)))
+
+(defun claude-org--ensure-history-loaded ()
+  "Ensure history is loaded from disk."
+  (unless claude-org--history-loaded
+    (claude-org--load-history)))
+#+END_SRC
+
+** Hook Functions
+
+Default hook functions for block history tracking.
+
+#+NAME: history-hooks
+#+BEGIN_SRC elisp
+(defun claude-org--record-block-execution (session-key query marker)
+  "Record block execution start.
+SESSION-KEY identifies the session, QUERY is the prompt text,
+MARKER points to the AI block."
+  (claude-org--ensure-history-loaded)
+  (let* ((block-id (format "block-%d-%s"
+                           (line-number-at-pos (marker-position marker))
+                           (format-time-string "%H%M%S")))
+         ;; Get title and CUSTOM_ID from parent heading
+         (heading-info (save-excursion
+                         (goto-char (marker-position marker))
+                         (when (org-up-heading-safe)
+                           (list :title (org-get-heading t t t t)
+                                 :custom-id (org-entry-get nil "CUSTOM_ID")))))
+         (title (plist-get heading-info :title))
+         (custom-id (plist-get heading-info :custom-id))
+         (entry `(:timestamp ,(float-time)
+                  :status in-progress
+                  :title ,(or title "Untitled")
+                  :custom-id ,custom-id
+                  :line ,(line-number-at-pos (marker-position marker))
+                  :marker ,marker
+                  :session-key ,session-key)))
+    ;; Add to history (at front for recent-first ordering)
+    (push (cons block-id entry) claude-org--block-history)
+    ;; Store block-id in session for later status update
+    (claude-org--session-put session-key :block-id block-id)
+    ;; Trigger debounced save
+    (claude-org--save-history)))
+
+(defun claude-org--update-block-status (session-key _result status)
+  "Update block status on completion.
+SESSION-KEY identifies the session, STATUS is `completed' or `error'."
+  (let ((block-id (claude-org--session-get session-key :block-id)))
+    (when block-id
+      (let ((entry (assoc block-id claude-org--block-history)))
+        (when entry
+          (plist-put (cdr entry) :status status)
+          (claude-org--save-history))))))
+
+;; Register default hooks
+(add-hook 'claude-org-execute-after-hook #'claude-org--record-block-execution)
+(add-hook 'claude-org-complete-hook #'claude-org--update-block-status)
+#+END_SRC
+
+** Navigation Functions
+
+Functions for collecting and navigating to recent blocks.
+
+#+NAME: history-navigation
+#+BEGIN_SRC elisp
+(defun claude-org--format-time-ago (timestamp)
+  "Format TIMESTAMP as relative time string."
+  (let* ((now (float-time))
+         (diff (- now timestamp))
+         (minutes (floor (/ diff 60)))
+         (hours (floor (/ diff 3600)))
+         (days (floor (/ diff 86400))))
+    (cond
+     ((< diff 60) "just now")
+     ((< minutes 60) (format "%dm ago" minutes))
+     ((< hours 24) (format "%dh ago" hours))
+     (t (format "%dd ago" days)))))
+
+(defun claude-org--format-block-candidate (entry)
+  "Format ENTRY for display in completing-read.
+ENTRY is (BLOCK-ID . PLIST)."
+  (let* ((plist (cdr entry))
+         (status (plist-get plist :status))
+         (title (plist-get plist :title))
+         (timestamp (plist-get plist :timestamp))
+         (status-icon (pcase status
+                        ('completed "✓")
+                        ('in-progress "⋯")
+                        ('error "✗")
+                        (_ "?")))
+         (time-str (if timestamp
+                       (claude-org--format-time-ago timestamp)
+                     "unknown")))
+    (format "[%s] %s (%s)"
+            status-icon
+            (truncate-string-to-width (or title "Untitled") 60 nil nil "…")
+            time-str)))
+
+(defun claude-org--collect-recent-blocks ()
+  "Collect recent blocks for completing-read.
+Returns alist of (DISPLAY-STRING . ENTRY)."
+  (claude-org--ensure-history-loaded)
+  (mapcar (lambda (entry)
+            (cons (claude-org--format-block-candidate entry) entry))
+          claude-org--block-history))
+
+(defun claude-org--goto-block-by-line (line)
+  "Navigate to AI block at LINE, searching nearby if exact match fails."
+  (goto-char (point-min))
+  (forward-line (1- line))
+  ;; Verify we're at an AI block, search nearby if not
+  (unless (claude-org--in-ai-block-p)
+    (let ((found nil)
+          (orig-point (point))
+          (search-range 10))
+      ;; Search forward
+      (save-excursion
+        (dotimes (_ search-range)
+          (when (and (not found)
+                     (re-search-forward "#\\+begin_src ai" nil t))
+            (setq found (match-beginning 0)))))
+      ;; If not found forward, try backward
+      (unless found
+        (save-excursion
+          (goto-char orig-point)
+          (when (re-search-backward "#\\+begin_src ai" nil t)
+            (setq found (match-beginning 0)))))
+      (when found
+        (goto-char found)))))
+
+(defun claude-org--goto-block-by-custom-id (custom-id)
+  "Navigate to AI block via CUSTOM_ID using org-link-search.
+Returns t if navigation succeeded, nil otherwise."
+  (condition-case nil
+      (progn
+        (org-link-search (format "#%s" custom-id))
+        t)
+    (error nil)))
+
+(defun claude-org-jump-to-ai-block ()
+  "Jump to a recent AI block.
+Shows a list of recently executed blocks with status and timing.
+Uses CUSTOM_ID for stable navigation (survives file edits),
+falling back to line number for legacy blocks."
+  (interactive)
+  (claude-org--ensure-history-loaded)
+  (let ((candidates (claude-org--collect-recent-blocks)))
+    (if (null candidates)
+        (message "No AI block history found")
+      (let* ((selection (completing-read "Jump to: " candidates nil t))
+             (entry (cdr (assoc selection candidates)))
+             (plist (cdr entry))
+             (marker (plist-get plist :marker))
+             (custom-id (plist-get plist :custom-id))
+             (line (plist-get plist :line)))
+        (cond
+         ;; Use marker if still valid (same session)
+         ((and marker (marker-buffer marker) (buffer-live-p (marker-buffer marker)))
+          (switch-to-buffer (marker-buffer marker))
+          (goto-char (marker-position marker)))
+         ;; Try CUSTOM_ID for stable navigation (works across file edits)
+         ((and custom-id (claude-org--goto-block-by-custom-id custom-id))
+          ;; Successfully navigated via CUSTOM_ID
+          nil)
+         ;; Fall back to line number
+         (line
+          (claude-org--goto-block-by-line line))
+         (t
+          (message "Cannot navigate to block - no position info")))))))
 #+END_SRC
 
 * Execution
@@ -2283,14 +2690,19 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
           (claude-org--session-put session-key :original-prompt content)
           (claude-org--session-put session-key :section-level (claude-org--get-section-level))
           (claude-org--session-put session-key :start-time (float-time))
-          (claude-org--session-put session-key :busy t)))
+          (claude-org--session-put session-key :busy t)
+          ;; Run pre-execution hook
+          (run-hook-with-args 'claude-org-execute-hook session-key content marker)))
       ;; Start spinner and send request
       (claude-org--start-spinner session-key)
       ;; Auto-generate title in parallel (using Haiku, separate session)
       (when heading-marker
         (claude-org--maybe-auto-generate-title content heading-marker))
       ;; Pass instruction number for session manager display
-      (claude-org--send-request content instr-num))))
+      (claude-org--send-request content instr-num)
+      ;; Run post-execution hook (after query sent)
+      (let ((marker (claude-org--session-get session-key :marker)))
+        (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -2658,10 +3070,13 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
     ("i" "New AI block" claude-org-insert-block)
     ("s" "Story section" claude-org-insert-story)
     ("d" "SDD structure" claude-org-insert-sdd)]
+   ["Navigate"
+    ("j" "Jump to AI block" claude-org-jump-to-ai-block)]
    ["Session"
     ("n" "Session info" claude-org-show-session-info)
     ("l" "List sessions" claude-org-list-sessions)
-    ("p" "Permission mode" claude-org-switch-permission-mode)]])
+    ("p" "Permission mode" claude-org-switch-permission-mode)]
+   ["" ("q" "Quit" transient-quit-one)]])
 #+END_SRC
 
 *** Keymap
@@ -2884,6 +3299,94 @@ Key bindings:
     (let* ((result (claude-org--auto-break-lines "First line\nSecond line" 40)))
       ;; Line length should be length of "Second line" (11), not 40+22
       (should (= 11 (cdr result))))))
+
+;; Block History Tests
+
+(ert-deftest claude-org-test-history-file-path ()
+  "Test history file path generation with readable naming."
+  (let ((buffer-file-name "/Users/test/notes/dev.org")
+        (claude-org-history-directory "/tmp/claude-org-test"))
+    (let ((path (claude-org--history-file-path)))
+      ;; Should contain basename
+      (should (string-match-p "dev--" path))
+      ;; Should end with .el
+      (should (string-suffix-p ".el" path))
+      ;; Should be in history directory
+      (should (string-prefix-p "/tmp/claude-org-test/" path)))))
+
+(ert-deftest claude-org-test-format-time-ago ()
+  "Test relative time formatting."
+  (let ((now (float-time)))
+    ;; Just now
+    (should (equal "just now" (claude-org--format-time-ago now)))
+    ;; Minutes ago
+    (should (equal "5m ago" (claude-org--format-time-ago (- now 300))))
+    ;; Hours ago
+    (should (equal "2h ago" (claude-org--format-time-ago (- now 7200))))
+    ;; Days ago
+    (should (equal "3d ago" (claude-org--format-time-ago (- now 259200))))))
+
+(ert-deftest claude-org-test-format-block-candidate ()
+  "Test block candidate formatting for completing-read."
+  ;; Completed block
+  (let ((entry '("block-1" :timestamp 1735312800.0
+                           :status completed
+                           :title "Test query")))
+    (let ((formatted (claude-org--format-block-candidate entry)))
+      (should (string-prefix-p "[✓]" formatted))
+      (should (string-match-p "Test query" formatted))))
+  ;; In-progress block
+  (let ((entry '("block-2" :timestamp 1735312800.0
+                           :status in-progress
+                           :title "Running query")))
+    (let ((formatted (claude-org--format-block-candidate entry)))
+      (should (string-prefix-p "[⋯]" formatted))))
+  ;; Error block
+  (let ((entry '("block-3" :timestamp 1735312800.0
+                           :status error
+                           :title "Failed query")))
+    (let ((formatted (claude-org--format-block-candidate entry)))
+      (should (string-prefix-p "[✗]" formatted)))))
+
+(ert-deftest claude-org-test-hooks-defined ()
+  "Test that execution hooks are properly defined."
+  (should (boundp 'claude-org-execute-hook))
+  (should (boundp 'claude-org-execute-after-hook))
+  (should (boundp 'claude-org-complete-hook)))
+
+(ert-deftest claude-org-test-default-hooks-registered ()
+  "Test that default hook functions are registered."
+  (should (member 'claude-org--record-block-execution
+                  claude-org-execute-after-hook))
+  (should (member 'claude-org--update-block-status
+                  claude-org-complete-hook)))
+
+(ert-deftest claude-org-test-prepare-history-for-save ()
+  "Test history preparation removes transient data."
+  (let ((claude-org--block-history
+         '(("block-1" :timestamp 1000.0 :status completed
+                      :title "Test" :line 10 :marker nil)
+           ("block-2" :timestamp 2000.0 :status in-progress
+                      :title "Test2" :line 20 :marker nil)))
+        (claude-org-history-max-entries 10))
+    (let ((prepared (claude-org--prepare-history-for-save)))
+      ;; Should be sorted by timestamp (most recent first)
+      (should (equal "block-2" (car (car prepared))))
+      ;; Should have required fields
+      (let ((entry (cdr (car prepared))))
+        (should (plist-get entry :timestamp))
+        (should (plist-get entry :status))
+        (should (plist-get entry :title))
+        (should (plist-get entry :line))))))
+
+(ert-deftest claude-org-test-collect-recent-blocks ()
+  "Test recent blocks collection for completing-read."
+  (let ((claude-org--block-history
+         '(("block-1" :timestamp 1000.0 :status completed :title "First")))
+        (claude-org--history-loaded t))
+    (let ((candidates (claude-org--collect-recent-blocks)))
+      (should (= 1 (length candidates)))
+      (should (stringp (car (car candidates)))))))
 #+END_SRC
 
 * Org File Protection Hook
