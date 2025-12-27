@@ -2449,15 +2449,15 @@ Uses format: <basename>--<short-hash>.el for readability."
 (defun claude-org--prepare-history-for-save ()
   "Prepare history for saving by removing transient data.
 Keeps only the most recent `claude-org-history-max-entries' entries.
-Includes :custom-id for stable navigation across sessions."
+Includes :custom-id for stable navigation - titles are built dynamically when listing."
   (let ((entries (mapcar
                   (lambda (entry)
                     (let ((id (car entry))
                           (plist (cdr entry)))
-                      ;; Remove :marker (not persistent), keep :custom-id
+                      ;; Remove :marker (not persistent), keep :custom-id for navigation
+                      ;; Note: :title no longer stored - built dynamically from CUSTOM_ID
                       (cons id (cl-list* :timestamp (plist-get plist :timestamp)
                                          :status (plist-get plist :status)
-                                         :title (plist-get plist :title)
                                          :custom-id (plist-get plist :custom-id)
                                          :line (plist-get plist :line)
                                          nil))))
@@ -2484,22 +2484,19 @@ Default hook functions for block history tracking.
 (defun claude-org--record-block-execution (session-key query marker)
   "Record block execution start.
 SESSION-KEY identifies the session, QUERY is the prompt text,
-MARKER points to the AI block."
+MARKER points to the AI block.
+Only stores CUSTOM_ID for navigation - titles are built dynamically when listing."
   (claude-org--ensure-history-loaded)
   (let* ((block-id (format "block-%d-%s"
                            (line-number-at-pos (marker-position marker))
                            (format-time-string "%H%M%S")))
-         ;; Get title and CUSTOM_ID from parent heading
-         (heading-info (save-excursion
-                         (goto-char (marker-position marker))
-                         (when (org-up-heading-safe)
-                           (list :title (org-get-heading t t t t)
-                                 :custom-id (org-entry-get nil "CUSTOM_ID")))))
-         (title (plist-get heading-info :title))
-         (custom-id (plist-get heading-info :custom-id))
+         ;; Only get CUSTOM_ID from parent heading - title built dynamically later
+         (custom-id (save-excursion
+                      (goto-char (marker-position marker))
+                      (when (org-up-heading-safe)
+                        (org-entry-get nil "CUSTOM_ID"))))
          (entry `(:timestamp ,(float-time)
                   :status in-progress
-                  :title ,(or title "Untitled")
                   :custom-id ,custom-id
                   :line ,(line-number-at-pos (marker-position marker))
                   :marker ,marker
@@ -2545,12 +2542,49 @@ Functions for collecting and navigating to recent blocks.
      ((< hours 24) (format "%dh ago" hours))
      (t (format "%dd ago" days)))))
 
+(defun claude-org--build-block-title-from-custom-id (custom-id)
+  "Build a meaningful title by navigating to CUSTOM_ID and walking up headings.
+Returns \"Story Name / Instruction Title\" format, or just instruction title
+if no SDD story context is found."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              ;; Now at the heading with CUSTOM_ID, get its title
+              (let* ((instruction-title (org-get-heading t t t t))
+                     (story-name nil))
+                ;; Walk up to find SDD story (look for :sdd: tag or story-like parent)
+                (save-excursion
+                  (while (and (not story-name) (org-up-heading-safe))
+                    (let ((tags (org-get-tags nil t)))
+                      ;; Check for SDD-related tags or feature-like headings
+                      (when (or (member "sdd" tags)
+                                (member "story" tags)
+                                (member "feature" tags)
+                                ;; Also check if this looks like a story heading (level 1-2)
+                                (<= (org-current-level) 2))
+                        (setq story-name (org-get-heading t t t t))))))
+                ;; Build the combined title
+                (if (and story-name
+                         (not (string= story-name instruction-title)))
+                    (format "%s / %s" story-name instruction-title)
+                  (or instruction-title "Untitled"))))
+          (error nil))))))
+
 (defun claude-org--format-block-candidate (entry)
   "Format ENTRY for display in completing-read.
-ENTRY is (BLOCK-ID . PLIST)."
+ENTRY is (BLOCK-ID . PLIST).
+Builds title dynamically from CUSTOM_ID to always show current heading names."
   (let* ((plist (cdr entry))
          (status (plist-get plist :status))
-         (title (plist-get plist :title))
+         (custom-id (plist-get plist :custom-id))
+         ;; Build title dynamically from CUSTOM_ID, fall back to stored title for legacy
+         (title (or (claude-org--build-block-title-from-custom-id custom-id)
+                    (plist-get plist :title)
+                    "Untitled"))
          (timestamp (plist-get plist :timestamp))
          (status-icon (pcase status
                         ('completed "✓")
@@ -2562,7 +2596,7 @@ ENTRY is (BLOCK-ID . PLIST)."
                      "unknown")))
     (format "[%s] %s (%s)"
             status-icon
-            (truncate-string-to-width (or title "Untitled") 60 nil nil "…")
+            (truncate-string-to-width title 60 nil nil "…")
             time-str)))
 
 (defun claude-org--collect-recent-blocks ()
