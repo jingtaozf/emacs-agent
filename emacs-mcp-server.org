@@ -9,7 +9,7 @@ the MCP Streamable HTTP transport protocol.
 
 Key features:
 - Single =evalElisp= tool for unlimited flexibility via elisp evaluation
-- 13 org-mode tools for section, property, and tag manipulation
+- State preservation by default (buffer, point, window)
 - Extensible tool registration API
 - Permission modes for controlling Claude's access
 
@@ -57,6 +57,16 @@ Uses Claude Code permission pattern syntax."
   :type '(repeat string)
   :group 'emacs-mcp-server)
 
+
+(defcustom emacs-mcp-server-verbose nil
+  "When non-nil, log detailed eval info to *MCP Server Log* buffer."
+  :type 'boolean
+  :group 'emacs-mcp-server)
+
+(defcustom emacs-mcp-server-show-mode-line t
+  "When non-nil, show MCP activity indicator in mode-line."
+  :type 'boolean
+  :group 'emacs-mcp-server)
 (defcustom emacs-mcp-server-max-output-length 50000
   "Maximum length of output from evalElisp."
   :type 'integer
@@ -89,6 +99,30 @@ Server state variables:
 (defvar emacs-mcp-server--tools '()
   "List of registered MCP tools.")
 
+
+;; Mode-line indicator state
+(defvar emacs-mcp-server--eval-active nil
+  "Non-nil when MCP eval is in progress.")
+
+(defvar emacs-mcp-server--eval-count 0
+  "Number of active eval operations.")
+
+(defvar emacs-mcp-server--spinner-index 0
+  "Current spinner frame index.")
+
+(defvar emacs-mcp-server--spinner-timer nil
+  "Timer for spinner animation.")
+
+(defconst emacs-mcp-server--spinner-frames
+  ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+  "Spinner animation frames.")
+
+(defvar emacs-mcp-server-activity-string ""
+  "Current activity string for mode-line display.
+Updated directly when eval starts/ends, like claude-agent-activity-string.")
+
+(defconst emacs-mcp-server--log-buffer "*MCP Server Log*"
+  "Buffer name for verbose logging.")
 (defvar emacs-mcp-server--sessions (make-hash-table :test 'equal)
   "Active session ID -> session data mapping.")
 #+END_SRC
@@ -97,6 +131,112 @@ Server state variables:
 
 The core tool that enables all Emacs operations. It evaluates arbitrary elisp
 and returns the result as JSON.
+
+*** Mode-Line Indicator
+
+#+BEGIN_SRC elisp
+(defun emacs-mcp-server--update-activity-string ()
+  "Update the activity mode-line string based on eval state.
+Sets `emacs-mcp-server-activity-string` directly like claude-agent does."
+  (if (and emacs-mcp-server-show-mode-line
+           emacs-mcp-server--eval-active)
+      (let* ((spinner (aref emacs-mcp-server--spinner-frames
+                            emacs-mcp-server--spinner-index))
+             (text (format " [MCP%s] " spinner)))
+        (setq emacs-mcp-server-activity-string
+              (propertize text
+                          'face '(:foreground "steel blue")
+                          'help-echo "MCP Server: Evaluating elisp...")))
+    (setq emacs-mcp-server-activity-string ""))
+  (force-mode-line-update t))
+
+(defun emacs-mcp-server--start-spinner ()
+  "Start the spinner animation timer."
+  (unless emacs-mcp-server--spinner-timer
+    (setq emacs-mcp-server--spinner-timer
+          (run-with-timer 0 0.15 #'emacs-mcp-server--advance-spinner))))
+
+(defun emacs-mcp-server--stop-spinner ()
+  "Stop the spinner animation timer."
+  (when emacs-mcp-server--spinner-timer
+    (cancel-timer emacs-mcp-server--spinner-timer)
+    (setq emacs-mcp-server--spinner-timer nil))
+  (setq emacs-mcp-server--spinner-index 0))
+
+(defun emacs-mcp-server--advance-spinner ()
+  "Advance spinner frame and update mode-line."
+  (setq emacs-mcp-server--spinner-index
+        (mod (1+ emacs-mcp-server--spinner-index)
+             (length emacs-mcp-server--spinner-frames)))
+  (emacs-mcp-server--update-activity-string))
+
+(defun emacs-mcp-server--eval-start ()
+  "Called when eval starts. Updates mode-line immediately."
+  (cl-incf emacs-mcp-server--eval-count)
+  (setq emacs-mcp-server--eval-active t)
+  ;; Update string IMMEDIATELY before starting timer
+  (emacs-mcp-server--update-activity-string)
+  (emacs-mcp-server--start-spinner))
+
+(defun emacs-mcp-server--eval-end ()
+  "Called when eval ends. Clears mode-line indicator."
+  (cl-decf emacs-mcp-server--eval-count)
+  (when (<= emacs-mcp-server--eval-count 0)
+    (setq emacs-mcp-server--eval-count 0)
+    (setq emacs-mcp-server--eval-active nil)
+    (emacs-mcp-server--stop-spinner)
+    (emacs-mcp-server--update-activity-string)))
+
+;; Add to mode-line using variable pattern (like claude-agent-activity-string)
+(unless (member '(:eval emacs-mcp-server-activity-string) mode-line-misc-info)
+  (push '(:eval emacs-mcp-server-activity-string) mode-line-misc-info))
+#+END_SRC
+
+*** Verbose Logging
+
+#+BEGIN_SRC elisp
+(defun emacs-mcp-server--log (format-string &rest args)
+  "Log message to MCP log buffer if verbose mode is enabled."
+  (when emacs-mcp-server-verbose
+    (let ((buf (get-buffer-create emacs-mcp-server--log-buffer)))
+      (with-current-buffer buf
+        (goto-char (point-max))
+        (insert (format-time-string "[%H:%M:%S.%3N] "))
+        (insert (apply #'format format-string args))
+        (insert "\n")))))
+
+(defun emacs-mcp-server--log-eval-start (code)
+  "Log the start of an eval operation."
+  (emacs-mcp-server--log ">>> EVAL START")
+  (emacs-mcp-server--log "    Code: %s"
+                         (emacs-mcp-server--truncate code 200)))
+
+(defun emacs-mcp-server--log-eval-end (result elapsed)
+  "Log the end of an eval operation with RESULT and ELAPSED time."
+  (emacs-mcp-server--log "    Result: %s"
+                         (emacs-mcp-server--truncate
+                          (format "%S" result) 200))
+  (emacs-mcp-server--log "<<< EVAL END (%.3fs)" elapsed))
+
+(defun emacs-mcp-server--log-eval-error (err elapsed)
+  "Log an eval error with ERR and ELAPSED time."
+  (emacs-mcp-server--log "    ERROR: %s" (error-message-string err))
+  (emacs-mcp-server--log "<<< EVAL FAILED (%.3fs)" elapsed))
+
+(defun emacs-mcp-server-toggle-verbose ()
+  "Toggle verbose logging mode."
+  (interactive)
+  (setq emacs-mcp-server-verbose (not emacs-mcp-server-verbose))
+  (message "MCP Server verbose mode: %s"
+           (if emacs-mcp-server-verbose "ON" "OFF"))
+  (when emacs-mcp-server-verbose
+    (emacs-mcp-server--log "--- Verbose logging enabled ---")))
+
+(defun emacs-mcp-server-show-log ()
+  "Show the MCP server log buffer."
+  (interactive)
+  (pop-to-buffer (get-buffer-create emacs-mcp-server--log-buffer)))
+#+END_SRC
 
 *** Helper Functions
 
@@ -107,6 +247,27 @@ and returns the result as JSON.
       (concat (substring str 0 (- max-len 3)) "...")
     str))
 
+
+(defun emacs-mcp-server--eval-with-state-preservation (form)
+  "Eval FORM while preserving buffer, point, and window state.
+This prevents elisp evaluation from disrupting the user's current editing context."
+  (let ((orig-buffer (current-buffer))
+        (orig-point (point))
+        (orig-window (selected-window))
+        (orig-window-buffer (window-buffer (selected-window))))
+    (unwind-protect
+        (eval form t)
+      ;; Restore window's buffer first (handles switch-to-buffer)
+      (when (and (window-live-p orig-window)
+                 (buffer-live-p orig-window-buffer))
+        (set-window-buffer orig-window orig-window-buffer))
+      ;; Restore selected window
+      (when (window-live-p orig-window)
+        (select-window orig-window t))
+      ;; Restore buffer context and point
+      (when (buffer-live-p orig-buffer)
+        (set-buffer orig-buffer)
+        (goto-char (min orig-point (point-max)))))))
 (defun emacs-mcp-server--pp-to-string (value)
   "Pretty-print VALUE to string, handling special cases."
   (condition-case _
@@ -121,17 +282,41 @@ and returns the result as JSON.
 
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--handler-eval-elisp (params _session)
-  "Handler for evalElisp tool.  PARAMS contains code."
+  "Handler for evalElisp tool.  PARAMS contains code and optional save_current_state."
   (let* ((code (alist-get 'code params))
-         (result
-          (condition-case err
-              (let ((form (car (read-from-string code))))
-                `((success . t)
-                  (result . ,(emacs-mcp-server--pp-to-string (eval form t)))))
-            (error
-             `((success . :json-false)
-               (error . ,(error-message-string err))
-               (errorType . ,(symbol-name (car err))))))))
+         (save-state (if (assq 'save_current_state params)
+                         (not (eq (alist-get 'save_current_state params) :json-false))
+                       t))  ;; Default: true
+         (start-time (current-time))
+         result)
+    ;; Start indicators
+    (emacs-mcp-server--eval-start)
+    (redisplay t)  ;; Force display update so spinner shows immediately
+    (emacs-mcp-server--log-eval-start code)
+    ;; Execute with cleanup
+    (unwind-protect
+        (setq result
+              (condition-case err
+                  (let ((form (car (read-from-string code)))
+                        eval-result)
+                    (setq eval-result
+                          (if save-state
+                              (emacs-mcp-server--eval-with-state-preservation form)
+                            (eval form t)))
+                    (emacs-mcp-server--log-eval-end
+                     eval-result
+                     (float-time (time-subtract (current-time) start-time)))
+                    `((success . t)
+                      (result . ,(emacs-mcp-server--pp-to-string eval-result))))
+                (error
+                 (emacs-mcp-server--log-eval-error
+                  err
+                  (float-time (time-subtract (current-time) start-time)))
+                 `((success . :json-false)
+                   (error . ,(error-message-string err))
+                   (errorType . ,(symbol-name (car err)))))))
+      ;; End indicators (always runs)
+      (emacs-mcp-server--eval-end))
     (list `((type . "text")
             (text . ,(emacs-mcp-server--truncate
                       (json-encode result)
@@ -147,7 +332,9 @@ and returns the result as JSON.
      (handler . emacs-mcp-server--handler-eval-elisp)
      (inputSchema . ((type . "object")
                      (properties . ((code . ((type . "string")
-                                             (description . "Elisp code to evaluate")))))
+                                             (description . "Elisp code to evaluate")))
+                                    (save_current_state . ((type . "boolean")
+                                                           (description . "Whether to preserve buffer, point, and window state during evaluation. Default: true. Set to false only when you need the side effects (e.g., switching buffers).")))))
                      (required . ["code"])))))
   "Built-in MCP tools.")
 #+END_SRC
@@ -165,6 +352,32 @@ with status line, headers (CRLF-separated), blank line, then body.
 
 #+NAME: http-response-raw
 #+BEGIN_SRC elisp
+(defun emacs-mcp-server--send-raw-response (process status-code headers body)
+  "Send a complete HTTP response with STATUS-CODE, HEADERS, and BODY.
+HEADERS is an alist of (name . value) pairs.
+Safely handles deleted processes without signaling errors."
+  (when (and process (process-live-p process))
+    (condition-case nil
+        (let* ((status-text (pcase status-code
+                              (200 "OK")
+                              (202 "Accepted")
+                              (400 "Bad Request")
+                              (404 "Not Found")
+                              (500 "Internal Server Error")
+                              (_ "Unknown")))
+               (response-line (format "HTTP/1.1 %d %s\r\n" status-code status-text)))
+          ;; Send status line
+          (process-send-string process response-line)
+          ;; Send headers
+          (dolist (header headers)
+            (process-send-string process
+                                 (format "%s: %s\r\n" (car header) (cdr header))))
+          ;; End headers
+          (process-send-string process "\r\n")
+          ;; Send body
+          (when body
+            (process-send-string process body)))
+      (error nil))))  ;; Silently ignore errors on dead processes
 (defun emacs-mcp-server--send-raw-response (process status-code headers body)
   "Send a complete HTTP response with STATUS-CODE, HEADERS, and BODY.
 HEADERS is an alist of (name . value) pairs."
@@ -506,1119 +719,22 @@ Handler signature: (handler params session) -> list of ((type . \"text\") (text 
   emacs-mcp-server--port)
 #+END_SRC
 
-* MCP Org Tools
-
-This module provides MCP tools for manipulating org-mode documents. It allows
-Claude to list, read, update, create, and delete sections, as well as manage
-properties and tags.
-
-** Design Decisions
-
-1. *Hierarchical paths*: Sections are addressed by path like =/Project/Tasks/Todo=.
-   This is intuitive and matches how users think about org structure.
-
-2. *Separate body from subsections*: When reading/updating content, we only
-   touch the section body, not its subsections. This prevents accidental damage.
-
-3. *Auto-enable*: Tools are automatically registered when this module loads.
-
-** Dependencies
-
-#+BEGIN_SRC elisp
-(require 'org)
-(require 'org-element)
-#+END_SRC
-
-** Customization
-
-#+BEGIN_SRC elisp
-(defgroup claude-mcp-org nil
-  "Org-mode MCP tools for emacs-mcp-server."
-  :group 'tools
-  :prefix "claude-mcp-org-")
-
-(defvar claude-mcp-org--enabled nil
-  "Whether org MCP tools are currently enabled.")
-#+END_SRC
-
-** Helper Functions
-
-*** Path Navigation
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--heading-path ()
-  "Get the full hierarchical path of current heading.
-Returns path like /Level1/Level2/Level3."
-  (let ((path '()))
-    (save-excursion
-      (while (org-up-heading-safe)
-        (push (org-get-heading t t t t) path))
-      (when (org-at-heading-p)
-        (push (org-get-heading t t t t) path)))
-    (if path
-        (concat "/" (mapconcat #'identity path "/"))
-      "/")))
-
-(defun claude-mcp-org--current-heading-path ()
-  "Get the path of the heading at point."
-  (save-excursion
-    (when (org-at-heading-p)
-      (let ((current (org-get-heading t t t t))
-            (parents '()))
-        (while (org-up-heading-safe)
-          (push (org-get-heading t t t t) parents))
-        (concat "/" (mapconcat #'identity (append parents (list current)) "/"))))))
-
-(defun claude-mcp-org--goto-section (file-path section-path)
-  "Navigate to section in FILE-PATH by SECTION-PATH.
-Returns t if found, nil otherwise."
-  (when (and file-path (file-exists-p file-path))
-    (with-current-buffer (find-file-noselect file-path)
-      (goto-char (point-min))
-      (let* ((parts (split-string (string-trim-left section-path "/") "/" t))
-             (found t))
-        (when (null parts)
-          ;; Root path "/" means beginning of file
-          (cl-return-from claude-mcp-org--goto-section t))
-        (dolist (part parts)
-          (let ((part-found nil))
-            (while (and (not part-found) (re-search-forward org-heading-regexp nil t))
-              (when (string= (org-get-heading t t t t) part)
-                ;; Check if this is at the right level by verifying parent path
-                (let ((current-path (claude-mcp-org--current-heading-path))
-                      (expected-prefix (concat "/" (mapconcat #'identity
-                                                               (butlast (split-string (string-trim-left section-path "/") "/" t))
-                                                               "/"))))
-                  (when (or (string= expected-prefix "/")
-                            (string-prefix-p expected-prefix current-path))
-                    (setq part-found t)))))
-            (unless part-found
-              (setq found nil))))
-        found))))
-#+END_SRC
-
-*** Content Bounds
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--section-content-bounds ()
-  "Get the content bounds (start . end) for current section body.
-Content excludes the heading line and property drawer, but includes subsections."
-  (save-excursion
-    (org-back-to-heading t)
-    (let* ((element (org-element-at-point))
-           (begin (org-element-property :contents-begin element))
-           (end (org-element-property :contents-end element)))
-      (when (and begin end)
-        (cons begin end)))))
-
-(defun claude-mcp-org--section-body-bounds ()
-  "Get the body bounds (start . end) for current section.
-Body excludes subsections - only the direct content."
-  (save-excursion
-    (org-back-to-heading t)
-    (let ((start nil)
-          (end nil)
-          (level (org-current-level)))
-      ;; Move past the heading line
-      (forward-line 1)
-      ;; Skip property drawer if present
-      (when (looking-at-p "[ \t]*:PROPERTIES:")
-        (re-search-forward ":END:" nil t)
-        (forward-line 1))
-      (setq start (point))
-      ;; Find end - either next heading at same or higher level, or end of subtree
-      (if (re-search-forward (format "^\\*\\{1,%d\\} " level) nil t)
-          (progn
-            (beginning-of-line)
-            (setq end (point)))
-        ;; No more headings at this level, find end of subtree
-        (org-end-of-subtree t t)
-        (setq end (point)))
-      (cons start end))))
-
-(defun claude-mcp-org--get-immediate-children ()
-  "Get list of immediate child section names."
-  (save-excursion
-    (let ((children '())
-          (level (org-current-level)))
-      (when (org-goto-first-child)
-        (push (org-get-heading t t t t) children)
-        (while (org-get-next-sibling)
-          (push (org-get-heading t t t t) children)))
-      (nreverse children))))
-#+END_SRC
-
-*** Response Helpers
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--make-mcp-response (text)
-  "Create MCP response with TEXT."
-  (list `((type . "text") (text . ,text))))
-
-(defun claude-mcp-org--make-json-response (data)
-  "Create MCP response with DATA encoded as JSON."
-  (list `((type . "text") (text . ,(json-encode data)))))
-#+END_SRC
-
-** Section Tool Handlers
-
-*** List Sections
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--list-sections-handler (params _session)
-  "Handle org_list_sections tool call.
-PARAMS should contain 'file_path' key."
-  (let ((file-path (alist-get 'file_path params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless (file-exists-p file-path)
-      (error "File not found: %s" file-path))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (let ((sections '()))
-            (org-map-entries
-             (lambda ()
-               (let* ((heading (org-get-heading t t t t))
-                      (level (org-current-level))
-                      (tags (org-get-tags nil t))
-                      (path (claude-mcp-org--current-heading-path))
-                      (element (org-element-at-point))
-                      (has-content (and (org-element-property :contents-begin element)
-                                        (org-element-property :contents-end element))))
-                 (push `((path . ,path)
-                         (heading . ,heading)
-                         (level . ,level)
-                         (tags . ,(or tags []))
-                         (has_content . ,(if has-content t :json-false)))
-                       sections))))
-            (claude-mcp-org--make-json-response (nreverse sections))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error listing sections: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Read Section
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--read-section-handler (params _session)
-  "Handle org_read_section tool call.
-PARAMS should contain 'file_path' and 'section_path' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (let* ((heading (org-get-heading t t t t))
-                     (level (org-current-level))
-                     (tags (org-get-tags nil t))
-                     (properties (org-entry-properties nil 'standard))
-                     (bounds (claude-mcp-org--section-body-bounds))
-                     (content (when bounds
-                                (string-trim (buffer-substring-no-properties
-                                              (car bounds) (cdr bounds)))))
-                     (children (claude-mcp-org--get-immediate-children)))
-                (claude-mcp-org--make-json-response
-                 `((path . ,section-path)
-                   (heading . ,heading)
-                   (level . ,level)
-                   (tags . ,(or tags []))
-                   (properties . ,(or properties ()))
-                   (content . ,(or content ""))
-                   (children . ,(or children [])))))
-            (claude-mcp-org--make-json-response
-             `((error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error reading section: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Update Section
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--update-section-handler (params _session)
-  "Handle org_update_section tool call.
-PARAMS should contain 'file_path', 'section_path', and 'new_content' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params))
-        (new-content (alist-get 'new_content params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-    (unless new-content
-      (error "Missing required parameter: new_content"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (let ((bounds (claude-mcp-org--section-body-bounds)))
-                (when bounds
-                  (delete-region (car bounds) (cdr bounds))
-                  (goto-char (car bounds))
-                  (insert new-content)
-                  (unless (bolp) (insert "\n"))
-                  (save-buffer))
-                (claude-mcp-org--make-json-response
-                 `((success . t)
-                   (path . ,section-path))))
-            (claude-mcp-org--make-json-response
-             `((success . :json-false)
-               (error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error updating section: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Create Section
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--create-section-handler (params _session)
-  "Handle org_create_section tool call.
-PARAMS should contain 'file_path', 'parent_path', 'heading', and optionally 'content' and 'tags'."
-  (let ((file-path (alist-get 'file_path params))
-        (parent-path (alist-get 'parent_path params))
-        (heading (alist-get 'heading params))
-        (content (alist-get 'content params))
-        (tags (alist-get 'tags params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless parent-path
-      (error "Missing required parameter: parent_path"))
-    (unless heading
-      (error "Missing required parameter: heading"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (let ((new-level 1)
-                (insert-point nil))
-            ;; Determine level and insertion point
-            (if (string= parent-path "/")
-                ;; Top-level section
-                (progn
-                  (goto-char (point-max))
-                  (setq insert-point (point))
-                  (setq new-level 1))
-              ;; Subsection
-              (if (claude-mcp-org--goto-section file-path parent-path)
-                  (progn
-                    (setq new-level (1+ (org-current-level)))
-                    (org-end-of-subtree t t)
-                    (setq insert-point (point)))
-                (error "Parent section not found: %s" parent-path)))
-
-            ;; Insert new section
-            (goto-char insert-point)
-            (unless (bolp) (insert "\n"))
-            (insert (make-string new-level ?*) " " heading)
-            ;; Add tags if provided
-            (when (and tags (> (length tags) 0))
-              (insert " :" (mapconcat #'identity tags ":") ":"))
-            (insert "\n")
-            ;; Add content if provided
-            (when content
-              (insert content)
-              (unless (bolp) (insert "\n")))
-            (save-buffer)
-
-            (let ((new-path (if (string= parent-path "/")
-                                (concat "/" heading)
-                              (concat parent-path "/" heading))))
-              (claude-mcp-org--make-json-response
-               `((success . t)
-                 (path . ,new-path))))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error creating section: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Delete Section
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--delete-section-handler (params _session)
-  "Handle org_delete_section tool call.
-PARAMS should contain 'file_path' and 'section_path' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (progn
-                (org-cut-subtree)
-                (save-buffer)
-                (claude-mcp-org--make-json-response
-                 `((success . t)
-                   (deleted . ,section-path))))
-            (claude-mcp-org--make-json-response
-             `((success . :json-false)
-               (error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error deleting section: %s" (error-message-string err)))))))
-#+END_SRC
-
-** Property Tool Handlers
-
-*** Get Property
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--get-property-handler (params _session)
-  "Handle org_get_property tool call.
-PARAMS should contain 'file_path', 'section_path', and 'property_name' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params))
-        (property-name (alist-get 'property_name params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-    (unless property-name
-      (error "Missing required parameter: property_name"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (let ((value (org-entry-get nil property-name)))
-                (claude-mcp-org--make-json-response
-                 `((property . ,property-name)
-                   (value . ,(or value :json-null)))))
-            (claude-mcp-org--make-json-response
-             `((error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error getting property: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Set Property
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--set-property-handler (params _session)
-  "Handle org_set_property tool call.
-PARAMS should contain 'file_path', 'section_path', 'property_name', and 'property_value' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params))
-        (property-name (alist-get 'property_name params))
-        (property-value (alist-get 'property_value params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-    (unless property-name
-      (error "Missing required parameter: property_name"))
-    (unless property-value
-      (error "Missing required parameter: property_value"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (progn
-                (org-entry-put nil property-name property-value)
-                (save-buffer)
-                (claude-mcp-org--make-json-response
-                 `((success . t)
-                   (property . ,property-name)
-                   (value . ,property-value))))
-            (claude-mcp-org--make-json-response
-             `((success . :json-false)
-               (error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error setting property: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Delete Property
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--delete-property-handler (params _session)
-  "Handle org_delete_property tool call.
-PARAMS should contain 'file_path', 'section_path', and 'property_name' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params))
-        (property-name (alist-get 'property_name params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-    (unless property-name
-      (error "Missing required parameter: property_name"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (progn
-                (org-entry-delete nil property-name)
-                (save-buffer)
-                (claude-mcp-org--make-json-response
-                 `((success . t)
-                   (property . ,property-name))))
-            (claude-mcp-org--make-json-response
-             `((success . :json-false)
-               (error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error deleting property: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** List Properties
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--list-properties-handler (params _session)
-  "Handle org_list_properties tool call.
-PARAMS should contain 'file_path' and 'section_path' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (let ((properties (org-entry-properties nil 'standard)))
-                (claude-mcp-org--make-json-response
-                 `((path . ,section-path)
-                   (properties . ,(or properties ())))))
-            (claude-mcp-org--make-json-response
-             `((error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error listing properties: %s" (error-message-string err)))))))
-#+END_SRC
-
-** Tag Tool Handlers
-
-*** Get Tags
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--get-tags-handler (params _session)
-  "Handle org_get_tags tool call.
-PARAMS should contain 'file_path' and 'section_path' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (let ((tags (org-get-tags nil t)))
-                (claude-mcp-org--make-json-response
-                 `((path . ,section-path)
-                   (tags . ,(or tags [])))))
-            (claude-mcp-org--make-json-response
-             `((error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error getting tags: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Set Tags
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--set-tags-handler (params _session)
-  "Handle org_set_tags tool call.
-PARAMS should contain 'file_path', 'section_path', and 'tags' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params))
-        (tags (alist-get 'tags params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (progn
-                (org-set-tags (if (vectorp tags) (append tags nil) tags))
-                (save-buffer)
-                (claude-mcp-org--make-json-response
-                 `((success . t)
-                   (path . ,section-path)
-                   (tags . ,(or tags [])))))
-            (claude-mcp-org--make-json-response
-             `((success . :json-false)
-               (error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error setting tags: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Add Tag
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--add-tag-handler (params _session)
-  "Handle org_add_tag tool call.
-PARAMS should contain 'file_path', 'section_path', and 'tag' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params))
-        (tag (alist-get 'tag params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-    (unless tag
-      (error "Missing required parameter: tag"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (let* ((current-tags (org-get-tags nil t))
-                     (new-tags (if (member tag current-tags)
-                                   current-tags
-                                 (append current-tags (list tag)))))
-                (org-set-tags new-tags)
-                (save-buffer)
-                (claude-mcp-org--make-json-response
-                 `((success . t)
-                   (path . ,section-path)
-                   (tags . ,new-tags))))
-            (claude-mcp-org--make-json-response
-             `((success . :json-false)
-               (error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error adding tag: %s" (error-message-string err)))))))
-#+END_SRC
-
-*** Remove Tag
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-org--remove-tag-handler (params _session)
-  "Handle org_remove_tag tool call.
-PARAMS should contain 'file_path', 'section_path', and 'tag' keys."
-  (let ((file-path (alist-get 'file_path params))
-        (section-path (alist-get 'section_path params))
-        (tag (alist-get 'tag params)))
-    (unless file-path
-      (error "Missing required parameter: file_path"))
-    (unless section-path
-      (error "Missing required parameter: section_path"))
-    (unless tag
-      (error "Missing required parameter: tag"))
-
-    (condition-case err
-        (with-current-buffer (find-file-noselect file-path)
-          (if (claude-mcp-org--goto-section file-path section-path)
-              (let* ((current-tags (org-get-tags nil t))
-                     (new-tags (delete tag current-tags)))
-                (org-set-tags new-tags)
-                (save-buffer)
-                (claude-mcp-org--make-json-response
-                 `((success . t)
-                   (path . ,section-path)
-                   (tags . ,(or new-tags [])))))
-            (claude-mcp-org--make-json-response
-             `((success . :json-false)
-               (error . "Section not found")
-               (path . ,section-path)))))
-      (error
-       (claude-mcp-org--make-mcp-response
-        (format "Error removing tag: %s" (error-message-string err)))))))
-#+END_SRC
-
-** Tool Definitions
-
-Tool definitions follow the MCP schema format, mapping tool names to handlers
-and JSON Schema input specifications. These are registered with the MCP server
-when =claude-mcp-org-enable= is called.
-
-*** Section Tool Definitions
-
-Section tools provide CRUD operations on org headings and their content.
-These form the primary interface for navigating and editing org documents.
-
-#+NAME: org-tool-defs-section
-#+BEGIN_SRC elisp
-(defvar claude-mcp-org--section-tool-definitions
-  (list
-   `((name . "org_list_sections")
-     (description . "List all org-mode sections in a file with their hierarchical paths, levels, and tags")
-     (handler . claude-mcp-org--list-sections-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))))
-                     (required . ["file_path"]))))
-
-   `((name . "org_read_section")
-     (description . "Read content, properties, and tags of an org section by its hierarchical path")
-     (handler . claude-mcp-org--read-section-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path like /Project/Tasks/Todo")))))
-                     (required . ["file_path" "section_path"]))))
-
-   `((name . "org_update_section")
-     (description . "Update the content of an org section (preserves heading, tags, and properties)")
-     (handler . claude-mcp-org--update-section-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path like /Project/Tasks")))
-                                    (new_content . ((type . "string")
-                                                    (description . "New content for the section body")))))
-                     (required . ["file_path" "section_path" "new_content"]))))
-
-   `((name . "org_create_section")
-     (description . "Create a new subsection under an existing section")
-     (handler . claude-mcp-org--create-section-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (parent_path . ((type . "string")
-                                                    (description . "Parent section path, or / for top level")))
-                                    (heading . ((type . "string")
-                                                (description . "New section heading text")))
-                                    (content . ((type . "string")
-                                                (description . "Optional initial content")))
-                                    (tags . ((type . "array")
-                                             (items . ((type . "string")))
-                                             (description . "Optional tags for the section")))))
-                     (required . ["file_path" "parent_path" "heading"]))))
-
-   `((name . "org_delete_section")
-     (description . "Delete an org section and all its children")
-     (handler . claude-mcp-org--delete-section-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path to delete")))))
-                     (required . ["file_path" "section_path"])))))
-  "Section manipulation tool definitions.")
-#+END_SRC
-
-*** Property Tool Definitions
-
-Property tools manage org property drawers (=:PROPERTIES:= blocks).
-Properties store metadata like timestamps, IDs, and custom key-value pairs.
-
-#+NAME: org-tool-defs-property
-#+BEGIN_SRC elisp
-(defvar claude-mcp-org--property-tool-definitions
-  (list
-   `((name . "org_get_property")
-     (description . "Get a property value from an org section")
-     (handler . claude-mcp-org--get-property-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))
-                                    (property_name . ((type . "string")
-                                                      (description . "Name of the property to get")))))
-                     (required . ["file_path" "section_path" "property_name"]))))
-
-   `((name . "org_set_property")
-     (description . "Set a property value on an org section")
-     (handler . claude-mcp-org--set-property-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))
-                                    (property_name . ((type . "string")
-                                                      (description . "Name of the property to set")))
-                                    (property_value . ((type . "string")
-                                                       (description . "Value to set")))))
-                     (required . ["file_path" "section_path" "property_name" "property_value"]))))
-
-   `((name . "org_delete_property")
-     (description . "Delete a property from an org section")
-     (handler . claude-mcp-org--delete-property-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))
-                                    (property_name . ((type . "string")
-                                                      (description . "Name of the property to delete")))))
-                     (required . ["file_path" "section_path" "property_name"]))))
-
-   `((name . "org_list_properties")
-     (description . "List all properties of an org section")
-     (handler . claude-mcp-org--list-properties-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))))
-                     (required . ["file_path" "section_path"])))))
-  "Property manipulation tool definitions.")
-#+END_SRC
-
-*** Tag Tool Definitions
-
-Tag tools manage org heading tags (the =:tag1:tag2:= syntax at end of headings).
-Tags enable filtering, searching, and categorizing org entries.
-
-#+NAME: org-tool-defs-tag
-#+BEGIN_SRC elisp
-(defvar claude-mcp-org--tag-tool-definitions
-  (list
-   `((name . "org_get_tags")
-     (description . "Get tags of an org section")
-     (handler . claude-mcp-org--get-tags-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))))
-                     (required . ["file_path" "section_path"]))))
-
-   `((name . "org_set_tags")
-     (description . "Set/replace all tags of an org section")
-     (handler . claude-mcp-org--set-tags-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))
-                                    (tags . ((type . "array")
-                                             (items . ((type . "string")))
-                                             (description . "Tags to set")))))
-                     (required . ["file_path" "section_path" "tags"]))))
-
-   `((name . "org_add_tag")
-     (description . "Add a tag to an org section")
-     (handler . claude-mcp-org--add-tag-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))
-                                    (tag . ((type . "string")
-                                            (description . "Tag to add")))))
-                     (required . ["file_path" "section_path" "tag"]))))
-
-   `((name . "org_remove_tag")
-     (description . "Remove a tag from an org section")
-     (handler . claude-mcp-org--remove-tag-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Absolute path to the org file")))
-                                    (section_path . ((type . "string")
-                                                     (description . "Section path")))
-                                    (tag . ((type . "string")
-                                            (description . "Tag to remove")))))
-                     (required . ["file_path" "section_path" "tag"])))))
-  "Tag manipulation tool definitions.")
-#+END_SRC
-
-*** Combined Tool Definitions
-
-Aggregate all tool definitions into a single list for registration.
-
-#+NAME: org-tool-defs-combined
-#+BEGIN_SRC elisp
-(defvar claude-mcp-org--tool-definitions
-  (append claude-mcp-org--section-tool-definitions
-          claude-mcp-org--property-tool-definitions
-          claude-mcp-org--tag-tool-definitions)
-  "List of all MCP tool definitions for org-mode operations.")
-#+END_SRC
-
-** Public API
-
-#+BEGIN_SRC elisp
-;;;###autoload
-(defun claude-mcp-org-enable ()
-  "Enable org-mode MCP tools for emacs-mcp-server."
-  (interactive)
-  (unless claude-mcp-org--enabled
-    (if (fboundp 'emacs-mcp-server-register-tool)
-        (progn
-          (dolist (tool claude-mcp-org--tool-definitions)
-            (emacs-mcp-server-register-tool tool))
-          (setq claude-mcp-org--enabled t)
-          (message "Claude-MCP-Org: %d tools enabled" (length claude-mcp-org--tool-definitions)))
-      (message "Claude-MCP-Org: emacs-mcp-server not available. Please load emacs-mcp-server first."))))
-
-;;;###autoload
-(defun claude-mcp-org-disable ()
-  "Disable org-mode MCP tools for emacs-mcp-server."
-  (interactive)
-  (when claude-mcp-org--enabled
-    (when (fboundp 'emacs-mcp-server-unregister-tool)
-      (dolist (tool claude-mcp-org--tool-definitions)
-        (emacs-mcp-server-unregister-tool (alist-get 'name tool)))
-      (setq claude-mcp-org--enabled nil)
-      (message "Claude-MCP-Org: Tools disabled"))))
-
-;;;###autoload
-(defun claude-mcp-org-status ()
-  "Show status of Claude MCP Org integration."
-  (interactive)
-  (message "Claude-MCP-Org: %s, %d tools defined"
-           (if claude-mcp-org--enabled "enabled" "disabled")
-           (length claude-mcp-org--tool-definitions)))
-#+END_SRC
-
-** Auto-enable
-
-#+BEGIN_SRC elisp
-;; Auto-enable org tools when loaded
-(claude-mcp-org-enable)
-#+END_SRC
-
-* MCP IDE Diagnostics Tools
-
-This module provides MCP tools for sharing Emacs IDE diagnostics (flycheck/flymake)
-with Claude Code, similar to what VS Code extension does.
-
-** Dependencies
-
-#+BEGIN_SRC elisp
-(require 'flycheck nil t)  ; Optional - for flycheck support
-(require 'flymake nil t)   ; Optional - for flymake support
-#+END_SRC
-
-** Customization
-
-#+BEGIN_SRC elisp
-(defgroup claude-mcp-ide nil
-  "IDE diagnostics MCP tools for emacs-mcp-server."
-  :group 'tools
-  :prefix "claude-mcp-ide-")
-
-(defvar claude-mcp-ide--enabled nil
-  "Whether IDE diagnostics MCP tools are currently enabled.")
-#+END_SRC
-
-** Helper Functions
-
-*** Flycheck Conversion
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-ide--flycheck-error-to-diagnostic (err)
-  "Convert flycheck error ERR to VS Code diagnostic format.
-Returns an alist with severity, message, range, source, and code."
-  `((severity . ,(pcase (flycheck-error-level err)
-                   ('error "Error")
-                   ('warning "Warning")
-                   ('info "Information")
-                   (_ "Hint")))
-    (message . ,(flycheck-error-message err))
-    (range . ((start . ((line . ,(1- (flycheck-error-line err)))
-                        (character . ,(or (flycheck-error-column err) 0))))
-              (end . ((line . ,(1- (or (flycheck-error-end-line err)
-                                       (flycheck-error-line err))))
-                      (character . ,(or (flycheck-error-end-column err)
-                                        (1+ (or (flycheck-error-column err) 0))))))))
-    (source . ,(symbol-name (flycheck-error-checker err)))
-    (code . ,(or (flycheck-error-id err) ""))))
-#+END_SRC
-
-*** Flymake Conversion
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-ide--flymake-diagnostic-to-vscode (diag)
-  "Convert flymake diagnostic DIAG to VS Code diagnostic format."
-  (let* ((beg (flymake-diagnostic-beg diag))
-         (end (flymake-diagnostic-end diag))
-         (type (flymake-diagnostic-type diag))
-         (text (flymake-diagnostic-text diag))
-         (backend (flymake-diagnostic-backend diag)))
-    `((severity . ,(pcase type
-                     (:error "Error")
-                     (:warning "Warning")
-                     (:note "Information")
-                     (_ "Hint")))
-      (message . ,text)
-      (range . ((start . ((line . ,(1- (line-number-at-pos beg)))
-                          (character . ,(save-excursion
-                                          (goto-char beg)
-                                          (current-column)))))
-                (end . ((line . ,(1- (line-number-at-pos end)))
-                        (character . ,(save-excursion
-                                        (goto-char end)
-                                        (current-column)))))))
-      (source . ,(if backend (symbol-name backend) "flymake"))
-      (code . ""))))
-#+END_SRC
-
-*** Buffer Diagnostics Collection
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-ide--collect-buffer-diagnostics (buffer)
-  "Collect diagnostics from BUFFER using flycheck or flymake.
-Returns list of diagnostics in VS Code format."
-  (with-current-buffer buffer
-    (cond
-     ;; Flycheck
-     ((and (bound-and-true-p flycheck-mode)
-           (boundp 'flycheck-current-errors)
-           flycheck-current-errors)
-      (mapcar #'claude-mcp-ide--flycheck-error-to-diagnostic
-              flycheck-current-errors))
-     ;; Flymake
-     ((and (bound-and-true-p flymake-mode)
-           (fboundp 'flymake-diagnostics))
-      (mapcar #'claude-mcp-ide--flymake-diagnostic-to-vscode
-              (flymake-diagnostics)))
-     (t nil))))
-#+END_SRC
-
-*** Response Helpers
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-ide--make-json-response (data)
-  "Create MCP response with DATA encoded as JSON."
-  (list `((type . "text") (text . ,(json-encode data)))))
-#+END_SRC
-
-** Tool Handlers
-
-*** Get Diagnostics
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-ide--get-diagnostics-handler (params _session)
-  "Handle getDiagnostics tool call.
-If file_path is provided, get diagnostics for that file only.
-Otherwise, get diagnostics for all open buffers with file names."
-  (let* ((file-path (alist-get 'file_path params))
-         (all-diagnostics '()))
-    (if file-path
-        ;; Single file mode
-        (let ((buf (get-file-buffer file-path)))
-          (when buf
-            (let ((diags (claude-mcp-ide--collect-buffer-diagnostics buf)))
-              (when diags
-                (push `((file . ,file-path)
-                        (diagnostics . ,(vconcat diags)))
-                      all-diagnostics)))))
-      ;; All buffers mode
-      (dolist (buf (buffer-list))
-        (when-let ((file (buffer-file-name buf)))
-          (let ((diags (claude-mcp-ide--collect-buffer-diagnostics buf)))
-            (when diags
-              (push `((file . ,file)
-                      (diagnostics . ,(vconcat diags)))
-                    all-diagnostics))))))
-    (claude-mcp-ide--make-json-response (vconcat (nreverse all-diagnostics)))))
-#+END_SRC
-
-*** Get Diagnostics Summary
-
-#+BEGIN_SRC elisp
-(defun claude-mcp-ide--get-diagnostics-summary-handler (_params _session)
-  "Handle getDiagnosticsSummary tool call.
-Returns counts of errors, warnings, info, and affected files."
-  (let ((errors 0)
-        (warnings 0)
-        (info 0)
-        (files 0))
-    (dolist (buf (buffer-list))
-      (when (buffer-file-name buf)
-        (let ((diags (claude-mcp-ide--collect-buffer-diagnostics buf)))
-          (when diags
-            (cl-incf files)
-            (dolist (d diags)
-              (pcase (alist-get 'severity d)
-                ("Error" (cl-incf errors))
-                ("Warning" (cl-incf warnings))
-                (_ (cl-incf info))))))))
-    (claude-mcp-ide--make-json-response
-     `((errors . ,errors)
-       (warnings . ,warnings)
-       (info . ,info)
-       (files . ,files)
-       (summary . ,(format "%d Errors, %d Warnings in %d files"
-                           errors warnings files))))))
-#+END_SRC
-
-** Tool Definitions
-
-#+BEGIN_SRC elisp
-(defconst claude-mcp-ide--tool-definitions
-  `(((name . "getDiagnostics")
-     (description . "Get diagnostics (errors, warnings) from Emacs buffers. Returns flycheck/flymake errors in VS Code diagnostic format.")
-     (handler . claude-mcp-ide--get-diagnostics-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ((file_path . ((type . "string")
-                                                  (description . "Optional: specific file path. If omitted, returns diagnostics for all open buffers.")))))
-                     (required . []))))
-
-    ((name . "getDiagnosticsSummary")
-     (description . "Get summary counts of diagnostics across all open buffers")
-     (handler . claude-mcp-ide--get-diagnostics-summary-handler)
-     (inputSchema . ((type . "object")
-                     (properties . ())
-                     (required . [])))))
-  "List of MCP tool definitions for IDE diagnostics.")
-#+END_SRC
-
-** Public API
-
-#+BEGIN_SRC elisp
-;;;###autoload
-(defun claude-mcp-ide-enable ()
-  "Enable IDE diagnostics MCP tools for emacs-mcp-server."
-  (interactive)
-  (unless claude-mcp-ide--enabled
-    (if (fboundp 'emacs-mcp-server-register-tool)
-        (progn
-          (dolist (tool claude-mcp-ide--tool-definitions)
-            (emacs-mcp-server-register-tool tool))
-          (setq claude-mcp-ide--enabled t)
-          (message "Claude-MCP-IDE: %d tools enabled" (length claude-mcp-ide--tool-definitions)))
-      (message "Claude-MCP-IDE: emacs-mcp-server not available."))))
-
-;;;###autoload
-(defun claude-mcp-ide-disable ()
-  "Disable IDE diagnostics MCP tools for emacs-mcp-server."
-  (interactive)
-  (when claude-mcp-ide--enabled
-    (when (fboundp 'emacs-mcp-server-unregister-tool)
-      (dolist (tool claude-mcp-ide--tool-definitions)
-        (emacs-mcp-server-unregister-tool (alist-get 'name tool)))
-      (setq claude-mcp-ide--enabled nil)
-      (message "Claude-MCP-IDE: Tools disabled"))))
-
-;;;###autoload
-(defun claude-mcp-ide-status ()
-  "Show status of Claude MCP IDE integration."
-  (interactive)
-  (message "Claude-MCP-IDE: %s, %d tools defined"
-           (if claude-mcp-ide--enabled "enabled" "disabled")
-           (length claude-mcp-ide--tool-definitions)))
-#+END_SRC
-
-** Auto-enable
-
-#+BEGIN_SRC elisp
-;; Auto-enable IDE tools when loaded
-(claude-mcp-ide-enable)
-#+END_SRC
-
 * Provide
 
 #+BEGIN_SRC elisp
 (provide 'emacs-mcp-server)
 #+END_SRC
+
+* Tests
+
+Tests for emacs-mcp-server are located in the =tests/= directory:
+
+| Test File | Description | Command |
+|-----------+-------------+---------|
+| =test-mcp-mode-line.el= | Mode-line spinner, logging, state preservation | =make test-mcp-mode-line= |
+| =test-mcp-ide-integration.el= | IDE diagnostics (flycheck/flymake) | =make test-mcp-ide= |
+
+Run all MCP tests:
+#+begin_example
+make test-mcp-mode-line test-mcp-ide
+#+end_example

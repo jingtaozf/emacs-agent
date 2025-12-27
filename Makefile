@@ -9,7 +9,7 @@ SOURCES = claude-agent.org claude-org.org
 
 # Test files
 UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el
-INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el
+INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
@@ -41,6 +41,7 @@ help:
 	@echo "  make test-permissions - Run permission functions tests"
 	@echo "  make test-mcp-ide     - Run MCP IDE diagnostics tests"
 	@echo "  make test-mcp-ide-unit - Run MCP IDE unit tests only"
+	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
 	@echo ""
 	@echo "Coverage:"
 	@echo "  make coverage         - Generate test coverage report"
@@ -276,6 +277,15 @@ test-mcp-ide-unit:
 		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		-l tests/test-mcp-ide-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(and (tag :mcp-ide) (tag :unit)))"
+
+.PHONY: test-mcp-mode-line
+test-mcp-mode-line:
+	@echo "Running MCP mode-line spinner tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		-l tests/test-mcp-mode-line.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :mcp-mode-line))"
 
 # Interactive test runner (opens in Emacs UI)
 .PHONY: test-interactive
