@@ -2644,7 +2644,8 @@ Returns t if navigation succeeded, nil otherwise."
   "Jump to a recent AI block.
 Shows a list of recently executed blocks with status and timing.
 Uses CUSTOM_ID for stable navigation (survives file edits),
-falling back to line number for legacy blocks."
+falling back to line number for legacy blocks.
+After navigation, unfolds the target section to make the block visible."
   (interactive)
   (claude-org--ensure-history-loaded)
   (let ((candidates (claude-org--collect-recent-blocks)))
@@ -2655,21 +2656,27 @@ falling back to line number for legacy blocks."
              (plist (cdr entry))
              (marker (plist-get plist :marker))
              (custom-id (plist-get plist :custom-id))
-             (line (plist-get plist :line)))
+             (line (plist-get plist :line))
+             (navigated nil))
         (cond
          ;; Use marker if still valid (same session)
          ((and marker (marker-buffer marker) (buffer-live-p (marker-buffer marker)))
           (switch-to-buffer (marker-buffer marker))
-          (goto-char (marker-position marker)))
+          (goto-char (marker-position marker))
+          (setq navigated t))
          ;; Try CUSTOM_ID for stable navigation (works across file edits)
          ((and custom-id (claude-org--goto-block-by-custom-id custom-id))
-          ;; Successfully navigated via CUSTOM_ID
-          nil)
+          (setq navigated t))
          ;; Fall back to line number
          (line
-          (claude-org--goto-block-by-line line))
+          (claude-org--goto-block-by-line line)
+          (setq navigated t))
          (t
-          (message "Cannot navigate to block - no position info")))))))
+          (message "Cannot navigate to block - no position info")))
+        ;; Unfold the target section to make the block visible
+        (when navigated
+          (org-reveal t)
+          (recenter))))))
 #+END_SRC
 
 * Execution
