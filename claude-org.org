@@ -2557,10 +2557,33 @@ Functions for collecting and navigating to recent blocks.
      ((< hours 24) (format "%dh ago" hours))
      (t (format "%dd ago" days)))))
 
+(defun claude-org--extract-query-title-from-ai-block ()
+  "Extract a title from the first AI block in current subtree.
+Returns first line of query content, truncated to 60 chars."
+  (save-excursion
+    (let ((subtree-end (save-excursion (org-end-of-subtree t) (point))))
+      (when (re-search-forward "#\\+begin_src ai" subtree-end t)
+        (forward-line 1)
+        (let* ((start (point))
+               (end (save-excursion
+                      (if (re-search-forward "#\\+end_src" subtree-end t)
+                          (line-beginning-position)
+                        subtree-end)))
+               (content (string-trim (buffer-substring-no-properties start end)))
+               ;; Get first non-empty line
+               (first-line (car (seq-filter (lambda (s) (not (string-empty-p s)))
+                                            (split-string content "\n")))))
+          (when first-line
+            (let ((title (string-trim first-line)))
+              (if (> (length title) 60)
+                  (concat (substring title 0 57) "...")
+                title))))))))
+
 (defun claude-org--build-block-title-from-custom-id (custom-id)
   "Build a meaningful title by navigating to CUSTOM_ID heading.
 Returns full hierarchy: \"Instruction > Parent > Grandparent\" format.
-Skips 'Workflow' headings as they're SDD containers."
+Skips 'Workflow' headings as they're SDD containers.
+For generic 'Instruction N' headings, uses first line of AI query instead."
   (when custom-id
     (save-excursion
       (save-restriction
@@ -2569,13 +2592,22 @@ Skips 'Workflow' headings as they're SDD containers."
             (progn
               ;; Navigate to the heading with CUSTOM_ID
               (org-link-search (format "#%s" custom-id))
-              ;; Collect all parent headings (skip Workflow)
-              (let ((headings (list (substring-no-properties (org-get-heading t t t t)))))
+              ;; Get current heading
+              (let* ((heading (substring-no-properties (org-get-heading t t t t)))
+                     ;; Check if heading is generic "Instruction N" pattern
+                     (is-generic (string-match-p "^Instruction [0-9]+$" heading))
+                     ;; For generic headings, extract title from AI block query
+                     (effective-heading (if is-generic
+                                            (or (claude-org--extract-query-title-from-ai-block)
+                                                heading)
+                                          heading))
+                     (headings (list effective-heading)))
+                ;; Collect parent headings (skip Workflow)
                 (save-excursion
                   (while (org-up-heading-safe)
-                    (let ((heading (substring-no-properties (org-get-heading t t t t))))
-                      (unless (string= heading "Workflow")
-                        (push heading headings)))))
+                    (let ((parent (substring-no-properties (org-get-heading t t t t))))
+                      (unless (string= parent "Workflow")
+                        (push parent headings)))))
                 ;; Build title: most specific first, then parents
                 ;; headings is now (root parent ... instruction)
                 ;; We want: instruction > parent > root
