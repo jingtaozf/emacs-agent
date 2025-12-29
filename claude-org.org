@@ -2449,19 +2449,18 @@ Uses format: <basename>--<short-hash>.el for readability."
 (defun claude-org--prepare-history-for-save ()
   "Prepare history for saving by removing transient data.
 Keeps only the most recent `claude-org-history-max-entries' entries.
-Includes :title for display and :custom-id for navigation."
-  (let ((entries (mapcar
-                  (lambda (entry)
-                    (let ((id (car entry))
-                          (plist (cdr entry)))
-                      ;; Remove :marker (not persistent), keep title and custom-id
-                      (cons id (cl-list* :timestamp (plist-get plist :timestamp)
-                                         :status (plist-get plist :status)
-                                         :title (plist-get plist :title)
-                                         :custom-id (plist-get plist :custom-id)
-                                         :line (plist-get plist :line)
-                                         nil))))
-                  claude-org--block-history)))
+Only saves entries with CUSTOM_ID - titles are built dynamically."
+  (let ((entries (cl-remove-if-not
+                  (lambda (entry) (plist-get (cdr entry) :custom-id))
+                  (mapcar
+                   (lambda (entry)
+                     (let ((id (car entry))
+                           (plist (cdr entry)))
+                       ;; Only keep timestamp, status, and custom-id
+                       (cons id (list :timestamp (plist-get plist :timestamp)
+                                      :status (plist-get plist :status)
+                                      :custom-id (plist-get plist :custom-id)))))
+                   claude-org--block-history))))
     ;; Sort by timestamp, keep most recent
     (setq entries (sort entries
                         (lambda (a b)
@@ -2481,50 +2480,48 @@ Default hook functions for block history tracking.
 
 #+NAME: history-hooks
 #+BEGIN_SRC elisp
-(defun claude-org--find-instruction-info ()
-  "Find the instruction heading info containing point.
+(defun claude-org--find-instruction-custom-id ()
+  "Find the CUSTOM_ID of the instruction heading containing point.
 Searches backward for a heading with :claude_chat: tag.
-Returns plist with :custom-id and :title, or nil if not found."
+Returns CUSTOM_ID string or nil if not found."
   (save-excursion
-    (let ((found nil))
+    (let ((custom-id nil))
       ;; First try walking up headings
-      (while (and (not found) (org-up-heading-safe))
+      (while (and (not custom-id) (org-up-heading-safe))
         (when (member "claude_chat" (org-get-tags nil t))
-          (setq found (list :custom-id (org-entry-get nil "CUSTOM_ID")
-                            :title (substring-no-properties (org-get-heading t t t t))))))
+          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
       ;; If not found, search backward for :claude_chat: heading
-      (unless found
+      (unless custom-id
         (when (re-search-backward "^\\*+.*:claude_chat:" nil t)
-          (setq found (list :custom-id (org-entry-get nil "CUSTOM_ID")
-                            :title (substring-no-properties (org-get-heading t t t t))))))
-      found)))
+          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
+      custom-id)))
 
 (defun claude-org--record-block-execution (session-key query marker)
   "Record block execution start.
 SESSION-KEY identifies the session, QUERY is the prompt text,
 MARKER points to the AI block.
-Stores instruction heading title and CUSTOM_ID for display and navigation."
+Only stores CUSTOM_ID - titles are built dynamically when listing.
+Blocks without CUSTOM_ID are not recorded."
   (claude-org--ensure-history-loaded)
-  (let* ((block-id (format "block-%d-%s"
-                           (line-number-at-pos (marker-position marker))
-                           (format-time-string "%H%M%S")))
-         ;; Find instruction heading info (title and CUSTOM_ID)
-         (instruction-info (save-excursion
-                             (goto-char (marker-position marker))
-                             (claude-org--find-instruction-info)))
-         (entry `(:timestamp ,(float-time)
-                  :status in-progress
-                  :title ,(plist-get instruction-info :title)
-                  :custom-id ,(plist-get instruction-info :custom-id)
-                  :line ,(line-number-at-pos (marker-position marker))
-                  :marker ,marker
-                  :session-key ,session-key)))
-    ;; Add to history (at front for recent-first ordering)
-    (push (cons block-id entry) claude-org--block-history)
-    ;; Store block-id in session for later status update
-    (claude-org--session-put session-key :block-id block-id)
-    ;; Trigger debounced save
-    (claude-org--save-history)))
+  (let* ((custom-id (save-excursion
+                      (goto-char (marker-position marker))
+                      (claude-org--find-instruction-custom-id))))
+    ;; Only record if we have a CUSTOM_ID
+    (when custom-id
+      (let* ((block-id (format "block-%s-%s"
+                               (substring custom-id (max 0 (- (length custom-id) 20)))
+                               (format-time-string "%H%M%S")))
+             (entry `(:timestamp ,(float-time)
+                      :status in-progress
+                      :custom-id ,custom-id
+                      :marker ,marker
+                      :session-key ,session-key)))
+        ;; Add to history (at front for recent-first ordering)
+        (push (cons block-id entry) claude-org--block-history)
+        ;; Store block-id in session for later status update
+        (claude-org--session-put session-key :block-id block-id)
+        ;; Trigger debounced save
+        (claude-org--save-history)))))
 
 (defun claude-org--update-block-status (session-key _result status)
   "Update block status on completion.
@@ -2562,8 +2559,8 @@ Functions for collecting and navigating to recent blocks.
 
 (defun claude-org--build-block-title-from-custom-id (custom-id)
   "Build a meaningful title by navigating to CUSTOM_ID heading.
-Returns \"Instruction Title (Story Name)\" format when possible.
-CUSTOM_ID should point to the instruction heading with :claude_chat: tag."
+Returns full hierarchy: \"Instruction > Parent > Grandparent\" format.
+Skips 'Workflow' headings as they're SDD containers."
   (when custom-id
     (save-excursion
       (save-restriction
@@ -2572,32 +2569,28 @@ CUSTOM_ID should point to the instruction heading with :claude_chat: tag."
             (progn
               ;; Navigate to the heading with CUSTOM_ID
               (org-link-search (format "#%s" custom-id))
-              ;; Get the instruction title (current heading)
-              (let ((instruction (substring-no-properties (org-get-heading t t t t)))
-                    (story nil))
-                ;; Walk up to find story context (level 1-2, skip Workflow)
+              ;; Collect all parent headings (skip Workflow)
+              (let ((headings (list (substring-no-properties (org-get-heading t t t t)))))
                 (save-excursion
-                  (while (and (not story) (org-up-heading-safe))
-                    (let ((heading (substring-no-properties (org-get-heading t t t t)))
-                          (level (org-current-level)))
-                      (when (and (<= level 2)
-                                 (not (string= heading "Workflow")))
-                        (setq story heading)))))
-                ;; Build the combined title
-                (cond
-                 ((and story (not (string= story instruction)))
-                  (format "%s (%s)" instruction story))
-                 (t instruction))))
+                  (while (org-up-heading-safe)
+                    (let ((heading (substring-no-properties (org-get-heading t t t t))))
+                      (unless (string= heading "Workflow")
+                        (push heading headings)))))
+                ;; Build title: most specific first, then parents
+                ;; headings is now (root parent ... instruction)
+                ;; We want: instruction > parent > root
+                (string-join (reverse headings) " > ")))
           (error nil))))))
 
 (defun claude-org--format-block-candidate (entry)
   "Format ENTRY for display in completing-read.
 ENTRY is (BLOCK-ID . PLIST).
-Uses stored instruction title from when block was executed."
+Builds title dynamically from CUSTOM_ID to show current heading hierarchy."
   (let* ((plist (cdr entry))
          (status (plist-get plist :status))
-         ;; Use stored title (captured at execution time)
-         (title (or (plist-get plist :title) "Untitled"))
+         (custom-id (plist-get plist :custom-id))
+         ;; Build title dynamically from CUSTOM_ID
+         (title (or (claude-org--build-block-title-from-custom-id custom-id) "Untitled"))
          (timestamp (plist-get plist :timestamp))
          (status-icon (pcase status
                         ('completed "✓")
@@ -2609,16 +2602,20 @@ Uses stored instruction title from when block was executed."
                      "unknown")))
     (format "[%s] %s (%s)"
             status-icon
-            (truncate-string-to-width title 100 nil nil "…")
+            title  ;; No truncation - show full hierarchy
             time-str)))
 
 (defun claude-org--collect-recent-blocks ()
   "Collect recent blocks for completing-read.
-Returns alist of (DISPLAY-STRING . ENTRY)."
+Returns alist of (DISPLAY-STRING . ENTRY).
+Only includes entries with CUSTOM_ID."
   (claude-org--ensure-history-loaded)
-  (mapcar (lambda (entry)
-            (cons (claude-org--format-block-candidate entry) entry))
-          claude-org--block-history))
+  (let ((valid-entries (cl-remove-if-not
+                        (lambda (entry) (plist-get (cdr entry) :custom-id))
+                        claude-org--block-history)))
+    (mapcar (lambda (entry)
+              (cons (claude-org--format-block-candidate entry) entry))
+            valid-entries)))
 
 (defun claude-org--goto-block-by-line (line)
   "Navigate to AI block at LINE, searching nearby if exact match fails."
