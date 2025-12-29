@@ -2542,47 +2542,52 @@ Functions for collecting and navigating to recent blocks.
      ((< hours 24) (format "%dh ago" hours))
      (t (format "%dd ago" days)))))
 
-(defun claude-org--build-block-title-from-custom-id (custom-id)
-  "Build a meaningful title by navigating to CUSTOM_ID and walking up headings.
-Returns \"Story Name / Instruction Title\" format, or just instruction title
-if no SDD story context is found."
-  (when custom-id
+(defun claude-org--build-block-title-from-position (line-number)
+  "Build a meaningful title by going to LINE-NUMBER and walking up headings.
+Returns \"Story Name / Instruction Title\" format when possible.
+Skips 'Workflow' headings as they're SDD containers.
+Uses the deepest meaningful heading as instruction, shallowest as story."
+  (when (and line-number (> line-number 0))
     (save-excursion
       (save-restriction
         (widen)
         (condition-case nil
             (progn
-              (org-link-search (format "#%s" custom-id))
-              ;; Now at the heading with CUSTOM_ID, get its title
-              (let* ((instruction-title (org-get-heading t t t t))
-                     (story-name nil))
-                ;; Walk up to find SDD story (look for :sdd: tag or story-like parent)
-                (save-excursion
-                  (while (and (not story-name) (org-up-heading-safe))
-                    (let ((tags (org-get-tags nil t)))
-                      ;; Check for SDD-related tags or feature-like headings
-                      (when (or (member "sdd" tags)
-                                (member "story" tags)
-                                (member "feature" tags)
-                                ;; Also check if this looks like a story heading (level 1-2)
-                                (<= (org-current-level) 2))
-                        (setq story-name (org-get-heading t t t t))))))
-                ;; Build the combined title
-                (if (and story-name
-                         (not (string= story-name instruction-title)))
-                    (format "%s / %s" story-name instruction-title)
-                  (or instruction-title "Untitled"))))
+              (goto-char (point-min))
+              (forward-line (1- line-number))
+              ;; Collect all meaningful headings (skip "Workflow")
+              (let ((headings nil))
+                (while (org-up-heading-safe)
+                  (let ((heading (substring-no-properties (org-get-heading t t t t)))
+                        (level (org-current-level)))
+                    (unless (string= heading "Workflow")
+                      (push (cons level heading) headings))))
+                ;; headings is now ((level1 . "heading1") (level2 . "heading2") ...)
+                ;; sorted from shallowest to deepest
+                (cond
+                 ;; No meaningful headings found
+                 ((null headings) nil)
+                 ;; Only one heading - just use it
+                 ((= (length headings) 1)
+                  (cdar headings))
+                 ;; Multiple headings - use shallowest as story, deepest as instruction
+                 (t
+                  (let ((story (cdar headings))           ;; first = shallowest
+                        (instruction (cdar (last headings)))) ;; last = deepest
+                    (if (string= story instruction)
+                        instruction
+                      (format "%s / %s" story instruction)))))))
           (error nil))))))
 
 (defun claude-org--format-block-candidate (entry)
   "Format ENTRY for display in completing-read.
 ENTRY is (BLOCK-ID . PLIST).
-Builds title dynamically from CUSTOM_ID to always show current heading names."
+Builds title dynamically from line number to always show current heading names."
   (let* ((plist (cdr entry))
          (status (plist-get plist :status))
-         (custom-id (plist-get plist :custom-id))
-         ;; Build title dynamically from CUSTOM_ID, fall back to stored title for legacy
-         (title (or (claude-org--build-block-title-from-custom-id custom-id)
+         (line (plist-get plist :line))
+         ;; Build title dynamically from line position, fall back to stored title for legacy
+         (title (or (claude-org--build-block-title-from-position line)
                     (plist-get plist :title)
                     "Untitled"))
          (timestamp (plist-get plist :timestamp))
