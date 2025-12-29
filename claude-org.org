@@ -2482,17 +2482,26 @@ Default hook functions for block history tracking.
 #+BEGIN_SRC elisp
 (defun claude-org--find-instruction-custom-id ()
   "Find the CUSTOM_ID of the instruction heading containing point.
-Searches backward for a heading with :claude_chat: tag.
+Checks: immediate heading, previous siblings at same level, then parent headings.
 Returns CUSTOM_ID string or nil if not found."
   (save-excursion
     (let ((custom-id nil))
-      ;; First try walking up headings
-      (while (and (not custom-id) (org-up-heading-safe))
+      ;; First check the immediate containing heading
+      (ignore-errors
+        (org-back-to-heading t)
         (when (member "claude_chat" (org-get-tags nil t))
           (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
-      ;; If not found, search backward for :claude_chat: heading
-      (unless custom-id
-        (when (re-search-backward "^\\*+.*:claude_chat:" nil t)
+      ;; Check previous siblings at same level (Response is sibling to Instruction)
+      (when (not custom-id)
+        (let ((current-level (org-current-level)))
+          (while (and (not custom-id)
+                      (org-get-previous-sibling))
+            (when (and (= (org-current-level) current-level)
+                       (member "claude_chat" (org-get-tags nil t)))
+              (setq custom-id (org-entry-get nil "CUSTOM_ID"))))))
+      ;; If still not found, walk up parent headings
+      (while (and (not custom-id) (org-up-heading-safe))
+        (when (member "claude_chat" (org-get-tags nil t))
           (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
       custom-id)))
 
