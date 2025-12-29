@@ -1627,13 +1627,24 @@ instruction headings and returns the next available number, ensuring no duplicat
 #+NAME: block-insert-numbering
 #+BEGIN_SRC elisp
 (defun claude-org--next-instruction-number ()
-  "Find the next available instruction number."
+  "Find the next available instruction number within current session scope.
+Counts headings with :claude_chat: tag within the session scope.
+Does not depend on heading titles (which may be renamed by users)."
   (save-excursion
-    (goto-char (point-min))
-    (let ((max-num 0))
-      (while (re-search-forward "^\\*+ Instruction \\([0-9]+\\)" nil t)
-        (setq max-num (max max-num (string-to-number (match-string 1)))))
-      (1+ max-num))))
+    (let ((count 0)
+          (session-pos (claude-org--find-session-scope-heading)))
+      ;; Try to find session scope and count chat headings within it
+      (when session-pos
+        (goto-char session-pos)
+        (let ((scope-end (save-excursion (org-end-of-subtree t) (point))))
+          ;; Only search forward if scope-end is after current position
+          (when (> scope-end session-pos)
+            ;; Count all headings with claude_chat tag in this scope
+            (while (re-search-forward "^\\*+ " scope-end t)
+              (when (member claude-org-heading-tag (org-get-tags nil t))
+                (setq count (1+ count)))))))
+      ;; Return next number (at least 1)
+      (max 1 (1+ count)))))
 #+END_SRC
 
 ** Standard Block Insertion
@@ -1949,6 +1960,7 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     ;; Insert top-level heading with session
     (insert stars " " name "\n")
     (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id name file-base) "\n")
     (insert ":CLAUDE_SESSION_ID: " session-id "\n")
     (insert ":END:\n\n")
 
@@ -2401,19 +2413,23 @@ Uses format: <basename>--<short-hash>.el for readability."
   "Load history from disk for current buffer."
   (when (and (buffer-file-name)
              (not claude-org--history-loaded))
-    (let ((history-file (claude-org--history-file-path)))
+    (let ((history-file (claude-org--history-file-path))
+          (current-org-file (buffer-file-name))
+          (loaded-blocks nil))
       (when (file-exists-p history-file)
         (condition-case err
-            (with-temp-buffer
-              (insert-file-contents history-file)
-              (let ((data (read (current-buffer))))
-                (when (and (plist-get data :blocks)
-                           (string= (plist-get data :org-file)
-                                    (buffer-file-name)))
-                  (setq claude-org--block-history
+            (setq loaded-blocks
+                  (with-temp-buffer
+                    (insert-file-contents history-file)
+                    (let ((data (read (current-buffer))))
+                      (when (and (plist-get data :blocks)
+                                 (string= (plist-get data :org-file)
+                                          current-org-file))
                         (plist-get data :blocks)))))
           (error
-           (message "claude-org: Failed to load history: %s" err)))))
+           (message "claude-org: Failed to load history: %s" err))))
+      (when loaded-blocks
+        (setq claude-org--block-history loaded-blocks)))
     (setq claude-org--history-loaded t)))
 
 (defun claude-org--save-history ()
@@ -2505,30 +2521,40 @@ Returns CUSTOM_ID string or nil if not found."
           (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
       custom-id)))
 
-(defun claude-org--record-block-execution (session-key query marker)
+(defun claude-org--record-block-execution (session-key _query _marker)
   "Record block execution start.
-SESSION-KEY identifies the session, QUERY is the prompt text,
-MARKER points to the AI block.
+SESSION-KEY identifies the session.
+Called from `claude-org-execute-hook' when point is still in the AI block.
 Only stores CUSTOM_ID - titles are built dynamically when listing.
-Blocks without CUSTOM_ID are not recorded."
+Blocks without CUSTOM_ID are not recorded.
+If block with same CUSTOM_ID exists, updates it instead of creating duplicate."
   (claude-org--ensure-history-loaded)
-  (let* ((custom-id (save-excursion
-                      (goto-char (marker-position marker))
-                      (claude-org--find-instruction-custom-id))))
+  (let ((custom-id (claude-org--find-instruction-custom-id)))
     ;; Only record if we have a CUSTOM_ID
     (when custom-id
-      (let* ((block-id (format "block-%s-%s"
-                               (substring custom-id (max 0 (- (length custom-id) 20)))
-                               (format-time-string "%H%M%S")))
-             (entry `(:timestamp ,(float-time)
-                      :status in-progress
-                      :custom-id ,custom-id
-                      :marker ,marker
-                      :session-key ,session-key)))
-        ;; Add to history (at front for recent-first ordering)
-        (push (cons block-id entry) claude-org--block-history)
-        ;; Store block-id in session for later status update
-        (claude-org--session-put session-key :block-id block-id)
+      ;; Check if entry with this CUSTOM_ID already exists
+      (let ((existing (cl-find-if (lambda (e)
+                                    (string= (plist-get (cdr e) :custom-id) custom-id))
+                                  claude-org--block-history)))
+        (if existing
+            ;; Update existing entry - move to front and update timestamp/status
+            (progn
+              (setq claude-org--block-history (delete existing claude-org--block-history))
+              (let ((updated-entry `(,(car existing)
+                                     :timestamp ,(float-time)
+                                     :status in-progress
+                                     :custom-id ,custom-id)))
+                (push updated-entry claude-org--block-history)
+                (claude-org--session-put session-key :block-id (car existing))))
+          ;; Create new entry
+          (let* ((block-id (format "block-%s-%s"
+                                   (substring custom-id (max 0 (- (length custom-id) 20)))
+                                   (format-time-string "%H%M%S")))
+                 (entry `(:timestamp ,(float-time)
+                          :status in-progress
+                          :custom-id ,custom-id)))
+            (push (cons block-id entry) claude-org--block-history)
+            (claude-org--session-put session-key :block-id block-id)))
         ;; Trigger debounced save
         (claude-org--save-history)))))
 
@@ -2543,7 +2569,8 @@ SESSION-KEY identifies the session, STATUS is `completed' or `error'."
           (claude-org--save-history))))))
 
 ;; Register default hooks
-(add-hook 'claude-org-execute-after-hook #'claude-org--record-block-execution)
+;; Record on execute-hook (before execution starts) - point is still in AI block
+(add-hook 'claude-org-execute-hook #'claude-org--record-block-execution)
 (add-hook 'claude-org-complete-hook #'claude-org--update-block-status)
 #+END_SRC
 
@@ -2658,30 +2685,6 @@ Only includes entries with CUSTOM_ID."
               (cons (claude-org--format-block-candidate entry) entry))
             valid-entries)))
 
-(defun claude-org--goto-block-by-line (line)
-  "Navigate to AI block at LINE, searching nearby if exact match fails."
-  (goto-char (point-min))
-  (forward-line (1- line))
-  ;; Verify we're at an AI block, search nearby if not
-  (unless (claude-org--in-ai-block-p)
-    (let ((found nil)
-          (orig-point (point))
-          (search-range 10))
-      ;; Search forward
-      (save-excursion
-        (dotimes (_ search-range)
-          (when (and (not found)
-                     (re-search-forward "#\\+begin_src ai" nil t))
-            (setq found (match-beginning 0)))))
-      ;; If not found forward, try backward
-      (unless found
-        (save-excursion
-          (goto-char orig-point)
-          (when (re-search-backward "#\\+begin_src ai" nil t)
-            (setq found (match-beginning 0)))))
-      (when found
-        (goto-char found)))))
-
 (defun claude-org--goto-block-by-custom-id (custom-id)
   "Navigate to AI block via CUSTOM_ID using org-link-search.
 Returns t if navigation succeeded, nil otherwise."
@@ -2694,8 +2697,7 @@ Returns t if navigation succeeded, nil otherwise."
 (defun claude-org-jump-to-ai-block ()
   "Jump to a recent AI block.
 Shows a list of recently executed blocks with status and timing.
-Uses CUSTOM_ID for stable navigation (survives file edits),
-falling back to line number for legacy blocks.
+Uses CUSTOM_ID for stable navigation (survives file edits).
 After navigation, unfolds the target section to make the block visible."
   (interactive)
   (claude-org--ensure-history-loaded)
@@ -2705,29 +2707,12 @@ After navigation, unfolds the target section to make the block visible."
       (let* ((selection (completing-read "Jump to: " candidates nil t))
              (entry (cdr (assoc selection candidates)))
              (plist (cdr entry))
-             (marker (plist-get plist :marker))
-             (custom-id (plist-get plist :custom-id))
-             (line (plist-get plist :line))
-             (navigated nil))
-        (cond
-         ;; Use marker if still valid (same session)
-         ((and marker (marker-buffer marker) (buffer-live-p (marker-buffer marker)))
-          (switch-to-buffer (marker-buffer marker))
-          (goto-char (marker-position marker))
-          (setq navigated t))
-         ;; Try CUSTOM_ID for stable navigation (works across file edits)
-         ((and custom-id (claude-org--goto-block-by-custom-id custom-id))
-          (setq navigated t))
-         ;; Fall back to line number
-         (line
-          (claude-org--goto-block-by-line line)
-          (setq navigated t))
-         (t
-          (message "Cannot navigate to block - no position info")))
-        ;; Unfold the target section to make the block visible
-        (when navigated
-          (org-reveal t)
-          (recenter))))))
+             (custom-id (plist-get plist :custom-id)))
+        (if (and custom-id (claude-org--goto-block-by-custom-id custom-id))
+            (progn
+              (org-reveal t)
+              (recenter))
+          (message "Cannot navigate to block - no CUSTOM_ID"))))))
 #+END_SRC
 
 * Execution

@@ -681,5 +681,133 @@
     ;; Should be level 4 (same as "My Custom Title")
     (should (= 4 (length (match-string 1))))))
 
+;;; Instruction Numbering Tests
+
+(ert-deftest test-claude-org-next-instruction-number-session-scoped ()
+  "Test that instruction numbering is scoped to current session."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-numbering.org")
+    ;; Create two SDD sections with their own instruction blocks
+    (insert "* SDD A\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: sdd-a\n")
+    (insert ":END:\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Query 1 :claude_chat:\n")
+    (insert "#+begin_src ai\nquery 1\n#+end_src\n")
+    (insert "*** Query 2 :claude_chat:\n")
+    (insert "#+begin_src ai\nquery 2\n#+end_src\n\n")
+    (insert "* SDD B\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: sdd-b\n")
+    (insert ":END:\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Query 1 :claude_chat:\n")
+    (insert "#+begin_src ai\nquery 1\n#+end_src\n")
+    ;; Position in SDD A - should find 2 existing, next is 3
+    (goto-char (point-min))
+    (re-search-forward "SDD A")
+    (re-search-forward "Query 2")
+    (should (= 3 (claude-org--next-instruction-number)))
+    ;; Position in SDD B - should find 1 existing, next is 2
+    (goto-char (point-min))
+    (re-search-forward "SDD B")
+    (re-search-forward "Query 1")
+    (should (= 2 (claude-org--next-instruction-number)))))
+
+(ert-deftest test-claude-org-next-instruction-number-counts-chat-tags ()
+  "Test that instruction numbering counts :claude_chat: tags, not heading text."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-numbering.org")
+    (insert "* Feature\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: test-session\n")
+    (insert ":END:\n")
+    (insert "** Workflow :sdd:\n")
+    ;; Renamed headings (no "Instruction N" pattern) but with :claude_chat: tag
+    (insert "*** Research Phase :claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "*** Design Discussion :claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "*** Implementation Plan :claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    ;; Position at end of Workflow
+    (goto-char (point-max))
+    ;; Should count 3 :claude_chat: headings, next is 4
+    (should (= 4 (claude-org--next-instruction-number)))))
+
+;;; Block History Deduplication Tests
+
+(ert-deftest test-claude-org-record-block-execution-deduplicates ()
+  "Test that recording same CUSTOM_ID updates existing entry instead of duplicating."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-history.org")
+    ;; Set up buffer-local history variables
+    (setq-local claude-org--block-history nil)
+    (setq-local claude-org--history-loaded t)
+    (insert "* Test\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: test-session\n")
+    (insert ":END:\n")
+    (insert "** Query :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-custom-id\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    ;; Position inside the ai block
+    (goto-char (point-min))
+    (re-search-forward "#+begin_src ai")
+    (forward-line 1)
+    ;; First recording
+    (claude-org--record-block-execution "test-session" "query" nil)
+    (should (= 1 (length claude-org--block-history)))
+    (let ((first-block-id (caar claude-org--block-history)))
+      ;; Second recording of same block (same CUSTOM_ID)
+      (claude-org--record-block-execution "test-session" "query" nil)
+      ;; Should still be 1 entry, not 2
+      (should (= 1 (length claude-org--block-history)))
+      ;; Should keep the same block-id
+      (should (equal first-block-id (caar claude-org--block-history))))))
+
+(ert-deftest test-claude-org-record-block-execution-different-ids ()
+  "Test that different CUSTOM_IDs create separate history entries."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-history.org")
+    (setq-local claude-org--block-history nil)
+    (setq-local claude-org--history-loaded t)
+    (insert "* Test\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: test-session\n")
+    (insert ":END:\n")
+    (insert "** Query 1 :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: custom-id-1\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery 1\n#+end_src\n")
+    (insert "** Query 2 :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: custom-id-2\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery 2\n#+end_src\n")
+    ;; Record first block
+    (goto-char (point-min))
+    (re-search-forward "query 1")
+    (claude-org--record-block-execution "test-session" "query 1" nil)
+    (should (= 1 (length claude-org--block-history)))
+    ;; Record second block
+    (goto-char (point-min))
+    (re-search-forward "query 2")
+    (claude-org--record-block-execution "test-session" "query 2" nil)
+    ;; Should have 2 entries
+    (should (= 2 (length claude-org--block-history)))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
