@@ -8,7 +8,7 @@ BATCH = $(EMACS) -Q --batch
 SOURCES = claude-agent.org claude-org.org
 
 # Test files
-UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el
+UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-error.el
 INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 

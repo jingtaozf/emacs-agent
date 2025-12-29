@@ -2953,6 +2953,15 @@ When non-nil, a <system-reminder> tag with context is prepended to each message.
 
 (defvar-local claude-agent-chat--total-cost 0.0
   "Total cost accumulated in this chat session.")
+
+(defvar-local claude-agent-chat--system-prompt nil
+  "Buffer-local system prompt. If nil, uses default.")
+
+(defvar-local claude-agent-chat--mcp-config nil
+  "Buffer-local MCP config file path. If nil, uses global config.")
+
+(defvar-local claude-agent-chat--options nil
+  "Buffer-local options plist for claude-agent-query.")
 #+END_SRC
 
 ** Chat Mode Faces
@@ -3103,11 +3112,23 @@ When non-nil, a <system-reminder> tag with context is prepended to each message.
       (claude-agent-chat--insert-response-start)
       (claude-agent-chat--insert "[Waiting...]" 'claude-agent-chat-thinking-face)
       ;; Build options with session continuation if we have a session
-      (let* ((opts (if claude-agent-chat--session-id
-                       (claude-agent-options
-                        :continue-conversation t
-                        :resume claude-agent-chat--session-id)
-                     (claude-agent-options)))
+      ;; Merge buffer-local options if set
+      (let* ((base-opts (or claude-agent-chat--options (claude-agent-options)))
+             (opts (if claude-agent-chat--session-id
+                       (plist-put (plist-put (copy-sequence base-opts)
+                                             :continue-conversation t)
+                                  :resume claude-agent-chat--session-id)
+                     base-opts))
+             ;; Use buffer-local system prompt if set
+             (opts (if claude-agent-chat--system-prompt
+                       (plist-put (copy-sequence opts)
+                                  :system-prompt claude-agent-chat--system-prompt)
+                     opts))
+             ;; Use buffer-local MCP config if set
+             (opts (if claude-agent-chat--mcp-config
+                       (plist-put (copy-sequence opts)
+                                  :mcp-config claude-agent-chat--mcp-config)
+                     opts))
              ;; Prepend system reminder with IDE context if enabled
              (system-reminder (when claude-agent-chat-include-ide-context
                                 (claude-agent-get-system-reminder)))
@@ -3533,6 +3554,163 @@ This is a convenience wrapper for simple use cases."
      :on-title cb
      :on-error (lambda (err)
                  (message "Title generation error: %s" err)))))
+#+END_SRC
+
+* Error Analysis
+
+This section provides AI-powered error analysis using Claude. When Emacs
+encounters an error (backtrace), users can request Claude to analyze it
+and provide suggestions.
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defgroup claude-agent-error nil
+  "Error analysis with Claude."
+  :group 'claude-agent
+  :prefix "claude-agent-error-")
+
+(defcustom claude-agent-error-debounce-delay 0.5
+  "Seconds to wait before processing queued error analysis.
+This prevents multiple rapid triggers from creating multiple analysis buffers."
+  :type 'number
+  :group 'claude-agent-error)
+
+(defcustom claude-agent-error-prompt-file
+  (expand-file-name "docs/prompts/error-analysis.org"
+                    (file-name-directory (or load-file-name buffer-file-name "")))
+  "Path to error analysis system prompt file."
+  :type 'file
+  :group 'claude-agent-error)
+
+(defcustom claude-agent-error-mcp-config nil
+  "MCP config file for error analysis.
+When set, enables MCP tools like evalElisp for deeper Emacs introspection."
+  :type '(choice (const nil) file)
+  :group 'claude-agent-error)
+
+(defcustom claude-agent-error-default-system-prompt
+  "You are an Emacs debugging assistant. Analyze the error and provide:
+1. Root Cause - what caused this error
+2. Explanation - why this happened
+3. Fix Suggestions - concrete steps to resolve
+4. Prevention - how to avoid this in future
+
+Be concise. Use org-mode formatting. Include elisp code snippets if helpful."
+  "Default system prompt when prompt file is not found."
+  :type 'string
+  :group 'claude-agent-error)
+#+END_SRC
+
+** Error Queue
+
+Debouncing prevents multiple analysis buffers when errors trigger rapidly.
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-error--pending nil
+  "Pending error content to analyze.")
+
+(defvar claude-agent-error--debounce-timer nil
+  "Timer for debouncing rapid error triggers.")
+
+(defvar claude-agent-error--counter 0
+  "Counter for unique error analysis buffer names.")
+
+(defun claude-agent-error--queue-analysis (content)
+  "Queue CONTENT for error analysis with debouncing.
+Replaces any pending analysis with the new content."
+  (setq claude-agent-error--pending content)
+  (when claude-agent-error--debounce-timer
+    (cancel-timer claude-agent-error--debounce-timer))
+  (setq claude-agent-error--debounce-timer
+        (run-with-timer
+         claude-agent-error-debounce-delay nil
+         #'claude-agent-error--process-pending)))
+
+(defun claude-agent-error--process-pending ()
+  "Process the pending error analysis request."
+  (when claude-agent-error--pending
+    (let ((content claude-agent-error--pending))
+      (setq claude-agent-error--pending nil)
+      (setq claude-agent-error--debounce-timer nil)
+      (claude-agent-error--start-chat content))))
+#+END_SRC
+
+** Chat Buffer Creation
+
+Each error analysis gets its own chat buffer for follow-up questions.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-error--create-chat-buffer ()
+  "Create a unique error analysis chat buffer."
+  (cl-incf claude-agent-error--counter)
+  (let ((name (format "*Claude Error Analysis %d*" claude-agent-error--counter)))
+    (get-buffer-create name)))
+
+(defun claude-agent-error--load-system-prompt ()
+  "Load system prompt from file or return default."
+  (if (and claude-agent-error-prompt-file
+           (file-exists-p claude-agent-error-prompt-file))
+      (with-temp-buffer
+        (insert-file-contents claude-agent-error-prompt-file)
+        (buffer-string))
+    claude-agent-error-default-system-prompt))
+
+(defun claude-agent-error--build-prompt (error-content)
+  "Build the initial prompt with ERROR-CONTENT."
+  (format "Please analyze this Emacs error:\n\n```\n%s\n```" error-content))
+
+(defun claude-agent-error--start-chat (error-content)
+  "Start a chat session to analyze ERROR-CONTENT."
+  (let* ((buf (claude-agent-error--create-chat-buffer))
+         (system-prompt (claude-agent-error--load-system-prompt))
+         (initial-prompt (claude-agent-error--build-prompt error-content)))
+    (with-current-buffer buf
+      ;; Initialize chat mode
+      (claude-agent-chat-mode)
+      ;; Set buffer-local configuration
+      (setq-local claude-agent-chat--system-prompt system-prompt)
+      (when claude-agent-error-mcp-config
+        (setq-local claude-agent-chat--mcp-config claude-agent-error-mcp-config))
+      ;; Disable IDE context for error analysis (we provide our own context)
+      (setq-local claude-agent-chat-include-ide-context nil)
+      ;; Initialize buffer with dummy process for comint
+      (let ((proc (start-process "claude-error-chat" buf "cat")))
+        (set-process-query-on-exit-flag proc nil)
+        (set-process-filter proc #'claude-agent-chat--comint-filter))
+      (claude-agent-chat--initialize-buffer)
+      ;; Send initial error analysis request
+      (claude-agent-chat--send-input initial-prompt))
+    (pop-to-buffer buf)))
+#+END_SRC
+
+** User Commands
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun claude-agent-analyze-backtrace ()
+  "Analyze the current *Backtrace* buffer with Claude.
+If called from a debugger-mode buffer, analyze that buffer.
+Otherwise, analyze the *Backtrace* buffer if it exists."
+  (interactive)
+  (let ((content (cond
+                  ((eq major-mode 'debugger-mode)
+                   (buffer-string))
+                  ((get-buffer "*Backtrace*")
+                   (with-current-buffer "*Backtrace*"
+                     (buffer-string)))
+                  (t
+                   (user-error "No backtrace buffer found")))))
+    (claude-agent-error--queue-analysis content)))
+
+;;;###autoload
+(defun claude-agent-analyze-region (start end)
+  "Analyze the selected region as an error with Claude."
+  (interactive "r")
+  (let ((content (buffer-substring-no-properties start end)))
+    (if (string-empty-p (string-trim content))
+        (user-error "No text selected")
+      (claude-agent-error--queue-analysis content))))
 #+END_SRC
 
 * Package Footer

@@ -511,7 +511,7 @@ The =claude-org= package provides a permission function to protect .org files:
 #+END_SRC
 
 This blocks =Edit= and =Write= tools on .org files, directing Claude to use
-Emacs MCP org_* tools instead (which preserve org structure).
+=evalElisp= instead (which preserves org structure).
 
 ** Permission Modes
 
@@ -624,15 +624,15 @@ These are automatically collected and included in queries.
 ** Org Link Resolution
 
 Claude can automatically resolve org links in your queries to fetch context. When you include
-links like =[[file:notes.org::*Project Setup][Setup]]= in AI blocks, Claude uses MCP tools to
-retrieve the linked content and inform its response.
+links like =[[file:notes.org::*Project Setup][Setup]]= in AI blocks, Claude uses =evalElisp=
+to retrieve the linked content and inform its response.
 
 *** Supported Link Types
 
-| Link Format | MCP Tool Used |
-|-------------+---------------|
-| =[[*Heading]]= | =org_read_section= (current notebook) |
-| =[[file:path.org::*Heading][desc]]= | =org_read_section= |
+| Link Format | Tool Used |
+|-------------+-----------|
+| =[[*Heading]]= | =evalElisp= (navigate to heading) |
+| =[[file:path.org::*Heading][desc]]= | =evalElisp= (open file, read section) |
 | =[[file:path.el::42][desc]]= | =Read= (with offset/limit) |
 | =[[https://url][desc]]= | =WebFetch= |
 
@@ -655,7 +655,7 @@ Please check the value in [[*Important Config][Important Config]] and tell me wh
 ,#+end_src
 #+END_EXAMPLE
 
-Claude will automatically call =org_read_section= to fetch the "Important Config" content,
+Claude will automatically use =evalElisp= to fetch the "Important Config" content,
 then use that context to answer your question.
 
 ** SDD (Spec-Driven Development)
@@ -730,7 +730,7 @@ When inserting new AI blocks in the Workflow section, use =C-c C-/= then =i= to 
 1. *Dual Memory*: Spec = lasting memory, Workflow = active memory
 2. *Human Checkpoints*: Get approval at Research→Design and Planning→Implementation
 3. *Atomic Features*: Each TODO should be completable in one session
-4. *Update as you go*: Claude updates Research Output, Spec, Features via MCP org tools
+4. *Update as you go*: Claude updates Research Output, Spec, Features via =evalElisp=
 
 ** Behavior Prompts (Tag/Header System)
 
@@ -984,23 +984,16 @@ M-x emacs-mcp-server-start
 *Core Tool:*
 - =evalElisp= - Execute arbitrary Emacs Lisp code
 
-*Org-mode Tools (13 tools):*
+Use =evalElisp= for all Emacs operations. Use Skills (=/emacs-*=) to learn
+elisp patterns for specific tasks:
 
-| Tool | Description |
-|------+-------------|
-| =org_list_sections= | List all sections with paths, levels, tags |
-| =org_read_section= | Read section content, properties, tags |
-| =org_create_section= | Create new subsection |
-| =org_update_section= | Update section body content |
-| =org_delete_section= | Delete section and children |
-| =org_get_property= | Get property value |
-| =org_set_property= | Set property value |
-| =org_delete_property= | Delete property |
-| =org_list_properties= | List all properties |
-| =org_get_tags= | Get section tags |
-| =org_set_tags= | Replace all tags |
-| =org_add_tag= | Add single tag |
-| =org_remove_tag= | Remove single tag |
+| Skill | Purpose |
+|-------+---------|
+| =/emacs-org= | Org-mode operations (headings, properties, tables, links) |
+| =/emacs-buffer= | Buffer manipulation (list, switch, create, kill) |
+| =/emacs-navigation= | File and position navigation |
+| =/emacs-variables= | Variable inspection and modification |
+| =/emacs-introspection= | Discover functions, packages, keybindings |
 
 *** Registering Custom Tools
 
@@ -1073,6 +1066,57 @@ Example transformation:
 - After: =*** Python JSON Parsing :claude_chat:=
 
 Custom headings (not matching the pattern) are preserved unchanged.
+
+** Error Analysis
+
+AI-powered analysis of Emacs errors using Claude.
+
+*** Usage
+
+When an error occurs and the =*Backtrace*= buffer appears:
+
+#+BEGIN_SRC elisp
+;; Analyze the current backtrace
+M-x claude-agent-analyze-backtrace
+
+;; Or analyze selected error text
+M-x claude-agent-analyze-region
+#+END_SRC
+
+Each analysis opens a new =*Claude Error Analysis N*= buffer with =claude-agent-chat-mode=, allowing follow-up questions.
+
+*** Automatic Analysis (Optional)
+
+To automatically analyze errors when the debugger appears, add to your config:
+
+#+BEGIN_SRC elisp
+;; Optional: auto-analyze on debugger entry
+(add-hook 'debugger-mode-hook #'claude-agent-analyze-backtrace)
+#+END_SRC
+
+*** MCP Integration
+
+For deeper analysis, Claude can query your live Emacs session using the =evalElisp= MCP tool:
+
+#+BEGIN_SRC elisp
+;; Configure MCP for error analysis
+(setq claude-agent-error-mcp-config "~/.config/claude/mcp-emacs.json")
+#+END_SRC
+
+This allows Claude to inspect variable values, function definitions, and other context.
+
+*** Configuration
+
+#+BEGIN_SRC elisp
+;; Debounce delay for rapid errors (default: 0.5 seconds)
+(setq claude-agent-error-debounce-delay 0.5)
+
+;; Custom system prompt file
+(setq claude-agent-error-prompt-file "~/my-error-prompt.org")
+
+;; MCP config for Emacs introspection
+(setq claude-agent-error-mcp-config "~/.config/claude/mcp-emacs.json")
+#+END_SRC
 
 ** Activity Mode-Line
 
@@ -1202,6 +1246,11 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 
 ;; Verbose buffer cleanup
 (setq claude-agent-verbose-buffer-auto-kill t)
+
+;; Error Analysis
+(setq claude-agent-error-debounce-delay 0.5)  ; Debounce rapid errors
+(setq claude-agent-error-prompt-file "~/my-prompt.org")  ; Custom prompt
+(setq claude-agent-error-mcp-config "~/.config/claude/mcp.json")  ; MCP tools
 #+END_SRC
 
 ** claude-org
