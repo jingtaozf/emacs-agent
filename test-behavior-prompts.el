@@ -262,7 +262,7 @@ inheritance requires full org buffer setup."
 ;;; Custom Behavior Registration Tests
 ;;; ============================================================
 ;;; Note: Custom tag/header registration via alists has been removed.
-;;; Tags and headers are now loaded exclusively from docs/prompts/ files.
+;;; Tags and headers are now loaded exclusively from prompts/ files.
 ;;; These tests now verify that nonexistent tags/headers return nil.
 
 (ert-deftest claude-org-behavior/custom-tag-nonexistent ()
