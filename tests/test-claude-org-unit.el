@@ -512,16 +512,26 @@
 ;;; Block Insertion Tests
 
 (ert-deftest test-claude-org-next-instruction-number ()
-  "Test finding next available instruction number."
+  "Test finding next available instruction number.
+Counts :claude_chat: tagged headings within session scope."
   :tags '(:unit :fast :stable :isolated :org :session)
   (with-temp-buffer
     (org-mode)
-    (insert "* Instruction 1\n")
-    (insert "* Instruction 5\n")
-    (insert "* Instruction 3\n")
-    (insert "* Other Section\n")
-    ;; Should find max + 1
-    (should (= 6 (claude-org--next-instruction-number)))))
+    (setq buffer-file-name "/tmp/test-numbering.org")
+    ;; Create a session scope with claude_chat headings
+    (insert "* Feature\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: test-session\n")
+    (insert ":END:\n")
+    (insert "** Instruction 1 :claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "** Instruction 2 :claude_chat:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (insert "** Other Section\n")
+    ;; Position at end of session scope
+    (goto-char (point-max))
+    ;; Should count 2 :claude_chat: headings, next is 3
+    (should (= 3 (claude-org--next-instruction-number)))))
 
 (ert-deftest test-claude-org-skip-output-section ()
   "Test skipping :ai_output: sections during insertion."
@@ -762,7 +772,7 @@
     (insert "#+begin_src ai\nquery\n#+end_src\n")
     ;; Position inside the ai block
     (goto-char (point-min))
-    (re-search-forward "#+begin_src ai")
+    (re-search-forward "#\\+begin_src ai")
     (forward-line 1)
     ;; First recording
     (claude-org--record-block-execution "test-session" "query" nil)
