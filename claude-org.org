@@ -12,38 +12,103 @@
 
 * Table of Contents                                            :TOC:noexport:
 - [[#introduction][Introduction]]
+  - [[#features][Features]]
+  - [[#usage-example][Usage Example]]
 - [[#dependencies][Dependencies]]
 - [[#customization][Customization]]
+  - [[#customization-group][Customization Group]]
+  - [[#tag-names][Tag Names]]
+  - [[#display-settings][Display Settings]]
+  - [[#execution-behavior][Execution Behavior]]
+  - [[#execution-hooks][Execution Hooks]]
+  - [[#block-history][Block History]]
+    - [[#configuration][Configuration]]
+    - [[#state-variables][State Variables]]
+  - [[#slash-commands][Slash Commands]]
+  - [[#file-based-prompt-templates][File-Based Prompt Templates]]
+    - [[#prompts-directory-configuration][Prompts Directory Configuration]]
+    - [[#prompt-file-loader][Prompt File Loader]]
+  - [[#property-name-constants][Property Name Constants]]
 - [[#session-management][Session Management]]
+  - [[#helper-functions][Helper Functions]]
   - [[#session-id-functions][Session ID Functions]]
   - [[#session-scope-detection][Session Scope Detection]]
+  - [[#sdk-uuid-management][SDK UUID Management]]
   - [[#session-recovery][Session Recovery]]
+- [[#environment-variable-loading][Environment Variable Loading]]
+  - [[#env-file-loading][ENV File Loading]]
+  - [[#variable-substitution][Variable Substitution]]
+- [[#permission-mode][Permission Mode]]
+  - [[#permission-mode-functions][Permission Mode Functions]]
+  - [[#permission-mode-setter][Permission Mode Setter]]
+  - [[#mcp-server-integration][MCP Server Integration]]
 - [[#project-configuration][Project Configuration]]
-  - [[#project-root][PROJECT_ROOT]]
+  - [[#project_root][PROJECT_ROOT]]
   - [[#system-prompts][System Prompts]]
 - [[#process-management][Process Management]]
-  - [[#state-variables][State Variables]]
+  - [[#state-variables-1][State Variables]]
   - [[#session-state-accessors][Session State Accessors]]
+- [[#behavior-prompts][Behavior Prompts]]
+  - [[#tag-prompt-lookup][Tag Prompt Lookup]]
+    - [[#generic-function][Generic Function]]
+    - [[#default-method-file-based-loading][Default Method (File-Based Loading)]]
+    - [[#legacy-wrapper][Legacy Wrapper]]
+    - [[#sdd-root-detection][SDD Root Detection]]
+    - [[#custom_id-generation][CUSTOM_ID Generation]]
+    - [[#sdd-link-generation][SDD Link Generation]]
+    - [[#sdd-specific-method][SDD-Specific Method]]
+  - [[#header-prompt-lookup][Header Prompt Lookup]]
+  - [[#collect-current-context][Collect Current Context]]
+  - [[#build-behavior-prompt][Build Behavior Prompt]]
 - [[#block-detection][Block Detection]]
+  - [[#section-level-detection][Section Level Detection]]
+  - [[#ai-block-boundary-detection][AI Block Boundary Detection]]
+  - [[#output-section-and-instruction-detection][Output Section and Instruction Detection]]
 - [[#block-insertion][Block Insertion]]
+  - [[#instruction-numbering][Instruction Numbering]]
+  - [[#standard-block-insertion][Standard Block Insertion]]
+    - [[#tag-selection-state][Tag Selection State]]
+    - [[#tag-toggle-functions][Tag Toggle Functions]]
+    - [[#transient-tag-selection-menu][Transient Tag Selection Menu]]
+    - [[#core-block-insertion][Core Block Insertion]]
+  - [[#session-and-story-blocks][Session and Story Blocks]]
+  - [[#session-info-display][Session Info Display]]
 - [[#slash-command-completion][Slash Command Completion]]
   - [[#command-discovery][Command Discovery]]
   - [[#company-backend][Company Backend]]
 - [[#response-handling][Response Handling]]
   - [[#debounced-font-lock][Debounced Font-Lock]]
+  - [[#header-normalization][Header Normalization]]
   - [[#token-handling][Token Handling]]
   - [[#message-handling][Message Handling]]
   - [[#error-handling][Error Handling]]
+- [[#block-history-1][Block History]]
+  - [[#persistence-functions][Persistence Functions]]
+  - [[#hook-functions][Hook Functions]]
+  - [[#navigation-functions][Navigation Functions]]
 - [[#execution][Execution]]
   - [[#execute-command][Execute Command]]
+  - [[#send-request-helpers][Send Request Helpers]]
   - [[#send-request][Send Request]]
 - [[#header-line][Header Line]]
+  - [[#state-variables-2][State Variables]]
+  - [[#spinner-control][Spinner Control]]
+  - [[#timer-management][Timer Management]]
+  - [[#tooltip-formatting][Tooltip Formatting]]
+  - [[#header-line-generation][Header Line Generation]]
 - [[#cancel-support][Cancel Support]]
+- [[#verbose-output][Verbose Output]]
 - [[#session-manager-ui][Session Manager UI]]
 - [[#mode-definition][Mode Definition]]
-  - [[#keymap][Keymap]]
+  - [[#transient-menu-system][Transient Menu System]]
+    - [[#transient-prefix][Transient Prefix]]
+    - [[#keymap][Keymap]]
   - [[#minor-mode][Minor Mode]]
 - [[#tests][Tests]]
+- [[#org-file-protection-hook][Org File Protection Hook]]
+  - [[#how-permission-functions-work][How Permission Functions Work]]
+  - [[#org-file-protection-permission-function][Org File Protection (Permission Function)]]
+  - [[#protection-installation][Protection Installation]]
 - [[#package-footer][Package Footer]]
 
 * Introduction
@@ -403,6 +468,34 @@ Returns file content as trimmed string, or nil if file doesn't exist."
     (with-temp-buffer
       (insert-file-contents file)
       (string-trim (buffer-string)))))
+
+(defun claude-org--extract-summary-section (file)
+  "Extract only the * Summary section from FILE.
+Returns content of Summary section if found, otherwise returns full file content.
+This enables progressive disclosure: system prompt loads only summaries,
+Claude reads full file via org link when tag is active.
+
+Summary section format:
+  * Summary
+  :PROPERTIES:
+  :CUSTOM_ID: tags-TAG-summary
+  :END:
+  [brief content with link to Details]
+
+If no Summary section exists (backward compat), returns full file content."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      ;; Look for "* Summary" at beginning of line
+      (if (re-search-forward "^\\* Summary[ \t]*$" nil t)
+          (let ((start (line-beginning-position)))
+            ;; Find end: next level-1 heading or end of file
+            (if (re-search-forward "^\\* " nil t)
+                (string-trim (buffer-substring-no-properties start (line-beginning-position)))
+              (string-trim (buffer-substring-no-properties start (point-max)))))
+        ;; No Summary section: return full content (backward compat)
+        (string-trim (buffer-string))))))
 
 (defun claude-org--load-system-prompts ()
   "Load all system prompts from system/ directory.
@@ -1235,10 +1328,17 @@ Returns a prompt string or nil.")
 
 *** Default Method (File-Based Loading)
 
+Default method uses =claude-org--extract-summary-section= for progressive disclosure.
+Only the Summary section is loaded into system prompt; Claude reads full file via
+org link when the tag is active.
+
 #+BEGIN_SRC elisp
 (cl-defmethod claude-org-tag-prompt (tag _context)
-  "Default: load prompt from docs/prompts/tags/TAG.org."
-  (claude-org--load-prompt-file
+  "Default: load Summary section from docs/prompts/tags/TAG.org.
+Uses progressive disclosure - only Summary is loaded into system prompt.
+Claude reads full file via org link when tag is active.
+Falls back to full file if no Summary section exists."
+  (claude-org--extract-summary-section
    (expand-file-name (format "tags/%s.org" (symbol-name tag))
                      claude-org-prompts-directory)))
 #+END_SRC
@@ -1296,42 +1396,41 @@ Returns a slug like \"claude-agent-dev-research-output-sdd-20251227-180147\"."
   "Generate org links to SDD sibling sections.
 FILE-PATH is the absolute path to the org file.
 SDD-ROOT is the parent section name (e.g., \"Feature Name\").
-SESSION-ID is optional; if provided, uses #custom-id format for stable links.
-Returns a formatted string with links to Research Output, Spec, Features."
-  (when (and file-path sdd-root)
+SESSION-ID is required for generating stable CUSTOM_ID based links.
+Returns a formatted string with links to Research Output, Spec, Features,
+or nil if session-id is missing (legacy SDD without proper IDs)."
+  (when (and file-path sdd-root session-id)
     (let ((sections '(("Research Output" . "research_output")
                       ("Spec" . "spec")
                       ("Features" . "features")))
-          (file-base (when file-path (file-name-base file-path))))
+          (file-base (file-name-base file-path)))
       (concat
        "** SDD Section Links\n\n"
-       "Use these links to navigate and update SDD sections:\n\n"
+       "*CRITICAL*: Use the CUSTOM_ID (not heading text) when searching/updating sections.\n\n"
        (mapconcat
         (lambda (sec)
           (let* ((name (car sec))
-                 (link (if session-id
-                           ;; Use stable #custom-id format with file-base for uniqueness
-                           (org-link-make-string
-                            (format "file:%s::#%s" file-path
-                                    (claude-org--generate-custom-id session-id name file-base))
-                            name)
-                         ;; Fallback to *heading format for legacy SDDs without session-id
-                         (org-link-make-string
-                          (format "file:%s::*%s" file-path name)
-                          name))))
-            (format "- *%s*: %s" name link)))
-        sections "\n")))))
+                 (custom-id (claude-org--generate-custom-id session-id name file-base))
+                 (link (org-link-make-string
+                        (format "file:%s::#%s" file-path custom-id)
+                        name)))
+            (format "- *%s*: %s\n  CUSTOM_ID: =%s=" name link custom-id)))
+        sections "\n")
+       "\n\n*Warning*: If a link fails to resolve, the target section may be missing its CUSTOM_ID property."))))
 #+END_SRC
 
 *** SDD-Specific Method
 
+SDD tag uses Summary section for progressive disclosure, then appends dynamic links.
+
 #+BEGIN_SRC elisp
 (cl-defmethod claude-org-tag-prompt ((tag (eql 'sdd)) context)
-  "SDD tag: combine static prompt with dynamic section links."
+  "SDD tag: combine Summary section with dynamic section links.
+Uses progressive disclosure - only Summary loaded, Claude reads full via link."
   (let* ((file-path (plist-get context :file-path))
          (sdd-root (plist-get context :sdd-root))
          (session-id (plist-get context :session-id))
-         (static-prompt (claude-org--load-prompt-file
+         (static-prompt (claude-org--extract-summary-section
                          (expand-file-name "tags/sdd.org"
                                            claude-org-prompts-directory)))
          (links (claude-org--generate-sdd-links file-path sdd-root session-id)))
@@ -3509,14 +3608,13 @@ Should be added to `claude-agent-permission-functions'."
       (list :behavior "deny"
             :message
             (concat "🚫 Cannot use " tool-name " on .org files.\n\n"
-                    "Use Emacs MCP tools instead:\n"
-                    "- mcp__emacs__org_read_section - Read section by path\n"
-                    "- mcp__emacs__org_update_section - Update section content\n"
-                    "- mcp__emacs__org_create_section - Create new subsection\n"
-                    "- mcp__emacs__org_delete_section - Delete section\n"
-                    "- mcp__emacs__org_set_property - Set property value\n"
-                    "- mcp__emacs__org_set_tags - Set section tags\n\n"
-                    "These tools preserve org structure and work with Emacs directly.")))))
+                    "Use evalElisp instead for org-mode operations.\n"
+                    "Run /emacs-org skill to learn elisp patterns for:\n"
+                    "- Reading/navigating org sections\n"
+                    "- Updating section content\n"
+                    "- Managing properties and tags\n"
+                    "- Creating/deleting headings\n\n"
+                    "evalElisp preserves org structure and works with Emacs directly.")))))
 #+END_SRC
 
 ** Protection Installation

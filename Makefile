@@ -42,6 +42,8 @@ help:
 	@echo "  make test-mcp-ide     - Run MCP IDE diagnostics tests"
 	@echo "  make test-mcp-ide-unit - Run MCP IDE unit tests only"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
+	@echo "  make test-readme-smoke - Run README tutorial smoke tests (no API)"
+	@echo "  make test-readme      - Run full README tutorial tests (requires API)"
 	@echo ""
 	@echo "Coverage:"
 	@echo "  make coverage         - Generate test coverage report"
@@ -286,6 +288,31 @@ test-mcp-mode-line:
 		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		-l tests/test-mcp-mode-line.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :mcp-mode-line))"
+
+# README tutorial tests
+.PHONY: test-readme-smoke
+test-readme-smoke:
+	@echo "Running README smoke tests (no API calls)..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(setq literate-elisp-test-p t)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/README.org\")" \
+		--eval "(ert-run-tests-batch-and-exit '(tag :readme-smoke))"
+
+.PHONY: test-readme
+test-readme:
+	@echo "Running full README tutorial tests (requires Claude API)..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(setq literate-elisp-test-p t)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/README.org\")" \
+		--eval "(ert-run-tests-batch-and-exit '(tag :readme))"
 
 # Interactive test runner (opens in Emacs UI)
 .PHONY: test-interactive

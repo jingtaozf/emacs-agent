@@ -1,667 +1,330 @@
-#+TITLE: Claude Agent for Emacs
+# -*- encoding:utf-8 Mode: POLY-ORG;  -*- ---
+#+Startup: noindent
+#+PROPERTY: header-args :results silent :eval no-export :comments org
+#+OPTIONS: num:nil toc:2 todo:nil tasks:nil tags:nil
+#+OPTIONS: skip:nil author:nil email:nil creator:nil timestamp:t
+#+PROPERTY: literate-lang elisp
+#+PROPERTY: literate-load yes
+#+TITLE: Emacs Claude Agent
 #+DESCRIPTION: Native Emacs SDK for Claude Code with org-mode as the interactive UI
-#+OPTIONS: toc:2
 #+AUTHOR: Jingtao Xu
-#+STARTUP: noindent
-#+STARTUP: inlineimages
-* Table of Contents                                            :TOC:noexport:
-- [[#overview][Overview]]
-- [[#quick-start][Quick Start]]
-  - [[#prerequisites][Prerequisites]]
-  - [[#installation][Installation]]
-    - [[#using-use-package-with-straightel][Using use-package with straight.el]]
-- [[#tutorial-getting-started][Tutorial: Getting Started]]
-  - [[#1-interactive-chat-easiest][1. Interactive Chat (Easiest)]]
-  - [[#2-org-mode-integration-recommended-for-documentation][2. Org-mode Integration (Recommended for Documentation)]]
-    - [[#key-bindings-in-claude-org-mode][Key Bindings in claude-org-mode]]
-  - [[#3-programmatic-queries][3. Programmatic Queries]]
-- [[#features][Features]]
-  - [[#session-management][Session Management]]
-    - [[#in-claude-org-mode][In claude-org-mode]]
-    - [[#session-recovery][Session Recovery]]
-  - [[#permission-functions][Permission Functions]]
-    - [[#quick-example---block-dangerous-commands][Quick Example - Block Dangerous Commands]]
-    - [[#available-hooks][Available Hooks]]
-    - [[#buffer-local-hooks][Buffer-Local Hooks]]
-    - [[#practical-examples][Practical Examples]]
-    - [[#integration-with-claude-org-mode][Integration with claude-org-mode]]
-  - [[#permission-system][Permission System]]
-    - [[#permission-presets][Permission Presets]]
-    - [[#in-claude-org-mode-1][In claude-org-mode]]
-    - [[#custom-permissions][Custom Permissions]]
-    - [[#pattern-syntax][Pattern Syntax]]
-  - [[#ide-context][IDE Context]]
-    - [[#excluding-buffers][Excluding Buffers]]
-  - [[#project-configuration-claude-org][Project Configuration (claude-org)]]
-    - [[#project_root][PROJECT_ROOT]]
-    - [[#system-prompts][System Prompts]]
-    - [[#environment-variables][Environment Variables]]
-  - [[#org-link-resolution][Org Link Resolution]]
-    - [[#supported-link-types][Supported Link Types]]
-    - [[#usage-example][Usage Example]]
-  - [[#sdd-spec-driven-development][SDD (Spec-Driven Development)]]
-    - [[#creating-an-sdd-structure][Creating an SDD Structure]]
-    - [[#workflow-phases][Workflow Phases]]
-    - [[#section-purposes][Section Purposes]]
-    - [[#key-principles][Key Principles]]
-  - [[#mcp-server-emacs-tools-for-claude][MCP Server (Emacs Tools for Claude)]]
-    - [[#starting-the-server][Starting the Server]]
-    - [[#available-tools][Available Tools]]
-    - [[#registering-custom-tools][Registering Custom Tools]]
-  - [[#output-formatting-claude-org][Output Formatting (claude-org)]]
-    - [[#header-normalization][Header Normalization]]
-    - [[#auto-line-breaking][Auto Line Breaking]]
-    - [[#line-ending-normalization][Line Ending Normalization]]
-    - [[#auto-title-generation][Auto Title Generation]]
-  - [[#activity-mode-line][Activity Mode-Line]]
-  - [[#usage-mode-line][Usage Mode-Line]]
-    - [[#setup][Setup]]
-    - [[#usage][Usage]]
-  - [[#verbose-output-buffers][Verbose Output Buffers]]
-  - [[#skills-user-settings][Skills (User Settings)]]
-    - [[#setting-sources][Setting Sources]]
-    - [[#per-file-or-per-section-override][Per-file or Per-section Override]]
-    - [[#skill-file-format][Skill File Format]]
-- [[#configuration-reference][Configuration Reference]]
-  - [[#claude-agent][claude-agent]]
-  - [[#claude-org][claude-org]]
-  - [[#emacs-mcp-server][emacs-mcp-server]]
-  - [[#claude-agent-chat][claude-agent-chat]]
-- [[#api-reference][API Reference]]
-  - [[#core-functions-claude-agent][Core Functions (claude-agent)]]
-  - [[#client-functions][Client Functions]]
-  - [[#org-functions-claude-org][Org Functions (claude-org)]]
-  - [[#mcp-server-functions][MCP Server Functions]]
-- [[#running-tests][Running Tests]]
-- [[#license][License]]
 
-* Overview
+* Table of Contents                                                   :TOC:
 
-An Emacs client library for the [[https://claude.ai/code][Claude Code CLI]], implemented using literate programming in Org mode.
+* Introduction
+:PROPERTIES:
+:CUSTOM_ID: introduction
+:END:
 
-** Why Claude Agent for Emacs?
+** What is Emacs Claude Agent?
+:PROPERTIES:
+:CUSTOM_ID: what-is-emacs-claude-agent
+:END:
 
-Claude Code CLI is powerful, but running it in a terminal has limitations:
+An Emacs client library for the [[https://claude.ai/code][Claude Code CLI]], implemented using literate
+programming in Org mode. It transforms AI conversations into persistent, searchable documents.
 
-- *Conversations disappear* - Terminal history is ephemeral; you lose context when you close the window
-- *No persistent documentation* - You can't easily reference or search past conversations
-- *Linear workflow* - Terminal interactions are sequential, making it hard to organize complex projects
-
-** Why Org-mode as the UI?
-
-Org-mode transforms AI conversations into *living documents*:
-
-- *Persistent history* - Every conversation is saved in your org file, searchable and revisitable
-- *Hierarchical organization* - Use org headings to organize conversations by feature, topic, or task
-- *Literate programming* - Mix AI discussions with code, notes, and documentation in one place
-- *Session continuity* - Resume conversations across Emacs sessions with automatic context recovery
-- *Project context* - Define =:system_prompt:= sections that automatically provide project guidelines to every query
-
-** Modules
-
-This project provides three integrated modules:
-
-| Module | File | Purpose |
-|--------+------+---------|
-| *claude-agent* | =claude-agent.org= | Core SDK: process management, query API, permissions, IDE context |
-| *claude-org* | =claude-org.org= | Org-mode integration: AI blocks, streaming, session management |
-| *emacs-mcp-server* | =emacs-mcp-server.org= | MCP HTTP server: exposes Emacs tools to Claude |
-
-** Reference Implementation
-
-This project references Anthropic's official [[https://github.com/anthropics/claude-agent-sdk-python][Claude Agent SDK (Python)]] as a submodule:
-
-#+BEGIN_SRC bash
-reference/claude-agent-sdk-python/   # Official Python SDK
+#+BEGIN_SRC elisp :load no
+;; Quick taste - send a query to Claude
+(claude-agent-query "What is 2+2?"
+  :on-message (lambda (msg)
+                (message "Response: %s" (claude-agent-extract-text msg))))
 #+END_SRC
 
-The Python SDK provides the canonical implementation of the Claude Agent protocol. Key features
-implemented here follow the same design patterns:
-- Session management and conversation threading
-- Tool use and permission control
-- Streaming protocol and JSON message format
-- Hook system for tool interception
+** Why Org-mode as the UI?
+:PROPERTIES:
+:CUSTOM_ID: why-org-mode-as-the-ui
+:END:
 
-When developing new features for =claude-agent.org=, consult the Python reference at
-=reference/claude-agent-sdk-python/src/claude_agent_sdk/= for implementation guidance.
+Claude Code CLI is powerful, but terminal conversations are ephemeral. Org-mode transforms
+AI interactions into *living documents*:
 
-** Alternative: Agent Shell
+| Terminal Limitation     | Org-mode Solution                               |
+|-------------------------+-------------------------------------------------|
+| Conversations disappear | Every conversation saved, searchable            |
+| Linear workflow         | Hierarchical organization by feature/topic      |
+| No context persistence  | Session continuity across Emacs restarts        |
+| Manual documentation    | Literate programming - code + discussion + docs |
 
-If you prefer a simpler terminal-based approach, consider [[https://xenodium.com/introducing-agent-shell][agent-shell]] - a shell-mode interface for AI agents in Emacs based on the [[https://agentclientprotocol.com/][Agent Client Protocol (ACP)]].
+** Modules
+:PROPERTIES:
+:CUSTOM_ID: modules
+:END:
 
-| Approach | Best For |
-|----------+----------|
-| *claude-agent* | Literate programming, org-mode notebooks, session management, MCP integration |
-| *agent-shell* | Quick terminal-style interactions, protocol-agnostic (ACP-based) |
+| Module             | File                   | Purpose                                              |
+|--------------------+------------------------+------------------------------------------------------|
+| *claude-agent*     | =claude-agent.org=     | Core SDK: process management, query API, permissions |
+| *claude-org*       | =claude-org.org=       | Org-mode integration: AI blocks, streaming, sessions |
+| *emacs-mcp-server* | =emacs-mcp-server.org= | MCP HTTP server: exposes Emacs tools to Claude       |
 
-* Quick Start
+* Tutorial
+:PROPERTIES:
+:CUSTOM_ID: tutorial
+:END:
 
-** Prerequisites
+This tutorial walks you through Emacs Claude Agent step by step.
+
+** Step 1: Prerequisites & Installation
+:PROPERTIES:
+:CUSTOM_ID: step-1-prerequisites--installation
+:END:
+
+*** Prerequisites
 
 - Emacs 28+ (includes transient) or Emacs 27.1+ with [[https://github.com/magit/transient][transient]] installed
-- Claude Code CLI: ~npm install -g @anthropic-ai/claude-code~
+- Claude Code CLI: =npm install -g @anthropic-ai/claude-code=
 - [[https://github.com/jingtaozf/literate-elisp][literate-elisp]] for loading org files directly
-- =web-server= package (for MCP server): ~M-x package-install RET web-server RET~
 
-** Installation
+*** Installation
 
-*** Using use-package with straight.el
+*1. Install dependencies:*
 
-#+BEGIN_SRC elisp
-;; Install dependencies first
+#+BEGIN_SRC elisp :load no
+;; Using use-package with straight.el
 (use-package literate-elisp
-    :straight (:type git :host github :repo "jingtaozf/literate-elisp"))
+  :straight (:type git :host github :repo "jingtaozf/literate-elisp"))
 
 (use-package web-server
-    :straight (:type git :host github :repo "eschulte/emacs-web-server"))
+  :straight (:type git :host github :repo "eschulte/emacs-web-server"))
 
 ;; Transient (built into Emacs 28+, required for Emacs 27)
 (use-package transient
   :straight (:type git :host github :repo "magit/transient")
   :if (< emacs-major-version 28))
+#+END_SRC
 
-;; Install claude-agent
+*2. Install emacs-claude-agent:*
+
+#+BEGIN_SRC elisp :load no
 (use-package claude-agent
   :demand t
   :straight (:type git :host github :repo "jingtaozf/emacs-claude-agent")
   :config
   ;; Optional: Set CLI path if not in PATH
-  (setq claude-agent-cli-path "/path/to/claude")
+  ;; (setq claude-agent-cli-path "/path/to/claude")
 
-  ;; Optional: Enable usage mode-line (requires CLAUDE_SESSION_KEY env var)
-  ;; See "Usage Mode-Line" section for setup
-  ;; (claude-agent-usage-mode-line-start)
-  )
+  ;; Permission functions configuration
+  (setq claude-agent-permission-functions
+        '(claude-agent-permission-check-patterns
+          claude-org-permission-protect-org
+          claude-agent-permission-auto-allow))
+
+  ;; Optional: Auto-analyze errors
+  (add-hook 'debugger-mode-hook #'claude-agent-analyze-backtrace))
 #+END_SRC
-* Tutorial: Getting Started
 
-** 1. Interactive Chat (Easiest)
+** Step 2: Your First Query (Interactive Chat)
+:PROPERTIES:
+:CUSTOM_ID: step-2-your-first-query-interactive-chat
+:END:
 
-The simplest way to interact with Claude:
+The simplest way to start is with the interactive chat buffer.
 
-#+BEGIN_SRC elisp
+*** Instructions
+
+*1. Open the chat buffer:*
+
+#+BEGIN_EXAMPLE
 M-x claude-agent-chat
+#+END_EXAMPLE
+
+*2. Type a message and press =RET=:*
+
+#+BEGIN_EXAMPLE
+You> What is the capital of France?
+#+END_EXAMPLE
+
+*3. Wait for the response to stream in.*
+
+*** Key Bindings
+
+| Key       | Action                          |
+|-----------+---------------------------------|
+| =RET=     | Send message                    |
+| =C-c C-k= | Interrupt current request       |
+| =C-c C-l= | Clear and reset session         |
+| =C-c C-n= | Start new session without clearing |
+
+** Step 3: Org-mode Integration
+:PROPERTIES:
+:CUSTOM_ID: step-3-org-mode-integration
+:END:
+
+For persistent, organized conversations, use org-mode integration.
+
+*** Instructions
+
+*1. Create a new org file:*
+
+#+BEGIN_SRC elisp :load no
+(find-file "/tmp/my-claude-test.org")
 #+END_SRC
 
-This opens a comint-based buffer where you can:
-- Type messages and press =RET= to send
-- =C-c C-k= to interrupt current request
-- =C-c C-l= to clear and reset session
-- =C-c C-n= to start new session without clearing
+*2. Enable claude-org-mode:*
 
-The chat automatically includes IDE context (current file, open files, selection).
-
-** 2. Org-mode Integration (Recommended for Documentation)
-
-Enable claude-org-mode in any org file manually:
-
-#+BEGIN_SRC elisp
+#+BEGIN_EXAMPLE
 M-x claude-org-mode
-#+END_SRC
+#+END_EXAMPLE
 
-Or auto-enable it via file-local variables. Create an org file with this header:
+*3. Insert an AI block using the transient menu:*
+
+#+BEGIN_EXAMPLE
+C-c C-/ i    (or M-x claude-org-insert-block)
+#+END_EXAMPLE
+
+This opens a workflow tag selector. Press =RET= to create a simple block (no tags),
+or select workflow phases (=r= Research, =d= Design, =p= Planning, =i= Implementation).
+
+*4. Type your query inside the block:*
+
+#+BEGIN_EXAMPLE
+,#+begin_src ai
+What is 2 + 2? Reply with just the number.
+,#+end_src
+#+END_EXAMPLE
+
+*5. Execute with =C-c C-c= and watch the response stream after the block.*
+
+*** What Happened?
+
+- =claude-org-insert-block= creates a new AI block with proper structure
+- =:claude_chat:= tag marks the section as an AI conversation
+- =#+begin_src ai= block contains your query
+- =C-c C-c= sends the query to Claude
+- Response appears directly after the block
+- MCP server starts automatically, allowing Claude to interact with Emacs
+
+*** Header Line Features
+
+When =claude-org-mode= is active, the header line shows:
+- *Session scope*: =[file-only]= or =[sec:session-id...]= for section-scoped sessions
+- *Permission mode*: Current permission preset (=RO=, =AE=, =PL=, =BP=)
+- *Active count*: Number of thinking queries (click to open session manager)
+- *Project root*: Working directory from =PROJECT_ROOT= property
+- *Current file*: The file Claude is working with (from IDE context)
+- *Selection*: Line range and size of selected text (for context)
+
+*** Auto-enable claude-org-mode
+
+Add this as the first line of your org file:
 
 #+BEGIN_EXAMPLE
 # -*- mode: org; eval: (claude-org-mode 1) -*-
-,#+TITLE: My Project Development
-,#+PROPERTY: PROJECT_ROOT /path/to/your/project
-,#+PROPERTY: CLAUDE_PERMISSION_MODE accept-edits
-
-,* Project Context :system_prompt:
-
-,** Overview
-My web application built with FastAPI and React.
-- Backend: Python 3.11, FastAPI, SQLAlchemy
-- Frontend: React 18, TypeScript, TailwindCSS
-
-,** Code Standards
-- Use absolute imports in Python
-- Follow PEP 8 style guide
-- Write docstrings for all public functions
-- Use type hints everywhere
-
-,** Important Rules
-- Never modify files in =migrations/= directly
-- Always run tests before committing
-
-,* Feature: User Authentication :claude_chat:
-
-,** Design Discussion
-
-,#+begin_src ai
-Help me design the user authentication flow.
-What approaches do you recommend?
-,#+end_src
-
-,** Implementation
-
-,#+begin_src ai
-Implement the login endpoint based on our discussion above.
-,#+end_src
 #+END_EXAMPLE
 
-*Key concepts:*
-- ~# -*- mode: org; eval: (claude-org-mode 1) -*-~ - Auto-enable claude-org-mode
-- ~#+PROPERTY: PROJECT_ROOT~ - Working directory for Claude
-- ~:system_prompt:~ tag - The entire section (including subsections) is included as context in every query
-- ~:claude_chat:~ tag - Groups related AI conversations as a "story"
-- Subsections under ~:claude_chat:~ organize different aspects of the conversation
+** Step 4: The Transient Menu (=C-c C-/=)
+:PROPERTIES:
+:CUSTOM_ID: step-4-transient-menu
+:END:
 
-*** Key Bindings in claude-org-mode
+The transient menu (=C-c C-/=) is the main user interface for claude-org. It provides
+quick access to all common operations.
 
-**** Transient Menu (Primary Interface)
-
-The =claude-org-menu= command (=C-c C-/=) is the primary way to interact with claude-org.
-It provides a visual command palette for all operations:
+*** Opening the Menu
 
 #+BEGIN_EXAMPLE
-┌────────────────────────────────────────┐
-│ Claude Org                             │
-├────────────────────────────────────────┤
-│ Execute        Insert        Session   │
-│ c Execute      i New block   n Info    │
-│ k Cancel       s Story       l List    │
-│ v Verbose      d SDD         p Perms   │
-└────────────────────────────────────────┘
+C-c C-/
 #+END_EXAMPLE
 
-| Key | Action |
-|-----+--------|
-| =c= | Execute AI block (same as =C-c C-c=) |
-| =k= | Cancel active query |
-| =v= | Show verbose output buffer |
-| =i= | Insert new AI block (with tag selection) |
-| =s= | Insert story section (=:claude_chat:=) |
-| =d= | Insert SDD structure |
-| =j= | Jump to recent AI block |
-| =n= | Show session info |
-| =l= | List all sessions |
-| =p= | Switch permission mode |
+*** Menu Structure
 
-**** Jump to Recent AI Blocks
+| Group | Key | Command | Description |
+|-------+-----+---------+-------------|
+| Execute | =c= | Execute | Execute the current AI block (=C-c C-c=) |
+| | =k= | Cancel | Cancel current query |
+| | =v= | Verbose | Show verbose output buffer |
+| Insert | =i= | New AI block | Insert new AI block with workflow tag selection |
+| | =s= | Story section | Insert new story section |
+| | =d= | SDD structure | Create SDD (Spec-Driven Development) structure |
+| Navigate | =j= | Jump | Jump to AI block |
+| Session | =n= | Session info | Show current session identity |
+| | =l= | List sessions | List all sessions |
+| | =p= | Permission mode | Switch permission mode |
 
-Quickly navigate to recently executed AI blocks with =C-c C-/ j= (or =M-x claude-org-jump-to-ai-block=).
+*** Permission Control
 
-This opens a completion list showing:
-- Block status: =[✓]= completed, =[⋯]= in progress, =[✗]= error
-- Hierarchical title: =Query Title > Parent Section > Grandparent=
-- Relative time: =just now=, =5m ago=, =2h ago=, =3d ago=
+Permission mode can be changed via the transient menu (=C-c C-/ p=):
 
-#+BEGIN_EXAMPLE
-[✓] Python JSON Parsing > Backend API > My Feature (5m ago)
-[✓] Database Schema Design > Design Phase > My Feature (1h ago)
-[⋯] Authentication Flow > Security Review > My Feature (just now)
-#+END_EXAMPLE
+| Preset | Description |
+|--------+-------------|
+| =readonly= | Read, Glob, Grep only (safest) |
+| =accept-edits= | + Write, Edit, MultiEdit (recommended) |
+| =plan= | Suggests changes only |
+| =bypass= | Allow all tools (use with caution) |
 
-*Features:*
-- History persists across Emacs restarts (stored in =~/.emacs.d/claude-org/=)
-- Navigation uses stable CUSTOM_ID links (survives file edits and heading renames)
-- Auto-unfolds target section after navigation
-
-**** Direct Keybindings
-
-| Key | Command | Description |
-|-----+---------+-------------|
-| =C-c C-/= | =claude-org-menu= | Open transient command menu |
-| =C-c C-c= | Execute query | Send AI block to Claude (org-babel) |
-| =C-c C-k= | Cancel | Cancel active query |
-
-**** Transient Setup
-
-Transient is built into Emacs 28+. For earlier versions:
-
-#+BEGIN_SRC elisp
-(use-package transient
-  :straight (:type git :host github :repo "magit/transient"))
-#+END_SRC
-
-** 3. Programmatic Queries
-
-For scripts and automation:
-
-#+BEGIN_SRC elisp
-;; Simple one-shot query
-(claude-agent-query
- "What is 2+2?"
- :on-message (lambda (msg)
-               (when (claude-agent-assistant-message-p msg)
-                 (message "Response: %s"
-                          (claude-agent-extract-text msg))))
- :on-complete (lambda (_) (message "Done!")))
-
-;; With options
-(claude-agent-query
- "Explain this code"
- :options (claude-agent-options
-           :model "claude-sonnet-4-5"
-           :max-turns 3
-           :permission-mode 'accept-edits
-           :cwd "/path/to/project")
- :on-token (lambda (text) (insert text))  ; Stream tokens
- :on-message #'my-message-handler)
-#+END_SRC
-
-* Features
-
-** Session Management
+** Step 5: Session Management
+:PROPERTIES:
+:CUSTOM_ID: step-5-session-management
+:END:
 
 Sessions preserve conversation context across queries.
 
-*** In claude-org-mode
+*** How Sessions Work
 
-Sessions are automatically managed per-file. You can also create section-scoped sessions:
+Each org file has a *file-scope session* by default. All queries in the file share context:
 
 #+BEGIN_EXAMPLE
-,#+PROPERTY: CLAUDE_SESSION_ID my-project-session
-
-,* Task A :claude_session:
-This section has its own independent session.
+,* First Question :claude_chat:
 
 ,#+begin_src ai
-Question specific to Task A context
+My favorite number is 42. Remember this.
 ,#+end_src
 
-,* Task B :claude_session:
-This is a separate session from Task A.
+,* Second Question :claude_chat:
 
 ,#+begin_src ai
-Different context here
+What is my favorite number?
 ,#+end_src
 #+END_EXAMPLE
 
+Claude will remember "42" because both queries share the same session.
+
+*** Section-Scoped Sessions
+
+Use =CLAUDE_SESSION_ID= property to create independent sessions:
+
+#+BEGIN_EXAMPLE
+,* Task A
+:PROPERTIES:
+:CLAUDE_SESSION_ID: task-a-session
+:END:
+
+This section has its OWN session.
+
+,#+begin_src ai
+Remember: the password is "secret123"
+,#+end_src
+
+,* Task B
+:PROPERTIES:
+:CLAUDE_SESSION_ID: task-b-session
+:END:
+
+This is a DIFFERENT session from Task A.
+
+,#+begin_src ai
+What password did I tell you?
+,#+end_src
+#+END_EXAMPLE
+
+Task B will NOT know the password - it has a separate session.
+
 *** Session Recovery
 
-When Claude sessions expire, claude-org automatically:
+When Claude sessions expire (after inactivity), claude-org automatically:
 1. Collects conversation history from the org file
 2. Rebuilds context with a recovery prompt
 3. Retries transparently
 
-*Performance Optimization:*
+*Performance tip:* Tag old sections with =:ARCHIVE:= to exclude from recovery.
 
-For large org files with extensive conversation history, you can archive old sections to improve recovery performance:
-
-#+BEGIN_EXAMPLE
-,* Old Conversations :ARCHIVE:
-Sections tagged with :ARCHIVE: are automatically skipped during session recovery.
-
-,** Ancient Discussion 1
-,#+begin_src ai
-Old conversation...
-,#+end_src
-
-,** Ancient Discussion 2
-,#+begin_src ai
-Another old conversation...
-,#+end_src
-#+END_EXAMPLE
-
-This allows you to keep historical context in the file while excluding it from session recovery, reducing
-context size and improving performance.
-
-** Permission Functions
-
-Control Claude's tool use with a flexible permission functions hook. When Claude CLI is in
-=acceptEdits= mode, permission functions are called for each tool request, allowing you to
-allow, deny, or prompt for confirmation.
-
-*** How It Works
-
-The =claude-agent-permission-functions= variable contains a list of functions called in order.
-Each function can:
-- Return =nil= - Pass to next function (no decision)
-- Return =(:behavior "allow")= - Allow the tool
-- Return =(:behavior "deny" :message "...")= - Deny with message
-
-The first non-nil result is used. If all return nil, the tool is allowed by default.
-
-*** Built-in Permission Functions
-
-| Function | Purpose |
-|----------+---------|
-| =claude-agent-permission-check-patterns= | Pattern-based allow/deny |
-| =claude-agent-permission-prompt= | Interactive y-or-n-p |
-| =claude-agent-permission-auto-allow= | Auto-approve everything |
-
-Default configuration:
-
-#+BEGIN_SRC elisp
-(setq claude-agent-permission-functions
-      '(claude-agent-permission-check-patterns
-        claude-agent-permission-prompt))
-#+END_SRC
-
-*** Pattern-Based Permissions
-
-Configure allow/deny patterns for automatic decisions:
-
-#+BEGIN_SRC elisp
-;; Allow read-only tools and MCP Emacs tools
-(setq claude-agent-allow-patterns
-      '("Read" "Grep" "Glob" "mcp__emacs__*"))
-
-;; Block dangerous commands
-(setq claude-agent-deny-patterns
-      '("Bash(rm -rf *)" "Bash(sudo *)" "Write(/etc/*)"))
-#+END_SRC
-
-Deny patterns are always checked first and take precedence.
-
-*** Custom Permission Functions
-
-Add your own permission logic:
-
-#+BEGIN_SRC elisp
-(defun my-protect-config-files (tool-name tool-input context)
-  "Prevent Claude from editing configuration files."
-  (let ((file-path (plist-get tool-input :file_path)))
-    (when (and (member tool-name '("Edit" "Write"))
-               file-path
-               (string-match-p "\\.\\(env\\|config\\|json\\)$" file-path))
-      (list :behavior "deny"
-            :message (format "🚫 Cannot modify config file: %s" file-path)))))
-
-;; Add to permission functions (runs before pattern check)
-(add-hook 'claude-agent-permission-functions
-          #'my-protect-config-files)
-#+END_SRC
-
-*** Practical Examples
-
-**** Block Dangerous Commands
-
-#+BEGIN_SRC elisp
-(defun my-block-dangerous-bash (tool-name tool-input _context)
-  "Block rm, sudo, and other dangerous bash commands."
-  (when (equal tool-name "Bash")
-    (let ((command (plist-get tool-input :command)))
-      (when (string-match-p "\\(rm\\s+-rf\\|sudo\\|chmod 777\\)" command)
-        (list :behavior "deny"
-              :message "🚫 Dangerous command blocked for safety")))))
-
-(add-hook 'claude-agent-permission-functions #'my-block-dangerous-bash)
-#+END_SRC
-
-**** Log All Tool Use
-
-#+BEGIN_SRC elisp
-(defun my-log-tool-use (tool-name tool-input _context)
-  "Log every tool Claude uses."
-  (message "[Claude Tool] %s at %s" tool-name (format-time-string "%H:%M:%S"))
-  nil)  ; Return nil = let next function decide
-
-(add-hook 'claude-agent-permission-functions #'my-log-tool-use)
-#+END_SRC
-
-**** Auto-approve Everything
-
-#+BEGIN_SRC elisp
-;; Replace default with auto-allow
-(setq claude-agent-permission-functions
-      '(claude-agent-permission-auto-allow))
-#+END_SRC
-
-*** Org File Protection
-
-The =claude-org= package provides a permission function to protect .org files:
-
-#+BEGIN_SRC elisp
-;; Enable org file protection
-(add-hook 'claude-agent-permission-functions
-          #'claude-org-permission-protect-org)
-#+END_SRC
-
-This blocks =Edit= and =Write= tools on .org files, directing Claude to use
-=evalElisp= instead (which preserves org structure).
-
-** Permission Modes
-
-Control which tools Claude can use with pattern-based permissions.
-
-*** Permission Presets
-
-#+BEGIN_SRC elisp
-;; Set globally
-(setq claude-agent-permission-preset "readonly")    ; Read, Glob, Grep only
-(setq claude-agent-permission-preset "accept-edits") ; + Write, Edit, MultiEdit
-(setq claude-agent-permission-preset "plan")         ; Suggests changes only
-(setq claude-agent-permission-preset "bypass")       ; Allow all tools
-#+END_SRC
-
-*** In claude-org-mode
-
-Set per-file or per-section:
-
-#+BEGIN_EXAMPLE
-,#+PROPERTY: CLAUDE_PERMISSION_MODE accept-edits
-
-,* Dangerous Section
+** Step 6: SDD (Spec-Driven Development)
 :PROPERTIES:
-:CLAUDE_PERMISSION_MODE: readonly
+:CUSTOM_ID: step-6-sdd
 :END:
-This section is read-only regardless of file setting.
-#+END_EXAMPLE
 
-*** Custom Permissions
-
-#+BEGIN_SRC elisp
-(setq claude-agent-permission-preset "custom")
-(setq claude-agent-permissions
-      '(:allow ("Read(**)" "Glob(**)" "Bash(git:*)" "mcp__emacs__*")
-        :deny ("Bash(rm *)" "Bash(sudo *)")))
-#+END_SRC
-
-*** Pattern Syntax
-
-| Pattern | Example | Meaning |
-|---------+---------+---------|
-| =*= | =*= | Match all tools |
-| =ToolName= | =WebSearch= | Match tool by name |
-| =ToolName(**)= | =Read(**)= | Match with any argument |
-| =ToolName(pattern)= | =Bash(git:*)= | Match argument prefix |
-| =mcp__*= | =mcp__emacs__*= | Glob for MCP tools |
-
-** IDE Context
-
-The library automatically collects IDE context from Emacs:
-- Current file being edited
-- List of open files (up to 10)
-- Selected text region (if any)
-- Current working directory
-
-This context is prepended to prompts as =<system-reminder>= tags.
-
-*** Excluding Buffers
-
-#+BEGIN_SRC elisp
-;; Exclude by name pattern (regexp)
-(setq claude-agent-ide-context-exclude-buffer-names
-      '("*Claude Chat*" "*Messages*" "*scratch*"))
-
-;; Exclude by major mode
-(setq claude-agent-ide-context-exclude-modes
-      '(claude-agent-chat-mode special-mode dired-mode))
-
-;; Custom predicate
-(add-to-list 'claude-agent-ide-context-exclude-predicates
-             (lambda (buf)
-               (with-current-buffer buf
-                 (bound-and-true-p my-special-mode))))
-#+END_SRC
-
-** Project Configuration (claude-org)
-
-*** PROJECT_ROOT
-
-Set working directory for Claude:
-
-#+BEGIN_EXAMPLE
-,#+PROPERTY: PROJECT_ROOT /path/to/project
-
-,* Or per-section via property drawer
-,** Backend Work
-   :PROPERTIES:
-   :PROJECT_ROOT: /path/to/backend
-   :END:
-#+END_EXAMPLE
-
-*** System Prompts
-
-Tag sections with =:system_prompt:= to include as project guidelines:
-
-#+BEGIN_EXAMPLE
-,* Project Guidelines :system_prompt:
-This project uses Python 3.11.
-Always use absolute imports.
-Follow PEP 8 style guide.
-
-,* Code Style :system_prompt:
-- Use type hints
-- Write docstrings for all public functions
-#+END_EXAMPLE
-
-These are automatically collected and included in queries.
-
-** Org Link Resolution
-
-Claude can automatically resolve org links in your queries to fetch context. When you include
-links like =[[file:notes.org::*Project Setup][Setup]]= in AI blocks, Claude uses =evalElisp=
-to retrieve the linked content and inform its response.
-
-*** Supported Link Types
-
-| Link Format | Tool Used |
-|-------------+-----------|
-| =[[*Heading]]= | =evalElisp= (navigate to heading) |
-| =[[file:path.org::*Heading][desc]]= | =evalElisp= (open file, read section) |
-| =[[file:path.el::42][desc]]= | =Read= (with offset/limit) |
-| =[[https://url][desc]]= | =WebFetch= |
-
-*** Usage Example
-
-Store a link with =C-c l= (=org-store-link=), then insert in your AI block with =C-c C-l=:
-
-#+BEGIN_EXAMPLE
-,* Implementation Notes
-
-,** Important Config :reference:
-The magic value is: XYZZY-12345
-
-,* AI Chat :claude_chat:
-
-,** Question
-
-,#+begin_src ai
-Please check the value in [[*Important Config][Important Config]] and tell me what it means.
-,#+end_src
-#+END_EXAMPLE
-
-Claude will automatically use =evalElisp= to fetch the "Important Config" content,
-then use that context to answer your question.
-
-** SDD (Spec-Driven Development)
-
-SDD is a structured workflow for feature development following the Atomic pattern:
-Research → Design → Planning → Implementation.
+SDD is a structured workflow for feature development - the key feature for serious
+development work. It follows the Atomic pattern: Research → Design → Planning → Implementation.
 
 *** Creating an SDD Structure
 
@@ -707,23 +370,12 @@ Use =C-c C-/= then =d= (or =M-x claude-org-insert-sdd=) to create a new SDD:
 
 *** Workflow Phases
 
-When inserting new AI blocks in the Workflow section, use =C-c C-/= then =i= to select phase tags:
-
 | Phase | Tag | Purpose | Updates |
 |-------+-----+---------+---------|
 | Research | =:research:= | Explore codebase | → Research Output section |
 | Design | =:design:= | Technical RFC | → Spec section |
 | Planning | =:planning:= | Task breakdown | → Features section (TODOs) |
 | Implementation | =:implementation:= | Write code | → Mark TODOs as DONE |
-
-*** Section Purposes
-
-| Section | Tag | Purpose |
-|---------+-----+---------|
-| *Workflow* | =:sdd:= | AI interactions - all phases happen here |
-| *Research Output* | =:research_output:= | Synthesized findings from exploration |
-| *Spec* | =:spec:= | Living RFC document (Goals, Non-Goals, Solution) |
-| *Features* | =:features:= | Atomic TODO items with ORDERED tracking |
 
 *** Key Principles
 
@@ -732,128 +384,265 @@ When inserting new AI blocks in the Workflow section, use =C-c C-/= then =i= to 
 3. *Atomic Features*: Each TODO should be completable in one session
 4. *Update as you go*: Claude updates Research Output, Spec, Features via =evalElisp=
 
-** Behavior Prompts (Tag/Header System)
+* Features
+:PROPERTIES:
+:CUSTOM_ID: features
+:END:
 
-Control Claude's behavior through org tags and header arguments. This provides a declarative way to
-activate different "modes" for your AI queries.
+Detailed documentation for all features.
 
-*** Phase Tags
+** Session Management
+:PROPERTIES:
+:CUSTOM_ID: ref-session-management
+:END:
 
-Use org section tags to set the current development phase:
+Sessions preserve conversation context across queries.
+
+*** In claude-org-mode
+
+Sessions are automatically managed per-file. You can also create section-scoped sessions:
 
 #+BEGIN_EXAMPLE
-,* Explore codebase :explore:
+,#+PROPERTY: CLAUDE_SESSION_ID my-project-session
+
+,* Task A
+:PROPERTIES:
+:CLAUDE_SESSION_ID: task-a-session
+:END:
+
+This section has its own independent session.
+
 ,#+begin_src ai
-How does the authentication system work?
+Question specific to Task A context
 ,#+end_src
 
-,* Design cache layer :plan:
-,#+begin_src ai
-Design a caching strategy for user sessions.
-,#+end_src
+,* Task B
+:PROPERTIES:
+:CLAUDE_SESSION_ID: task-b-session
+:END:
 
-,* Implement login :code:
+This is a separate session from Task A.
+
 ,#+begin_src ai
-Implement the login endpoint.
+Different context here
 ,#+end_src
 #+END_EXAMPLE
 
-| Tag | Behavior |
-|-----+----------|
-| =:explore:= | Focus on understanding, use Read/Grep/Glob, do NOT modify files |
-| =:plan:= | Design approach, present options with trade-offs, wait for approval |
-| =:code:= | Implement solution, track progress, run tests |
-| =:test:= | Write comprehensive tests, run and report results |
-| =:review:= | Find bugs and issues, do NOT write new code |
-| =:commit:= | Stage and commit with semantic message, do NOT push |
+*** Session Recovery
 
-*** Modifier Tags
+When Claude sessions expire, claude-org automatically:
+1. Collects conversation history from the org file
+2. Rebuilds context with a recovery prompt
+3. Retries transparently
 
-Combine with phase tags to adjust behavior:
+*Performance Optimization:*
+
+For large org files with extensive conversation history, you can archive old sections to
+improve recovery performance:
 
 #+BEGIN_EXAMPLE
-,* Security audit :review:security:
-,#+begin_src ai
-Review authentication code for vulnerabilities.
-,#+end_src
+,* Old Conversations :ARCHIVE:
+Sections tagged with :ARCHIVE: are automatically skipped during session recovery.
 
-,* Critical fix :code:strict:
+,** Ancient Discussion 1
 ,#+begin_src ai
-Fix the memory leak - must pass all tests.
+Old conversation...
 ,#+end_src
 #+END_EXAMPLE
 
-| Tag | Effect |
-|-----+--------|
-| =:strict:= | Zero tolerance for any issues |
-| =:security:= | Apply comprehensive security analysis |
-| =:no_edit:= | Read-only mode, analysis only |
-| =:parallel:= | Use parallel execution for subtasks |
+** Permission Functions
+:PROPERTIES:
+:CUSTOM_ID: ref-permission-functions
+:END:
 
-*** Header Arguments
+Control Claude's tool use with a flexible permission functions hook. When Claude CLI is in
+=acceptEdits= mode, permission functions are called for each tool request.
 
-Override or supplement behavior via block header arguments:
+*** How It Works
 
-#+BEGIN_EXAMPLE
-,* Task
-,#+begin_src ai :phase code :tests :coverage 80
-Implement the user preference API.
-,#+end_src
-#+END_EXAMPLE
+The =claude-agent-permission-functions= variable contains a list of functions called in order.
+Each function can:
+- Return =nil= - Pass to next function (no decision)
+- Return =(:behavior "allow")= - Allow the tool
+- Return =(:behavior "deny" :message "...")= - Deny with message
 
-| Header | Values | Effect |
-|--------+--------+--------|
-| =:phase= | explore/plan/code/test/review/commit | Override section phase |
-| =:tests= | t | Generate comprehensive tests |
-| =:coverage= | NUMBER | Require minimum test coverage % |
-| =:strict= | t | Enable strict mode |
-| =:files= | PATTERN | Limit scope to specific files |
-| =:context= | TEXT | Add additional context |
-| =:agent= | TYPE | Delegate to specialized subagent |
+The first non-nil result is used. If all return nil, the tool is allowed by default.
 
-*** Combining Tags and Headers
+*** Built-in Permission Functions
 
-Tags and headers combine naturally. Tags apply to all blocks in a section, headers can override per-block:
+| Function | Purpose |
+|----------+---------|
+| =claude-agent-permission-check-patterns= | Pattern-based allow/deny |
+| =claude-org-permission-protect-org= | Protect .org files from direct edits |
+| =claude-agent-permission-prompt= | Interactive y-or-n-p |
+| =claude-agent-permission-auto-allow= | Auto-approve everything |
 
-#+BEGIN_EXAMPLE
-,* Backend API :code:security:
-All blocks here get CODE + SECURITY behavior.
+Recommended configuration:
 
-,#+begin_src ai
-Implement user endpoint.
-,#+end_src
-
-,#+begin_src ai :phase review
-Review what we just implemented.
-,#+end_src
-#+END_EXAMPLE
-
-*** Custom Behaviors
-
-Add your own tags and headers:
-
-#+BEGIN_SRC elisp
-;; Custom tag for API development
-(add-to-list 'claude-org-tag-behaviors
-             '(api . "## API MODE
-Follow REST conventions. Use proper HTTP methods.
-Return appropriate status codes."))
-
-;; Custom header for timeout
-(add-to-list 'claude-org-header-behaviors
-             '(:timeout . "Complete within %s minutes."))
+#+BEGIN_SRC elisp :load no
+(setq claude-agent-permission-functions
+      '(claude-agent-permission-check-patterns
+        claude-org-permission-protect-org
+        claude-agent-permission-auto-allow))
 #+END_SRC
 
-Or use =M-x customize-variable= to edit =claude-org-tag-behaviors= and =claude-org-header-behaviors=.
+*** Pattern-Based Permissions
 
-*** File-Level Tag Definitions
+Configure allow/deny patterns for automatic decisions:
 
-Define available tags in your org file for quick access with =C-c C-c= on headings:
+#+BEGIN_SRC elisp :load no
+;; Allow read-only tools and MCP Emacs tools
+(setq claude-agent-allow-patterns
+      '("Read" "Grep" "Glob" "mcp__emacs__*"))
+
+;; Block dangerous commands
+(setq claude-agent-deny-patterns
+      '("Bash(rm -rf *)" "Bash(sudo *)" "Write(/etc/*)"))
+#+END_SRC
+
+Deny patterns are always checked first and take precedence.
+
+*** Custom Permission Functions
+
+Add your own permission logic:
+
+#+BEGIN_SRC elisp :load no
+(defun my-protect-config-files (tool-name tool-input context)
+  "Prevent Claude from editing configuration files."
+  (let ((file-path (plist-get tool-input :file_path)))
+    (when (and (member tool-name '("Edit" "Write"))
+               file-path
+               (string-match-p "\\.\\(env\\|config\\|json\\)$" file-path))
+      (list :behavior "deny"
+            :message (format "Cannot modify config file: %s" file-path)))))
+
+;; Add to permission functions (runs before pattern check)
+(add-hook 'claude-agent-permission-functions
+          #'my-protect-config-files)
+#+END_SRC
+
+*** Org File Protection
+
+The =claude-org= package provides a permission function to protect .org files:
+
+#+BEGIN_SRC elisp :load no
+;; Enable org file protection (recommended)
+(add-to-list 'claude-agent-permission-functions
+             #'claude-org-permission-protect-org)
+#+END_SRC
+
+This blocks =Edit= and =Write= tools on .org files, directing Claude to use
+=evalElisp= instead (which preserves org structure).
+
+** Permission Modes
+:PROPERTIES:
+:CUSTOM_ID: ref-permission-modes
+:END:
+
+Control which tools Claude can use with pattern-based permissions.
+
+*** Permission Presets
+
+Access via transient menu: =C-c C-/ p=
+
+#+BEGIN_SRC elisp :load no
+;; Set globally
+(setq claude-agent-permission-preset "readonly")    ; Read, Glob, Grep only
+(setq claude-agent-permission-preset "accept-edits") ; + Write, Edit, MultiEdit
+(setq claude-agent-permission-preset "plan")         ; Suggests changes only
+(setq claude-agent-permission-preset "bypass")       ; Allow all tools
+#+END_SRC
+
+*** In claude-org-mode
+
+Set per-file or per-section:
 
 #+BEGIN_EXAMPLE
-,#+TAGS: explore(e) plan(p) code(c) test(t) review(r) commit(m)
-,#+TAGS: strict(s) security(S) no_edit(n) parallel(P)
+,#+PROPERTY: CLAUDE_PERMISSION_MODE accept-edits
+
+,* Dangerous Section
+:PROPERTIES:
+:CLAUDE_PERMISSION_MODE: readonly
+:END:
+This section is read-only regardless of file setting.
 #+END_EXAMPLE
+
+*** Pattern Syntax
+
+| Pattern | Example | Meaning |
+|---------+---------+---------|
+| =*= | =*= | Match all tools |
+| =ToolName= | =WebSearch= | Match tool by name |
+| =ToolName(**)= | =Read(**)= | Match with any argument |
+| =ToolName(pattern)= | =Bash(git:*)= | Match argument prefix |
+| =mcp__*= | =mcp__emacs__*= | Glob for MCP tools |
+
+** IDE Context
+:PROPERTIES:
+:CUSTOM_ID: ref-ide-context
+:END:
+
+The library automatically collects IDE context from Emacs:
+- Current file being edited
+- List of open files (up to 10)
+- Selected text region (if any)
+- Current working directory
+
+This context is prepended to prompts as =<system-reminder>= tags.
+
+*** Excluding Buffers
+
+#+BEGIN_SRC elisp :load no
+;; Exclude by name pattern (regexp)
+(setq claude-agent-ide-context-exclude-buffer-names
+      '("*Claude Chat*" "*Messages*" "*scratch*"))
+
+;; Exclude by major mode
+(setq claude-agent-ide-context-exclude-modes
+      '(claude-agent-chat-mode special-mode dired-mode))
+
+;; Custom predicate
+(add-to-list 'claude-agent-ide-context-exclude-predicates
+             (lambda (buf)
+               (with-current-buffer buf
+                 (bound-and-true-p my-special-mode))))
+#+END_SRC
+
+** Project Configuration (claude-org)
+:PROPERTIES:
+:CUSTOM_ID: ref-project-configuration
+:END:
+
+*** PROJECT_ROOT
+
+Set working directory for Claude:
+
+#+BEGIN_EXAMPLE
+,#+PROPERTY: PROJECT_ROOT /path/to/project
+
+,* Or per-section via property drawer
+,** Backend Work
+   :PROPERTIES:
+   :PROJECT_ROOT: /path/to/backend
+   :END:
+#+END_EXAMPLE
+
+*** System Prompts
+
+Tag sections with =:system_prompt:= to include as project guidelines:
+
+#+BEGIN_EXAMPLE
+,* Project Guidelines :system_prompt:
+This project uses Python 3.11.
+Always use absolute imports.
+Follow PEP 8 style guide.
+
+,* Code Style :system_prompt:
+- Use type hints
+- Write docstrings for all public functions
+#+END_EXAMPLE
+
+These are automatically collected and included in queries.
 
 *** Environment Variables
 
@@ -889,11 +678,11 @@ Supported properties:
 
 **** Secure Environment Variables with ENV_FILE
 
-**IMPORTANT SECURITY NOTICE:** Never commit API tokens or credentials to version control!
+*IMPORTANT SECURITY NOTICE:* Never commit API tokens or credentials to version control!
 
 Use =ENV_FILE= to load sensitive values from a local =.env= file with variable substitution:
 
-**Setup:**
+*Setup:*
 
 1. Create a =.env= file (use standard dotenv syntax):
 
@@ -906,19 +695,11 @@ Use =ENV_FILE= to load sensitive values from a local =.env= file with variable s
 
 2. Secure the file:
 
-   #+BEGIN_SRC bash
+   #+BEGIN_SRC bash :load no
    chmod 600 ~/.local/doubao.env
    #+END_SRC
 
-3. Add to =.gitignore=:
-
-   #+BEGIN_EXAMPLE
-   .env
-   *.env
-   .local/
-   #+END_EXAMPLE
-
-4. Reference in org file using =${VAR}= syntax:
+3. Reference in org file using =${VAR}= syntax:
 
    #+BEGIN_EXAMPLE
    ,#+PROPERTY: ENV_FILE ~/.local/doubao.env
@@ -927,55 +708,99 @@ Use =ENV_FILE= to load sensitive values from a local =.env= file with variable s
    ,#+PROPERTY: PROJECT_ROOT ${PROJECT_PATH}
    #+END_EXAMPLE
 
-**Features:**
-- Supports standard =.env= syntax: =KEY=value=, quoted values, comments
-- Variable substitution: =${VAR}= is replaced with value from ENV_FILE
-- Fallback to environment: Uses =process-environment= if variable not in ENV_FILE
-- Default values: =${VAR:-default}= provides fallback if VAR is not set
-- Tilde expansion: =~/path= expands to home directory
-- Works with any org property, not just ANTHROPIC_*
+** Org Link Resolution
+:PROPERTIES:
+:CUSTOM_ID: ref-org-link-resolution
+:END:
 
-**Security Best Practices:**
-- ✓ Store =.env= files outside version control
-- ✓ Set file permissions to =600= (owner read/write only)
-- ✓ Never sync =.env= files to cloud storage
-- ✓ Use different =.env= files for different projects/environments
-- ✗ Never hardcode tokens in org files
-- ✗ Never commit =.env= files to git
+Claude can automatically resolve org links in your queries to fetch context. When you include
+links like =[[file:notes.org::*Project Setup][Setup]]= in AI blocks, Claude uses =evalElisp=
+to retrieve the linked content and inform its response.
 
-**** Example: Using Volcengine Doubao
+*** Supported Link Types
 
-[[https://www.volcengine.com/docs/82379/1928261][Volcengine]] provides Claude-compatible API access in China. To configure:
+| Link Format | Tool Used |
+|-------------+-----------|
+| =[[*Heading]]= | =evalElisp= (navigate to heading) |
+| =[[file:path.org::*Heading][desc]]= | =evalElisp= (open file, read section) |
+| =[[file:path.el::42][desc]]= | =Read= (with offset/limit) |
+| =[[https://url][desc]]= | =WebFetch= |
 
-**Secure method (recommended):**
+*** Usage Example
 
-1. Create =~/.local/doubao.env=:
-   #+BEGIN_EXAMPLE
-   DOUBAO_API_KEY=your-ark-api-key-here
-   #+END_EXAMPLE
+Store a link with =C-c l= (=org-store-link=), then insert in your AI block with =C-c C-l=:
 
-2. Reference in org file:
-   #+BEGIN_EXAMPLE
-   ,#+PROPERTY: ENV_FILE ~/.local/doubao.env
-   ,#+PROPERTY: ANTHROPIC_BASE_URL https://ark.cn-beijing.volces.com/api/coding
-   ,#+PROPERTY: ANTHROPIC_AUTH_TOKEN ${DOUBAO_API_KEY}
-   ,#+PROPERTY: ANTHROPIC_MODEL doubao-seed-code-preview-latest
-   #+END_EXAMPLE
+#+BEGIN_EXAMPLE
+,* Implementation Notes
 
-Get your API key from the [[https://console.volcengine.com/ark][Volcengine Ark Console]].
+,** Important Config :reference:
+The magic value is: XYZZY-12345
+
+,* AI Chat :claude_chat:
+
+,** Question
+
+,#+begin_src ai
+Please check the value in [[*Important Config][Important Config]] and tell me what it means.
+,#+end_src
+#+END_EXAMPLE
+
+** Behavior Prompts (Tag/Header System)
+:PROPERTIES:
+:CUSTOM_ID: ref-behavior-prompts
+:END:
+
+Control Claude's behavior through org tags and header arguments.
+
+*** Phase Tags
+
+| Tag | Behavior |
+|-----+----------|
+| =:explore:= | Focus on understanding, use Read/Grep/Glob, do NOT modify files |
+| =:plan:= | Design approach, present options with trade-offs, wait for approval |
+| =:code:= | Implement solution, track progress, run tests |
+| =:test:= | Write comprehensive tests, run and report results |
+| =:review:= | Find bugs and issues, do NOT write new code |
+| =:commit:= | Stage and commit with semantic message, do NOT push |
+
+*** Modifier Tags
+
+| Tag | Effect |
+|-----+--------|
+| =:strict:= | Zero tolerance for any issues |
+| =:security:= | Apply comprehensive security analysis |
+| =:no_edit:= | Read-only mode, analysis only |
+| =:parallel:= | Use parallel execution for subtasks |
+
+*** Header Arguments
+
+| Header | Values | Effect |
+|--------+--------+--------|
+| =:phase= | explore/plan/code/test/review/commit | Override section phase |
+| =:tests= | t | Generate comprehensive tests |
+| =:coverage= | NUMBER | Require minimum test coverage % |
+| =:strict= | t | Enable strict mode |
+| =:files= | PATTERN | Limit scope to specific files |
 
 ** MCP Server (Emacs Tools for Claude)
+:PROPERTIES:
+:CUSTOM_ID: ref-mcp-server
+:END:
 
-The MCP server exposes Emacs operations to Claude Code CLI.
+The MCP server exposes Emacs operations to Claude Code CLI. It starts automatically
+when you use claude-org-mode.
 
-*** Starting the Server
+*** Manual Control
 
-#+BEGIN_SRC elisp
-;; Manual start
+#+BEGIN_SRC elisp :load no
+;; Manual start/stop
 M-x emacs-mcp-server-start
+M-x emacs-mcp-server-stop
 
-;; Or auto-start with claude-org-mode
-(setq claude-org-auto-start-mcp-server t)
+;; Via transient menu
+C-c C-/ m
+
+;; Configuration
 (setq emacs-mcp-server-default-port 9999)  ; optional, default is 9999
 #+END_SRC
 
@@ -997,7 +822,7 @@ elisp patterns for specific tasks:
 
 *** Registering Custom Tools
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 (emacs-mcp-server-register-tool
  '((name . "my_tool")
    (description . "Does something useful")
@@ -1014,25 +839,24 @@ elisp patterns for specific tasks:
 #+END_SRC
 
 ** Output Formatting (claude-org)
-
-Claude-org includes several features to improve output readability:
+:PROPERTIES:
+:CUSTOM_ID: ref-output-formatting
+:END:
 
 *** Header Normalization
 
 When Claude outputs org headers, they're automatically adjusted to fit your document hierarchy.
-For example, if you execute a query inside a level-3 section, Claude's =* Header= becomes =**** Header=.
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Enable/disable header normalization (default: t)
 (setq claude-org-normalize-headers t)
 #+END_SRC
 
 *** Auto Line Breaking
 
-Long lines can be automatically broken after sentence-ending punctuation (=.= =!= =?=).
-This helps when Claude generates very long paragraphs without natural breaks.
+Long lines can be automatically broken after sentence-ending punctuation.
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Break lines after 110 characters (at sentence boundaries)
 (setq claude-org-auto-break-line-length 110)
 
@@ -1040,34 +864,23 @@ This helps when Claude generates very long paragraphs without natural breaks.
 (setq claude-org-auto-break-line-length -1)
 #+END_SRC
 
-*** Line Ending Normalization
-
-DOS (=\r\n=) and old Mac (=\r=) line endings are automatically converted to Unix (=\n=).
-
 *** Auto Title Generation
 
 When executing AI blocks under generic "Instruction N" headings, titles are automatically
-generated using the Haiku model (fast and low-cost). The generated title replaces the
-generic heading while preserving tags.
+generated using the Haiku model.
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Enable auto-title generation (default: t)
 (setq claude-org-auto-generate-title t)
 
-;; Only replace headings matching this pattern (default: "^Instruction [0-9]+$")
+;; Only replace headings matching this pattern
 (setq claude-org-auto-title-heading-pattern "^Instruction [0-9]+$")
-
-;; Disable auto-title generation
-(setq claude-org-auto-generate-title nil)
 #+END_SRC
 
-Example transformation:
-- Before: =*** Instruction 1 :claude_chat:=
-- After: =*** Python JSON Parsing :claude_chat:=
-
-Custom headings (not matching the pattern) are preserved unchanged.
-
 ** Error Analysis
+:PROPERTIES:
+:CUSTOM_ID: ref-error-analysis
+:END:
 
 AI-powered analysis of Emacs errors using Claude.
 
@@ -1075,7 +888,7 @@ AI-powered analysis of Emacs errors using Claude.
 
 When an error occurs and the =*Backtrace*= buffer appears:
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Analyze the current backtrace
 M-x claude-agent-analyze-backtrace
 
@@ -1083,68 +896,39 @@ M-x claude-agent-analyze-backtrace
 M-x claude-agent-analyze-region
 #+END_SRC
 
-Each analysis opens a new =*Claude Error Analysis N*= buffer with =claude-agent-chat-mode=, allowing follow-up questions.
+*** Automatic Analysis (Recommended)
 
-*** Automatic Analysis (Optional)
-
-To automatically analyze errors when the debugger appears, add to your config:
-
-#+BEGIN_SRC elisp
-;; Optional: auto-analyze on debugger entry
+#+BEGIN_SRC elisp :load no
+;; Auto-analyze on debugger entry
 (add-hook 'debugger-mode-hook #'claude-agent-analyze-backtrace)
 #+END_SRC
 
-*** MCP Integration
-
-For deeper analysis, Claude can query your live Emacs session using the =evalElisp= MCP tool:
-
-#+BEGIN_SRC elisp
-;; Configure MCP for error analysis
-(setq claude-agent-error-mcp-config "~/.config/claude/mcp-emacs.json")
-#+END_SRC
-
-This allows Claude to inspect variable values, function definitions, and other context.
-
-*** Configuration
-
-#+BEGIN_SRC elisp
-;; Debounce delay for rapid errors (default: 0.5 seconds)
-(setq claude-agent-error-debounce-delay 0.5)
-
-;; Custom system prompt file
-(setq claude-agent-error-prompt-file "~/my-error-prompt.org")
-
-;; MCP config for Emacs introspection
-(setq claude-agent-error-mcp-config "~/.config/claude/mcp-emacs.json")
-#+END_SRC
-
 ** Activity Mode-Line
+:PROPERTIES:
+:CUSTOM_ID: ref-activity-mode-line
+:END:
 
 Shows when Claude queries are active.
 
 - Spinning indicator =[C:◐]= during queries
 - Count for multiple: =[C:◓×3]=
 - Click to open session manager
-- Hover for detailed query information
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; View active queries
 M-x claude-agent-list-queries
 #+END_SRC
 
-In the session manager:
-- =k= - Cancel query at point
-- =K= - Cancel all queries
-- =g= - Refresh list
-- =q= - Quit
-
 ** Usage Mode-Line
+:PROPERTIES:
+:CUSTOM_ID: ref-usage-mode-line
+:END:
 
 Display Claude API usage statistics.
 
 *** Setup
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Set your organization ID (from claude.ai URL)
 (setq claude-agent-usage-org-id "your-org-id-here")
 
@@ -1155,64 +939,47 @@ Display Claude API usage statistics.
 
 *** Usage
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 M-x claude-agent-usage-mode-line-start  ; Start (auto-refresh every 5 min)
 M-x claude-agent-usage-mode-line-stop   ; Stop
 M-x claude-agent-usage-fetch            ; Manual refresh
 #+END_SRC
 
-*Display Format:*
-- =[C:XX|YY|ZZ]= - 5-hour | 7-day | 7-day Sonnet utilization %
-- Hover for reset times (e.g., "7d 10h", "5h 30m")
-
 ** Verbose Output Buffers
+:PROPERTIES:
+:CUSTOM_ID: ref-verbose-output
+:END:
 
 Per-session verbose buffers display CLI-like output.
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; In claude-org-mode
 C-c C-v  ; Show verbose buffer for current session
+
+;; Or via transient menu
+C-c C-/ v
 
 ;; Programmatically
 M-x claude-agent-show-session-verbose
 M-x claude-agent-list-session-verbose-buffers
 #+END_SRC
 
-Buffer shows: query headers, tool calls, thinking indicators, responses, cost summary.
-
 ** Skills (User Settings)
+:PROPERTIES:
+:CUSTOM_ID: ref-skills
+:END:
 
-Claude Code supports loading custom skills from =~/.claude/skills/=. Skills are markdown files with YAML frontmatter that define specialized behaviors.
+Claude Code supports loading custom skills from =~/.claude/skills/=.
 
 *** Setting Sources
 
-Control where Claude loads skills and settings from:
-
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Default: load user skills from ~/.claude/skills/
 (setq claude-org-setting-sources '("user"))
 
 ;; Load from multiple sources
 (setq claude-org-setting-sources '("user" "project" "local"))
 #+END_SRC
-
-Valid sources:
-- =user= - User-level skills in =~/.claude/skills/=
-- =project= - Project-level settings in =.claude/= directory
-- =local= - Local settings
-
-*** Per-file or Per-section Override
-
-Use org properties to override setting sources:
-
-#+BEGIN_EXAMPLE
-,#+PROPERTY: CLAUDE_SETTING_SOURCES user,project
-
-,* Section with Different Sources
-:PROPERTIES:
-:CLAUDE_SETTING_SOURCES: local
-:END:
-#+END_EXAMPLE
 
 *** Skill File Format
 
@@ -1228,40 +995,52 @@ Skills are markdown files in subdirectories of =~/.claude/skills/=:
     └── skill.md
 #+END_EXAMPLE
 
-Each =skill.md= file contains YAML frontmatter and markdown content defining the skill behavior.
+** Configuration Reference
+:PROPERTIES:
+:CUSTOM_ID: configuration-reference
+:END:
 
-* Configuration Reference
+*** claude-agent
+:PROPERTIES:
+:CUSTOM_ID: config-claude-agent
+:END:
 
-** claude-agent
-
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; CLI path (auto-detected if nil)
 (setq claude-agent-cli-path "/path/to/claude")
 
 ;; Debug logging
 (setq claude-agent-debug t)
 
-;; Permission preset
-(setq claude-agent-permission-preset "readonly")
+;; Permission functions (recommended configuration)
+(setq claude-agent-permission-functions
+      '(claude-agent-permission-check-patterns
+        claude-org-permission-protect-org
+        claude-agent-permission-auto-allow))
+
+;; Auto-analyze errors (recommended)
+(add-hook 'debugger-mode-hook #'claude-agent-analyze-backtrace)
 
 ;; Verbose buffer cleanup
 (setq claude-agent-verbose-buffer-auto-kill t)
 
 ;; Error Analysis
-(setq claude-agent-error-debounce-delay 0.5)  ; Debounce rapid errors
-(setq claude-agent-error-prompt-file "~/my-prompt.org")  ; Custom prompt
-(setq claude-agent-error-mcp-config "~/.config/claude/mcp.json")  ; MCP tools
+(setq claude-agent-error-debounce-delay 0.5)
+(setq claude-agent-error-prompt-file "~/my-prompt.org")
+(setq claude-agent-error-mcp-config "~/.config/claude/mcp.json")
 #+END_SRC
 
-** claude-org
+*** claude-org
+:PROPERTIES:
+:CUSTOM_ID: config-claude-org
+:END:
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Font-lock delay during streaming (lower = more responsive)
 (setq claude-org-fontlock-delay 0.05)
 
 ;; Default tags
 (setq claude-org-heading-tag "claude_chat")
-(setq claude-org-session-tag "claude_session")
 
 ;; Include IDE context in prompts
 (setq claude-org-include-ide-context t)
@@ -1269,44 +1048,39 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 ;; Show system messages in response
 (setq claude-org-show-system-messages nil)
 
-;; Tools to auto-approve (read-only operations for plan mode)
-(setq claude-org-allowed-tools '("Read" "Glob" "Grep" "WebFetch" "WebSearch"))
-
-;; Maximum line width hint for Claude (sent in system prompt)
+;; Maximum line width hint for Claude
 (setq claude-org-line-width 170)
 
 ;; Auto-break long lines after sentence punctuation (-1 to disable)
-;; When positive, lines exceeding this length are broken after . ! ?
 (setq claude-org-auto-break-line-length 110)
 
-;; Normalize org headers in output (adjust levels to fit document hierarchy)
+;; Normalize org headers in output
 (setq claude-org-normalize-headers t)
 
-;; Auto-generate titles for "Instruction N" headings using Haiku
+;; Auto-generate titles for "Instruction N" headings
 (setq claude-org-auto-generate-title t)
 (setq claude-org-auto-title-heading-pattern "^Instruction [0-9]+$")
 
-;; MCP server auto-start
+;; MCP server auto-start (default: t)
 (setq claude-org-auto-start-mcp-server t)
 
-;; Default system prompts (list of strings)
+;; Default system prompts
 (setq claude-org-default-system-prompts '("Your custom prompt"))
 
-;; Setting sources for loading skills (default: user)
+;; Setting sources for loading skills
 (setq claude-org-setting-sources '("user"))
-
-;; Environment variables passed to Claude CLI (set via org properties)
-;; Supported: ANTHROPIC_MODEL, ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN
-;; Example org property: #+PROPERTY: ANTHROPIC_MODEL claude-sonnet-4-20250514
 #+END_SRC
 
-** emacs-mcp-server
+*** emacs-mcp-server
+:PROPERTIES:
+:CUSTOM_ID: config-emacs-mcp-server
+:END:
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Default port (0 = auto-select)
 (setq emacs-mcp-server-default-port 9999)
 
-;; Permission mode for tools (default: acceptEdits)
+;; Permission mode for tools
 (setq emacs-mcp-server-permission-mode "acceptEdits")
 
 ;; Allowed tool patterns
@@ -1316,9 +1090,12 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 (setq emacs-mcp-server-max-output-length 50000)
 #+END_SRC
 
-** claude-agent-chat
+*** claude-agent-chat
+:PROPERTIES:
+:CUSTOM_ID: config-claude-agent-chat
+:END:
 
-#+BEGIN_SRC elisp
+#+BEGIN_SRC elisp :load no
 ;; Prompt string
 (setq claude-agent-chat-prompt "You> ")
 
@@ -1335,9 +1112,15 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 (setq claude-agent-chat-include-ide-context t)
 #+END_SRC
 
-* API Reference
+** API Reference
+:PROPERTIES:
+:CUSTOM_ID: api-reference
+:END:
 
-** Core Functions (claude-agent)
+*** Core Functions (claude-agent)
+:PROPERTIES:
+:CUSTOM_ID: api-core-functions
+:END:
 
 | Function | Description |
 |----------+-------------|
@@ -1351,7 +1134,10 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 | =claude-agent-cancel-all-queries= | Cancel all active queries |
 | =claude-agent-active-query-count= | Get number of active queries |
 
-** Client Functions
+*** Client Functions
+:PROPERTIES:
+:CUSTOM_ID: api-client-functions
+:END:
 
 | Function | Description |
 |----------+-------------|
@@ -1361,7 +1147,10 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 | =claude-agent-client-disconnect= | Disconnect |
 | =claude-agent-client-interrupt= | Interrupt current operation |
 
-** Org Functions (claude-org)
+*** Org Functions (claude-org)
+:PROPERTIES:
+:CUSTOM_ID: api-org-functions
+:END:
 
 | Function | Description |
 |----------+-------------|
@@ -1374,8 +1163,12 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 | =claude-org-list-sessions= | List all sessions |
 | =claude-org-show-verbose= | Show verbose output |
 | =claude-org-switch-permission-mode= | Change permission mode |
+| =claude-org-menu= | Open transient menu (C-c C-/) |
 
-** MCP Server Functions
+*** MCP Server Functions
+:PROPERTIES:
+:CUSTOM_ID: api-mcp-server-functions
+:END:
 
 | Function | Description |
 |----------+-------------|
@@ -1388,15 +1181,278 @@ Each =skill.md= file contains YAML frontmatter and markdown content defining the
 | =claude-mcp-org-enable= | Enable org tools |
 | =claude-mcp-org-disable= | Disable org tools |
 
-* Running Tests
+** FAQ
+:PROPERTIES:
+:CUSTOM_ID: faq
+:END:
 
-#+BEGIN_SRC elisp
+*** Installation Issues
+:PROPERTIES:
+:CUSTOM_ID: faq-installation
+:END:
+
+**** "Claude CLI not found"
+
+*Symptoms:* Error message about missing =claude= command.
+
+*Solutions:*
+
+1. Verify Claude Code CLI is installed:
+   #+BEGIN_SRC bash :load no
+   which claude
+   # or
+   claude --version
+   #+END_SRC
+
+2. If not in PATH, set the path explicitly:
+   #+BEGIN_SRC elisp :load no
+   (setq claude-agent-cli-path "/usr/local/bin/claude")
+   #+END_SRC
+
+3. Install if missing:
+   #+BEGIN_SRC bash :load no
+   npm install -g @anthropic-ai/claude-code
+   #+END_SRC
+
+**** "literate-elisp not found"
+
+*Symptoms:* Error when loading claude-agent.org.
+
+*Solutions:*
+
+1. Install literate-elisp:
+   #+BEGIN_SRC elisp :load no
+   (use-package literate-elisp
+     :straight (:type git :host github :repo "jingtaozf/literate-elisp"))
+   #+END_SRC
+
+2. Verify installation:
+   #+BEGIN_SRC elisp :load no
+   (require 'literate-elisp)
+   #+END_SRC
+
+*** Session Issues
+:PROPERTIES:
+:CUSTOM_ID: faq-sessions
+:END:
+
+**** "Session expired" or context lost
+
+*Symptoms:* Claude doesn't remember previous conversation.
+
+*Explanation:* Claude Code sessions expire after inactivity. claude-org automatically
+attempts recovery, but this may fail if:
+- The org file has been heavily modified
+- The conversation history is very long
+
+*Solutions:*
+
+1. Check session info via transient menu:
+   #+BEGIN_EXAMPLE
+   C-c C-/ s
+   #+END_EXAMPLE
+
+2. Start a fresh session:
+   - Create a new section with its own =CLAUDE_SESSION_ID= property
+
+3. Archive old conversations to reduce recovery size:
+   #+BEGIN_EXAMPLE
+   ,* Old Stuff :ARCHIVE:
+   ...old conversations...
+   #+END_EXAMPLE
+
+**** Independent sections sharing context
+
+*Symptoms:* Sections seem to share context unexpectedly.
+
+*Solution:* Ensure each independent section has its own =CLAUDE_SESSION_ID= property:
+
+#+BEGIN_EXAMPLE
+,* Task A
+:PROPERTIES:
+:CLAUDE_SESSION_ID: unique-id-for-task-a
+:END:
+#+END_EXAMPLE
+
+*** Permission Issues
+:PROPERTIES:
+:CUSTOM_ID: faq-permissions
+:END:
+
+**** "Tool blocked" unexpectedly
+
+*Symptoms:* Claude reports a tool was denied but you expected it to work.
+
+*Solutions:*
+
+1. Check current permission mode via transient menu:
+   #+BEGIN_EXAMPLE
+   C-c C-/ p
+   #+END_EXAMPLE
+
+2. Review deny patterns:
+   #+BEGIN_SRC elisp :load no
+   claude-agent-deny-patterns
+   #+END_SRC
+
+3. Enable debug logging to see permission decisions:
+   #+BEGIN_SRC elisp :load no
+   (setq claude-agent-debug t)
+   #+END_SRC
+
+**** How to allow a specific tool
+
+#+BEGIN_SRC elisp :load no
+;; Add to allow patterns
+(add-to-list 'claude-agent-allow-patterns "ToolName")
+
+;; Or for tools with arguments
+(add-to-list 'claude-agent-allow-patterns "Bash(git:*)")
+#+END_SRC
+
+*** MCP Server Issues
+:PROPERTIES:
+:CUSTOM_ID: faq-mcp
+:END:
+
+**** "MCP server won't start"
+
+*Symptoms:* =emacs-mcp-server-start= fails or returns error.
+
+*Solutions:*
+
+1. Check if =web-server= package is installed:
+   #+BEGIN_SRC elisp :load no
+   (require 'web-server)
+   #+END_SRC
+
+2. Check if port is already in use:
+   #+BEGIN_SRC elisp :load no
+   ;; Use auto-select port
+   (setq emacs-mcp-server-default-port 0)
+   #+END_SRC
+
+3. Check server status:
+   #+BEGIN_SRC elisp :load no
+   (emacs-mcp-server-running-p)
+   (emacs-mcp-server-port)
+   #+END_SRC
+
+**** "evalElisp not available"
+
+*Symptoms:* Claude can't use the evalElisp tool.
+
+*Solutions:*
+
+1. Verify MCP server is running:
+   #+BEGIN_SRC elisp :load no
+   (emacs-mcp-server-running-p)  ; Should return t
+   #+END_SRC
+
+2. Check MCP config in Claude Code settings:
+   - The MCP server URL should be =http://localhost:PORT=
+
+*** Org-mode Issues
+:PROPERTIES:
+:CUSTOM_ID: faq-org-mode
+:END:
+
+**** "Block not executing" (C-c C-c does nothing)
+
+*Symptoms:* Pressing =C-c C-c= in an AI block has no effect.
+
+*Solutions:*
+
+1. Verify claude-org-mode is enabled:
+   #+BEGIN_EXAMPLE
+   M-x claude-org-mode
+   #+END_EXAMPLE
+
+2. Check cursor is inside the =#+begin_src ai= block
+
+3. Verify the block syntax is correct:
+   #+BEGIN_EXAMPLE
+   ,#+begin_src ai
+   Your query here
+   ,#+end_src
+   #+END_EXAMPLE
+
+**** "Streaming not working" (response appears all at once)
+
+*Symptoms:* Response doesn't stream character-by-character.
+
+*Solution:* This is expected behavior in some terminal environments. The streaming
+happens at the CLI level; what you see is buffered output.
+
+* Appendix
+:PROPERTIES:
+:CUSTOM_ID: appendix
+:END:
+
+** Related Projects
+:PROPERTIES:
+:CUSTOM_ID: related-projects
+:END:
+
+*** Reference Implementation
+
+This project references Anthropic's official SDK:
+
+| Project | Description | Location |
+|---------+-------------+----------|
+| [[https://github.com/anthropics/claude-agent-sdk-python][claude-agent-sdk-python]] | Official Python SDK | =reference/claude-agent-sdk-python/= |
+
+The Python SDK provides the canonical implementation of the Claude Agent protocol.
+Key features implemented here follow the same design patterns.
+
+*** Dependencies
+
+| Project | Description | Purpose |
+|---------+-------------+---------|
+| [[https://github.com/jingtaozf/literate-elisp][literate-elisp]] | Load org files as elisp | Literate programming foundation |
+| [[https://github.com/eschulte/emacs-web-server][emacs-web-server]] | HTTP server for Emacs | MCP server backend |
+| [[https://github.com/magit/transient][transient]] | Transient commands | Command menu (=C-c C-/=) |
+
+*** Alternative Approaches
+
+| Project | Description | Best For |
+|---------+-------------+----------|
+| [[https://xenodium.com/introducing-agent-shell][agent-shell]] | Shell-mode interface for AI agents | Terminal-style interactions |
+| [[https://agentclientprotocol.com/][Agent Client Protocol]] | Standard protocol for AI agents | Protocol-agnostic integrations |
+
+** Running Tests
+:PROPERTIES:
+:CUSTOM_ID: running-tests
+:END:
+
+*** Quick Start
+
+#+BEGIN_SRC bash :load no
+# Run all tests
+make test
+
+# Run unit tests only (fast, no API calls)
+make test-unit
+
+# Run integration tests (requires Claude API)
+make test-integration
+#+END_SRC
+
+*** Running Tests in Emacs
+
+#+BEGIN_SRC elisp :load no
 (setq literate-elisp-test-p t)
 (literate-elisp-load "~/projects/claude-agent/claude-agent.org")
 (literate-elisp-load "~/projects/claude-agent/claude-org.org")
 (ert t)  ; Run all tests
+
+;; Run only unit tests (no API)
+(ert '(tag :unit))
 #+END_SRC
 
-* License
+** License
+:PROPERTIES:
+:CUSTOM_ID: license
+:END:
 
 MIT

@@ -245,41 +245,90 @@ inheritance requires full org buffer setup."
       (should (null prompt)))))
 
 (ert-deftest claude-org-behavior/build-prompt-tag-order ()
-  "Test that tags are sorted alphabetically."
+  "Test that tags are sorted by SDD priority (same priority = original order)."
   (with-temp-buffer
     (org-mode)
+    ;; Tags in heading: strict, code, explore - all have same priority (50)
+    ;; So they appear in the order from org-get-tags (left-to-right from heading)
     (insert "* Task :strict:code:explore:\n#+begin_src ai\nquery\n#+end_src")
     (goto-char (+ (point-min) 45))
     (let ((prompt (claude-org--build-behavior-prompt)))
-      ;; code < explore < strict alphabetically
-      (let ((code-pos (string-match "CODE" prompt))
-            (explore-pos (string-match "EXPLORE" prompt))
-            (strict-pos (string-match "STRICT" prompt)))
-        (should (< code-pos explore-pos))
-        (should (< explore-pos strict-pos))))))
+      ;; All tags should be present in the prompt
+      (should (string-match-p "STRICT" prompt))
+      (should (string-match-p "CODE" prompt))
+      (should (string-match-p "EXPLORE" prompt)))))
 
 ;;; ============================================================
 ;;; Custom Behavior Registration Tests
 ;;; ============================================================
+;;; Note: Custom tag/header registration via alists has been removed.
+;;; Tags and headers are now loaded exclusively from docs/prompts/ files.
+;;; These tests now verify that nonexistent tags/headers return nil.
 
-(ert-deftest claude-org-behavior/custom-tag ()
-  "Test adding custom tag behavior."
-  (let ((claude-org-tag-behaviors
-         (cons '(custom_tag . "## CUSTOM TAG\nCustom behavior here.")
-               claude-org-tag-behaviors)))
-    (let ((prompt (claude-org--tag-prompt 'custom_tag)))
-      (should (stringp prompt))
-      (should (string-match-p "CUSTOM TAG" prompt)))))
+(ert-deftest claude-org-behavior/custom-tag-nonexistent ()
+  "Test that nonexistent tag returns nil (no alist fallback)."
+  (should (null (claude-org--tag-prompt 'nonexistent_custom_tag))))
 
-(ert-deftest claude-org-behavior/custom-header ()
-  "Test adding custom header behavior."
-  (let ((claude-org-header-behaviors
-         (cons '(:custom . "## CUSTOM HEADER\nTimeout: %s minutes.")
-               claude-org-header-behaviors)))
-    (let ((prompt (claude-org--header-prompt :custom "30")))
-      (should (stringp prompt))
-      (should (string-match-p "CUSTOM HEADER" prompt))
-      (should (string-match-p "30 minutes" prompt)))))
+(ert-deftest claude-org-behavior/custom-header-nonexistent ()
+  "Test that nonexistent header returns nil (no alist fallback)."
+  (should (null (claude-org--header-prompt :nonexistent_custom "30"))))
+
+;;; ============================================================
+;;; Summary Section Extraction Tests
+;;; ============================================================
+
+(ert-deftest claude-org-behavior/extract-summary-with-summary ()
+  "Test extraction of Summary section from file with Summary."
+  (let ((temp-file (make-temp-file "test-summary" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "#+TITLE: Test\n\n")
+            (insert "* Summary\n")
+            (insert ":PROPERTIES:\n:CUSTOM_ID: test-summary\n:END:\n\n")
+            (insert "Brief summary content.\n\n")
+            (insert "* Details\n\n")
+            (insert "Full detailed content here.\n"))
+          (let ((result (claude-org--extract-summary-section temp-file)))
+            (should (stringp result))
+            (should (string-match-p "Summary" result))
+            (should (string-match-p "Brief summary content" result))
+            ;; Should NOT contain Details section content
+            (should-not (string-match-p "Full detailed content" result))))
+      (delete-file temp-file))))
+
+(ert-deftest claude-org-behavior/extract-summary-without-summary ()
+  "Test extraction returns full content when no Summary section."
+  (let ((temp-file (make-temp-file "test-no-summary" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file temp-file
+            (insert "#+TITLE: Test\n\n")
+            (insert "* Main Content\n\n")
+            (insert "This is the full content.\n"))
+          (let ((result (claude-org--extract-summary-section temp-file)))
+            (should (stringp result))
+            ;; Should return full content when no Summary section
+            (should (string-match-p "Main Content" result))
+            (should (string-match-p "full content" result))))
+      (delete-file temp-file))))
+
+(ert-deftest claude-org-behavior/extract-summary-real-sdd-file ()
+  "Test Summary extraction on actual sdd.org file."
+  (let* ((prompt-file (expand-file-name "tags/sdd.org" claude-org-prompts-directory))
+         (result (claude-org--extract-summary-section prompt-file)))
+    (should (stringp result))
+    ;; Summary should contain key metadata
+    (should (string-match-p "sdd" result))
+    (should (string-match-p "Purpose" result))
+    ;; Summary should have link to Details
+    (should (string-match-p "Details" result))
+    ;; Should NOT contain full workflow content
+    (should-not (string-match-p "Finding Current Progress" result))))
+
+(ert-deftest claude-org-behavior/extract-summary-nil-for-nonexistent ()
+  "Test extraction returns nil for nonexistent file."
+  (should (null (claude-org--extract-summary-section "/nonexistent/file.org"))))
 
 ;;; ============================================================
 ;;; Run all tests

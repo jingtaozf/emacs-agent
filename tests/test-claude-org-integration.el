@@ -472,7 +472,7 @@ should be able to execute in parallel without interference."
 (ert-deftest test-org-integration-mcp-emacs-tools ()
   "Test that Emacs MCP tools are accessible via claude-org.
 This test verifies the MCP server integration is working correctly
-by checking that Claude can see the emacs MCP tools.
+by checking that Claude can see the evalElisp MCP tool.
 FLAKY: Response capture sometimes returns empty in batch mode."
   :tags '(:integration :slow :api :mcp :org :process :flaky)
   (test-claude-skip-unless-cli-available)
@@ -485,12 +485,10 @@ FLAKY: Response capture sometimes returns empty in batch mode."
        ;; Skip if empty rather than fail
        (when (or (null response) (string-empty-p (string-trim response)))
          (ert-skip "Empty response - flaky in batch mode"))
-       ;; Verify emacs MCP tools are listed
-       ;; The response should contain mcp__emacs__ prefixed tools
+       ;; Verify evalElisp MCP tool is available
+       ;; The response should mention evalElisp or mcp__emacs__
        (should (or (string-match-p "mcp__emacs__" response)
                    (string-match-p "evalElisp" response)
-                   (string-match-p "org_list_sections" response)
-                   (string-match-p "org_read_section" response)
                    (string-match-p "getDiagnostics" response)))))))
 
 ;;; Auto-Title Generation Tests
