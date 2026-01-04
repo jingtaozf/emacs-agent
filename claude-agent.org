@@ -10,6 +10,7 @@
 
 * Table of Contents                                            :TOC:noexport:
 - [[#introduction][Introduction]]
+  - [[#usage-example][Usage Example]]
 - [[#dependencies-and-requirements][Dependencies and Requirements]]
   - [[#package-header][Package Header]]
   - [[#required-libraries][Required Libraries]]
@@ -22,10 +23,25 @@
   - [[#hook-types][Hook Types]]
 - [[#process-management][Process Management]]
   - [[#cli-discovery][CLI Discovery]]
+  - [[#docker-container-management][Docker Container Management]]
+    - [[#docker-command-detection][Docker Command Detection]]
+    - [[#docker-compose-directory-discovery][Docker Compose Directory Discovery]]
+    - [[#container-status-check][Container Status Check]]
+    - [[#container-startup][Container Startup]]
   - [[#argument-builder][Argument Builder]]
+    - [[#permission-mode-conversion][Permission Mode Conversion]]
+    - [[#core-argument-builder][Core Argument Builder]]
   - [[#process-state][Process State]]
   - [[#process-filter][Process Filter]]
+    - [[#debug-logging][Debug Logging]]
+    - [[#token-extraction][Token Extraction]]
+    - [[#json-boolean-handling][JSON Boolean Handling]]
+    - [[#error-detection][Error Detection]]
+    - [[#json-buffer-processing][JSON Buffer Processing]]
+    - [[#process-filter-entry-point][Process Filter Entry Point]]
   - [[#process-sentinel][Process Sentinel]]
+  - [[#streaming-mode-initialization][Streaming Mode Initialization]]
+  - [[#closing-stdin-after-result][Closing Stdin After Result]]
   - [[#process-creation][Process Creation]]
 - [[#json-protocol][JSON Protocol]]
   - [[#content-block-parsing][Content Block Parsing]]
@@ -37,16 +53,71 @@
   - [[#client-structure][Client Structure]]
   - [[#client-creation][Client Creation]]
   - [[#client-methods][Client Methods]]
-- [[#hook-system][Hook System]]
-  - [[#hook-input-structures][Hook Input Structures]]
-  - [[#hook-invocation][Hook Invocation]]
-- [[#session-management][Session Management]]
-- [[#query-cancellation][Query Cancellation]]
-- [[#activity-mode-line][Activity Mode-Line]]
-- [[#usage-mode-line][Usage Mode-Line]]
-- [[#interactive-chat-mode][Interactive Chat Mode]]
+  - [[#control-request-handling][Control Request Handling]]
+  - [[#process-filter-integration][Process Filter Integration]]
 - [[#tests][Tests]]
-  - [[#unit-tests][Unit Tests]]
+  - [[#test-file-organization][Test File Organization]]
+  - [[#running-tests][Running Tests]]
+  - [[#test-categories][Test Categories]]
+- [[#permission-system][Permission System]]
+  - [[#permission-hook][Permission Hook]]
+    - [[#permission-cache-per-session][Permission Cache (Per-Session)]]
+    - [[#tool-description][Tool Description]]
+    - [[#default-implementation-interactive-prompt][Default Implementation: Interactive Prompt]]
+    - [[#auto-approve-implementation][Auto-Approve Implementation]]
+  - [[#permission-presets][Permission Presets]]
+  - [[#pattern-matching][Pattern Matching]]
+  - [[#permission-checking][Permission Checking]]
+- [[#ide-context][IDE Context]]
+  - [[#buffer-filtering][Buffer Filtering]]
+  - [[#buffer-information][Buffer Information]]
+  - [[#selection-formatting][Selection Formatting]]
+  - [[#ide-context-collection][IDE Context Collection]]
+  - [[#system-reminder-building][System Reminder Building]]
+- [[#session-management][Session Management]]
+  - [[#session-mapping][Session Mapping]]
+  - [[#session-expiration-and-context-limits][Session Expiration and Context Limits]]
+- [[#query-cancellation][Query Cancellation]]
+  - [[#active-query-tracking][Active Query Tracking]]
+  - [[#cancellation-functions][Cancellation Functions]]
+- [[#activity-mode-line][Activity Mode-Line]]
+  - [[#state-variables][State Variables]]
+  - [[#activity-count][Activity Count]]
+  - [[#activity-display][Activity Display]]
+  - [[#session-manager][Session Manager]]
+  - [[#auto-enable][Auto-Enable]]
+- [[#usage-mode-line][Usage Mode-Line]]
+  - [[#customization][Customization]]
+  - [[#helper-functions-1][Helper Functions]]
+  - [[#fetch-and-callback][Fetch and Callback]]
+  - [[#mode-line-control][Mode-Line Control]]
+- [[#verbose-output][Verbose Output]]
+  - [[#verbose-buffer-storage][Verbose Buffer Storage]]
+  - [[#verbose-mode][Verbose Mode]]
+  - [[#verbose-buffer-management][Verbose Buffer Management]]
+  - [[#message-formatter][Message Formatter]]
+  - [[#view-commands][View Commands]]
+- [[#interactive-chat-mode][Interactive Chat Mode]]
+  - [[#chat-mode-variables][Chat Mode Variables]]
+  - [[#chat-mode-faces][Chat Mode Faces]]
+  - [[#chat-mode-functions][Chat Mode Functions]]
+  - [[#chat-mode-definition][Chat Mode Definition]]
+  - [[#main-entry-point][Main Entry Point]]
+- [[#utilities][Utilities]]
+  - [[#translation][Translation]]
+    - [[#customization-1][Customization]]
+    - [[#translation-buffer][Translation Buffer]]
+    - [[#core-translation-function][Core Translation Function]]
+    - [[#interactive-commands][Interactive Commands]]
+    - [[#cancel-translation][Cancel Translation]]
+- [[#conversation-titling][Conversation Titling]]
+  - [[#customization-2][Customization]]
+  - [[#title-generation][Title Generation]]
+- [[#error-analysis][Error Analysis]]
+  - [[#customization-3][Customization]]
+  - [[#error-queue][Error Queue]]
+  - [[#chat-buffer-creation][Chat Buffer Creation]]
+  - [[#user-commands][User Commands]]
 - [[#package-footer][Package Footer]]
 - [[#release][Release]]
 
@@ -151,6 +222,25 @@ If nil, the CLI will be searched in PATH and common locations."
 (defcustom claude-agent-debug nil
   "When non-nil, enable debug logging."
   :type 'boolean
+  :group 'claude-agent)
+
+(defcustom claude-agent-docker-auto-start t
+  "When non-nil, auto-start Docker container if CLI path is a docker command.
+This allows seamless Docker execution without manually running docker compose up."
+  :type 'boolean
+  :group 'claude-agent)
+
+(defcustom claude-agent-docker-compose-dir nil
+  "Directory containing docker-compose.yml for Claude container.
+If nil, searches for .devcontainer/docker-compose.yml or docker-compose.yml
+in the project hierarchy."
+  :type '(choice (const nil :tag "Auto-detect")
+                 (directory :tag "Explicit directory"))
+  :group 'claude-agent)
+
+(defcustom claude-agent-docker-service-name "claude"
+  "Docker compose service name for Claude container."
+  :type 'string
   :group 'claude-agent)
 #+END_SRC
 
@@ -366,6 +456,149 @@ Returns version string or nil if unable to determine."
     (error nil)))
 #+END_SRC
 
+** Docker Container Management
+
+When =claude-agent-cli-path= or the =:cli-path= option is a Docker command
+(e.g., "docker compose exec claude claude"), these functions handle automatic
+container startup and management.
+
+*** Docker Command Detection
+
+#+BEGIN_SRC elisp
+(defun claude-agent--docker-command-p (cmd)
+  "Return non-nil if CMD is a Docker command.
+Detects 'docker run', 'docker-compose', and 'docker compose' patterns."
+  (and cmd
+       (stringp cmd)
+       (string-match-p
+        (rx bos (* space)
+            (or "docker run"
+                "docker-compose"
+                "docker compose"))
+        cmd)))
+
+(defun claude-agent--split-command (cmd)
+  "Split CMD string into a list of arguments.
+Handles quoted strings and basic shell syntax.
+For non-Docker commands, returns a single-element list."
+  (if (claude-agent--docker-command-p cmd)
+      (split-string-and-unquote cmd)
+    (list cmd)))
+
+(defun claude-agent--extract-compose-file-from-command (cmd)
+  "Extract compose file path from Docker command CMD.
+Looks for -f or --file flag followed by the path.
+Returns the compose file path or nil if not found."
+  (when (and cmd (stringp cmd))
+    (let ((args (split-string-and-unquote cmd)))
+      (cl-loop for (arg next) on args
+               when (and (member arg '("-f" "--file"))
+                         next)
+               return next))))
+#+END_SRC
+
+*** Docker Compose Directory Discovery
+
+#+BEGIN_SRC elisp
+(defun claude-agent--find-compose-dir (&optional cli-path project-root)
+  "Find directory containing docker-compose.yml for Claude.
+
+Optional CLI-PATH is the Docker command which may contain -f flag.
+Optional PROJECT-ROOT is the project directory for resolving relative paths.
+
+Search order:
+1. Extract from CLI-PATH -f flag (absolute or relative to PROJECT-ROOT)
+2. .devcontainer/ in PROJECT-ROOT
+3. .devcontainer/ in directory hierarchy from PROJECT-ROOT
+4. docker-compose.yml directly in PROJECT-ROOT
+5. docker-compose.yml in directory hierarchy from PROJECT-ROOT
+
+Returns the directory path or nil if not found."
+  (let ((search-dir (or project-root default-directory)))
+    (or
+     ;; 1. Extract from CLI command -f flag
+     (when-let ((compose-file (claude-agent--extract-compose-file-from-command cli-path)))
+       (let* ((expanded (if (file-name-absolute-p compose-file)
+                            compose-file
+                          (expand-file-name compose-file (or project-root default-directory))))
+              (dir (file-name-directory expanded)))
+         (when (file-exists-p expanded)
+           dir)))
+     ;; 2. Look for .devcontainer/docker-compose.yml from project-root
+     (when project-root
+       (let ((devcontainer (expand-file-name ".devcontainer" project-root)))
+         (when (file-exists-p (expand-file-name "docker-compose.yml" devcontainer))
+           devcontainer)))
+     ;; 3. Look for .devcontainer in directory hierarchy
+     (when-let ((project-dir (locate-dominating-file search-dir ".devcontainer")))
+       (let ((devcontainer (expand-file-name ".devcontainer" project-dir)))
+         (when (file-exists-p (expand-file-name "docker-compose.yml" devcontainer))
+           devcontainer)))
+     ;; 4. Look for docker-compose.yml directly in project-root
+     (when (and project-root
+                (file-exists-p (expand-file-name "docker-compose.yml" project-root)))
+       project-root)
+     ;; 5. Look for docker-compose.yml in directory hierarchy
+     (locate-dominating-file search-dir "docker-compose.yml"))))
+#+END_SRC
+
+*** Container Status Check
+
+#+BEGIN_SRC elisp
+(defun claude-agent--docker-container-running-p (&optional cli-path project-root)
+  "Check if the Claude Docker container is running.
+Uses docker compose ps to check container status.
+
+Optional CLI-PATH is the Docker command which may contain -f flag.
+Optional PROJECT-ROOT is the project directory for resolving relative paths."
+  (let ((compose-dir (claude-agent--find-compose-dir cli-path project-root)))
+    (when compose-dir
+      (let* ((default-directory compose-dir)
+             (cmd (format "docker compose ps --status running -q %s 2>/dev/null"
+                          claude-agent-docker-service-name))
+             (output (shell-command-to-string cmd)))
+        (not (string-empty-p (string-trim output)))))))
+#+END_SRC
+
+*** Container Startup
+
+#+BEGIN_SRC elisp
+(defun claude-agent--ensure-docker-container (&optional cli-path project-root)
+  "Ensure the Claude Docker container is running.
+Starts the container if not already running.
+
+Optional CLI-PATH is the Docker command which may contain -f flag.
+Optional PROJECT-ROOT is the project directory for resolving relative paths.
+
+Returns t if container is ready, signals error on failure."
+  (if (claude-agent--docker-container-running-p cli-path project-root)
+      t
+    (let ((compose-dir (claude-agent--find-compose-dir cli-path project-root)))
+      (unless compose-dir
+        (error "Cannot find docker-compose.yml for Claude container"))
+      (message "Starting Claude Docker container...")
+      (let* ((default-directory compose-dir)
+             (output-buffer (get-buffer-create "*docker-compose-output*"))
+             (exit-code (with-current-buffer output-buffer
+                          (erase-buffer)
+                          (call-process "docker" nil t nil "compose" "up" "-d"))))
+        (unless (zerop exit-code)
+          (error "Docker compose up failed (exit code %d). See *docker-compose-output* buffer"
+                 exit-code)))
+      ;; Wait for container to be ready (includes Claude Code installation)
+      (let ((retries 30)  ; 30 seconds max
+            (ready nil))
+        (while (and (> retries 0) (not ready))
+          (sleep-for 1)
+          (setq ready (claude-agent--docker-container-running-p cli-path project-root))
+          (cl-decf retries))
+        (if ready
+            (progn
+              (message "Claude Docker container ready")
+              t)
+          (error "Failed to start Claude Docker container (timeout)"))))))
+#+END_SRC
+
 ** Argument Builder
 
 The argument builder transforms the options plist into CLI arguments for the
@@ -475,6 +708,9 @@ Internal state structure for managing async process communication.
   session-key       ; Session key for verbose buffer grouping
   source-buffer     ; Buffer that initiated query (for display)
   source-label      ; Human-readable label like "5" for Instruction 5
+  docker-mode       ; Non-nil when running in Docker sandbox
+  path-mappings     ; Path mappings for Docker mode ((host . container) ...)
+  edited-files      ; List of files edited during query (container paths)
   (ready nil)       ; Boolean ready state
   (closed nil))     ; Boolean closed state
 
@@ -717,10 +953,12 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
       ;; Cleanup
       (setq claude-agent--active-states
             (delq state claude-agent--active-states))
+      ;; Clear Docker path mappings (set during claude-agent-query)
+      (setq emacs-mcp-server-path-mappings nil)
       ;; Unregister from active queries
-      (when-let ((req-id (claude-agent--process-state-request-id state)))
+      (when-let* ((req-id (claude-agent--process-state-request-id state)))
         (claude-agent--unregister-query req-id))
-      (when-let ((buf (claude-agent--process-state-buffer state)))
+      (when-let* ((buf (claude-agent--process-state-buffer state)))
         (when (buffer-live-p buf)
           (kill-buffer buf))))))
 #+END_SRC
@@ -807,14 +1045,18 @@ Uses streaming mode by default to enable bidirectional control protocol
 for features like canUseTool permission callback.
 
 Returns a process state object."
-  (let* ((cli-path (expand-file-name
-                    (or (plist-get options :cli-path)
-                        (claude-agent--find-cli))))
+  (let* ((raw-cli-path (or (plist-get options :cli-path)
+                           (claude-agent--find-cli)))
+         ;; For Docker commands, split into args; for regular paths, expand
+         (cli-parts (if (claude-agent--docker-command-p raw-cli-path)
+                        (claude-agent--split-command raw-cli-path)
+                      (list (expand-file-name raw-cli-path))))
          ;; Always use streaming mode for bidirectional control protocol
          (args (claude-agent--build-args options t))
          (cwd (plist-get options :cwd))
          (env-vars (plist-get options :env))
          (req-id (or request-id (claude-agent--generate-request-id)))
+         (docker-mode-p (claude-agent--docker-command-p raw-cli-path))
          (state (claude-agent--make-process-state
                  :options options
                  :json-buffer ""
@@ -827,6 +1069,7 @@ Returns a process state object."
                  :session-key session-key
                  :source-buffer source-buffer
                  :source-label source-label
+                 :docker-mode docker-mode-p
                  :ready nil
                  :closed nil))
          ;; Note: We use :connection-type 'pipe in make-process below
@@ -838,7 +1081,8 @@ Returns a process state object."
                                       env-vars)
                               process-environment)))
     ;; Build command (prompt sent via stdin in streaming mode)
-    (let* ((command (cons cli-path args))
+    ;; For Docker commands, cli-parts is already a list; append args
+    (let* ((command (append cli-parts args))
            (process (make-process
                     :name "claude-agent"
                     :command command
@@ -858,7 +1102,9 @@ Returns a process state object."
       ;; Initialize verbose buffer for session if session-key provided
       (when session-key
         (claude-agent--get-session-verbose-buffer session-key)
-        (claude-agent--verbose-insert-query-header session-key prompt cli-path args default-directory env-vars))
+        (claude-agent--verbose-insert-query-header session-key prompt
+                                                   (string-join cli-parts " ")
+                                                   args default-directory env-vars))
       ;; Streaming mode: Send initialization and prompt via stdin
       (claude-agent--streaming-init process state prompt)
       (push state claude-agent--active-states)
@@ -944,7 +1190,8 @@ Returns a process state object."
 
 #+BEGIN_SRC elisp
 (cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete
-                                     session-key source-buffer source-label)
+                                     session-key source-buffer source-label
+                                     cli-path path-mappings project-root)
   "Send a one-shot query to Claude.
 
 PROMPT is the query string to send.
@@ -978,6 +1225,20 @@ SOURCE-BUFFER is the buffer that initiated this query (optional).
 SOURCE-LABEL is a human-readable label like \"5\" for Instruction 5 (optional).
   Used together with SOURCE-BUFFER for display.
 
+CLI-PATH overrides `claude-agent-cli-path' for this query (optional).
+  Use for Docker execution, e.g., \"docker compose exec claude claude\".
+  When a Docker command is detected and `claude-agent-docker-auto-start' is t,
+  the container will be started automatically.
+
+PATH-MAPPINGS is an alist of (HOST-PATH . CONTAINER-PATH) for Docker mode (optional).
+  These mappings are let-bound to `emacs-mcp-server-path-mappings' during query
+  execution, enabling path translation between container and host.
+
+PROJECT-ROOT is the project directory path (optional).
+  Used to resolve relative paths in Docker compose commands and for finding
+  docker-compose.yml. Typically set from org property PROJECT_ROOT or
+  CLAUDE_HOST_PATH.
+
 Returns the process state object for potential interruption.
 The process state includes a request-id that can be used with
 `claude-agent-cancel-query' for cancellation.
@@ -995,21 +1256,39 @@ Example:
                   (message \"Done!\"))
    :session-key \"my-session\"
    :source-buffer (current-buffer)
-   :source-label \"5\")"
+   :source-label \"5\")
+
+Docker example:
+  (claude-agent-query
+   \"List files\"
+   :cli-path \"docker compose exec claude claude\"
+   :path-mappings \\='((\"/home/user/project\" . \"/workspace\")))"
   (unless prompt
     (error "Prompt is required"))
-  (let ((opts (or options (claude-agent-options))))
-    (claude-agent--start-process
-     prompt
-     opts
-     on-message
-     on-error
-     on-complete
-     on-token
-     nil  ; request-id (auto-generated)
-     session-key
-     source-buffer
-     source-label)))
+  (let* ((effective-cli-path (or cli-path claude-agent-cli-path))
+         (opts (or options (claude-agent-options))))
+    ;; Auto-start Docker container if needed
+    (when (and claude-agent-docker-auto-start
+               (claude-agent--docker-command-p effective-cli-path))
+      (claude-agent--ensure-docker-container effective-cli-path project-root))
+    ;; Set path mappings for MCP server (for Docker mode path translation).
+    ;; This must be setq (not let-bound) because MCP requests arrive
+    ;; asynchronously via HTTP, outside any let-binding scope.
+    ;; The variable is cleared on query completion.
+    (setq emacs-mcp-server-path-mappings path-mappings)
+    ;; Execute query
+    (let ((claude-agent-cli-path effective-cli-path))
+      (claude-agent--start-process
+       prompt
+       opts
+       on-message
+       on-error
+       on-complete
+       on-token
+       nil  ; request-id (auto-generated)
+       session-key
+       source-buffer
+       source-label))))
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
@@ -2276,8 +2555,10 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
          (let* ((start-time (claude-agent--process-state-start-time state))
                 (elapsed (claude-agent--format-elapsed start-time))
                 (spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
-                (identity (claude-agent--format-query-identity state)))
-           (push (format "● %s  [%s %s]" identity spinner elapsed) lines))))
+                (identity (claude-agent--format-query-identity state))
+                (docker-p (claude-agent--process-state-docker-mode state))
+                (docker-tag (if docker-p " [Docker]" "")))
+           (push (format "● %s%s  [%s %s]" identity docker-tag spinner elapsed) lines))))
      claude-agent--active-queries)
     (if (= (length lines) 2)
         "No active queries\n\nClick to open session manager"
@@ -2298,26 +2579,46 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
      claude-agent--active-queries)
     (when (= count 1) result)))
 
+(defun claude-agent--any-docker-mode-p ()
+  "Return non-nil if any active query is running in Docker mode."
+  (let ((found nil))
+    (maphash (lambda (_id state)
+               (when (and state
+                          (claude-agent--process-state-p state)
+                          (not (claude-agent--process-state-closed state))
+                          (claude-agent--process-state-docker-mode state))
+                 (setq found t)))
+             claude-agent--active-queries)
+    found))
+
 (defun claude-agent--update-activity-string ()
   "Update the activity mode-line string based on active queries."
   (let ((count (claude-agent-active-query-count)))
     (if (> count 0)
         (let* ((spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
+               (docker-p (claude-agent--any-docker-mode-p))
                ;; For single query, show identity; for multiple, show count
+               ;; Add Docker indicator if any query is in Docker mode
+               (docker-prefix (if docker-p "D:" "C:"))
                (display (if (= count 1)
                             (let* ((state (claude-agent--get-single-active-state))
                                    (identity (when state
                                                (claude-agent--format-query-identity state))))
                               (if identity
-                                  (format " [C:%s %s]" spinner identity)
-                                (format " [C:%s]" spinner)))
-                          (format " [C:%s×%d]" spinner count))))
+                                  (format " [%s%s %s]" docker-prefix spinner identity)
+                                (format " [%s%s]" docker-prefix spinner)))
+                          (format " [%s%s×%d]" docker-prefix spinner count)))
+               ;; Use bold for Docker mode, normal weight for local
+               ;; (e-ink friendly - no colors)
+               (face (if docker-p
+                         '(:weight bold :slant italic)
+                       '(:weight bold))))
           (setq claude-agent--spinner-index
                 (mod (1+ claude-agent--spinner-index)
                      (length claude-agent--spinner-frames)))
           (setq claude-agent-activity-string
                 (propertize display
-                            'face '(:foreground "orange" :weight bold)
+                            'face face
                             'help-echo (claude-agent--format-activity-tooltip)
                             'mouse-face 'mode-line-highlight
                             'local-map (let ((map (make-sparse-keymap)))
@@ -2356,7 +2657,9 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
         (erase-buffer)
         (insert "Active Queries\n")
         (insert "══════════════════════════════════════════════════\n\n")
-        (let ((has-queries nil))
+        (let ((has-queries nil)
+              (docker-count 0)
+              (local-count 0))
           (maphash
            (lambda (id state)
              (when (and state
@@ -2367,18 +2670,32 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
                       (elapsed (claude-agent--format-elapsed start-time))
                       ;; Use identity with long-form buffer name
                       (identity (claude-agent--format-query-identity state t))
-                      (label (claude-agent--process-state-source-label state)))
-                 ;; Format: ● buffer-name Instruction N  [elapsed]
+                      (label (claude-agent--process-state-source-label state))
+                      (docker-p (claude-agent--process-state-docker-mode state)))
+                 ;; Track Docker vs local counts
+                 (if docker-p (cl-incf docker-count) (cl-incf local-count))
+                 ;; Format: ● [Docker] buffer-name Instruction N  [elapsed]
                  (insert (propertize (format "● %s" identity)
                                      'face 'font-lock-function-name-face
                                      'query-id id))
+                 (when docker-p
+                   (insert (propertize " [Docker]"
+                                       'face '(:weight bold :slant italic))))
                  (when label
                    (insert (propertize (format " Instruction %s" label)
                                        'face 'font-lock-keyword-face)))
                  (insert (format "  [%s]\n" elapsed)))))
            claude-agent--active-queries)
           (unless has-queries
-            (insert "No active queries.\n")))
+            (insert "No active queries.\n"))
+          ;; Show summary if there are Docker queries
+          (when (> docker-count 0)
+            (insert "\n")
+            (insert (propertize (format "Docker: %d" docker-count)
+                                'face '(:weight bold :slant italic)))
+            (when (> local-count 0)
+              (insert (format "  Local: %d" local-count)))
+            (insert "\n")))
         (insert "\n")
         (insert "Keys: k=cancel  K=cancel all  g=refresh  q=quit\n"))
       (claude-agent-queries-mode)
@@ -2490,7 +2807,7 @@ Shows days and hours for periods >= 24h, otherwise hours and minutes."
       ;; Show config error
       (setq claude-agent-usage-string
             (propertize " [C:CFG]"
-                        'face '(:foreground "orange")
+                        'face '(:weight bold :slant italic)
                         'help-echo "Configure claude-agent-usage-org-id and set CLAUDE_SESSION_KEY env var"))
       (force-mode-line-update t))))
 
@@ -2552,7 +2869,7 @@ Shows days and hours for periods >= 24h, otherwise hours and minutes."
     (when error-msg
       (setq claude-agent-usage-string
             (propertize " [C:ERR]"
-                        'face '(:foreground "red")
+                        'face '(:weight bold :underline t)
                         'help-echo (format "Claude usage error:\n%s\n\nClick to retry" error-msg)
                         'mouse-face 'mode-line-highlight
                         'local-map (let ((map (make-sparse-keymap)))

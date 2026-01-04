@@ -42,6 +42,8 @@ help:
 	@echo "  make test-mcp-ide     - Run MCP IDE diagnostics tests"
 	@echo "  make test-mcp-ide-unit - Run MCP IDE unit tests only"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
+	@echo "  make test-docker      - Run Docker unit tests (path translation)"
+	@echo "  make test-docker-sandbox - Run Docker sandbox tests (requires container)"
 	@echo "  make test-readme-smoke - Run README tutorial smoke tests (no API)"
 	@echo "  make test-readme      - Run full README tutorial tests (requires API)"
 	@echo ""
@@ -51,6 +53,12 @@ help:
 	@echo "Release:"
 	@echo "  make package          - Create release package"
 	@echo "  make check            - Run all checks before release"
+	@echo ""
+	@echo "Docker:"
+	@echo "  make docker-auth      - First-time auth (opens browser for OAuth)"
+	@echo "  make docker-up        - Start Claude Code container"
+	@echo "  make docker-down      - Stop Claude Code container"
+	@echo "  make docker-status    - Show container and auth volume status"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  make docs             - Generate documentation"
@@ -288,6 +296,67 @@ test-mcp-mode-line:
 		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		-l tests/test-mcp-mode-line.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :mcp-mode-line))"
+
+.PHONY: test-docker
+test-docker:
+	@echo "Running Docker unit tests (path translation, etc.)..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/test-docker-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(and (tag :docker) (not (tag :sandbox))))"
+
+.PHONY: test-docker-sandbox
+test-docker-sandbox:
+	@echo "Running Docker sandbox integration tests..."
+	@echo "Prerequisites: make docker-up && make docker-auth"
+	@echo ""
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/test-docker-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :sandbox))"
+
+# Docker container management
+.PHONY: docker-auth
+docker-auth:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║  Claude Code Docker Authentication                           ║"
+	@echo "╠══════════════════════════════════════════════════════════════╣"
+	@echo "║  This will open a browser for OAuth login.                   ║"
+	@echo "║  Credentials will be stored in Docker volume:                ║"
+	@echo "║    claude-sandbox-data                                       ║"
+	@echo "║                                                              ║"
+	@echo "║  After auth, you can run: docker compose exec claude claude  ║"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	@echo ""
+	cd .devcontainer && docker compose run --rm -it --entrypoint sh claude -c " \
+		apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates && \
+		bun install -g @anthropic-ai/claude-code@latest && \
+		claude /login"
+
+.PHONY: docker-up
+docker-up:
+	@echo "Starting Claude Code Docker container..."
+	cd .devcontainer && docker compose up -d
+	@echo "Container started. Run 'docker compose exec claude claude --version' to verify."
+
+.PHONY: docker-down
+docker-down:
+	@echo "Stopping Claude Code Docker container..."
+	cd .devcontainer && docker compose down
+
+.PHONY: docker-status
+docker-status:
+	@echo "Claude Code Docker Status:"
+	@docker compose -f .devcontainer/docker-compose.yml ps 2>/dev/null || echo "Container not running"
+	@echo ""
+	@echo "Auth volume:"
+	@docker volume inspect claude-sandbox-data 2>/dev/null | grep -E "Name|CreatedAt" || echo "Volume not created (run 'make docker-auth' first)"
 
 # README tutorial tests
 .PHONY: test-readme-smoke

@@ -1,0 +1,79 @@
+# Docker Compose for Claude Code in container
+# Uses persistent volume for auth (official Docker sandbox pattern)
+#
+# First-time setup:
+#   make docker-auth              # Authenticate (opens browser)
+#
+# Usage:
+#   docker compose up -d          # Start container in background
+#   docker compose exec claude claude --version  # Run claude in container
+#   docker compose exec claude claude -p "Hello"  # Run query
+#   docker compose down           # Stop container
+#
+# Testing:
+#   docker compose exec claude make test-docker  # Run unit tests
+
+services:
+  claude:
+    image: oven/bun:latest
+    container_name: claude-agent
+    working_dir: /workspace
+
+    # Install dependencies, Emacs, and Claude Code, then keep running
+    entrypoint: >
+      sh -c "
+        echo 'Installing system dependencies...' &&
+        apt-get update &&
+        apt-get install -y --no-install-recommends \
+          git curl ca-certificates openssh-client make \
+          emacs-nox &&
+        echo 'Installing Emacs packages for testing...' &&
+        mkdir -p /root/projects &&
+        git clone --depth 1 https://github.com/jingtaozf/literate-elisp.git /root/projects/literate-elisp &&
+        mkdir -p /root/.emacs.d/straight/build/web-server &&
+        curl -sL https://raw.githubusercontent.com/eschulte/emacs-web-server/master/web-server.el \
+          -o /root/.emacs.d/straight/build/web-server/web-server.el &&
+        curl -sL https://raw.githubusercontent.com/eschulte/emacs-web-server/master/web-server-status-codes.el \
+          -o /root/.emacs.d/straight/build/web-server/web-server-status-codes.el &&
+        echo 'Installing Claude Code...' &&
+        bun install -g @anthropic-ai/claude-code@latest &&
+        echo 'Container ready (Claude Code + Emacs + test deps installed).' &&
+        exec sleep infinity
+      "
+
+    volumes:
+      # Claude credentials (persistent volume - auth stored here)
+      # This follows the official Docker sandbox pattern:
+      # https://docs.docker.com/ai/sandboxes/claude-code/
+      - claude-sandbox-data:/root/.claude
+
+      # Git access (read-only from host)
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.gitconfig:/root/.gitconfig:ro
+
+      # Workspace (read-write) - PROJECT_DIR env var or parent dir
+      - ${PROJECT_DIR:-..}:/workspace
+
+      # Persist command history
+      - claude-history:/root/.bash_history
+
+    environment:
+      - TZ=${TZ:-UTC}
+      - HOME=/root
+      - CLAUDE_CONFIG_DIR=/root/.claude
+
+    # Enable host.docker.internal on Linux (already works on Mac/Windows)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Keep stdin open for interactive use
+    stdin_open: true
+    tty: true
+
+volumes:
+  # Persistent volume for Claude credentials (shared across projects)
+  # Credentials stored here after `make docker-auth`
+  claude-sandbox-data:
+    name: claude-sandbox-data
+  claude-history:
+    name: claude-agent-history

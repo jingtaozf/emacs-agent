@@ -71,6 +71,92 @@ Uses Claude Code permission pattern syntax."
   "Maximum length of output from evalElisp."
   :type 'integer
   :group 'emacs-mcp-server)
+
+(defcustom emacs-mcp-server-host "127.0.0.1"
+  "Host address for MCP server to bind.
+Use \"0.0.0.0\" to allow connections from Docker containers."
+  :type 'string
+  :group 'emacs-mcp-server)
+#+END_SRC
+
+** Path Translation
+
+When Claude Code runs in a Docker container, file paths in requests use
+container paths (e.g., =/workspace/file.txt=) that must be translated to
+host paths (e.g., =/home/user/project/file.txt=) for Emacs to operate on.
+
+This variable is set by =claude-agent-query= when Docker mode is active.
+Since MCP requests arrive asynchronously via HTTP (outside any let-binding
+scope), =setq= must be used instead of =let=.  The variable is automatically
+cleared when the query completes.
+
+#+BEGIN_SRC elisp
+(defvar emacs-mcp-server-path-mappings nil
+  "Alist of (HOST-PATH . CONTAINER-PATH) for Docker path translation.
+This variable is set by `claude-agent-query' when Docker mode is active
+and cleared on query completion.  MCP requests use this to translate
+container paths to host paths before evaluation, and host paths back to
+container paths in results.
+
+Example mapping:
+  ((\"/home/user/project\" . \"/workspace\"))
+
+This translates /workspace/src/main.py to /home/user/project/src/main.py.")
+
+(defun emacs-mcp-server--path-matches-p (prefix path)
+  "Return non-nil if PATH matches PREFIX for path translation.
+Matches if PATH equals PREFIX exactly, or starts with PREFIX followed by /.
+This prevents false matches like /workspacefoo matching /workspace."
+  (or (string= path prefix)
+      (string-prefix-p (file-name-as-directory prefix) path)))
+
+(defun emacs-mcp-server--to-host-path (path)
+  "Translate container PATH to host path using current mappings.
+Returns PATH unchanged if no mapping matches or mappings are nil.
+Uses strict prefix matching to avoid false positives."
+  (if (null emacs-mcp-server-path-mappings)
+      path
+    (cl-loop for (host . container) in emacs-mcp-server-path-mappings
+             when (emacs-mcp-server--path-matches-p container path)
+             return (if (string= path container)
+                        (directory-file-name host)
+                      (concat (file-name-as-directory host)
+                              (substring path (length (file-name-as-directory container)))))
+             finally return path)))
+
+(defun emacs-mcp-server--to-container-path (path)
+  "Translate host PATH to container path using current mappings.
+Returns PATH unchanged if no mapping matches or mappings are nil.
+Uses strict prefix matching to avoid false positives."
+  (if (null emacs-mcp-server-path-mappings)
+      path
+    (cl-loop for (host . container) in emacs-mcp-server-path-mappings
+             when (emacs-mcp-server--path-matches-p host path)
+             return (if (string= path host)
+                        (directory-file-name container)
+                      (concat (file-name-as-directory container)
+                              (substring path (length (file-name-as-directory host)))))
+             finally return path)))
+
+(defun emacs-mcp-server--translate-paths-in-code (code direction)
+  "Translate file paths in elisp CODE string.
+DIRECTION is :to-host or :to-container.
+Translates quoted string paths like \"/workspace/foo.txt\"."
+  (if (null emacs-mcp-server-path-mappings)
+      code
+    (let ((translate-fn (if (eq direction :to-host)
+                            #'emacs-mcp-server--to-host-path
+                          #'emacs-mcp-server--to-container-path)))
+      (replace-regexp-in-string
+       "\"\\(/[^\"]+\\)\""
+       (lambda (match)
+         (let ((path (match-string 1 match)))
+           (format "\"%s\"" (funcall translate-fn path))))
+       code t))))
+
+(defun emacs-mcp-server--translate-paths-in-result (result-str)
+  "Translate host paths back to container paths in RESULT-STR."
+  (emacs-mcp-server--translate-paths-in-code result-str :to-container))
 #+END_SRC
 
 ** Constants and State
@@ -282,8 +368,13 @@ This prevents elisp evaluation from disrupting the user's current editing contex
 
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--handler-eval-elisp (params _session)
-  "Handler for evalElisp tool.  PARAMS contains code and optional save_current_state."
-  (let* ((code (alist-get 'code params))
+  "Handler for evalElisp tool.  PARAMS contains code and optional save_current_state.
+When `emacs-mcp-server-path-mappings' is bound (by `claude-agent-query' in Docker
+mode), translates container paths to host paths before evaluation and back again
+in results."
+  (let* ((raw-code (alist-get 'code params))
+         ;; Translate container paths to host paths for Emacs to operate on
+         (code (emacs-mcp-server--translate-paths-in-code raw-code :to-host))
          (save-state (if (assq 'save_current_state params)
                          (not (eq (alist-get 'save_current_state params) :json-false))
                        t))  ;; Default: true
@@ -306,8 +397,10 @@ This prevents elisp evaluation from disrupting the user's current editing contex
                     (emacs-mcp-server--log-eval-end
                      eval-result
                      (float-time (time-subtract (current-time) start-time)))
+                    ;; Translate host paths back to container paths in result
                     `((success . t)
-                      (result . ,(emacs-mcp-server--pp-to-string eval-result))))
+                      (result . ,(emacs-mcp-server--translate-paths-in-result
+                                  (emacs-mcp-server--pp-to-string eval-result)))))
                 (error
                  (emacs-mcp-server--log-eval-error
                   err

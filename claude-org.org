@@ -44,6 +44,7 @@
   - [[#mcp-server-integration][MCP Server Integration]]
 - [[#project-configuration][Project Configuration]]
   - [[#project_root][PROJECT_ROOT]]
+  - [[#docker-configuration][Docker Configuration]]
   - [[#system-prompts][System Prompts]]
 - [[#process-management][Process Management]]
   - [[#state-variables-1][State Variables]]
@@ -517,6 +518,8 @@ configuration. Using constants ensures consistency across the codebase.
 | =CLAUDE_PERMISSION_MODE= | Tool permission level (readonly/accept-edits/plan/bypass) |
 | =CLAUDE_SDK_UUID= | Session identifier for =--resume= |
 | =CLAUDE_SETTING_SOURCES= | Comma-separated list of setting sources |
+| =CLAUDE_CODE_PATH= | Claude CLI command/path (e.g. =docker compose exec claude claude=) |
+| =CLAUDE_CONTAINER_PATH= | Container path for Docker mapping (e.g. =/workspace=). Uses PROJECT_ROOT as host path. |
 
 #+NAME: custom-property-constants
 #+BEGIN_SRC elisp
@@ -542,6 +545,24 @@ be passed as environment variables when starting the Claude process.")
     ("bypass"        . (:cli "bypassPermissions"  :short "BP")))
   "Map permission preset names to CLI values and short display names.
 Each entry is (PRESET . (:cli CLI-VALUE :short SHORT-NAME)).")
+
+;; Docker container support properties
+(defconst claude-org-code-path-property "CLAUDE_CODE_PATH"
+  "Org property name for Claude CLI path/command.
+When set to a Docker command (e.g., \"docker compose exec claude claude\"),
+enables Docker container mode with automatic path translation.
+
+Usage:
+  #+PROPERTY: CLAUDE_CODE_PATH docker compose exec claude claude")
+
+(defconst claude-org-container-path-property "CLAUDE_CONTAINER_PATH"
+  "Org property name for container path in Docker path mapping.
+Used with PROJECT_ROOT to translate paths between host and container.
+PROJECT_ROOT provides the host path, this provides the container path.
+
+Usage:
+  #+PROPERTY: PROJECT_ROOT /home/user/project
+  #+PROPERTY: CLAUDE_CONTAINER_PATH /workspace")
 #+END_SRC
 
 * Session Management
@@ -586,22 +607,26 @@ Session IDs enable multiple independent conversations within a single org file.
 (defun claude-org--get-session-id ()
   "Get user-defined CLAUDE_SESSION_ID from org properties.
 Searches section property drawer first, then file-level #+PROPERTY.
-Returns nil if no session ID is defined (file path will be used alone)."
-  (save-excursion
-    ;; org-entry-get with t enables inheritance up the heading tree
-    (org-entry-get nil "CLAUDE_SESSION_ID" t)))
+Returns nil if no session ID is defined (file path will be used alone).
+Returns nil safely if not in org-mode context."
+  (ignore-errors
+    (save-excursion
+      ;; org-entry-get with t enables inheritance up the heading tree
+      (org-entry-get nil "CLAUDE_SESSION_ID" t))))
 
 (defun claude-org--get-session-scope ()
   "Determine the scope of the current CLAUDE_SESSION_ID.
 Returns `section' if defined in a property drawer, `file' if defined
-at file level, or nil if no session ID is defined."
-  (save-excursion
-    (let ((local-session (org-entry-get nil "CLAUDE_SESSION_ID" nil))
-          (inherited-session (org-entry-get nil "CLAUDE_SESSION_ID" t)))
-      (cond
-       (local-session 'section)
-       (inherited-session 'file)
-       (t nil)))))
+at file level, or nil if no session ID is defined.
+Returns nil safely if not in org-mode context."
+  (ignore-errors
+    (save-excursion
+      (let ((local-session (org-entry-get nil "CLAUDE_SESSION_ID" nil))
+            (inherited-session (org-entry-get nil "CLAUDE_SESSION_ID" t)))
+        (cond
+         (local-session 'section)
+         (inherited-session 'file)
+         (t nil))))))
 
 (defun claude-org--current-session-key ()
   "Get the session key for the current context.
@@ -621,30 +646,34 @@ file shares one conversation context.
 #+BEGIN_SRC elisp
 (defun claude-org--has-session-tag-p ()
   "Check if current section has the session tag.
-Returns non-nil if current heading has :claude_session: tag."
-  (save-excursion
-    (when (org-at-heading-p)
-      (let ((tags (org-get-tags nil t)))
-        (member claude-org-session-tag tags)))))
+Returns non-nil if current heading has :claude_session: tag.
+Returns nil safely if not in org-mode context."
+  (ignore-errors
+    (save-excursion
+      (when (org-at-heading-p)
+        (let ((tags (org-get-tags nil t)))
+          (member claude-org-session-tag tags))))))
 
 (defun claude-org--find-session-scope-heading ()
   "Find the heading that defines the session scope.
 Walks up the heading tree looking for :claude_session: tag or CLAUDE_SESSION_ID.
 Checks current heading first, then walks upward.
-Returns the heading position or nil if at file scope."
-  (save-excursion
-    (catch 'found
-      ;; First check current heading (if at one)
-      (when (org-at-heading-p)
-        (when (or (claude-org--has-session-tag-p)
-                  (org-entry-get nil "CLAUDE_SESSION_ID" nil))
-          (throw 'found (point))))
-      ;; Then walk up the tree
-      (while (org-up-heading-safe)
-        (when (or (claude-org--has-session-tag-p)
-                  (org-entry-get nil "CLAUDE_SESSION_ID" nil))
-          (throw 'found (point))))
-      nil)))
+Returns the heading position or nil if at file scope.
+Returns nil safely if not in org-mode context."
+  (ignore-errors
+    (save-excursion
+      (catch 'found
+        ;; First check current heading (if at one)
+        (when (org-at-heading-p)
+          (when (or (claude-org--has-session-tag-p)
+                    (org-entry-get nil "CLAUDE_SESSION_ID" nil))
+            (throw 'found (point))))
+        ;; Then walk up the tree
+        (while (org-up-heading-safe)
+          (when (or (claude-org--has-session-tag-p)
+                    (org-entry-get nil "CLAUDE_SESSION_ID" nil))
+            (throw 'found (point))))
+        nil))))
 #+END_SRC
 
 ** SDK UUID Management
@@ -967,12 +996,13 @@ Permission mode can be stored as org property `CLAUDE_PERMISSION_MODE`.
 (defun claude-org--get-permission-mode-property ()
   "Get CLAUDE_PERMISSION_MODE from org properties.
 Checks section property drawer first, then file-level #+PROPERTY.
-Returns nil if not set."
-  (or
-   ;; Section-level property (with inheritance)
-   (org-entry-get nil claude-org-permission-property t)
-   ;; File-level property via keyword
-   (claude-org--get-file-level-property claude-org-permission-property)))
+Returns nil if not set.  Returns nil safely if not in org-mode context."
+  (ignore-errors
+    (or
+     ;; Section-level property (with inheritance)
+     (org-entry-get nil claude-org-permission-property t)
+     ;; File-level property via keyword
+     (claude-org--get-file-level-property claude-org-permission-property))))
 
 (defun claude-org--get-permission-mode ()
   "Get effective permission mode for current session.
@@ -1003,13 +1033,15 @@ Returns CLI permission-mode value."
 (defun claude-org--get-setting-sources ()
   "Get setting sources for Claude CLI.
 Checks CLAUDE_SETTING_SOURCES org property first, then uses default.
-Returns list of strings like (\"user\" \"project\")."
+Returns list of strings like (\"user\" \"project\").
+Returns default safely if not in org-mode context."
   (let ((prop-value
-         (or
-          ;; Section-level property (with inheritance)
-          (org-entry-get nil claude-org-setting-sources-property t)
-          ;; File-level property via keyword
-          (claude-org--get-file-level-property claude-org-setting-sources-property))))
+         (ignore-errors
+           (or
+            ;; Section-level property (with inheritance)
+            (org-entry-get nil claude-org-setting-sources-property t)
+            ;; File-level property via keyword
+            (claude-org--get-file-level-property claude-org-setting-sources-property)))))
     (if prop-value
         ;; Parse comma-separated string from property
         (mapcar #'string-trim (split-string prop-value ","))
@@ -1019,16 +1051,17 @@ Returns list of strings like (\"user\" \"project\")."
 (defun claude-org--get-org-property (property &optional no-expand)
   "Get PROPERTY value from org properties with variable expansion.
 Checks section property drawer first (with inheritance), then file-level #+PROPERTY.
-Returns nil if not set.
+Returns nil if not set.  Returns nil safely if not in org-mode context.
 
 By default, expands ${VAR} references using ENV_FILE variables and process environment.
 Set NO-EXPAND to t to disable variable expansion."
   (let ((raw-value
-         (or
-          ;; Section-level property (with inheritance)
-          (org-entry-get nil property t)
-          ;; File-level property via keyword
-          (claude-org--get-file-level-property property))))
+         (ignore-errors
+           (or
+            ;; Section-level property (with inheritance)
+            (org-entry-get nil property t)
+            ;; File-level property via keyword
+            (claude-org--get-file-level-property property)))))
     ;; Apply variable expansion unless disabled
     (if (or no-expand (not raw-value))
         raw-value
@@ -1148,6 +1181,7 @@ Project configuration for cwd and system prompts.
 Checks section-level property drawer first, then inherits from parent headings,
 finally falls back to file-level #+PROPERTY.
 Returns nil if not set (will use default-directory).
+Returns nil safely if not in org-mode context.
 
 Usage in org file:
   File-level: #+PROPERTY: PROJECT_ROOT /path/to/project
@@ -1156,7 +1190,49 @@ Usage in org file:
     :PROPERTIES:
     :PROJECT_ROOT: /other/path
     :END:"
-  (org-entry-get nil "PROJECT_ROOT" t))
+  (ignore-errors
+    (org-entry-get nil "PROJECT_ROOT" t)))
+#+END_SRC
+
+** Docker Configuration
+
+These functions support running Claude Code in Docker containers.  When
+=CLAUDE_CODE_PATH= is set to a Docker command, path translation is enabled
+between host and container paths using =PROJECT_ROOT= (host) and =CLAUDE_CONTAINER_PATH=.
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-cli-path ()
+  "Get Claude CLI path/command from org properties.
+Returns nil to use default (claude-agent-cli-path).
+Returns nil safely if not in org-mode context.
+
+Usage:
+  #+PROPERTY: CLAUDE_CODE_PATH docker compose exec claude claude"
+  (ignore-errors
+    (org-entry-get nil claude-org-code-path-property t)))
+
+(defun claude-org--get-path-mappings ()
+  "Build path mappings alist from org properties for Docker mode.
+Returns alist of (HOST-PATH . CONTAINER-PATH) or nil if not configured.
+
+Uses PROJECT_ROOT as the host path and CLAUDE_CONTAINER_PATH as container path.
+Both must be set for mapping to work.
+
+Usage:
+  #+PROPERTY: PROJECT_ROOT /home/user/project
+  #+PROPERTY: CLAUDE_CONTAINER_PATH /workspace"
+  (ignore-errors
+    (let ((host-path (claude-org--get-project-root))
+          (container-path (org-entry-get nil claude-org-container-path-property t)))
+      (when (and host-path container-path)
+        (list (cons host-path container-path))))))
+
+(defun claude-org--docker-mode-p ()
+  "Return non-nil if Docker mode is active.
+Docker mode is detected when CLAUDE_CODE_PATH contains 'docker'.
+Returns nil safely if not in org-mode context."
+  (let ((cli-path (claude-org--get-cli-path)))
+    (and cli-path (string-match-p "docker" cli-path))))
 #+END_SRC
 
 ** System Prompts
@@ -1202,22 +1278,34 @@ Usage in org file:
         (when prompts
           (mapconcat #'identity (nreverse prompts) "\n\n"))))))
 
+(defun claude-org--build-elisp-reload-hint ()
+  "Build instruction for reloading elisp files after editing.
+Always included in system prompt to ensure Claude reloads code changes."
+  "IMPORTANT - Elisp Reload Rule:
+After editing .el or .org files containing Elisp code, you MUST reload them
+in Emacs using evalElisp MCP tool so changes take effect:
+- For .el files: (load-file \"/path/to/file.el\")
+- For .org files with literate-elisp: (literate-elisp-load \"/path/to/file.org\")
+This applies in both host and Docker sandbox modes.")
+
 (defun claude-org--build-system-prompt ()
   "Build complete system prompt from file-based templates and org sections.
 Combines:
 1. System prompts from prompts/system/*.org (loaded in sorted order)
 2. :system_prompt: tagged org sections in the current file
 3. Behavior prompts from tags and header arguments
-4. Line width instruction based on `claude-org-line-width'"
+4. Line width instruction based on `claude-org-line-width'
+5. Elisp reload instruction"
   (let ((file-prompts (claude-org--load-system-prompts))
         (org-prompts (claude-org--collect-system-prompts))
         (behavior-prompt (claude-org--build-behavior-prompt))
         (line-width-hint (when (and claude-org-line-width (> claude-org-line-width 0))
                            (format "Keep output lines under %d characters, break long lines naturally."
-                                   claude-org-line-width))))
-    ;; Combine all parts: file prompts + org-prompts + behaviors + line-width
+                                   claude-org-line-width)))
+        (elisp-hint (claude-org--build-elisp-reload-hint)))
+    ;; Combine all parts: file prompts + org-prompts + behaviors + line-width + elisp-reload
     (let ((parts (append file-prompts
-                         (delq nil (list org-prompts behavior-prompt line-width-hint)))))
+                         (delq nil (list org-prompts behavior-prompt line-width-hint elisp-hint)))))
       (when parts
         (string-join parts "\n\n")))))
 #+END_SRC
@@ -2934,11 +3022,18 @@ SDK-UUID: Session UUID for resume"
 #+BEGIN_SRC elisp
 (defun claude-org--send-request (prompt &optional instr-num)
   "Send PROMPT to Claude via claude-agent.
-INSTR-NUM is the instruction number for display in session manager (optional)."
+INSTR-NUM is the instruction number for display in session manager (optional).
+
+When Docker mode is active (CLAUDE_CODE_PATH contains 'docker'), this function
+passes :cli-path and :path-mappings to claude-agent-query for automatic path
+translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
   (let* ((session-key (claude-org--current-session-key))
          (sdk-uuid (claude-org--get-sdk-uuid))
          (project-root (claude-org--get-project-root))
          (system-prompt (claude-org--build-system-prompt))
+         ;; Docker configuration from org properties
+         (cli-path (claude-org--get-cli-path))
+         (path-mappings (claude-org--get-path-mappings))
          ;; Build IDE context reminder and query options using helpers
          (system-reminder (claude-org--build-ide-context-reminder project-root))
          (options (claude-org--build-query-options project-root system-prompt sdk-uuid))
@@ -2954,12 +3049,16 @@ INSTR-NUM is the instruction number for display in session manager (optional)."
     (lexical-let ((buf source-buf)
                   (session-key session-key))
       ;; Send query via claude-agent
+      ;; Pass :cli-path and :path-mappings for Docker mode support
       (let ((state (claude-agent-query
                     full-prompt
                     :options options
                     :session-key session-key
                     :source-buffer source-buf
                     :source-label source-label
+                    :cli-path cli-path
+                    :path-mappings path-mappings
+                    :project-root project-root
                     :on-token (lambda (text)
                                 (when (buffer-live-p buf)
                                   (with-current-buffer buf
@@ -3100,6 +3199,18 @@ Dynamic header line showing session status, IDE context, and thinking state.
                                                 'font-lock-constant-face
                                               'font-lock-type-face))
                         (propertize " [file-only]" 'face 'font-lock-comment-face)))
+         ;; Docker sandbox indicator
+         (docker-p (claude-org--docker-mode-p))
+         (container-path (when docker-p
+                           (ignore-errors
+                             (org-entry-get nil claude-org-container-path-property t))))
+         (docker-str (if docker-p
+                         (propertize " [Docker]"
+                                     'face '(:weight bold :slant italic)
+                                     'help-echo (format "Docker sandbox mode\nCLI: %s\nContainer path: %s"
+                                                        (or (claude-org--get-cli-path) "default")
+                                                        (or container-path "/workspace")))
+                       ""))
          ;; Permission mode indicator
          (perm-str (propertize (format " [%s]" (claude-org--permission-mode-short))
                                'face 'font-lock-warning-face
@@ -3109,7 +3220,7 @@ Dynamic header line showing session status, IDE context, and thinking state.
          (active-count (claude-org--active-session-count))
          (active-str (if (> active-count 0)
                          (propertize (format " [%d thinking...]" active-count)
-                                     'face '(:foreground "orange" :weight bold)
+                                     'face '(:weight bold)
                                      'help-echo (claude-org--format-session-tooltip)
                                      'mouse-face 'mode-line-highlight
                                      'local-map claude-org--session-badge-map)
@@ -3142,7 +3253,7 @@ Dynamic header line showing session status, IDE context, and thinking state.
                     "")))
     (concat " Claude Org: "
             (propertize file-name 'face 'font-lock-function-name-face)
-            session-str perm-str active-str project-str file-str sel-str)))
+            session-str docker-str perm-str active-str project-str file-str sel-str)))
 #+END_SRC
 
 * Cancel Support

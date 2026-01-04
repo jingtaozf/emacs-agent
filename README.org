@@ -54,6 +54,12 @@
     - [[#pattern-syntax][Pattern Syntax]]
   - [[#ide-context][IDE Context]]
     - [[#excluding-buffers][Excluding Buffers]]
+  - [[#ref-docker-sandbox][Docker Sandbox Support]]
+    - [[#quick-start-1][Quick Start]]
+    - [[#file-properties-for-docker][File Properties for Docker]]
+    - [[#per-section-docker-configuration][Per-Section Docker Configuration]]
+    - [[#path-translation][Path Translation]]
+    - [[#docker-commands][Docker Commands]]
   - [[#project-configuration-claude-org][Project Configuration (claude-org)]]
     - [[#project_root][PROJECT_ROOT]]
     - [[#system-prompts][System Prompts]]
@@ -99,6 +105,7 @@
     - [[#session-issues][Session Issues]]
     - [[#permission-issues][Permission Issues]]
     - [[#mcp-server-issues][MCP Server Issues]]
+    - [[#faq-docker][Docker Issues]]
     - [[#org-mode-issues][Org-mode Issues]]
 - [[#appendix][Appendix]]
   - [[#related-projects][Related Projects]]
@@ -707,6 +714,87 @@ This context is prepended to prompts as =<system-reminder>= tags.
                  (bound-and-true-p my-special-mode))))
 #+END_SRC
 
+** Docker Sandbox Support
+:PROPERTIES:
+:CUSTOM_ID: ref-docker-sandbox
+:END:
+
+Run Claude Code in a Docker container for isolation and reproducibility.
+
+*** Quick Start
+
+#+BEGIN_SRC bash :load no
+# One-time setup: authenticate (opens browser)
+make docker-auth
+
+# Start container
+make docker-up
+
+# Check status
+make docker-status
+#+END_SRC
+
+*** File Properties for Docker
+
+Set these properties to use Docker execution:
+
+#+BEGIN_EXAMPLE
+,#+PROPERTY: CLAUDE_CODE_PATH docker compose -f /path/to/docker-compose.yml exec claude claude
+,#+PROPERTY: CLAUDE_HOST_PATH /Users/yourname/projects/myproject
+,#+PROPERTY: CLAUDE_CONTAINER_PATH /workspace
+#+END_EXAMPLE
+
+| Property | Description |
+|----------+-------------|
+| =CLAUDE_CODE_PATH= | CLI command or path (supports Docker compose commands) |
+| =CLAUDE_HOST_PATH= | Host machine path that is mounted in container |
+| =CLAUDE_CONTAINER_PATH= | Corresponding path inside the container |
+
+*** Per-Section Docker Configuration
+
+Override Docker settings per-section:
+
+#+BEGIN_EXAMPLE
+,* Backend Work
+:PROPERTIES:
+:CLAUDE_CODE_PATH: docker compose -f ~/.devcontainer/docker-compose.yml exec claude claude
+:CLAUDE_HOST_PATH: /Users/me/projects/backend
+:CLAUDE_CONTAINER_PATH: /workspace
+:END:
+
+,#+begin_src ai
+Work in isolated Docker environment for this section.
+,#+end_src
+#+END_EXAMPLE
+
+*** Path Translation
+
+When using Docker, paths are automatically translated between host and container:
+- Paths in Claude's tool calls (container → host)
+- Paths in MCP server responses (host → container)
+
+This allows Claude to read/write files using container paths while Emacs MCP server
+operates on host paths.
+
+*** Docker Commands
+
+| Command | Description |
+|---------+-------------|
+| =make docker-auth= | First-time authentication (opens browser for OAuth) |
+| =make docker-up= | Start Docker container |
+| =make docker-down= | Stop Docker container |
+| =make docker-status= | Show container and auth volume status |
+
+*** Testing Docker Integration
+
+#+BEGIN_SRC bash :load no
+# Run unit tests (path translation, etc.)
+make test-docker
+
+# Run integration tests (requires running container)
+make test-docker-sandbox
+#+END_SRC
+
 ** Project Configuration (claude-org)
 :PROPERTIES:
 :CUSTOM_ID: ref-project-configuration
@@ -1150,6 +1238,18 @@ Skills are markdown files in subdirectories of =~/.claude/skills/=:
 ;; CLI path (auto-detected if nil)
 (setq claude-agent-cli-path "/path/to/claude")
 
+;; Docker CLI path example
+;; (setq claude-agent-cli-path "docker compose -f ~/.devcontainer/docker-compose.yml exec claude claude")
+
+;; Docker auto-start (starts container if not running)
+(setq claude-agent-docker-auto-start t)
+
+;; Docker compose directory (auto-detected if nil)
+;; (setq claude-agent-docker-compose-dir "~/.devcontainer")
+
+;; Docker service name (default: "claude")
+(setq claude-agent-docker-service-name "claude")
+
 ;; Debug logging
 (setq claude-agent-debug t)
 
@@ -1229,6 +1329,11 @@ Skills are markdown files in subdirectories of =~/.claude/skills/=:
 
 ;; Max output length from evalElisp
 (setq emacs-mcp-server-max-output-length 50000)
+
+;; Docker path mappings (set dynamically by claude-agent-query)
+;; Format: ((host-path . container-path) ...)
+;; Example: (("/Users/me/project" . "/workspace"))
+;; Note: Usually set via CLAUDE_HOST_PATH and CLAUDE_CONTAINER_PATH properties
 #+END_SRC
 
 *** claude-agent-chat
@@ -1492,6 +1597,65 @@ attempts recovery, but this may fail if:
 
 2. Check MCP config in Claude Code settings:
    - The MCP server URL should be =http://localhost:PORT=
+
+*** Docker Issues
+:PROPERTIES:
+:CUSTOM_ID: faq-docker
+:END:
+
+**** "Container not running" error
+
+*Symptoms:* Error when trying to execute queries with Docker CLI path.
+
+*Solutions:*
+
+1. Start the container:
+   #+BEGIN_SRC bash :load no
+   make docker-up
+   #+END_SRC
+
+2. Check container status:
+   #+BEGIN_SRC bash :load no
+   make docker-status
+   #+END_SRC
+
+3. Enable auto-start:
+   #+BEGIN_SRC elisp :load no
+   (setq claude-agent-docker-auto-start t)
+   #+END_SRC
+
+**** "Invalid API key" in Docker
+
+*Symptoms:* Authentication error when running in Docker container.
+
+*Solutions:*
+
+1. Run first-time authentication:
+   #+BEGIN_SRC bash :load no
+   make docker-auth
+   #+END_SRC
+
+   This opens a browser for OAuth login and stores credentials in the
+   =claude-sandbox-data= Docker volume.
+
+2. Check volume exists:
+   #+BEGIN_SRC bash :load no
+   docker volume ls | grep claude-sandbox-data
+   #+END_SRC
+
+**** Path issues with Docker
+
+*Symptoms:* "File not found" errors when Claude tries to access files.
+
+*Solutions:*
+
+1. Ensure path properties are set correctly:
+   #+BEGIN_EXAMPLE
+   ,#+PROPERTY: CLAUDE_HOST_PATH /Users/yourname/projects/myproject
+   ,#+PROPERTY: CLAUDE_CONTAINER_PATH /workspace
+   #+END_EXAMPLE
+
+2. Verify the mount in docker-compose.yml matches your host path.
 
 *** Org-mode Issues
 :PROPERTIES:
