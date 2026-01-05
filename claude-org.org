@@ -378,6 +378,13 @@ Each org file gets its own history file named <basename>--<hash>.el."
   :type 'integer
   :group 'claude-org)
 
+(defcustom claude-org-recent-blocks-limit 30
+  "Maximum number of recent blocks to show in `claude-org-jump-to-ai-block'.
+When nil, show all blocks (up to `claude-org-history-max-entries')."
+  :type '(choice (const :tag "No limit" nil)
+                 (integer :tag "Maximum count"))
+  :group 'claude-org)
+
 (defconst claude-org--history-save-delay 2.0
   "Seconds to wait before saving history after changes.")
 #+END_SRC
@@ -2868,14 +2875,19 @@ Builds title dynamically from CUSTOM_ID to show current heading hierarchy."
 (defun claude-org--collect-recent-blocks ()
   "Collect recent blocks for completing-read.
 Returns alist of (DISPLAY-STRING . ENTRY).
-Only includes entries with CUSTOM_ID."
+Only includes entries with CUSTOM_ID.
+Limited by `claude-org-recent-blocks-limit'."
   (claude-org--ensure-history-loaded)
-  (let ((valid-entries (cl-remove-if-not
-                        (lambda (entry) (plist-get (cdr entry) :custom-id))
-                        claude-org--block-history)))
+  (let* ((valid-entries (cl-remove-if-not
+                         (lambda (entry) (plist-get (cdr entry) :custom-id))
+                         claude-org--block-history))
+         ;; Apply limit if set
+         (limited-entries (if claude-org-recent-blocks-limit
+                              (seq-take valid-entries claude-org-recent-blocks-limit)
+                            valid-entries)))
     (mapcar (lambda (entry)
               (cons (claude-org--format-block-candidate entry) entry))
-            valid-entries)))
+            limited-entries)))
 
 (defun claude-org--goto-block-by-custom-id (custom-id)
   "Navigate to AI block via CUSTOM_ID using org-link-search.
