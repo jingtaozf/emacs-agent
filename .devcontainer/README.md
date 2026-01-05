@@ -98,12 +98,10 @@ translation occurs:
 
 ## Connecting to Host Emacs MCP Server
 
-The container can reach the host via `host.docker.internal`. Configure your MCP
-server to bind to all interfaces:
+The container reaches the host via `host.docker.internal`, which works with the
+default `127.0.0.1` binding. Just start the MCP server:
 
 ```elisp
-;; In your Emacs config
-(setq emacs-mcp-server-host "0.0.0.0")
 (emacs-mcp-server-start)
 ```
 
@@ -142,10 +140,9 @@ docker compose exec claude ssh -T git@github.com
    ;; Should return: (("/home/user/project" . "/workspace"))
    ```
 
-2. Check the MCP server is running with correct host binding:
+2. Check the MCP server is running:
    ```elisp
    (emacs-mcp-server-running-p)
-   emacs-mcp-server-host  ;; Should be "0.0.0.0" for Docker access
    ```
 
 ### Reset authentication
