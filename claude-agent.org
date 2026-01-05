@@ -708,6 +708,8 @@ Internal state structure for managing async process communication.
   session-key       ; Session key for verbose buffer grouping
   source-buffer     ; Buffer that initiated query (for display)
   source-label      ; Human-readable label like "5" for Instruction 5
+  source-location-fn   ; Function symbol to call for navigation (or nil)
+  source-location-args ; List of args for source-location-fn (or nil)
   docker-mode       ; Non-nil when running in Docker sandbox
   path-mappings     ; Path mappings for Docker mode ((host . container) ...)
   edited-files      ; List of files edited during query (container paths)
@@ -1029,7 +1031,8 @@ PROCESS is the CLI process."
 #+BEGIN_SRC elisp
 (defun claude-agent--start-process (prompt options callback error-callback complete-callback
                                           &optional token-callback request-id session-key
-                                          source-buffer source-label)
+                                          source-buffer source-label
+                                          source-location-fn source-location-args)
   "Start Claude CLI process with PROMPT and OPTIONS.
 
 CALLBACK is called with each parsed message.
@@ -1040,6 +1043,8 @@ REQUEST-ID is a unique identifier for this request (optional).
 SESSION-KEY identifies the session for verbose output grouping (optional).
 SOURCE-BUFFER is the buffer that initiated this query (optional).
 SOURCE-LABEL is a human-readable label like \"5\" for Instruction 5 (optional).
+SOURCE-LOCATION-FN is a function symbol to call for navigation (optional).
+SOURCE-LOCATION-ARGS is a list of args for SOURCE-LOCATION-FN (optional).
 
 Uses streaming mode by default to enable bidirectional control protocol
 for features like canUseTool permission callback.
@@ -1069,6 +1074,8 @@ Returns a process state object."
                  :session-key session-key
                  :source-buffer source-buffer
                  :source-label source-label
+                 :source-location-fn source-location-fn
+                 :source-location-args source-location-args
                  :docker-mode docker-mode-p
                  :ready nil
                  :closed nil))
@@ -1191,6 +1198,7 @@ Returns a process state object."
 #+BEGIN_SRC elisp
 (cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete
                                      session-key source-buffer source-label
+                                     source-location-fn source-location-args
                                      cli-path path-mappings project-root)
   "Send a one-shot query to Claude.
 
@@ -1224,6 +1232,13 @@ SOURCE-BUFFER is the buffer that initiated this query (optional).
 
 SOURCE-LABEL is a human-readable label like \"5\" for Instruction 5 (optional).
   Used together with SOURCE-BUFFER for display.
+
+SOURCE-LOCATION-FN is a function symbol to call for navigation (optional).
+  When non-nil, the query will be shown as a navigable link in session manager.
+  The function is called with SOURCE-LOCATION-ARGS in SOURCE-BUFFER.
+
+SOURCE-LOCATION-ARGS is a list of args for SOURCE-LOCATION-FN (optional).
+  Passed to the location function when navigating to source.
 
 CLI-PATH overrides `claude-agent-cli-path' for this query (optional).
   Use for Docker execution, e.g., \"docker compose exec claude claude\".
@@ -1288,7 +1303,9 @@ Docker example:
        nil  ; request-id (auto-generated)
        session-key
        source-buffer
-       source-label))))
+       source-label
+       source-location-fn
+       source-location-args))))
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
@@ -2633,6 +2650,7 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
 #+BEGIN_SRC elisp
 (defvar claude-agent-queries-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'claude-agent-queries-goto-source)
     (define-key map (kbd "k") #'claude-agent-queries-cancel-at-point)
     (define-key map (kbd "K") #'claude-agent-cancel-all-queries)
     (define-key map (kbd "g") #'claude-agent-list-queries)
@@ -2668,13 +2686,18 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
                       ;; Use identity with long-form buffer name
                       (identity (claude-agent--format-query-identity state t))
                       (label (claude-agent--process-state-source-label state))
-                      (docker-p (claude-agent--process-state-docker-mode state)))
+                      (docker-p (claude-agent--process-state-docker-mode state))
+                      ;; Check if navigable (has source-location-fn)
+                      (loc-fn (claude-agent--process-state-source-location-fn state))
+                      (navigable (not (null loc-fn))))
                  ;; Track Docker vs local counts
                  (if docker-p (cl-incf docker-count) (cl-incf local-count))
                  ;; Format: ● [Docker] buffer-name Instruction N  [elapsed]
+                 ;; Use 'link face for navigable queries, regular face otherwise
                  (insert (propertize (format "● %s" identity)
-                                     'face 'font-lock-function-name-face
-                                     'query-id id))
+                                     'face (if navigable 'link 'font-lock-function-name-face)
+                                     'query-id id
+                                     'navigable navigable))
                  (when docker-p
                    (insert (propertize " [Docker]"
                                        'face '(:weight bold))))
@@ -2694,7 +2717,7 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
               (insert (format "  Local: %d" local-count)))
             (insert "\n")))
         (insert "\n")
-        (insert "Keys: k=cancel  K=cancel all  g=refresh  q=quit\n"))
+        (insert "Keys: RET=goto source (links)  k=cancel  K=cancel all  g=refresh  q=quit\n"))
       (claude-agent-queries-mode)
       (goto-char (point-min)))
     (display-buffer buf)))
@@ -2709,6 +2732,37 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
           (message "Cancelled query: %s" query-id)
           (claude-agent-list-queries))
       (message "No query on this line."))))
+
+(defun claude-agent-queries-goto-source ()
+  "Jump to the source location for query at point.
+For navigable queries (shown as links), jumps to the source heading.
+For non-navigable queries, jumps to the source buffer only."
+  (interactive)
+  (let* ((query-id (get-text-property (point) 'query-id))
+         (navigable (get-text-property (point) 'navigable)))
+    (if (null query-id)
+        (message "No query on this line")
+      (let ((state (gethash query-id claude-agent--active-queries)))
+        (if (null state)
+            (message "Query not found (may have completed)")
+          (let ((buf (claude-agent--process-state-source-buffer state))
+                (loc-fn (claude-agent--process-state-source-location-fn state))
+                (loc-args (claude-agent--process-state-source-location-args state)))
+            (cond
+             ((null buf)
+              (message "No source buffer for this query"))
+             ((not (buffer-live-p buf))
+              (message "Source buffer no longer exists"))
+             ((null loc-fn)
+              ;; No location function - just jump to buffer
+              (pop-to-buffer buf)
+              (message "Jumped to buffer (no specific location)"))
+             (t
+              ;; Has location function - switch buffer and call it
+              (pop-to-buffer buf)
+              (if (apply loc-fn loc-args)
+                  (message "Jumped to source")
+                (message "Location function failed to find target"))))))))))
 #+END_SRC
 
 ** Auto-Enable

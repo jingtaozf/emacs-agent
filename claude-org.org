@@ -105,7 +105,6 @@
     - [[#transient-prefix][Transient Prefix]]
     - [[#keymap][Keymap]]
   - [[#minor-mode][Minor Mode]]
-- [[#tests][Tests]]
 - [[#org-file-protection-hook][Org File Protection Hook]]
   - [[#how-permission-functions-work][How Permission Functions Work]]
   - [[#org-file-protection-permission-function][Org File Protection (Permission Function)]]
@@ -2657,7 +2656,7 @@ Uses format: <basename>--<short-hash>.el for readability."
 
 (defun claude-org--prepare-history-for-save ()
   "Prepare history for saving by removing transient data.
-Keeps only the most recent `claude-org-history-max-entries' entries.
+Keeps only the most recent entries, limited by `claude-org-history-max-entries'.
 Only saves entries with CUSTOM_ID - titles are built dynamically."
   (let ((entries (cl-remove-if-not
                   (lambda (entry) (plist-get (cdr entry) :custom-id))
@@ -2669,13 +2668,14 @@ Only saves entries with CUSTOM_ID - titles are built dynamically."
                        (cons id (list :timestamp (plist-get plist :timestamp)
                                       :status (plist-get plist :status)
                                       :custom-id (plist-get plist :custom-id)))))
-                   claude-org--block-history))))
+                   claude-org--block-history)))
+        (limit claude-org-history-max-entries))
     ;; Sort by timestamp, keep most recent
     (setq entries (sort entries
                         (lambda (a b)
                           (> (or (plist-get (cdr a) :timestamp) 0)
                              (or (plist-get (cdr b) :timestamp) 0)))))
-    (seq-take entries claude-org-history-max-entries)))
+    (seq-take entries limit)))
 
 (defun claude-org--ensure-history-loaded ()
   "Ensure history is loaded from disk."
@@ -2713,6 +2713,16 @@ Returns CUSTOM_ID string or nil if not found."
         (when (member "claude_chat" (org-get-tags nil t))
           (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
       custom-id)))
+
+(defun claude-org-goto-custom-id (custom-id)
+  "Navigate to the heading with CUSTOM_ID.
+This is used as a source-location-fn for session manager navigation.
+Returns t if found and positioned, nil otherwise."
+  (goto-char (point-min))
+  (when (re-search-forward
+         (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
+    (org-back-to-heading t)
+    t))
 
 (defun claude-org--record-block-execution (session-key _query _marker)
   "Record block execution start.
@@ -2930,6 +2940,8 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
     (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
   (let* ((content (claude-org--get-block-content))
          (session-key (claude-org--current-session-key))
+         ;; Get CUSTOM_ID for session manager navigation (before buffer changes)
+         (custom-id (claude-org--find-instruction-custom-id))
          ;; Check for auto-title BEFORE any buffer modifications
          (should-auto-title (and claude-org-auto-generate-title
                                  (claude-org--heading-matches-auto-title-pattern-p)))
@@ -2970,8 +2982,8 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
       ;; Auto-generate title in parallel (using Haiku, separate session)
       (when heading-marker
         (claude-org--maybe-auto-generate-title content heading-marker))
-      ;; Pass instruction number for session manager display
-      (claude-org--send-request content instr-num)
+      ;; Pass instruction number and CUSTOM_ID for session manager
+      (claude-org--send-request content instr-num custom-id)
       ;; Run post-execution hook (after query sent)
       (let ((marker (claude-org--session-get session-key :marker)))
         (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))
@@ -3028,9 +3040,10 @@ SDK-UUID: Session UUID for resume"
 ** Send Request
 
 #+BEGIN_SRC elisp
-(defun claude-org--send-request (prompt &optional instr-num)
+(defun claude-org--send-request (prompt &optional instr-num custom-id)
   "Send PROMPT to Claude via claude-agent.
 INSTR-NUM is the instruction number for display in session manager (optional).
+CUSTOM-ID is the CUSTOM_ID of the instruction heading for navigation (optional).
 
 When Docker mode is active (CLAUDE_CODE_PATH contains 'docker'), this function
 passes :cli-path and :path-mappings to claude-agent-query for automatic path
@@ -3058,12 +3071,15 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
                   (session-key session-key))
       ;; Send query via claude-agent
       ;; Pass :cli-path and :path-mappings for Docker mode support
+      ;; Pass :source-location-fn and :source-location-args for session manager navigation
       (let ((state (claude-agent-query
                     full-prompt
                     :options options
                     :session-key session-key
                     :source-buffer source-buf
                     :source-label source-label
+                    :source-location-fn (when custom-id 'claude-org-goto-custom-id)
+                    :source-location-args (when custom-id (list custom-id))
                     :cli-path cli-path
                     :path-mappings path-mappings
                     :project-root project-root
