@@ -819,5 +819,83 @@ Counts :claude_chat: tagged headings within session scope."
     ;; Should have 2 entries
     (should (= 2 (length claude-org--block-history)))))
 
+;;; History Preparation Tests
+
+(ert-deftest test-claude-org-prepare-history-for-save ()
+  "Test history preparation removes transient data and respects limits."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (let ((claude-org--block-history
+         '(("block-1" :timestamp 1000.0 :status completed
+                      :custom-id "id-1" :title "Test" :line 10 :marker nil)
+           ("block-2" :timestamp 2000.0 :status in-progress
+                      :custom-id "id-2" :title "Test2" :line 20 :marker nil)))
+        (claude-org-history-max-entries 10))
+    (let ((prepared (claude-org--prepare-history-for-save)))
+      ;; Should be sorted by timestamp (most recent first)
+      (should (equal "block-2" (car (car prepared))))
+      ;; Should have required fields
+      (let ((entry (cdr (car prepared))))
+        (should (plist-get entry :timestamp))
+        (should (plist-get entry :status))
+        (should (plist-get entry :custom-id))
+        ;; Should NOT have transient fields
+        (should-not (plist-get entry :title))
+        (should-not (plist-get entry :line))
+        (should-not (plist-get entry :marker))))))
+
+(ert-deftest test-claude-org-prepare-history-respects-limit ()
+  "Test that history preparation respects history-max-entries limit."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (let ((claude-org--block-history
+         '(("block-1" :timestamp 1000.0 :status completed :custom-id "id-1")
+           ("block-2" :timestamp 2000.0 :status completed :custom-id "id-2")
+           ("block-3" :timestamp 3000.0 :status completed :custom-id "id-3")))
+        (claude-org-history-max-entries 2))
+    (let ((prepared (claude-org--prepare-history-for-save)))
+      ;; Should only keep 2 entries (respecting max-entries limit)
+      (should (= 2 (length prepared)))
+      ;; Should be most recent ones
+      (should (equal "block-3" (car (car prepared))))
+      (should (equal "block-2" (car (cadr prepared)))))))
+
+;;; Recent Blocks Collection Tests
+
+(ert-deftest test-claude-org-collect-recent-blocks ()
+  "Test recent blocks collection for completing-read."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (let ((claude-org--block-history
+         '(("block-1" :timestamp 1000.0 :status completed
+                      :custom-id "id-1" :title "First")))
+        (claude-org--history-loaded t)
+        (claude-org-history-max-entries 100))
+    (let ((candidates (claude-org--collect-recent-blocks)))
+      (should (= 1 (length candidates)))
+      (should (stringp (car (car candidates)))))))
+
+(ert-deftest test-claude-org-collect-recent-blocks-respects-limit ()
+  "Test that recent blocks collection respects the limit."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (let ((claude-org--block-history
+         '(("block-1" :timestamp 1000.0 :status completed :custom-id "id-1" :title "First")
+           ("block-2" :timestamp 2000.0 :status completed :custom-id "id-2" :title "Second")
+           ("block-3" :timestamp 3000.0 :status completed :custom-id "id-3" :title "Third")))
+        (claude-org--history-loaded t)
+        (claude-org-history-max-entries 2))
+    (let ((candidates (claude-org--collect-recent-blocks)))
+      ;; Should only return 2 candidates
+      (should (= 2 (length candidates))))))
+
+(ert-deftest test-claude-org-collect-recent-blocks-filters-no-custom-id ()
+  "Test that blocks without CUSTOM_ID are filtered out."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (let ((claude-org--block-history
+         '(("block-1" :timestamp 1000.0 :status completed :custom-id "id-1" :title "Has ID")
+           ("block-2" :timestamp 2000.0 :status completed :title "No ID")))
+        (claude-org--history-loaded t)
+        (claude-org-history-max-entries 100))
+    (let ((candidates (claude-org--collect-recent-blocks)))
+      ;; Should only return 1 candidate (the one with custom-id)
+      (should (= 1 (length candidates))))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
