@@ -1532,6 +1532,31 @@ Uses progressive disclosure - only Summary loaded, Claude reads full via link."
       static-prompt)))
 #+END_SRC
 
+*** Implementation-Specific Method
+
+Implementation tag passes MAX_RETRIES configuration dynamically.
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-org-tag-prompt ((tag (eql 'implementation)) context)
+  "Implementation tag: combine Summary with MAX_RETRIES configuration.
+MAX_RETRIES is sourced from (in priority order):
+1. :max-retries header argument on ai block
+2. :MAX_RETRIES org property on Features section or parent
+3. Default: 3"
+  (let* ((max-retries (or (plist-get context :max-retries)
+                          (save-excursion
+                            (when-let ((prop (org-entry-get nil "MAX_RETRIES" t)))
+                              (string-to-number prop)))
+                          3))
+         (static-prompt (claude-org--extract-summary-section
+                         (expand-file-name "tags/implementation.org"
+                                           claude-org-prompts-directory))))
+    (concat static-prompt
+            "\n\n** Runtime Configuration\n\n"
+            (format "| Parameter | Value |\n|-----------|-------|\n| MAX_RETRIES | %d |\n" max-retries)
+            "\nMAX_RETRIES: Maximum test-fix cycles before reporting failure.\n")))
+#+END_SRC
+
 ** Header Prompt Lookup
 
 Loads prompt from =prompts/headers/=. Supports:
@@ -1621,13 +1646,21 @@ Container tags come before phase tags."
     ("implementation" 13)
     (_ 50)))          ; Other tags last
 
-(defun claude-org--build-behavior-context ()
+(defun claude-org--build-behavior-context (&optional header-args)
   "Build context plist for tag prompt generation.
-Returns plist with :file-path, :sdd-root, :session-id, :current-tags."
-  (list :file-path (buffer-file-name)
-        :sdd-root (claude-org--find-sdd-root)
-        :session-id (claude-org--get-session-id)
-        :current-tags (claude-org--get-current-tags)))
+Returns plist with :file-path, :sdd-root, :session-id, :current-tags.
+If HEADER-ARGS is provided, extracts :max-retries and other relevant args."
+  (let ((context (list :file-path (buffer-file-name)
+                       :sdd-root (claude-org--find-sdd-root)
+                       :session-id (claude-org--get-session-id)
+                       :current-tags (claude-org--get-current-tags))))
+    ;; Extract :max-retries from header arguments if present
+    (when-let ((max-retries (plist-get header-args :max-retries)))
+      (setq context (plist-put context :max-retries
+                               (if (stringp max-retries)
+                                   (string-to-number max-retries)
+                                 max-retries))))
+    context))
 
 (defun claude-org--build-behavior-prompt ()
   "Build behavior prompt from current tags and header arguments.
@@ -1635,11 +1668,12 @@ Returns combined prompt string or nil if no behaviors active.
 
 For SDD workflow, tags are ordered: container (sdd) first, then phase tags.
 This ensures the workflow context is established before phase-specific behavior.
-Context is passed to tag methods for dynamic prompt generation (e.g., SDD links)."
+Context is passed to tag methods for dynamic prompt generation (e.g., SDD links,
+MAX_RETRIES for implementation tag)."
   (let* ((config (claude-org--collect-behavior-config))
          (tags (plist-get config :tags))
          (header-args (plist-get config :header-args))
-         (context (claude-org--build-behavior-context))
+         (context (claude-org--build-behavior-context header-args))
          (parts '()))
     ;; Collect tag prompts (ordered by SDD priority for proper context)
     (dolist (tag-str (sort (copy-sequence tags)

@@ -10,10 +10,10 @@
 | Property | Value |
 |----------+-------|
 | Tag | =:implementation:= |
-| Purpose | Implement features one at a time using TDD |
-| Output | Mark TODOs as DONE in Features section |
+| Purpose | Implement all features, run tests at end, fix failures autonomously |
+| Output | All TODOs marked DONE, all tests passing (or MAX_RETRIES reached) |
 
-*CRITICAL*: Implement ONE feature, then STOP. Wait for user confirmation before next.
+Workflow: Implement all → Test at end → Fix failures → Repeat until pass or max retries.
 
 Full instructions: [[file:prompts/tags/implementation.org::*Details][Read Details]]
 
@@ -22,59 +22,98 @@ Full instructions: [[file:prompts/tags/implementation.org::*Details][Read Detail
 :CUSTOM_ID: tags-implementation-details
 :END:
 
-You are in the *Implementation* phase of SDD. Your goal is to implement features
-one at a time, following TDD principles and marking TODOs as DONE upon completion.
+You are in the *Implementation* phase of SDD. Your goal is to implement all features
+autonomously, run tests at the end, and fix any failures until all tests pass.
 
 ** Phase Boundaries
 
 *** This Phase Does NOT
 - Research or explore beyond what's needed for current TODO
 - Redesign or modify the Spec (go back to Design phase if needed)
-- Replan or add new TODOs (go back to Planning phase if needed)
+- Wait for user confirmation between features (autonomous workflow)
 
 *** Input ← From Previous Phases
 - Spec section: Technical Design for implementation details
-- Features section: TODO items to implement (work on first incomplete one)
+- Features section: TODO items to implement
 - Research Output: Codebase Patterns to follow
+- Runtime Configuration: MAX_RETRIES (see below)
 
 *** Output
-- Working code with tests
-- Mark TODOs as DONE in Features section
+- All TODOs marked DONE
+- All tests passing (or MAX_RETRIES reached with failure report)
 
 See [[file:prompts/tags/sdd.org::*Finding and Editing Sections by CUSTOM_ID][sdd.org]] for navigation patterns.
 
-** Atomic Implementation Rule
+** Implementation Workflow
 
-*CRITICAL*: Implement ONE feature at a time, then STOP.
+*** Phase 1: Implement All Features
 
-1. Find the first incomplete TODO in Features section
-2. Implement ONLY that feature
-3. Write tests for that feature
-4. Mark TODO as DONE using =(org-todo)= via =evalElisp=
-5. STOP and report completion
+For each TODO in Features section (in order):
+1. Implement the feature
+2. If feature explicitly requires tests (e.g., "write tests for X") → run tests for that feature only
+3. Mark TODO as DONE using =(org-todo "DONE")= via =evalElisp=
+4. Move to next TODO
 
-Do NOT proceed to the next feature without user confirmation.
+Continue until ALL TODOs are marked DONE.
 
-** TDD Workflow
+*** Phase 2: Final Test Run
 
-For each feature:
+After ALL features are marked DONE:
+1. Run the full test suite (detect command: =make test=, =npm test=, =pytest=, etc.)
+2. If all tests pass → Report "WORKFLOW COMPLETE" and stop
+3. If any tests fail → Go to Phase 3
 
-1. *Write test first*: Define expected behavior
-2. *Run test*: Verify it fails (red)
-3. *Implement*: Minimal code to pass
-4. *Run test*: Verify it passes (green)
-5. *Refactor*: Clean up while tests pass
-6. *Commit*: Save progress
+*** Phase 3: Bug Fix Cycle
 
-** Implementation Checklist
+For each distinct test failure:
+1. Create a bug-fix TODO at the TOP of Features section (see "Creating Bug-Fix TODOs")
+2. Implement the fix
+3. Mark the bug-fix TODO as DONE
 
-Before marking a feature DONE:
+After fixing all failures:
+1. Run tests again
+2. Increment retry counter
+3. If all tests pass → Report "WORKFLOW COMPLETE" and stop
+4. If retry count >= MAX_RETRIES → Report "MAX RETRIES REACHED" with remaining failures and stop
+5. Otherwise → Repeat Phase 3
 
-- [ ] Tests written and passing
-- [ ] Code follows patterns from Research Output
-- [ ] Matches Technical Design in Spec
-- [ ] No unhandled edge cases
-- [ ] Code is clean and readable
+*** End Conditions
+
+Workflow ends when either:
+- *Success*: All features DONE + all tests pass
+- *Failure*: Retry count >= MAX_RETRIES (report remaining test failures)
+
+*** MAX_RETRIES
+
+See "Runtime Configuration" section (injected by claude-org) for the current value.
+Default is 3 if not specified.
+
+** Creating Bug-Fix TODOs
+
+When tests fail, create a bug-fix TODO for each distinct failure.
+
+*CRITICAL*: Detect the correct heading level first (see [[file:prompts/tags/sdd.org::*Org Hierarchy Rules (CRITICAL)][Org Hierarchy Rules]] in sdd.org).
+
+#+begin_src elisp
+(save-excursion
+  (org-link-open-from-string "[[#features-section-id]]")
+  (let ((parent-level (org-outline-level)))
+    (org-end-of-meta-data t)
+    (insert (format "\n%s TODO Fix: [test name or error summary]\n"
+                    (make-string (1+ parent-level) ?*))
+            "Test failure: [exact error message]\n"
+            "- [ ] Identify root cause\n"
+            "- [ ] Implement fix\n")))
+#+end_src
+
+** When to Run Tests
+
+| Scenario | Run Tests? |
+|----------+------------|
+| Feature explicitly requires tests | Yes (for that feature) |
+| Intermediate feature (more TODOs remain) | No |
+| All features DONE (Phase 2) | Yes (full suite) |
+| After bug fixes (Phase 3) | Yes (full suite) |
 
 ** Marking Features Complete
 
@@ -85,69 +124,24 @@ Before: *** TODO Create auth middleware skeleton
 After:  *** DONE Create auth middleware skeleton
 #+end_example
 
-You can use =C-c C-t= in Emacs or =(org-todo)= via =evalElisp=.
+Use =(org-todo "DONE")= via =evalElisp=.
 
-** Context Window Management
+** Quality Guidelines
 
-Monitor your context usage:
-- If context exceeds 60%, STOP
-- Summarize progress in current feature
-- Report what remains to be done
-- Let user decide whether to continue or restart
-
-** Anti-Patterns to Avoid
-
-| Don't | Do |
-|-------+----|
-| Implement multiple features at once | One feature, then stop |
-| Skip tests | TDD - tests first |
-| Ignore existing patterns | Follow Codebase Patterns |
-| Rush through implementation | Quality over speed |
-| Forget to mark DONE | Update org-todo state |
-
-** Completion Report
-
-After implementing a feature:
-
-#+begin_example
-*Feature Completed*: [feature name]
-
-*Files Changed*:
-- =path/to/file.ts= - [what changed]
-- =path/to/test.ts= - [tests added]
-
-*Tests*: X passing, 0 failing
-
-*Next Feature*: [name of next TODO]
-
-Ready to proceed? (y/n)
-#+end_example
-
-** Quality Gates
-
-Before marking a feature DONE, verify:
-
-- [ ] Tests written and passing
-- [ ] No regressions in existing tests
-- [ ] Code follows existing patterns (from Research Output)
-- [ ] Matches Technical Design in Spec
-- [ ] Security considerations addressed (input validation, auth, injection)
+Before marking a feature DONE:
+- Code follows patterns from Research Output
+- Matches Technical Design in Spec
+- No obvious bugs or unhandled edge cases
+- Code is clean and readable
 
 ** Debugging Workflow
 
-When encountering failures:
+When encountering implementation errors (not test failures):
 
 1. *Capture*: Error message, stack trace, reproduction steps
 2. *Isolate*: Find the failure location
-3. *Hypothesize*: Form and test theories
-4. *Fix*: Minimal change to resolve the issue
-5. *Verify*: Ensure fix works and no regressions
-6. *Prevent*: Consider if similar bugs exist elsewhere
-
-Provide for each issue:
-- Root cause explanation with evidence
-- Suggested fix with =file:line= references
-- Testing approach to verify
+3. *Fix*: Minimal change to resolve the issue
+4. *Continue*: Move to next feature
 
 ** Code Review Checklist
 
@@ -158,29 +152,27 @@ Self-review before marking DONE:
 | Logic | No obvious bugs, null handling, edge cases |
 | Security | No injection, proper auth, no exposed secrets |
 | Patterns | Follows existing codebase conventions |
-| Tests | Happy path + edge cases + error conditions |
 | Clean | No dead code, good naming, minimal changes |
 
 ** Commit Strategy
 
-After completing a feature:
+After completing ALL features (end of Phase 1):
 1. Stage related changes: =git add=
-2. Write semantic commit message explaining *why*
+2. Write semantic commit message explaining *what* was implemented
 3. Verify clean state: =git status=
 4. Do NOT push unless explicitly asked
 
 ** Context Window Management
 
 Monitor your context usage:
-- If context exceeds 60%, STOP
-- Summarize progress in current feature
-- Write handoff notes for session continuity
-- Report what remains to be done
+- If context exceeds 60%, create a handoff summary
+- Report progress: X of Y features done, current retry count
+- Note any test failures for next session
 
 ** Session Continuity
 
 If resuming a session:
 1. Check Features section for progress (DONE vs TODO)
-2. Review last completed feature
-3. Find next incomplete TODO
-4. Continue from there
+2. Check if in Phase 1 (implementing) or Phase 3 (fixing)
+3. Check current retry count if in bug-fix cycle
+4. Continue from current state
