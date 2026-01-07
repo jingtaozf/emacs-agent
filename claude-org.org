@@ -2478,13 +2478,121 @@ TODOS is a list of plists with :content, :status, :activeForm."
             (mapconcat #'claude-org--format-todo-item todos "\n")
             "\n")))
 
+(defun claude-org--find-instruction-heading-for-session (session-key)
+  "Find the instruction heading position for SESSION-KEY.
+Uses the stored custom-id to locate the heading.
+Returns marker position or nil if not found."
+  (let ((custom-id (claude-org--session-get session-key :custom-id)))
+    (when custom-id
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward
+               (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
+          (org-back-to-heading t)
+          (point))))))
+
+(defun claude-org--find-todo-region (heading-pos)
+  "Find existing todo list region after HEADING-POS.
+Looks for checkbox list between #+end_src and the next heading or marker.
+Returns (BEG . END) of the region, or nil if no todos found."
+  (save-excursion
+    (goto-char heading-pos)
+    ;; Find the #+end_src of the ai block
+    (when (re-search-forward "^#\\+end_src" nil t)
+      (forward-line 1)
+      (let ((search-start (point))
+            (search-end (save-excursion
+                          ;; Find next heading or end of buffer
+                          (if (re-search-forward "^\\*+ " nil t)
+                              (line-beginning-position)
+                            (point-max)))))
+        ;; Look for checkbox list in this region
+        (when (re-search-forward "^- \\[[ X-]\\]" search-end t)
+          (goto-char (line-beginning-position))
+          (let ((beg (point)))
+            ;; Find end of checkbox list
+            (while (and (< (point) search-end)
+                        (looking-at "^- \\[[ X-]\\]"))
+              (forward-line 1))
+            ;; Include trailing blank line if present
+            (when (and (< (point) search-end)
+                       (looking-at "^$"))
+              (forward-line 1))
+            (cons beg (point))))))))
+
+(defun claude-org--compute-todo-cookie (todos)
+  "Compute statistics cookie string from TODOS list.
+Returns string like \"[2/5]\" showing completed/total."
+  (let ((total (length todos))
+        (completed (cl-count-if
+                    (lambda (todo)
+                      (string= (plist-get todo :status) "completed"))
+                    todos)))
+    (format "[%d/%d]" completed total)))
+
+(defun claude-org--update-heading-cookie (heading-pos cookie-str)
+  "Update or add statistics cookie in heading at HEADING-POS.
+COOKIE-STR is like \"[2/5]\". Replaces existing cookie or adds before tags."
+  (save-excursion
+    (goto-char heading-pos)
+    (let ((line-end (line-end-position)))
+      ;; Check if there's already a cookie [N/M] or [N%]
+      (if (re-search-forward "\\[\\([0-9]+/[0-9]+\\|[0-9]+%\\)\\]" line-end t)
+          ;; Replace existing cookie
+          (replace-match cookie-str t t)
+        ;; No cookie - add before tags or at end of heading text
+        (goto-char heading-pos)
+        ;; Skip past the stars and heading text to find insertion point
+        (if (re-search-forward "[ \t]+\\(:[^ \t\n:]+:\\)+[ \t]*$" line-end t)
+            ;; Has tags - insert before the space+tags
+            (progn
+              (goto-char (match-beginning 0))
+              (insert " " cookie-str))
+          ;; No tags - insert at end of line
+          (end-of-line)
+          (insert " " cookie-str))))))
+
+(defun claude-org--update-todos-in-place (session-key todos)
+  "Update todo list in place for SESSION-KEY with TODOS.
+Finds the instruction heading via custom-id, updates the checkbox list
+between #+end_src and Response section, and updates the heading cookie."
+  (let ((heading-pos (claude-org--find-instruction-heading-for-session session-key)))
+    (when heading-pos
+      (save-excursion
+        ;; Update heading cookie
+        (claude-org--update-heading-cookie
+         heading-pos
+         (claude-org--compute-todo-cookie todos))
+        ;; Format the new todo list (with trailing newline for spacing)
+        (let ((new-todos-text (concat (mapconcat #'claude-org--format-todo-item todos "\n") "\n\n"))
+              (existing-region (claude-org--find-todo-region heading-pos)))
+          (if existing-region
+              ;; Replace existing todo list
+              (progn
+                (delete-region (car existing-region) (cdr existing-region))
+                (goto-char (car existing-region))
+                (insert new-todos-text))
+            ;; No existing todos - insert after #+end_src
+            (goto-char heading-pos)
+            (when (re-search-forward "^#\\+end_src" nil t)
+              (forward-line 1)
+              ;; Skip any blank lines
+              (while (looking-at "^$")
+                (forward-line 1))
+              ;; Insert before current position (which might be Response heading)
+              (insert "\n" new-todos-text))))))))
+
 (defun claude-org--handle-tool-use (session-key tool-name tool-input)
   "Handle special TOOL-NAME with TOOL-INPUT for SESSION-KEY.
-Returns formatted string to insert, or nil if not a special tool."
+For TodoWrite: updates in-place under instruction heading, returns nil.
+For other tools: returns formatted string to insert, or nil if not special."
   (pcase tool-name
     ("TodoWrite"
      (let ((todos (plist-get tool-input :todos)))
-       (claude-org--format-todos todos)))
+       ;; Update todos in-place under instruction heading (not at marker)
+       (claude-org--update-todos-in-place session-key todos)
+       ;; Return nil so nothing is inserted at streaming marker
+       nil))
     (_ nil)))
 
 (defun claude-org--handle-message (session-key msg)
