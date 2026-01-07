@@ -233,11 +233,19 @@
                   :closed nil)))
       (claude-agent--register-query "req-123" state)
       (should (= 1 (claude-agent-active-query-count)))
-      ;; Get it back
-      (should (claude-agent--get-active-query "req-123"))
+      ;; Get it back - MUST return the actual state, not just truthy
+      (let ((retrieved (claude-agent--get-active-query "req-123")))
+        (should retrieved)
+        (should (eq retrieved state))
+        (should (claude-agent--process-state-p retrieved))
+        (should (equal "req-123" (claude-agent--process-state-request-id retrieved))))
+      ;; Non-existent query should return nil
+      (should-not (claude-agent--get-active-query "nonexistent-id"))
       ;; Unregister
       (claude-agent--unregister-query "req-123")
-      (should (= 0 (claude-agent-active-query-count))))))
+      (should (= 0 (claude-agent-active-query-count)))
+      ;; After unregister, should return nil
+      (should-not (claude-agent--get-active-query "req-123")))))
 
 (ert-deftest test-claude-agent-query-cancellation ()
   "Test query cancellation by request ID."
