@@ -90,6 +90,7 @@
 - [[#execution][Execution]]
   - [[#execute-command][Execute Command]]
   - [[#send-request-helpers][Send Request Helpers]]
+  - [[#iteration-markers][Iteration Markers]]
   - [[#send-request][Send Request]]
 - [[#header-line][Header Line]]
   - [[#state-variables-2][State Variables]]
@@ -1333,8 +1334,27 @@ Each session state contains:
   :original-prompt - for session recovery
   :recovering    - non-nil during recovery
   :section-level - heading level for response adjustment
+  :loop-max      - total loop iterations
+  :loop-current  - current iteration (1-based)
+  :loop-interval - seconds between iterations
 
 Initialized to a new hash table when `claude-org-mode' is enabled.")
+
+(defun claude-org--cleanup-stale-sessions ()
+  "Remove stale entries from sessions hash table.
+Called after code reload to clean up entries with dead buffers."
+  (when (and (boundp 'claude-org--sessions)
+             (hash-table-p claude-org--sessions))
+    (let ((stale-keys '()))
+      (maphash
+       (lambda (key state)
+         (when (or (not (listp state))
+                   (let ((buf (plist-get state :source-buffer)))
+                     (and buf (not (buffer-live-p buf)))))
+           (push key stale-keys)))
+       claude-org--sessions)
+      (dolist (key stale-keys)
+        (remhash key claude-org--sessions)))))
 
 (defvar-local claude-org--fontlock-timer nil
   "Timer for debounced font-lock during streaming.")
@@ -1532,31 +1552,6 @@ Uses progressive disclosure - only Summary loaded, Claude reads full via link."
       static-prompt)))
 #+END_SRC
 
-*** Implementation-Specific Method
-
-Implementation tag passes MAX_RETRIES configuration dynamically.
-
-#+BEGIN_SRC elisp
-(cl-defmethod claude-org-tag-prompt ((tag (eql 'implementation)) context)
-  "Implementation tag: combine Summary with MAX_RETRIES configuration.
-MAX_RETRIES is sourced from (in priority order):
-1. :max-retries header argument on ai block
-2. :MAX_RETRIES org property on Features section or parent
-3. Default: 3"
-  (let* ((max-retries (or (plist-get context :max-retries)
-                          (save-excursion
-                            (when-let ((prop (org-entry-get nil "MAX_RETRIES" t)))
-                              (string-to-number prop)))
-                          3))
-         (static-prompt (claude-org--extract-summary-section
-                         (expand-file-name "tags/implementation.org"
-                                           claude-org-prompts-directory))))
-    (concat static-prompt
-            "\n\n** Runtime Configuration\n\n"
-            (format "| Parameter | Value |\n|-----------|-------|\n| MAX_RETRIES | %d |\n" max-retries)
-            "\nMAX_RETRIES: Maximum test-fix cycles before reporting failure.\n")))
-#+END_SRC
-
 ** Header Prompt Lookup
 
 Loads prompt from =prompts/headers/=. Supports:
@@ -1646,21 +1641,13 @@ Container tags come before phase tags."
     ("implementation" 13)
     (_ 50)))          ; Other tags last
 
-(defun claude-org--build-behavior-context (&optional header-args)
+(defun claude-org--build-behavior-context ()
   "Build context plist for tag prompt generation.
-Returns plist with :file-path, :sdd-root, :session-id, :current-tags.
-If HEADER-ARGS is provided, extracts :max-retries and other relevant args."
-  (let ((context (list :file-path (buffer-file-name)
-                       :sdd-root (claude-org--find-sdd-root)
-                       :session-id (claude-org--get-session-id)
-                       :current-tags (claude-org--get-current-tags))))
-    ;; Extract :max-retries from header arguments if present
-    (when-let ((max-retries (plist-get header-args :max-retries)))
-      (setq context (plist-put context :max-retries
-                               (if (stringp max-retries)
-                                   (string-to-number max-retries)
-                                 max-retries))))
-    context))
+Returns plist with :file-path, :sdd-root, :session-id, :current-tags."
+  (list :file-path (buffer-file-name)
+        :sdd-root (claude-org--find-sdd-root)
+        :session-id (claude-org--get-session-id)
+        :current-tags (claude-org--get-current-tags)))
 
 (defun claude-org--build-behavior-prompt ()
   "Build behavior prompt from current tags and header arguments.
@@ -1668,12 +1655,11 @@ Returns combined prompt string or nil if no behaviors active.
 
 For SDD workflow, tags are ordered: container (sdd) first, then phase tags.
 This ensures the workflow context is established before phase-specific behavior.
-Context is passed to tag methods for dynamic prompt generation (e.g., SDD links,
-MAX_RETRIES for implementation tag)."
+Context is passed to tag methods for dynamic prompt generation (e.g., SDD links)."
   (let* ((config (claude-org--collect-behavior-config))
          (tags (plist-get config :tags))
          (header-args (plist-get config :header-args))
-         (context (claude-org--build-behavior-context header-args))
+         (context (claude-org--build-behavior-context))
          (parts '()))
     ;; Collect tag prompts (ordered by SDD priority for proper context)
     (dolist (tag-str (sort (copy-sequence tags)
@@ -2540,6 +2526,60 @@ Extracts session ID from result messages and stores it."
                             (claude-agent-system-message-subtype msg)))
             (set-marker marker (point))))))))
 
+(defun claude-org--maybe-continue-loop (session-key)
+  "Continue loop execution if more iterations remain.
+Called after each iteration completes."
+  (let* ((loop-current (claude-org--session-get session-key :loop-current))
+         (loop-max (claude-org--session-get session-key :loop-max))
+         (loop-interval (or (claude-org--session-get session-key :loop-interval) 0))
+         (original-prompt (claude-org--session-get session-key :original-prompt))
+         (instr-num (claude-org--session-get session-key :instruction-num))
+         (custom-id (claude-org--session-get session-key :custom-id)))
+    (when (and loop-current loop-max (< loop-current loop-max))
+      ;; Increment loop counter
+      (let ((next-iteration (1+ loop-current)))
+        (claude-org--session-put session-key :loop-current next-iteration)
+        ;; Schedule next iteration
+        (if (and loop-interval (> loop-interval 0))
+            ;; Delayed execution
+            (run-at-time loop-interval nil
+                         #'claude-org--execute-loop-iteration
+                         session-key next-iteration loop-max original-prompt
+                         instr-num custom-id loop-interval)
+          ;; Immediate execution
+          (claude-org--execute-loop-iteration
+           session-key next-iteration loop-max original-prompt
+           instr-num custom-id loop-interval))))))
+
+(defun claude-org--execute-loop-iteration (session-key iteration max prompt instr-num custom-id interval)
+  "Execute a single loop iteration.
+SESSION-KEY identifies the session.
+ITERATION is current iteration number (1-based).
+MAX is total iterations.
+PROMPT is the original query.
+INSTR-NUM and CUSTOM-ID are for session manager display.
+INTERVAL is delay between iterations (for display)."
+  ;; Get buffer from session marker (needed when called via run-at-time)
+  (let ((marker (claude-org--session-get session-key :marker)))
+    (when (and marker (marker-buffer marker))
+      (with-current-buffer (marker-buffer marker)
+        ;; Set busy state
+        (claude-org--session-put session-key :busy t)
+        (claude-org--session-put session-key :start-time (float-time))
+        ;; Start spinner
+        (claude-org--start-spinner session-key)
+        ;; Insert iteration marker
+        (claude-org--insert-iteration-marker iteration max)
+        ;; Build query-context with updated iteration
+        (let ((query-ctx (when instr-num
+                           (claude-agent-make-query-context
+                            :instruction-num instr-num
+                            :loop-current iteration
+                            :loop-max max
+                            :custom-id custom-id))))
+          ;; Send request (uses continue-conversation for context)
+          (claude-org--send-request prompt query-ctx))))))
+
 (defun claude-org--handle-complete (session-key result)
   "Handle query completion for SESSION-KEY with RESULT."
   (claude-org--session-put session-key :busy nil)
@@ -2555,7 +2595,9 @@ Extracts session ID from result messages and stores it."
   ;; Update header line
   (claude-org--refresh-header-line)
   ;; Run completion hook
-  (run-hook-with-args 'claude-org-complete-hook session-key result 'completed))
+  (run-hook-with-args 'claude-org-complete-hook session-key result 'completed)
+  ;; Check for loop continuation
+  (claude-org--maybe-continue-loop session-key))
 #+END_SRC
 
 ** Error Handling
@@ -2965,6 +3007,11 @@ Execution and request handling.
   "Execute the AI query at point.
 Must be called when point is inside a #+begin_src ai block.
 Sends the query to Claude and streams the response below the block.
+
+Supports loop execution via header arguments:
+  :loop N     - Execute N iterations (default 1)
+  :interval N - Wait N seconds between iterations (default 0)
+
 When `claude-org-auto-create-response-section' is non-nil, creates a Response
 section with :ai_output: tag for flat pattern organization.
 When `claude-org-auto-generate-title' is non-nil, generates a title for
@@ -2974,6 +3021,13 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
     (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
   (let* ((content (claude-org--get-block-content))
          (session-key (claude-org--current-session-key))
+         ;; Get header args for loop support
+         (header-args (claude-org--get-block-header-args))
+         (loop-max (or (plist-get header-args :loop) 1))
+         (loop-interval (or (plist-get header-args :interval) 0))
+         ;; Convert string values to numbers if needed
+         (loop-max (if (stringp loop-max) (string-to-number loop-max) loop-max))
+         (loop-interval (if (stringp loop-interval) (string-to-number loop-interval) loop-interval))
          ;; Get CUSTOM_ID for session manager navigation (before buffer changes)
          (custom-id (claude-org--find-instruction-custom-id))
          ;; Check for auto-title BEFORE any buffer modifications
@@ -3009,6 +3063,13 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
           (claude-org--session-put session-key :section-level (claude-org--get-section-level))
           (claude-org--session-put session-key :start-time (float-time))
           (claude-org--session-put session-key :busy t)
+          ;; Store loop state
+          (claude-org--session-put session-key :loop-max loop-max)
+          (claude-org--session-put session-key :loop-current 1)
+          (claude-org--session-put session-key :loop-interval loop-interval)
+          ;; Store instruction info for loop continuation
+          (claude-org--session-put session-key :instruction-num instr-num)
+          (claude-org--session-put session-key :custom-id custom-id)
           ;; Run pre-execution hook
           (run-hook-with-args 'claude-org-execute-hook session-key content marker)))
       ;; Start spinner and send request
@@ -3016,8 +3077,17 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
       ;; Auto-generate title in parallel (using Haiku, separate session)
       (when heading-marker
         (claude-org--maybe-auto-generate-title content heading-marker))
-      ;; Pass instruction number and CUSTOM_ID for session manager
-      (claude-org--send-request content instr-num custom-id)
+      ;; Build query-context for session manager (with loop info)
+      (let ((query-ctx (when instr-num
+                         (claude-agent-make-query-context
+                          :instruction-num instr-num
+                          :loop-current 1
+                          :loop-max loop-max
+                          :custom-id custom-id))))
+        ;; Insert iteration marker if looping
+        (when (> loop-max 1)
+          (claude-org--insert-iteration-marker 1 loop-max))
+        (claude-org--send-request content query-ctx))
       ;; Run post-execution hook (after query sent)
       (let ((marker (claude-org--session-get session-key :marker)))
         (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))
@@ -3071,13 +3141,35 @@ SDK-UUID: Session UUID for resume"
    :env (claude-org--get-env-vars)))
 #+END_SRC
 
+** Iteration Markers
+
+#+BEGIN_SRC elisp
+(defun claude-org--insert-iteration-marker (current max)
+  "Insert iteration marker before response.
+CURRENT is the current iteration (1-based), MAX is total iterations."
+  (let ((marker (claude-org--session-get (claude-org--current-session-key) :marker)))
+    (when marker
+      (save-excursion
+        (goto-char marker)
+        (insert (format "\n----- Iteration %d/%d -----\n\n" current max))
+        (set-marker marker (point))))))
+
+(defun claude-org--insert-loop-complete (completed max)
+  "Insert completion marker after loop ends.
+COMPLETED is iterations completed, MAX is total."
+  (let ((marker (claude-org--session-get (claude-org--current-session-key) :marker)))
+    (when marker
+      (save-excursion
+        (goto-char marker)
+        (insert (format "\n----- Loop complete: %d/%d iterations -----\n" completed max))))))
+#+END_SRC
+
 ** Send Request
 
 #+BEGIN_SRC elisp
-(defun claude-org--send-request (prompt &optional instr-num custom-id)
+(defun claude-org--send-request (prompt &optional query-context)
   "Send PROMPT to Claude via claude-agent.
-INSTR-NUM is the instruction number for display in session manager (optional).
-CUSTOM-ID is the CUSTOM_ID of the instruction heading for navigation (optional).
+QUERY-CONTEXT is a claude-agent-query-context struct for Session Manager display.
 
 When Docker mode is active (CLAUDE_CODE_PATH contains 'docker'), this function
 passes :cli-path and :path-mappings to claude-agent-query for automatic path
@@ -3099,7 +3191,7 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
                         prompt))
          ;; Capture source context for session manager display
          (source-buf (current-buffer))
-         (source-label (when instr-num (number-to-string instr-num))))
+         (custom-id (when query-context (claude-agent-query-context-custom-id query-context))))
     ;; Use lexical-let to properly capture variables for callbacks
     (lexical-let ((buf source-buf)
                   (session-key session-key))
@@ -3111,7 +3203,7 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
                     :options options
                     :session-key session-key
                     :source-buffer source-buf
-                    :source-label source-label
+                    :query-context query-context
                     :source-location-fn (when custom-id 'claude-org-goto-custom-id)
                     :source-location-args (when custom-id (list custom-id))
                     :cli-path cli-path
@@ -3318,12 +3410,17 @@ Dynamic header line showing session status, IDE context, and thinking state.
 
 #+BEGIN_SRC elisp
 (defun claude-org-cancel ()
-  "Cancel the current session's active query."
+  "Cancel the current session's active query and stop any loop."
   (interactive)
   (let* ((session-key (claude-org--current-session-key))
-         (process-state (claude-org--session-get session-key :process-state)))
+         (process-state (claude-org--session-get session-key :process-state))
+         (loop-current (claude-org--session-get session-key :loop-current))
+         (loop-max (claude-org--session-get session-key :loop-max)))
     (if (and process-state (claude-org--session-get session-key :busy))
         (progn
+          ;; Stop loop by setting current = max
+          (when (and loop-max (> loop-max 1))
+            (claude-org--session-put session-key :loop-current loop-max))
           (claude-agent-query-interrupt process-state)
           (claude-org--session-put session-key :busy nil)
           (claude-org--stop-spinner session-key)
@@ -3332,7 +3429,11 @@ Dynamic header line showing session status, IDE context, and thinking state.
               (with-current-buffer (marker-buffer marker)
                 (save-excursion
                   (goto-char marker)
-                  (insert "\n[Cancelled]\n")))))
+                  ;; Show loop cancellation info if in a loop
+                  (if (and loop-max (> loop-max 1))
+                      (insert (format "\n[Cancelled at iteration %d/%d]\n" 
+                                      (or loop-current 1) loop-max))
+                    (insert "\n[Cancelled]\n"))))))
           (claude-org--refresh-header-line)
           (message "Query cancelled"))
       (message "No active query to cancel"))))

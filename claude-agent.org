@@ -19,6 +19,7 @@
 - [[#data-structures][Data Structures]]
   - [[#options][Options]]
   - [[#content-block-types][Content Block Types]]
+  - [[#query-context][Query Context]]
   - [[#message-types][Message Types]]
   - [[#hook-types][Hook Types]]
 - [[#process-management][Process Management]]
@@ -359,6 +360,51 @@ Content blocks represent different types of content in messages.
   tool-use-id
   content
   is-error)
+#+END_SRC
+
+** Query Context
+
+Query context holds rich metadata for display and tracking in Session Manager.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-query-context
+               (:constructor claude-agent-make-query-context)
+               (:copier nil))
+  "Rich context for query display and tracking.
+Used by Session Manager to show query identity like 'dev.org#5(1/3)'."
+  (instruction-num nil)   ; Integer instruction number (e.g., 5)
+  (loop-current 1)        ; Current iteration (1-based)
+  (loop-max 1)            ; Total iterations
+  (custom-id nil)         ; CUSTOM_ID for navigation
+  (tags nil))             ; List of tags like (:implementation :sdd)
+
+(defun claude-agent-query-context-format-id (ctx)
+  "Format context for identity display.
+Returns instruction number with optional loop status:
+  - '5' for single execution
+  - '5(1/3)' for loop iteration"
+  (when ctx
+    (let ((num (claude-agent-query-context-instruction-num ctx)))
+      (when num
+        (let ((cur (claude-agent-query-context-loop-current ctx))
+              (max (claude-agent-query-context-loop-max ctx)))
+          (if (= max 1)
+              (number-to-string num)
+            (format "%d(%d/%d)" num cur max)))))))
+
+(defun claude-agent-query-context-format-label (ctx)
+  "Format context for Session Manager label display.
+Returns human-readable label:
+  - 'Instruction 5' for single execution
+  - 'Instruction 5 (1/3)' for loop iteration"
+  (when ctx
+    (let ((num (claude-agent-query-context-instruction-num ctx)))
+      (when num
+        (let ((cur (claude-agent-query-context-loop-current ctx))
+              (max (claude-agent-query-context-loop-max ctx)))
+          (if (= max 1)
+              (format "Instruction %d" num)
+            (format "Instruction %d (%d/%d)" num cur max)))))))
 #+END_SRC
 
 ** Message Types
@@ -707,7 +753,7 @@ Internal state structure for managing async process communication.
   start-time        ; Query start time (float-time)
   session-key       ; Session key for verbose buffer grouping
   source-buffer     ; Buffer that initiated query (for display)
-  source-label      ; Human-readable label like "5" for Instruction 5
+  query-context     ; claude-agent-query-context struct for display
   source-location-fn   ; Function symbol to call for navigation (or nil)
   source-location-args ; List of args for source-location-fn (or nil)
   docker-mode       ; Non-nil when running in Docker sandbox
@@ -1031,7 +1077,7 @@ PROCESS is the CLI process."
 #+BEGIN_SRC elisp
 (defun claude-agent--start-process (prompt options callback error-callback complete-callback
                                           &optional token-callback request-id session-key
-                                          source-buffer source-label
+                                          source-buffer query-context
                                           source-location-fn source-location-args)
   "Start Claude CLI process with PROMPT and OPTIONS.
 
@@ -1042,7 +1088,7 @@ TOKEN-CALLBACK is called with each text token for streaming (optional).
 REQUEST-ID is a unique identifier for this request (optional).
 SESSION-KEY identifies the session for verbose output grouping (optional).
 SOURCE-BUFFER is the buffer that initiated this query (optional).
-SOURCE-LABEL is a human-readable label like \"5\" for Instruction 5 (optional).
+QUERY-CONTEXT is a claude-agent-query-context struct for display (optional).
 SOURCE-LOCATION-FN is a function symbol to call for navigation (optional).
 SOURCE-LOCATION-ARGS is a list of args for SOURCE-LOCATION-FN (optional).
 
@@ -1073,7 +1119,7 @@ Returns a process state object."
                  :start-time (float-time)
                  :session-key session-key
                  :source-buffer source-buffer
-                 :source-label source-label
+                 :query-context query-context
                  :source-location-fn source-location-fn
                  :source-location-args source-location-args
                  :docker-mode docker-mode-p
@@ -1197,7 +1243,7 @@ Returns a process state object."
 
 #+BEGIN_SRC elisp
 (cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete
-                                     session-key source-buffer source-label
+                                     session-key source-buffer query-context
                                      source-location-fn source-location-args
                                      cli-path path-mappings project-root)
   "Send a one-shot query to Claude.
@@ -1230,7 +1276,7 @@ SESSION-KEY identifies the session for verbose output grouping (optional).
 SOURCE-BUFFER is the buffer that initiated this query (optional).
   Used for display in session manager and mode-line.
 
-SOURCE-LABEL is a human-readable label like \"5\" for Instruction 5 (optional).
+QUERY-CONTEXT is a claude-agent-query-context struct for display (optional).
   Used together with SOURCE-BUFFER for display.
 
 SOURCE-LOCATION-FN is a function symbol to call for navigation (optional).
@@ -1271,7 +1317,7 @@ Example:
                   (message \"Done!\"))
    :session-key \"my-session\"
    :source-buffer (current-buffer)
-   :source-label \"5\")
+   :query-context (claude-agent-make-query-context :instruction-num 5))
 
 Docker example:
   (claude-agent-query
@@ -1303,7 +1349,7 @@ Docker example:
        nil  ; request-id (auto-generated)
        session-key
        source-buffer
-       source-label
+       query-context
        source-location-fn
        source-location-args))))
 
@@ -2460,6 +2506,28 @@ queries and allowing them to be interrupted.
 
 (defun claude-agent--get-active-query (request-id)
   "Get process state for REQUEST-ID."
+
+(defun claude-agent--cleanup-stale-queries ()
+  "Remove stale entries from active-queries hash table.
+Called after code reload to clean up entries with dead processes
+or outdated structure."
+  (let ((stale-keys '()))
+    (maphash
+     (lambda (key state)
+       (when (or (not (claude-agent--process-state-p state))
+                 (and (claude-agent--process-state-process state)
+                      (not (process-live-p
+                            (claude-agent--process-state-process state))))
+                 (claude-agent--process-state-closed state))
+         (push key stale-keys)))
+     claude-agent--active-queries)
+    (dolist (key stale-keys)
+      (remhash key claude-agent--active-queries))
+    (when stale-keys
+      (claude-agent--debug-log "Cleaned up %d stale queries" (length stale-keys)))))
+
+;; Run cleanup on load
+(claude-agent--cleanup-stale-queries)
   (gethash request-id claude-agent--active-queries))
 #+END_SRC
 
@@ -2542,17 +2610,18 @@ Uses compact format for mode-line display."
 (defun claude-agent--format-query-identity (state &optional long-form)
   "Format human-readable identity for query STATE.
 If LONG-FORM is non-nil, use full buffer name instead of abbreviated.
-Returns a string like \"dev.org#5\" or \"#123\" as fallback."
+Returns a string like 'dev.org#5' or 'dev.org#5(1/3)'."
   (let ((buf (claude-agent--process-state-source-buffer state))
-        (label (claude-agent--process-state-source-label state))
+        (ctx (claude-agent--process-state-query-context state))
         (req-id (claude-agent--process-state-request-id state)))
     (if (and buf (buffer-live-p buf))
         (let* ((buf-name (buffer-name buf))
                (short-name (if long-form
                                buf-name
-                             (file-name-base buf-name))))
-          (if label
-              (format "%s#%s" short-name label)
+                             (file-name-base buf-name)))
+               (id-suffix (claude-agent-query-context-format-id ctx)))
+          (if id-suffix
+              (format "%s#%s" short-name id-suffix)
             short-name))
       ;; Fallback to request-id based format
       (if (and req-id (string-match "req-\\([0-9]+\\)" req-id))
@@ -2560,27 +2629,6 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
         (if req-id
             (substring req-id 0 (min 12 (length req-id)))
           "#?")))))
-
-(defun claude-agent--format-activity-tooltip ()
-  "Format tooltip showing all active queries."
-  (let ((lines (list "Active Queries" "───────────────────")))
-    (maphash
-     (lambda (_id state)
-       (when (and state
-                  (claude-agent--process-state-p state)
-                  (not (claude-agent--process-state-closed state)))
-         (let* ((start-time (claude-agent--process-state-start-time state))
-                (elapsed (claude-agent--format-elapsed start-time))
-                (spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
-                (identity (claude-agent--format-query-identity state))
-                (docker-p (claude-agent--process-state-docker-mode state))
-                (docker-tag (if docker-p " [Docker]" "")))
-           (push (format "● %s%s  [%s %s]" identity docker-tag spinner elapsed) lines))))
-     claude-agent--active-queries)
-    (if (= (length lines) 2)
-        "No active queries\n\nClick to open session manager"
-      (concat (string-join (nreverse lines) "\n")
-              "\n\nClick to open session manager"))))
 
 (defun claude-agent--get-single-active-state ()
   "Return the single active query state, or nil if count != 1."
@@ -2642,7 +2690,50 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
       ;; No active queries
       (setq claude-agent-activity-string "")
       (setq claude-agent--spinner-index 0)))
-  (force-mode-line-update t))
+  (force-mode-line-update t)
+  ;; Auto-refresh queries buffer if visible
+  (claude-agent--maybe-refresh-queries-buffer))
+
+(defun claude-agent--maybe-refresh-queries-buffer ()
+  "Refresh *Claude Queries* buffer if it exists and is visible."
+  (when-let ((buf (get-buffer "*Claude Queries*")))
+    (when (get-buffer-window buf t)  ; visible in any frame
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (pos (point)))
+          (erase-buffer)
+          (insert "Active Queries\n")
+          (insert "══════════════════════════════════════════════════\n\n")
+          (let ((has-queries nil))
+            (maphash
+             (lambda (id state)
+               (when (and state
+                          (claude-agent--process-state-p state)
+                          (not (claude-agent--process-state-closed state)))
+                 (setq has-queries t)
+                 (let* ((start-time (claude-agent--process-state-start-time state))
+                        (elapsed (claude-agent--format-elapsed start-time))
+                        (identity (claude-agent--format-query-identity state t))
+                        (ctx (claude-agent--process-state-query-context state))
+                        (docker-p (claude-agent--process-state-docker-mode state))
+                        (loc-fn (claude-agent--process-state-source-location-fn state))
+                        (navigable (not (null loc-fn))))
+                   (insert (propertize (format "● %s" identity)
+                                       'face (if navigable 'link 'font-lock-function-name-face)
+                                       'query-id id
+                                       'navigable navigable))
+                   (when docker-p
+                     (insert (propertize " [Docker]" 'face '(:weight bold))))
+                   (when-let ((label (claude-agent-query-context-format-label ctx)))
+                     (insert (propertize (format " %s" label)
+                                         'face 'font-lock-keyword-face)))
+                   (insert (format "  [%s]\n" elapsed)))))
+             claude-agent--active-queries)
+            (unless has-queries
+              (insert "No active queries.\n")))
+          (insert "\n")
+          (insert "Keys: RET=goto source (links)  k=cancel  K=cancel all  g=refresh  q=quit\n")
+          (goto-char (min pos (point-max))))))))
 #+END_SRC
 
 ** Session Manager
@@ -2685,7 +2776,7 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
                       (elapsed (claude-agent--format-elapsed start-time))
                       ;; Use identity with long-form buffer name
                       (identity (claude-agent--format-query-identity state t))
-                      (label (claude-agent--process-state-source-label state))
+                      (ctx (claude-agent--process-state-query-context state))
                       (docker-p (claude-agent--process-state-docker-mode state))
                       ;; Check if navigable (has source-location-fn)
                       (loc-fn (claude-agent--process-state-source-location-fn state))
@@ -2701,8 +2792,8 @@ Returns a string like \"dev.org#5\" or \"#123\" as fallback."
                  (when docker-p
                    (insert (propertize " [Docker]"
                                        'face '(:weight bold))))
-                 (when label
-                   (insert (propertize (format " Instruction %s" label)
+                 (when-let ((label (claude-agent-query-context-format-label ctx)))
+                   (insert (propertize (format " %s" label)
                                        'face 'font-lock-keyword-face)))
                  (insert (format "  [%s]\n" elapsed)))))
            claude-agent--active-queries)

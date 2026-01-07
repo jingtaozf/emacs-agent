@@ -470,14 +470,15 @@
 ;;; Query Identity Display Tests
 
 (ert-deftest test-claude-agent-format-query-identity-with-buffer-and-label ()
-  "Test query identity formatting with source buffer and label."
+  "Test query identity formatting with source buffer and query-context."
   :tags '(:unit :fast :stable :isolated :display)
   (with-temp-buffer
     (rename-buffer "claude-agent-dev.org" t)
-    (let ((state (claude-agent--make-process-state
-                  :request-id "req-42-1234567890"
-                  :source-buffer (current-buffer)
-                  :source-label "5")))
+    (let* ((ctx (claude-agent-make-query-context :instruction-num 5))
+           (state (claude-agent--make-process-state
+                   :request-id "req-42-1234567890"
+                   :source-buffer (current-buffer)
+                   :query-context ctx)))
       ;; Short form should show "basename#label"
       (should (equal "claude-agent-dev#5"
                      (claude-agent--format-query-identity state)))
@@ -486,14 +487,14 @@
                               (claude-agent--format-query-identity state t))))))
 
 (ert-deftest test-claude-agent-format-query-identity-buffer-only ()
-  "Test query identity with buffer but no label."
+  "Test query identity with buffer but no query-context."
   :tags '(:unit :fast :stable :isolated :display)
   (with-temp-buffer
     (rename-buffer "test-file.org" t)
     (let ((state (claude-agent--make-process-state
                   :request-id "req-10-1234567890"
                   :source-buffer (current-buffer)
-                  :source-label nil)))
+                  :query-context nil)))
       ;; Should show just buffer name without "#"
       (should (equal "test-file"
                      (claude-agent--format-query-identity state))))))
@@ -505,14 +506,15 @@
   (let ((state (claude-agent--make-process-state
                 :request-id "req-99-1234567890"
                 :source-buffer nil
-                :source-label nil)))
+                :query-context nil)))
     (should (equal "#99" (claude-agent--format-query-identity state))))
   ;; Dead buffer - should also fall back
   (let* ((buf (generate-new-buffer "temp-dead"))
+         (ctx (claude-agent-make-query-context :instruction-num 3))
          (state (claude-agent--make-process-state
                  :request-id "req-88-1234567890"
                  :source-buffer buf
-                 :source-label "3")))
+                 :query-context ctx)))
     (kill-buffer buf)
     (should (equal "#88" (claude-agent--format-query-identity state)))))
 
@@ -539,16 +541,71 @@
     (claude-agent--unregister-query "req-2")))
 
 (ert-deftest test-claude-agent-process-state-source-slots ()
-  "Test that process-state has source-buffer and source-label slots."
+  "Test that process-state has source-buffer and query-context slots."
   :tags '(:unit :fast :stable :isolated :display)
   (with-temp-buffer
-    (let ((state (claude-agent--make-process-state
-                  :source-buffer (current-buffer)
-                  :source-label "42")))
+    (let* ((ctx (claude-agent-make-query-context
+                 :instruction-num 42
+                 :loop-current 1
+                 :loop-max 1))
+           (state (claude-agent--make-process-state
+                   :source-buffer (current-buffer)
+                   :query-context ctx)))
       (should (eq (current-buffer)
                   (claude-agent--process-state-source-buffer state)))
-      (should (equal "42"
-                     (claude-agent--process-state-source-label state))))))
+      (should (claude-agent-query-context-p
+               (claude-agent--process-state-query-context state)))
+      (should (equal 42
+                     (claude-agent-query-context-instruction-num
+                      (claude-agent--process-state-query-context state)))))))
+
+(ert-deftest test-claude-agent-query-context-format-id ()
+  "Test query-context-format-id formatting."
+  :tags '(:unit :fast :stable :isolated :display)
+  ;; Single execution (no loop suffix)
+  (let ((ctx (claude-agent-make-query-context
+              :instruction-num 5
+              :loop-current 1
+              :loop-max 1)))
+    (should (equal "5" (claude-agent-query-context-format-id ctx))))
+  ;; Loop iteration
+  (let ((ctx (claude-agent-make-query-context
+              :instruction-num 5
+              :loop-current 2
+              :loop-max 3)))
+    (should (equal "5(2/3)" (claude-agent-query-context-format-id ctx))))
+  ;; First iteration of loop
+  (let ((ctx (claude-agent-make-query-context
+              :instruction-num 5
+              :loop-current 1
+              :loop-max 3)))
+    (should (equal "5(1/3)" (claude-agent-query-context-format-id ctx))))
+  ;; No instruction number
+  (let ((ctx (claude-agent-make-query-context
+              :instruction-num nil)))
+    (should (null (claude-agent-query-context-format-id ctx)))))
+
+(ert-deftest test-claude-agent-query-context-format-label ()
+  "Test query-context-format-label formatting."
+  :tags '(:unit :fast :stable :isolated :display)
+  ;; Single execution
+  (let ((ctx (claude-agent-make-query-context
+              :instruction-num 5
+              :loop-current 1
+              :loop-max 1)))
+    (should (equal "Instruction 5" (claude-agent-query-context-format-label ctx))))
+  ;; Loop iteration
+  (let ((ctx (claude-agent-make-query-context
+              :instruction-num 5
+              :loop-current 2
+              :loop-max 3)))
+    (should (equal "Instruction 5 (2/3)" (claude-agent-query-context-format-label ctx))))
+  ;; First iteration of loop
+  (let ((ctx (claude-agent-make-query-context
+              :instruction-num 5
+              :loop-current 1
+              :loop-max 3)))
+    (should (equal "Instruction 5 (1/3)" (claude-agent-query-context-format-label ctx)))))
 
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here
