@@ -3752,34 +3752,91 @@ To protect org files, add =claude-org-permission-protect-org= to
 
 ** Org File Protection (Permission Function)
 
-This permission function denies Edit/Write on .org files, suggesting MCP tools.
+This permission function protects .org files from modifications via:
+1. Edit/Write tools directly targeting .org files
+2. Bash commands that would modify .org files (sed -i, redirects, cp, mv, etc.)
+
 Add it to =claude-agent-permission-functions= to enable protection.
+
+*** Bash Command Detection
+
+Detect if a bash command would modify an .org file.
+
+#+NAME: org-protect-bash-detect
+#+BEGIN_SRC elisp
+(defun claude-org--bash-modifies-org-p (command)
+  "Return non-nil if COMMAND would modify an .org file.
+Checks for:
+- In-place edit commands (sed -i, perl -i) referencing .org
+- Output redirection (>, >>) to .org files
+- File operations (cp, mv, install, tee) targeting .org files
+- Temp file swap patterns (cmd > tmp && mv tmp file.org)"
+  (when (and command (stringp command) (string-match-p "\\.org\\b" command))
+    (or
+     ;; In-place edit commands: sed -i, perl -i, ruby -i
+     (and (string-match-p "\\b\\(sed\\|perl\\|ruby\\)\\b" command)
+          (string-match-p " -[^ ]*i" command))
+     ;; Output redirection to .org: > file.org, >> file.org, 2> file.org
+     ;; Match > or >> followed by anything then .org (but not | or ; before .org)
+     (string-match-p ">[>&]?[^|;]*\\.org" command)
+     ;; File operations with .org as target at end of command
+     (string-match-p "\\b\\(cp\\|mv\\|install\\)\\b.*\\.org[ \t]*$" command)
+     ;; File operations with .org in quotes
+     (string-match-p "\\b\\(cp\\|mv\\|install\\)\\b.*\\.org['\"]" command)
+     ;; tee to .org file
+     (string-match-p "\\btee\\b.*\\.org" command)
+     ;; Temp file swap pattern: ... && mv ... .org
+     (string-match-p "&&.*\\bmv\\b.*\\.org" command))))
+#+END_SRC
+
+*** Deny Message Helper
+
+#+NAME: org-protect-deny-helper
+#+BEGIN_SRC elisp
+(defun claude-org--deny-org-modification (tool-name)
+  "Return permission denial result for org file modification via TOOL-NAME.
+Provides helpful message guiding to use evalElisp instead."
+  (list :behavior "deny"
+        :message
+        (concat "🚫 Cannot use " tool-name " to modify .org files.\n\n"
+                "Use evalElisp MCP tool for org-mode operations.\n"
+                "Run /emacs-org skill to learn elisp patterns for:\n"
+                "- Reading/navigating org sections\n"
+                "- Updating section content\n"
+                "- Managing properties and tags\n\n"
+                "If evalElisp is not available, report this as an error and stop.")))
+#+END_SRC
+
+*** Main Protection Function
 
 #+NAME: org-protect-permission
 #+BEGIN_SRC elisp
 (defun claude-org-permission-protect-org (tool-name tool-input _context)
-  "Permission function to protect .org files from Edit/Write.
+  "Permission function to protect .org files from modifications.
 
-TOOL-NAME: string like \"Edit\", \"Write\"
-TOOL-INPUT: plist with :file_path and other parameters
+TOOL-NAME: string like \"Edit\", \"Write\", \"Bash\"
+TOOL-INPUT: plist with tool-specific parameters
 CONTEXT: plist with :session-id, :org-section
+
+Blocks:
+1. Edit/Write tools on .org files
+2. Bash commands that would modify .org files
 
 Returns nil to pass through, or permission result to deny.
 Should be added to `claude-agent-permission-functions'."
-  (let ((file-path (plist-get tool-input :file_path)))
-    (when (and (member tool-name '("Edit" "Write"))
-               file-path
-               (string-match-p "\\.org$" file-path))
-      (list :behavior "deny"
-            :message
-            (concat "🚫 Cannot use " tool-name " on .org files.\n\n"
-                    "Use evalElisp instead for org-mode operations.\n"
-                    "Run /emacs-org skill to learn elisp patterns for:\n"
-                    "- Reading/navigating org sections\n"
-                    "- Updating section content\n"
-                    "- Managing properties and tags\n"
-                    "- Creating/deleting headings\n\n"
-                    "evalElisp preserves org structure and works with Emacs directly.")))))
+  (let ((file-path (plist-get tool-input :file_path))
+        (command (plist-get tool-input :command)))
+    (cond
+     ;; Layer 1: Block Edit/Write on .org files
+     ((and (member tool-name '("Edit" "Write"))
+           file-path
+           (string-match-p "\\.org$" file-path))
+      (claude-org--deny-org-modification tool-name))
+     ;; Layer 2-4: Block Bash commands modifying .org files
+     ((and (string= tool-name "Bash")
+           command
+           (claude-org--bash-modifies-org-p command))
+      (claude-org--deny-org-modification "Bash")))))
 #+END_SRC
 
 ** Protection Installation
