@@ -292,5 +292,43 @@ an auth error since CLI ignores the environment variable."
              (lambda () (= 0 (claude-agent-active-query-count)))
              5))))
 
+;;; Translation Tests
+
+(ert-deftest test-integration-translate-with-haiku-model ()
+  "Test translation uses haiku model for speed and cost efficiency."
+  :tags '(:integration :slow :api :stable)
+  (test-claude-skip-unless-cli-available)
+
+  ;; Ensure translate variables are defined
+  (unless (boundp 'claude-agent-translate-model)
+    (defvar claude-agent-translate-model "haiku"))
+  (unless (boundp 'claude-agent-translate-buffer-name)
+    (defvar claude-agent-translate-buffer-name "*claude-agent-translate*"))
+  (unless (boundp 'claude-agent-translate--active-state)
+    (defvar claude-agent-translate--active-state nil))
+
+  (let ((claude-agent-translate-model "haiku")
+        (claude-agent-translate--active-state nil))
+
+    ;; Run translation
+    (claude-agent-translate "Hello, world!" "Chinese")
+
+    ;; Wait for completion
+    (should (test-claude-wait-until
+             (lambda ()
+               (null claude-agent-translate--active-state))
+             30))
+
+    ;; Check translation buffer has content
+    (let* ((buf (get-buffer claude-agent-translate-buffer-name))
+           (result-text (when buf (with-current-buffer buf (buffer-string)))))
+
+      (should buf)
+      (should result-text)
+      ;; Verify translation completed
+      (should (string-match-p "Translation complete" result-text))
+      ;; Should contain some Chinese characters (Unicode range)
+      (should (string-match-p "[\u4e00-\u9fff]" result-text)))))
+
 (provide 'test-claude-agent-integration)
 ;;; test-claude-agent-integration.el ends here
