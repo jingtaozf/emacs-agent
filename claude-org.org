@@ -2676,8 +2676,8 @@ INTERVAL is delay between iterations (for display)."
         (claude-org--session-put session-key :start-time (float-time))
         ;; Start spinner
         (claude-org--start-spinner session-key)
-        ;; Insert iteration marker
-        (claude-org--insert-iteration-marker iteration max)
+        ;; Insert new Response section for this iteration
+        (claude-org--insert-iteration-section session-key iteration max instr-num)
         ;; Build query-context with updated iteration
         (let ((query-ctx (when instr-num
                            (claude-agent-make-query-context
@@ -3163,8 +3163,14 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
         (when (and claude-org-auto-create-response-section instr-num)
           (let* ((level (claude-org--get-section-level))
                  (stars (make-string level ?*)))
-            (insert stars " Response " (number-to-string instr-num)
-                    " :" claude-org-output-tag ":\n\n")))
+            (if (> loop-max 1)
+                ;; Loop: include iteration in section name "Response N(1/M)"
+                (insert stars " Response " (number-to-string instr-num)
+                        "(1/" (number-to-string loop-max) ")"
+                        " :" claude-org-output-tag ":\n\n")
+              ;; Non-loop: original format "Response N"
+              (insert stars " Response " (number-to-string instr-num)
+                      " :" claude-org-output-tag ":\n\n"))))
         (let ((marker (point-marker)))
           (claude-org--session-put session-key :marker marker)
           (claude-org--session-put session-key :original-prompt content)
@@ -3192,9 +3198,7 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
                           :loop-current 1
                           :loop-max loop-max
                           :custom-id custom-id))))
-        ;; Insert iteration marker if looping
-        (when (> loop-max 1)
-          (claude-org--insert-iteration-marker 1 loop-max))
+        ;; First iteration's section header already created above with Response N(1/M)
         (claude-org--send-request content query-ctx))
       ;; Run post-execution hook (after query sent)
       (let ((marker (claude-org--session-get session-key :marker)))
@@ -3249,27 +3253,32 @@ SDK-UUID: Session UUID for resume"
    :env (claude-org--get-env-vars)))
 #+END_SRC
 
-** Iteration Markers
+** Iteration Sections
 
 #+BEGIN_SRC elisp
-(defun claude-org--insert-iteration-marker (current max)
-  "Insert iteration marker before response.
-CURRENT is the current iteration (1-based), MAX is total iterations."
-  (let ((marker (claude-org--session-get (claude-org--current-session-key) :marker)))
-    (when marker
-      (save-excursion
-        (goto-char marker)
-        (insert (format "\n----- Iteration %d/%d -----\n\n" current max))
-        (set-marker marker (point))))))
+(defun claude-org--insert-iteration-section (session-key iteration max instr-num)
+  "Insert new Response section for loop iteration.
+SESSION-KEY identifies the session.
+ITERATION is current iteration number (1-based).
+MAX is total iterations.
+INSTR-NUM is the instruction number for section naming.
 
-(defun claude-org--insert-loop-complete (completed max)
-  "Insert completion marker after loop ends.
-COMPLETED is iterations completed, MAX is total."
-  (let ((marker (claude-org--session-get (claude-org--current-session-key) :marker)))
-    (when marker
-      (save-excursion
-        (goto-char marker)
-        (insert (format "\n----- Loop complete: %d/%d iterations -----\n" completed max))))))
+Uses the session marker for position tracking - Emacs markers automatically
+adjust their position when text is inserted/deleted elsewhere in the buffer,
+so this works correctly even when the user is editing other parts of the file."
+  (let ((marker (claude-org--session-get session-key :marker))
+        (level (or (claude-org--session-get session-key :section-level)
+                   (claude-org--get-section-level))))
+    (when (and marker (marker-buffer marker))
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (let ((stars (make-string level ?*)))
+            (insert "\n" stars " Response " (number-to-string instr-num)
+                    "(" (number-to-string iteration) "/"
+                    (number-to-string max) ")"
+                    " :" claude-org-output-tag ":\n\n"))
+          (set-marker marker (point)))))))
 #+END_SRC
 
 ** Send Request
