@@ -125,6 +125,76 @@ my-var  ; just use the symbol
   (erase-buffer))
 ```
 
+## Lexical Binding and Closures
+
+**IMPORTANT**: Emacs has two binding modes - dynamic (default in older code) and lexical.
+Literate-elisp files and files without `lexical-binding: t` use dynamic binding.
+
+### The Problem: Closures in Dynamic Binding
+
+In dynamic binding, lambdas don't capture variables - they look them up at runtime:
+
+```elisp
+;; BROKEN in dynamic binding - tn is void at call time
+(defun make-broken-fn (name)
+  (let ((tn name))
+    (lambda () (message "Name: %s" tn))))  ; tn looked up when called, not defined!
+```
+
+### Solution: Use lexical-let
+
+`lexical-let` (from cl-lib) creates true lexical closures even in dynamic binding mode:
+
+```elisp
+(require 'cl-lib)
+
+;; WORKS - lexical-let captures variables properly
+(defun make-working-fn (name)
+  (lexical-let ((tn name))
+    (lambda () (message "Name: %s" tn))))  ; tn captured at definition time
+```
+
+### When to Use lexical-let
+
+Use `lexical-let` when:
+- Creating closures/lambdas that reference outer variables
+- Building callbacks or handler functions dynamically
+- Any lambda that will be called later and needs captured state
+
+```elisp
+;; Creating multiple closures that each capture different values
+(defun make-toggler (tag-name)
+  "Create a function that toggles TAG-NAME."
+  (lexical-let ((tn tag-name))
+    (lambda ()
+      (interactive)
+      (toggle-tag tn))))
+
+;; Creating a description function for transient menu
+(defun make-description (tag desc)
+  "Create a description function for TAG with DESC."
+  (lexical-let ((t tag) (d desc))
+    (lambda ()
+      (format "[%s] %s" (if (selected-p t) "X" " ") d))))
+```
+
+### Alternative: Enable Lexical Binding
+
+For new files, prefer enabling lexical binding in the file header:
+
+```elisp
+;;; my-file.el --- Description -*- lexical-binding: t; -*-
+```
+
+Then regular `let` creates closures correctly:
+
+```elisp
+;; Works with lexical-binding: t
+(defun make-fn (name)
+  (let ((tn name))
+    (lambda () (message "Name: %s" tn))))
+```
+
 ## Hash Tables
 
 ### Create hash table

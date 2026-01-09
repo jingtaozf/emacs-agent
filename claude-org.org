@@ -1588,11 +1588,30 @@ Supports two patterns:
 ** Collect Current Context
 
 #+BEGIN_SRC elisp
-(defun claude-org--get-current-tags ()
-  "Get list of tag strings for current section (inherited).
+(defun claude-org--get-heading-tags ()
+  "Get list of tag strings from current section headings (inherited).
 Uses org-get-tags with LOCAL=nil to include inherited tags from ancestors."
   (when-let* ((tags (org-get-tags nil nil)))  ; nil = include inherited tags
     (mapcar #'downcase tags)))
+
+(defun claude-org--get-property-tags ()
+  "Get list of tag strings from CLAUDE_TAGS property (with inheritance).
+Property value is space-separated list of tag names."
+  (when-let* ((prop-value (org-entry-get nil "CLAUDE_TAGS" t)))  ; t = inherit
+    (split-string prop-value "[ \t]+" t)))
+
+(defun claude-org--get-current-tags ()
+  "Get effective list of tag strings for current context.
+Merges heading tags with CLAUDE_TAGS property, deduplicating.
+Heading tags take priority (appear first in list)."
+  (let* ((heading-tags (claude-org--get-heading-tags))
+         (property-tags (claude-org--get-property-tags))
+         (all-tags heading-tags))
+    ;; Add property tags that aren't already in heading tags
+    (dolist (tag property-tags)
+      (unless (member (downcase tag) (mapcar #'downcase all-tags))
+        (push (downcase tag) all-tags)))
+    (nreverse all-tags)))
 
 (defun claude-org--get-block-header-args ()
   "Get header arguments from current ai block.
@@ -1874,12 +1893,66 @@ The primary insertion command. Key behaviors:
 (defvar claude-org--selected-tags nil
   "Currently selected workflow tags for block insertion.")
 
-(defconst claude-org--workflow-tags
-  '(("r" "research" "Research - codebase exploration")
-    ("d" "design" "Design - architecture/API design")
-    ("p" "planning" "Planning - implementation steps")
-    ("i" "implementation" "Implementation - writing code"))
-  "Available workflow tags: (key tag description).")
+(defvar claude-org--discovered-tags-cache nil
+  "Cache of discovered tags: (timestamp . tag-list).
+Each tag is (key tag description).")
+
+(defconst claude-org--discovered-tags-cache-ttl 5
+  "Seconds to cache discovered tags before re-scanning.")
+
+(defun claude-org--discover-tags ()
+  "Discover available tags from prompts/tags/ directory.
+Returns list of (key tag description) for each tag file.
+Results are cached for `claude-org--discovered-tags-cache-ttl' seconds."
+  (let* ((now (float-time))
+         (cache-time (car claude-org--discovered-tags-cache))
+         (cached-tags (cdr claude-org--discovered-tags-cache)))
+    (if (and cache-time
+             (< (- now cache-time) claude-org--discovered-tags-cache-ttl))
+        cached-tags
+      ;; Rebuild cache
+      (let* ((tag-dir (expand-file-name "tags" claude-org-prompts-directory))
+             (files (when (file-directory-p tag-dir)
+                      (directory-files tag-dir nil "\\.org$")))
+             (tags '())
+             (used-keys '()))
+        (dolist (file files)
+          (let* ((tag-name (file-name-sans-extension file))
+                 (file-path (expand-file-name file tag-dir))
+                 (desc (claude-org--extract-tag-description file-path))
+                 (key (claude-org--assign-tag-key tag-name used-keys)))
+            (push key used-keys)
+            (push (list key tag-name (or desc (capitalize tag-name))) tags)))
+        (setq tags (nreverse tags))
+        (setq claude-org--discovered-tags-cache (cons now tags))
+        tags))))
+
+(defun claude-org--extract-tag-description (file-path)
+  "Extract #+DESCRIPTION: from tag FILE-PATH, or nil if not found."
+  (when (file-readable-p file-path)
+    (with-temp-buffer
+      (insert-file-contents file-path nil 0 500)  ; Read first 500 chars
+      (goto-char (point-min))
+      (when (re-search-forward "^#\\+DESCRIPTION:\\s-*\\(.+\\)$" nil t)
+        (string-trim (match-string 1))))))
+
+(defun claude-org--assign-tag-key (tag-name used-keys)
+  "Assign a single-char key for TAG-NAME avoiding USED-KEYS.
+Tries first letter, then subsequent letters, then digits."
+  (let ((candidates (append (string-to-list (downcase tag-name))
+                            (string-to-list "1234567890"))))
+    (catch 'found
+      (dolist (char candidates)
+        (let ((key (char-to-string char)))
+          (unless (member key used-keys)
+            (throw 'found key))))
+      ;; Fallback: use full tag name (shouldn't happen)
+      tag-name)))
+
+(defun claude-org--workflow-tags ()
+  "Get available workflow tags (dynamic discovery).
+Returns list of (key tag description)."
+  (claude-org--discover-tags))
 #+END_SRC
 
 *** Tag Toggle Functions
@@ -1896,57 +1969,67 @@ The primary insertion command. Key behaviors:
   "Return non-nil if TAG is currently selected."
   (member tag claude-org--selected-tags))
 
-(defun claude-org--toggle-research ()
-  "Toggle research tag." (interactive)
-  (claude-org--toggle-tag "research"))
-
-(defun claude-org--toggle-design ()
-  "Toggle design tag." (interactive)
-  (claude-org--toggle-tag "design"))
-
-(defun claude-org--toggle-planning ()
-  "Toggle planning tag." (interactive)
-  (claude-org--toggle-tag "planning"))
-
-(defun claude-org--toggle-implementation ()
-  "Toggle implementation tag." (interactive)
-  (claude-org--toggle-tag "implementation"))
+(defun claude-org--make-tag-toggler (tag-name)
+  "Create a toggle function for TAG-NAME."
+  (lexical-let ((tn tag-name))
+    (lambda ()
+      (interactive)
+      (claude-org--toggle-tag tn))))
 #+END_SRC
 
 *** Transient Tag Selection Menu
+
+The menu is built dynamically from discovered tags in =prompts/tags/=.
 
 #+NAME: block-insert-transient-menu
 #+BEGIN_SRC elisp
 (require 'transient)
 
-(transient-define-prefix claude-org-insert-block-menu ()
-  "Select workflow tags for new AI block."
-  :value (lambda () claude-org--selected-tags)
-  ["Workflow Tags (toggle to select)"
-   ("r" claude-org--toggle-research
-    :transient t
-    :description (lambda ()
-                   (concat (if (claude-org--tag-selected-p "research") "[X] " "[ ] ")
-                           "Research - codebase exploration")))
-   ("d" claude-org--toggle-design
-    :transient t
-    :description (lambda ()
-                   (concat (if (claude-org--tag-selected-p "design") "[X] " "[ ] ")
-                           "Design - architecture/API design")))
-   ("p" claude-org--toggle-planning
-    :transient t
-    :description (lambda ()
-                   (concat (if (claude-org--tag-selected-p "planning") "[X] " "[ ] ")
-                           "Planning - implementation steps")))
-   ("i" claude-org--toggle-implementation
-    :transient t
-    :description (lambda ()
-                   (concat (if (claude-org--tag-selected-p "implementation") "[X] " "[ ] ")
-                           "Implementation - writing code")))]
-  ["Actions"
-   ("RET" "Create block with tags" claude-org--insert-block-with-tags)
-   ("n" "Create block (no tags)" claude-org--insert-block-no-tags)
-   ("q" "Cancel" transient-quit-one)])
+(defun claude-org--make-tag-description (tag-name description)
+  "Create a description function for TAG-NAME with DESCRIPTION."
+  (lexical-let ((tn tag-name)
+                (desc description))
+    (lambda ()
+      (concat (if (claude-org--tag-selected-p tn) "[X] " "[ ] ")
+              desc))))
+
+(defun claude-org--build-tag-menu-items ()
+  "Build transient menu items from discovered tags.
+Returns a vector suitable for transient group."
+  (let ((items '()))
+    (dolist (tag-spec (claude-org--workflow-tags))
+      (let* ((key (nth 0 tag-spec))
+             (tag-name (nth 1 tag-spec))
+             (description (nth 2 tag-spec)))
+        (push (list key
+                    (claude-org--make-tag-toggler tag-name)
+                    :transient t
+                    :description
+                    (claude-org--make-tag-description tag-name description))
+              items)))
+    (apply #'vector (nreverse items))))
+
+(defun claude-org-insert-block-menu ()
+  "Show transient menu to select workflow tags for new AI block.
+Tags are discovered dynamically from prompts/tags/ directory."
+  (interactive)
+  (let ((tag-items (claude-org--build-tag-menu-items)))
+    (transient-define-prefix claude-org--insert-block-menu-dynamic ()
+      "Select workflow tags for new AI block."
+      :value (lambda () claude-org--selected-tags)
+      [:description "Workflow Tags (toggle to select)"
+       :setup-children
+       (lambda (_)
+         (mapcar (lambda (item)
+                   (transient-parse-suffix
+                    (oref transient--prefix command)
+                    item))
+                 (append tag-items nil)))]
+      ["Actions"
+       ("RET" "Create block with tags" claude-org--insert-block-with-tags)
+       ("n" "Create block (no tags)" claude-org--insert-block-no-tags)
+       ("q" "Cancel" transient-quit-one)])
+    (claude-org--insert-block-menu-dynamic)))
 
 (defun claude-org--insert-block-with-tags ()
   "Insert block with currently selected tags, then clear selection."
