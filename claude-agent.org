@@ -2656,6 +2656,31 @@ Returns a string like 'dev.org#5' or 'dev.org#5(1/3)'."
              claude-agent--active-queries)
     found))
 
+(defun claude-agent--format-activity-tooltip ()
+  "Format tooltip text for the activity mode-line indicator.
+Shows details about all active queries."
+  (let ((lines '("Active Claude Queries (click to list)"))
+        (count 0))
+    (maphash
+     (lambda (_id state)
+       (when (and state
+                  (claude-agent--process-state-p state)
+                  (not (claude-agent--process-state-closed state)))
+         (cl-incf count)
+         (let* ((start-time (claude-agent--process-state-start-time state))
+                (elapsed (claude-agent--format-elapsed start-time))
+                (identity (claude-agent--format-query-identity state t))
+                (docker-p (claude-agent--process-state-docker-mode state)))
+           (push (format "  • %s%s [%s]"
+                         identity
+                         (if docker-p " [Docker]" "")
+                         elapsed)
+                 lines))))
+     claude-agent--active-queries)
+    (when (= count 0)
+      (push "  (no active queries)" lines))
+    (mapconcat #'identity (nreverse lines) "\n")))
+
 (defun claude-agent--update-activity-string ()
   "Update the activity mode-line string based on active queries."
   (let ((count (claude-agent-active-query-count)))

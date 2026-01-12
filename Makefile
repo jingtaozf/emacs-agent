@@ -63,6 +63,10 @@ help:
 	@echo "Documentation:"
 	@echo "  make docs             - Generate documentation"
 	@echo "  make readme           - Update README from org files"
+	@echo ""
+	@echo "Static Analysis:"
+	@echo "  make lint             - Run static analysis (undefined functions/variables)"
+	@echo "  make check            - Run all checks (lint + test-unit)"
 
 .PHONY: compile
 compile:
@@ -401,13 +405,24 @@ coverage:
 	@echo "Generating coverage report..."
 	@echo "TODO: Implement coverage reporting"
 
-# Release checks
+# Static Analysis / Linting
+# These tests catch undefined functions/variables that would only error at runtime
+# Dynamically extracts all definitions from source and verifies they are bound
+.PHONY: lint
+lint:
+	@echo "Running static analysis..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		-l tests/test-static-analysis.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :static))"
+
+# Release checks - runs lint + unit tests
 .PHONY: check
-check: test-unit
-	@echo "Running pre-release checks..."
-	@echo "- Unit tests: PASSED"
-	@echo "- TODO: Add linting checks"
-	@echo "- TODO: Add documentation checks"
+check: lint test-unit
+	@echo ""
+	@echo "Pre-release checks completed:"
+	@echo "  - Static analysis: PASSED"
+	@echo "  - Unit tests: PASSED"
 
 .PHONY: package
 package: clean check

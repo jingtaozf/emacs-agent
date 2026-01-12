@@ -615,5 +615,64 @@
               :loop-max 3)))
     (should (equal "Instruction 5 (1/3)" (claude-agent-query-context-format-label ctx)))))
 
+;;; Activity Mode-Line Tests
+
+(ert-deftest test-claude-agent-format-activity-tooltip ()
+  "Test activity tooltip formatting function exists and works."
+  :tags '(:unit :fast :stable :isolated :display)
+  ;; First verify the function exists (this would have caught the deletion!)
+  (should (fboundp 'claude-agent--format-activity-tooltip))
+  ;; Test with no active queries
+  (let ((claude-agent--active-queries (make-hash-table :test 'equal)))
+    (let ((tooltip (claude-agent--format-activity-tooltip)))
+      (should (stringp tooltip))
+      (should (string-match-p "Active Claude Queries" tooltip))
+      (should (string-match-p "no active queries" tooltip))))
+  ;; Test with one active query
+  (let ((claude-agent--active-queries (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (rename-buffer "test-activity.org" t)
+      (let* ((ctx (claude-agent-make-query-context :instruction-num 7))
+             (state (claude-agent--make-process-state
+                     :request-id "req-123"
+                     :source-buffer (current-buffer)
+                     :query-context ctx
+                     :start-time (float-time)
+                     :closed nil)))
+        (claude-agent--register-query "req-123" state)
+        (let ((tooltip (claude-agent--format-activity-tooltip)))
+          (should (stringp tooltip))
+          (should (string-match-p "test-activity" tooltip))
+          (should (string-match-p "#7" tooltip))
+          (should (string-match-p "\\[.*s\\]" tooltip)))  ; elapsed time like [0s]
+        (claude-agent--unregister-query "req-123")))))
+
+(ert-deftest test-claude-agent-update-activity-string ()
+  "Test activity string update doesn't error.
+This test ensures all helper functions called exist."
+  :tags '(:unit :fast :stable :isolated :display)
+  ;; This test will fail if any function called by update-activity-string is missing
+  (let ((claude-agent--active-queries (make-hash-table :test 'equal))
+        (claude-agent-activity-string "")
+        (claude-agent--spinner-index 0))
+    ;; Test with no queries - should not error
+    (should (progn (claude-agent--update-activity-string) t))
+    (should (equal "" claude-agent-activity-string))
+    ;; Test with one query
+    (let* ((ctx (claude-agent-make-query-context :instruction-num 1))
+           (state (claude-agent--make-process-state
+                   :request-id "req-test"
+                   :start-time (float-time)
+                   :query-context ctx
+                   :closed nil)))
+      (claude-agent--register-query "req-test" state)
+      ;; This call would have caught the void-function error!
+      (should (progn (claude-agent--update-activity-string) t))
+      (should (stringp claude-agent-activity-string))
+      (should (> (length claude-agent-activity-string) 0))
+      ;; Verify tooltip is set as help-echo property
+      (should (get-text-property 0 'help-echo claude-agent-activity-string))
+      (claude-agent--unregister-query "req-test"))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here
