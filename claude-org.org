@@ -874,27 +874,36 @@ Returns list of (question . response) pairs for recovery."
 
 (defun claude-org--recover-session (session-key &optional reason)
   "Recover session for SESSION-KEY by collecting context and retrying.
-REASON can be 'context-limit or 'expired (default)."
+REASON can be 'context-limit or 'expired (default).
+
+IMPORTANT: This is called from async error handler where cursor may have moved.
+All cursor-dependent operations (org-entry-get, collect-session-context) must
+be done within the marker's buffer with cursor positioned at marker location."
   (claude-org--session-put session-key :recovering t)
-  ;; Notify user with appropriate message
   (let ((marker (claude-org--session-get session-key :marker))
         (msg (pcase reason
                ('context-limit "/Context limit reached, recovering with history.../")
                (_ "/Session expired, recovering with context.../"))))
-    (when marker
+    (when (and marker (marker-buffer marker))
       (with-current-buffer (marker-buffer marker)
+        ;; Position cursor at marker for all org-entry-get calls to work correctly
         (save-excursion
           (goto-char marker)
+          ;; Insert recovery message
           (insert (format "\n%s\n\n" msg))
           (set-marker marker (point)))
         ;; Clear old session UUID from org property
-        (claude-org--clear-sdk-uuid))))
-  ;; Collect context and retry
-  (let* ((context (claude-org--collect-session-context))
-         (original-prompt (claude-org--session-get session-key :original-prompt))
-         (recovery-prompt (claude-org--build-recovery-prompt context original-prompt)))
-    ;; Retry with recovery prompt
-    (claude-org--send-request recovery-prompt)))
+        (claude-org--clear-sdk-uuid)
+        ;; Collect context while still positioned in correct buffer
+        ;; NOTE: collect-session-context uses org-entry-get which depends on cursor position
+        ;; but uses save-excursion internally, so being in the right buffer is sufficient
+        (let* ((context (save-excursion
+                          (goto-char marker)
+                          (claude-org--collect-session-context)))
+               (original-prompt (claude-org--session-get session-key :original-prompt))
+               (recovery-prompt (claude-org--build-recovery-prompt context original-prompt)))
+          ;; Retry with recovery prompt, passing session-key explicitly
+          (claude-org--send-request recovery-prompt nil session-key))))))
 #+END_SRC
 
 * Environment Variable Loading

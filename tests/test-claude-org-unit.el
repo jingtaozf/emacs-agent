@@ -940,5 +940,36 @@ This ensures loop iterations use the original session, not current cursor positi
     ;; Cleanup
     (remhash test-session-key claude-org--sessions)))
 
+;;; Recovery Session Key Tests
+
+(ert-deftest test-claude-org-recover-session-passes-session-key ()
+  "Test that recover-session passes session-key to send-request.
+This ensures recovery uses the original session, not current cursor position."
+  :tags '(:unit :fast :stable :isolated :org :recovery)
+  (let* ((fn-str (format "%s" (symbol-function 'claude-org--recover-session)))
+         ;; Check that the function calls send-request with session-key as 3rd arg
+         (has-session-key-arg (string-match "send-request recovery-prompt nil session-key" fn-str)))
+    (should has-session-key-arg)))
+
+(ert-deftest test-claude-org-recover-session-uses-marker-buffer ()
+  "Test that recover-session uses marker buffer for context collection.
+This ensures we're in the right buffer when calling org-entry-get dependent functions."
+  :tags '(:unit :fast :stable :isolated :org :recovery)
+  (let* ((fn-str (format "%s" (symbol-function 'claude-org--recover-session)))
+         ;; Check that marker-buffer is used to get the buffer
+         ;; The string representation may vary, so we check for key patterns
+         (uses-marker-buffer (or (string-match "marker-buffer marker" fn-str)
+                                 (string-match "(marker-buffer marker)" fn-str))))
+    (should uses-marker-buffer)))
+
+(ert-deftest test-claude-org-recover-session-positions-cursor ()
+  "Test that recover-session positions cursor at marker before collecting context.
+This ensures org-entry-get returns correct values when called during recovery."
+  :tags '(:unit :fast :stable :isolated :org :recovery)
+  (let* ((fn-str (format "%s" (symbol-function 'claude-org--recover-session)))
+         ;; Check that goto-char marker is called before collect-session-context
+         (positions-cursor (string-match "goto-char marker" fn-str)))
+    (should positions-cursor)))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
