@@ -171,3 +171,37 @@ Functions called from header-line or mode-line should wrap org-* calls:
   (ignore-errors
     (org-entry-get nil "PROP" t)))
 ```
+
+## CRITICAL: Async/Callback Context Warning
+
+**`org-entry-get nil` uses CURRENT cursor position!**
+
+In async callbacks (`:on-complete`, `run-at-time`, process filters), the cursor
+may have moved. See `/emacs-async` skill for full patterns.
+
+### Quick Fix Pattern for Async
+
+```elisp
+;; When called from async context with a marker:
+(defun handle-async-result (session-key result)
+  (let ((marker (get-session-marker session-key)))
+    (when (marker-buffer marker)
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)  ; Position cursor FIRST!
+          ;; NOW org-entry-get works correctly
+          (org-entry-get nil "PROPERTY" t))))))
+```
+
+### Common Bug Pattern
+
+```elisp
+;; BUG: Called from async callback, cursor may be anywhere!
+(defun bad-error-handler (error)
+  (let ((session-key (my-get-session-from-cursor)))  ; WRONG!
+    (recover-session session-key)))
+
+;; FIX: Pass session-key explicitly from the original call
+(defun good-error-handler (session-key error)
+  (recover-session session-key))
+```
