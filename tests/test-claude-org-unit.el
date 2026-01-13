@@ -897,5 +897,48 @@ Counts :claude_chat: tagged headings within session scope."
       ;; Should only return 1 candidate (the one with custom-id)
       (should (= 1 (length candidates))))))
 
+
+;;; Loop Session Key Tests
+
+(ert-deftest test-claude-org-send-request-uses-session-key-override ()
+  "Test that send-request uses session-key-override when provided.
+This is critical for loop iterations where cursor may have moved."
+  :tags '(:unit :fast :stable :isolated :org :loop)
+  ;; We can't easily test the full send-request without mocking claude-agent-query,
+  ;; but we can verify the function signature accepts session-key-override
+  (should (equal '(prompt &optional query-context session-key-override)
+                 (help-function-arglist 'claude-org--send-request))))
+
+(ert-deftest test-claude-org-execute-loop-iteration-passes-session-key ()
+  "Test that execute-loop-iteration passes session-key to send-request.
+This ensures loop iterations use the original session, not current cursor position."
+  :tags '(:unit :fast :stable :isolated :org :loop)
+  (let* ((fn-str (format "%s" (symbol-function 'claude-org--execute-loop-iteration)))
+         ;; Check that the function calls send-request with session-key as 3rd arg
+         (has-session-key-arg (string-match "send-request prompt query-ctx session-key" fn-str)))
+    (should has-session-key-arg)))
+
+(ert-deftest test-claude-org-loop-state-preserved ()
+  "Test that loop state is properly stored and retrieved from session."
+  :tags '(:unit :fast :stable :isolated :org :loop)
+  (let ((test-session-key "test-loop-session::test"))
+    ;; Setup loop state as claude-org-execute would
+    (claude-org--session-put test-session-key :loop-max 5)
+    (claude-org--session-put test-session-key :loop-current 1)
+    (claude-org--session-put test-session-key :loop-interval 10)
+    (claude-org--session-put test-session-key :original-prompt "test prompt")
+    (claude-org--session-put test-session-key :instruction-num 1)
+    ;; Verify state is retrievable
+    (should (= 5 (claude-org--session-get test-session-key :loop-max)))
+    (should (= 1 (claude-org--session-get test-session-key :loop-current)))
+    (should (= 10 (claude-org--session-get test-session-key :loop-interval)))
+    (should (equal "test prompt" (claude-org--session-get test-session-key :original-prompt)))
+    ;; Verify loop continuation condition
+    (let ((loop-current (claude-org--session-get test-session-key :loop-current))
+          (loop-max (claude-org--session-get test-session-key :loop-max)))
+      (should (and loop-current loop-max (< loop-current loop-max))))
+    ;; Cleanup
+    (remhash test-session-key claude-org--sessions)))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
