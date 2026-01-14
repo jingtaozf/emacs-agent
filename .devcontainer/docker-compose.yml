@@ -1,11 +1,12 @@
 # Docker Compose for Claude Code in container
-# Uses persistent volume for auth (official Docker sandbox pattern)
+# Uses Dockerfile.dev for cached builds (official Docker pattern)
 #
 # First-time setup:
 #   make docker-auth              # Authenticate (opens browser)
 #
 # Usage:
 #   docker compose up -d          # Start container in background
+#   docker compose up -d --build  # Rebuild and start (after Dockerfile changes)
 #   docker compose exec claude claude --version  # Run claude in container
 #   docker compose exec claude claude -p "Hello"  # Run query
 #   docker compose down           # Stop container
@@ -15,38 +16,11 @@
 
 services:
   claude:
-    image: oven/bun:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
     container_name: claude-agent
     working_dir: /workspace
-
-    # Install dependencies, Emacs, and Claude Code, then keep running
-    entrypoint: >
-      sh -c "
-        set -e &&
-        echo 'Installing system dependencies...' &&
-        apt-get update &&
-        apt-get install -y --no-install-recommends git curl ca-certificates openssh-client make emacs-nox socat &&
-        echo 'Installing Emacs packages for testing...' &&
-        mkdir -p /root/projects &&
-        git clone --depth 1 https://github.com/jingtaozf/literate-elisp.git /root/projects/literate-elisp &&
-        mkdir -p /root/.emacs.d/straight/build/web-server &&
-        curl -sL https://raw.githubusercontent.com/eschulte/emacs-web-server/master/web-server.el -o /root/.emacs.d/straight/build/web-server/web-server.el &&
-        curl -sL https://raw.githubusercontent.com/eschulte/emacs-web-server/master/web-server-status-codes.el -o /root/.emacs.d/straight/build/web-server/web-server-status-codes.el &&
-        echo 'Installing Claude Code...' &&
-        bun install -g @anthropic-ai/claude-code@latest &&
-        echo 'Setting up MCP server config...' &&
-        HOST_IP=$$(getent hosts host.docker.internal | awk '{print $$1}') &&
-        if [ -n \"$$HOST_IP\" ]; then
-          echo \"{\\\"mcpServers\\\":{\\\"emacs\\\":{\\\"type\\\":\\\"http\\\",\\\"url\\\":\\\"http://$$HOST_IP:9999/mcp\\\"}}}\" > /workspace/.mcp.json &&
-          echo \"MCP config created with host IP: $$HOST_IP\" &&
-          echo 'Starting MCP proxy (localhost:9999 -> host:9999)...' &&
-          socat TCP-LISTEN:9999,fork,reuseaddr TCP:$$HOST_IP:9999 &
-          sleep 1 &&
-          echo 'MCP proxy started'
-        fi &&
-        echo 'Container ready (Claude Code + Emacs + test deps installed).' &&
-        exec sleep infinity
-      "
 
     volumes:
       # Claude credentials (persistent volume - auth stored here)
