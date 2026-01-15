@@ -516,6 +516,49 @@ Same-file duplicates are ignored (often example code or intentional redefs)."
                (length cross-file-duplicates)
                (mapconcat #'identity (seq-take cross-file-duplicates 10) "\n  "))))))
 
+(ert-deftest test-static-no-code-outside-src-blocks ()
+  "Check that no elisp definitions appear outside #+BEGIN_SRC blocks.
+This catches a common literate programming mistake where code is accidentally
+placed between #+END_SRC and the next #+BEGIN_SRC, causing it to be silently
+ignored by literate-elisp."
+  :tags '(:static :lint :literate)
+  (let* ((root (test-static--find-project-root))
+         (org-files (test-static--find-org-source-files root))
+         (errors nil))
+    (dolist (file org-files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (let ((in-src-block nil)
+              (file-short (file-name-nondirectory file)))
+          ;; Scan line by line
+          (while (not (eobp))
+            (let ((line (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position))))
+              (cond
+               ;; Entering src block
+               ((string-match-p "^#\\+BEGIN_SRC\\s-+elisp" line)
+                (setq in-src-block t))
+               ;; Exiting src block
+               ((string-match-p "^#\\+END_SRC" line)
+                (setq in-src-block nil))
+               ;; Check for definitions outside blocks
+               ((and (not in-src-block)
+                     (string-match "^(\\(def\\|cl-def\\)" line))
+                (push (format "%s:%d: %s"
+                              file-short
+                              (line-number-at-pos)
+                              (string-trim
+                               (substring line 0 (min 60 (length line)))))
+                      errors))))
+            (forward-line 1)))))
+    (when errors
+      (ert-fail
+       (format "Found %d elisp definitions outside #+BEGIN_SRC blocks:\n  %s\n\n\
+These will be silently ignored by literate-elisp. Wrap them in src blocks."
+               (length errors)
+               (mapconcat #'identity errors "\n  "))))))
+
 ;;; ============================================================================
 ;;; Utility: Show all definitions (for debugging)
 ;;; ============================================================================

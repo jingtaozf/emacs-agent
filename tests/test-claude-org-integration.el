@@ -605,8 +605,10 @@ buffer and instruction number for better identification."
              (should (buffer-live-p source-buf))
              ;; Should be our buffer
              (should (eq source-buf buf)))
-           ;; Query should have source-label set to "1" (Instruction 1)
-           (should (equal "1" (claude-agent--process-state-source-label found-state)))
+           ;; Query should have instruction-num set to 1 (Instruction 1)
+           (let ((ctx (claude-agent--process-state-query-context found-state)))
+             (should ctx)
+             (should (equal 1 (claude-agent-query-context-instruction-num ctx))))
            ;; Format identity should show buffer#instruction
            (let ((identity (claude-agent--format-query-identity found-state)))
              (should (stringp identity))
@@ -711,6 +713,218 @@ FLAKY: Claude may interpret line number links differently."
            (ert-skip (format "Response didn't match expected patterns: %s"
                              (substring response 0 (min 200 (length response))))))
          (should matched))))))
+
+;;; Scheduled Execution Tests
+
+(ert-deftest test-org-integration-scheduled-collect-from-file ()
+  "Test that scheduled AI blocks are correctly collected from org files."
+  :tags '(:integration :fast :org :scheduled)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Collect scheduled blocks from the fixture
+     (let ((collected (claude-org-scheduled--collect-from-file org-file)))
+       ;; Should find 3 scheduled blocks (past-due, daily-repeater, future)
+       (should (>= (length collected) 3))
+       ;; Check that our test blocks are found
+       (should (assoc "scheduled-test-past-due" collected))
+       (should (assoc "scheduled-test-daily-repeater" collected))
+       (should (assoc "scheduled-test-future" collected))))))
+
+(ert-deftest test-org-integration-scheduled-execution-past-due ()
+  "Test that past-due scheduled AI blocks execute correctly.
+This test verifies that `claude-org-scheduled--maybe-execute` runs
+when scheduled time is in the past and no prior execution occurred."
+  :tags '(:integration :slow :api :org :scheduled)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       ;; Disable MCP auto-start for testing
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Clear scheduled blocks alist
+       (setq claude-org--scheduled-blocks nil)
+
+       ;; Navigate to the past-due scheduled block
+       (goto-char (point-min))
+       (re-search-forward ":CUSTOM_ID: scheduled-test-past-due" nil t)
+       (org-back-to-heading t)
+
+       ;; Verify no LAST_AI_EXECUTED yet
+       (should-not (org-entry-get nil "LAST_AI_EXECUTED"))
+
+       ;; Get scheduled time - should be in the past (2025-01-01)
+       (let ((scheduled-time (org-get-scheduled-time (point))))
+         (should scheduled-time)
+         ;; Should be in the past
+         (should (time-less-p scheduled-time (current-time)))
+
+         ;; Execute via maybe-execute function
+         (claude-org-scheduled--maybe-execute
+          org-file "scheduled-test-past-due" scheduled-time)
+
+         ;; Navigate back to the block to get correct session key
+         (goto-char (point-min))
+         (re-search-forward ":CUSTOM_ID: scheduled-test-past-due" nil t)
+         (re-search-forward "#\\+begin_src ai" nil t)
+         (forward-line 1)
+
+         ;; Wait for the query to complete
+         (let ((session-key (claude-org--current-session-key)))
+           (test-claude-wait-for-completion session-key 60))
+
+         ;; After execution, LAST_AI_EXECUTED should be set
+         (goto-char (point-min))
+         (re-search-forward ":CUSTOM_ID: scheduled-test-past-due" nil t)
+         (org-back-to-heading t)
+         (let ((last-executed (org-entry-get nil "LAST_AI_EXECUTED")))
+           (should last-executed)
+           (should (stringp last-executed))
+           (should (> (length last-executed) 0)))
+
+         ;; Check that response contains expected text
+         (goto-char (point-min))
+         (should (re-search-forward "scheduled-past-due-executed" nil t)))))))
+
+(ert-deftest test-org-integration-scheduled-repeater-advancement ()
+  "Test that repeater timestamps are advanced after scheduled execution.
+This test verifies that a +1d repeater advances the SCHEDULED date."
+  :tags '(:integration :slow :api :org :scheduled :repeater)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       ;; Disable MCP auto-start for testing
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Clear scheduled blocks alist
+       (setq claude-org--scheduled-blocks nil)
+
+       ;; Navigate to the daily-repeater scheduled block
+       (goto-char (point-min))
+       (re-search-forward ":CUSTOM_ID: scheduled-test-daily-repeater" nil t)
+       (org-back-to-heading t)
+
+       ;; Record the original scheduled time
+       (let* ((original-scheduled (org-entry-get nil "SCHEDULED"))
+              (scheduled-time (org-get-scheduled-time (point))))
+         (should original-scheduled)
+         (should (string-match-p "\\+1d" original-scheduled))
+
+         ;; Execute via maybe-execute function
+         (claude-org-scheduled--maybe-execute
+          org-file "scheduled-test-daily-repeater" scheduled-time)
+
+         ;; Navigate back to the block to get correct session key
+         (goto-char (point-min))
+         (re-search-forward ":CUSTOM_ID: scheduled-test-daily-repeater" nil t)
+         (re-search-forward "#\\+begin_src ai" nil t)
+         (forward-line 1)
+
+         ;; Wait for the query to complete
+         (let ((session-key (claude-org--current-session-key)))
+           (test-claude-wait-for-completion session-key 60))
+
+         ;; Navigate back and check the timestamp was advanced
+         (goto-char (point-min))
+         (re-search-forward ":CUSTOM_ID: scheduled-test-daily-repeater" nil t)
+         (org-back-to-heading t)
+
+         (let ((new-scheduled (org-entry-get nil "SCHEDULED")))
+           (should new-scheduled)
+           ;; Should still have repeater
+           (should (string-match-p "\\+1d" new-scheduled))
+           ;; Date should have changed (advanced by 1 day)
+           (should-not (string= original-scheduled new-scheduled)))
+
+         ;; Check that response contains expected text
+         (goto-char (point-min))
+         (should (re-search-forward "daily-repeater-executed" nil t)))))))
+
+(ert-deftest test-org-integration-scheduled-future-not-executed ()
+  "Test that future-scheduled AI blocks do NOT execute.
+Blocks scheduled for the future should be skipped."
+  :tags '(:integration :fast :org :scheduled)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (org-mode)  ; Just org-mode, don't need claude-org-mode for this test
+
+       ;; Navigate to the future-scheduled block
+       (goto-char (point-min))
+       (re-search-forward ":CUSTOM_ID: scheduled-test-future" nil t)
+       (org-back-to-heading t)
+
+       ;; Get scheduled time - should be in the future (2099-12-31)
+       (let ((scheduled-time (org-get-scheduled-time (point))))
+         (should scheduled-time)
+         ;; Should be in the future
+         (should (time-less-p (current-time) scheduled-time))
+         ;; should-execute-p should return nil for future schedules
+         (should-not (claude-org-scheduled--should-execute-p scheduled-time nil)))))))
+
+(ert-deftest test-org-integration-scheduled-already-executed-skipped ()
+  "Test that already-executed scheduled blocks are skipped.
+If LAST_AI_EXECUTED is after the scheduled time, don't execute again."
+  :tags '(:integration :fast :org :scheduled)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (org-mode)
+       ;; Navigate to the past-due scheduled block
+       (goto-char (point-min))
+       (re-search-forward ":CUSTOM_ID: scheduled-test-past-due" nil t)
+       (org-back-to-heading t)
+
+       ;; Set LAST_AI_EXECUTED to now (after the scheduled time)
+       (org-entry-put nil "LAST_AI_EXECUTED"
+                      (format-time-string "%Y-%m-%d %H:%M:%S"))
+       (save-buffer)
+
+       ;; Get scheduled time
+       (let* ((scheduled-time (org-get-scheduled-time (point)))
+              (last-executed-str (org-entry-get nil "LAST_AI_EXECUTED")))
+         ;; should-execute-p should return nil (already executed)
+         (should-not (claude-org-scheduled--should-execute-p
+                      scheduled-time last-executed-str)))))))
+
+(ert-deftest test-org-integration-scheduled-scan-finds-blocks ()
+  "Test that scanning finds scheduled AI blocks correctly.
+This tests the timer callback function's scan logic."
+  :tags '(:integration :fast :org :scheduled)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     ;; Use this file as our scheduled org files list
+     ;; Note: variable name is claude-org-scheduled-files (not -org-files)
+     (let ((claude-org-scheduled-files (list org-file))
+           (claude-org--scheduled-blocks nil))
+
+       ;; Refresh the scheduled blocks list
+       (claude-org-scheduled-scan-all)
+
+       ;; Should have found our scheduled blocks
+       (should (>= (length claude-org--scheduled-blocks) 3))
+       (should (assoc "scheduled-test-past-due" claude-org--scheduled-blocks))
+       (should (assoc "scheduled-test-daily-repeater" claude-org--scheduled-blocks))
+       (should (assoc "scheduled-test-future" claude-org--scheduled-blocks))
+
+       ;; Verify past-due block is marked as ready to execute
+       (let* ((entry (assoc "scheduled-test-past-due" claude-org--scheduled-blocks))
+              (scheduled-time (plist-get (cdr entry) :scheduled-time)))
+         (should scheduled-time)
+         (should (claude-org-scheduled--should-execute-p scheduled-time nil)))
+
+       ;; Verify future block is NOT ready to execute
+       (let* ((entry (assoc "scheduled-test-future" claude-org--scheduled-blocks))
+              (scheduled-time (plist-get (cdr entry) :scheduled-time)))
+         (should scheduled-time)
+         (should-not (claude-org-scheduled--should-execute-p scheduled-time nil)))))))
 
 (provide 'test-claude-org-integration)
 ;;; test-claude-org-integration.el ends here

@@ -65,7 +65,10 @@ help:
 	@echo "  make readme           - Update README from org files"
 	@echo ""
 	@echo "Static Analysis:"
-	@echo "  make lint             - Run static analysis (undefined functions/variables)"
+	@echo "  make lint             - Run static analysis:"
+	@echo "                          * Undefined functions/variables"
+	@echo "                          * Code outside src blocks (literate programming)"
+	@echo "                          * Duplicate definitions"
 	@echo "  make check            - Run all checks (lint + test-unit)"
 
 .PHONY: compile
@@ -228,6 +231,8 @@ test-org-unit:
 		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
 		-l tests/test-claude-org-unit.el \
+		-l tests/test-claude-org-scheduled.el \
+		-l tests/test-claude-org-response.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-agent-integration
