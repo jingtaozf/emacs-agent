@@ -1352,22 +1352,6 @@ Each session state contains:
 
 Initialized to a new hash table when `claude-org-mode' is enabled.")
 
-(defun claude-org--cleanup-stale-sessions ()
-  "Remove stale entries from sessions hash table.
-Called after code reload to clean up entries with dead buffers."
-  (when (and (boundp 'claude-org--sessions)
-             (hash-table-p claude-org--sessions))
-    (let ((stale-keys '()))
-      (maphash
-       (lambda (key state)
-         (when (or (not (listp state))
-                   (let ((buf (plist-get state :source-buffer)))
-                     (and buf (not (buffer-live-p buf)))))
-           (push key stale-keys)))
-       claude-org--sessions)
-      (dolist (key stale-keys)
-        (remhash key claude-org--sessions)))))
-
 (defvar-local claude-org--fontlock-timer nil
   "Timer for debounced font-lock during streaming.")
 #+END_SRC
@@ -1466,17 +1450,6 @@ Falls back to full file if no Summary section exists."
   (claude-org--extract-summary-section
    (expand-file-name (format "tags/%s.org" (symbol-name tag))
                      claude-org-prompts-directory)))
-#+END_SRC
-
-*** Legacy Wrapper
-
-Backward-compatible wrapper for existing callers.
-
-#+BEGIN_SRC elisp
-(defun claude-org--tag-prompt (tag)
-  "Get behavior prompt for TAG symbol.
-Legacy wrapper - calls `claude-org-tag-prompt' with minimal context."
-  (claude-org-tag-prompt tag nil))
 #+END_SRC
 
 *** SDD Root Detection
@@ -2397,12 +2370,6 @@ Returns list of command strings with / prefix."
 ** Company Backend
 
 #+BEGIN_SRC elisp
-(defun claude-org--at-line-start-p ()
-  "Check if point is at the start of a line (ignoring whitespace)."
-  (save-excursion
-    (skip-chars-backward " \t")
-    (bolp)))
-
 (defun claude-org-company-slash-commands (command &optional arg &rest ignored)
   "Company backend for Claude slash commands in AI blocks.
 Only triggers when / is at the start of a line."
@@ -2517,13 +2484,15 @@ Returns a string like: \"** Response 1 (2025-01-13 08:00) :ai_output:\""
 Batches rapid updates during streaming for better performance."
   (when claude-org--fontlock-timer
     (cancel-timer claude-org--fontlock-timer))
-  (setq claude-org--fontlock-timer
-        (run-with-timer claude-org-fontlock-delay nil
-                        (lambda ()
-                          (when (and (buffer-live-p (current-buffer))
-                                     (derived-mode-p 'org-mode))
-                            (font-lock-flush)
-                            (redisplay))))))
+  (lexical-let ((buf (current-buffer)))  ; Capture buffer lexically
+    (setq claude-org--fontlock-timer
+          (run-with-timer claude-org-fontlock-delay nil
+                          (lambda ()
+                            (when (buffer-live-p buf)
+                              (with-current-buffer buf
+                                (when (derived-mode-p 'org-mode)
+                                  (font-lock-flush)
+                                  (redisplay)))))))))
 #+END_SRC
 
 ** Header Normalization
@@ -2641,14 +2610,6 @@ since activeForm is the present continuous form of the same task."
                            active-form
                          content)))
     (format "- %s %s" checkbox display-text)))
-
-(defun claude-org--format-todos (todos)
-  "Format TODOS list as org checkbox list.
-TODOS is a list of plists with :content, :status, :activeForm."
-  (when todos
-    (concat "\n*Todos:*\n"
-            (mapconcat #'claude-org--format-todo-item todos "\n")
-            "\n")))
 
 (defun claude-org--find-instruction-heading-for-session (session-key)
   "Find the instruction heading position for SESSION-KEY.
@@ -2860,6 +2821,14 @@ INTERVAL is delay between iterations (for display)."
           ;; Send request (uses continue-conversation for context)
           (claude-org--send-request prompt query-ctx session-key))))))
 
+(defun claude-org--free-marker (session-key)
+  "Free marker for SESSION-KEY to prevent memory leak.
+Markers hold references to buffers; must be explicitly freed."
+  (when-let ((marker (claude-org--session-get session-key :marker)))
+    (when (markerp marker)
+      (set-marker marker nil))
+    (claude-org--session-put session-key :marker nil)))
+
 (defun claude-org--handle-complete (session-key result)
   "Handle query completion for SESSION-KEY with RESULT."
   (claude-org--session-put session-key :busy nil)
@@ -2872,6 +2841,11 @@ INTERVAL is delay between iterations (for display)."
         (save-excursion
           (goto-char marker)
           (insert "\n")))))
+  ;; Free marker to prevent memory leak (unless loop continues)
+  (let ((loop-max (or (claude-org--session-get session-key :loop-max) 1))
+        (loop-current (or (claude-org--session-get session-key :loop-current) 1)))
+    (when (>= loop-current loop-max)
+      (claude-org--free-marker session-key)))
   ;; Update header line
   (claude-org--refresh-header-line)
   ;; Run completion hook
@@ -2926,8 +2900,9 @@ Attempts session recovery if error indicates expired session or context too long
       (with-current-buffer (marker-buffer marker)
         (save-excursion
           (goto-char marker)
-          (insert (format "\n[Error: %s]\n" error-msg))
-          (set-marker marker (point))))))
+          (insert (format "\n[Error: %s]\n" error-msg))))))
+  ;; Free marker to prevent memory leak
+  (claude-org--free-marker session-key)
   (claude-org--refresh-header-line)
   ;; Run completion hook with error status
   (run-hook-with-args 'claude-org-complete-hook session-key error-msg 'error))
@@ -4158,6 +4133,10 @@ Key bindings:
     (claude-org--remove-protection)
     ;; Stop header timer if no more claude-org buffers
     (claude-org--stop-header-timer)
+    ;; Cancel font-lock debounce timer (buffer-local)
+    (when claude-org--fontlock-timer
+      (cancel-timer claude-org--fontlock-timer)
+      (setq claude-org--fontlock-timer nil))
     ;; Company backends will be cleaned up automatically (buffer-local)
     ))
 

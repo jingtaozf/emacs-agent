@@ -1505,7 +1505,6 @@ Use `claude-agent-client-create' to construct instances."
   session-id      ; Current session ID
   (connected-p nil) ; Boolean connection state
   hooks           ; Alist of (event . matchers)
-  message-queue   ; Queue of pending messages
   on-message      ; Default message callback
   on-error)       ; Default error callback
 #+END_SRC
@@ -1532,7 +1531,6 @@ Example:
   (claude-agent--make-client
    :options (or options (claude-agent-options))
    :hooks (plist-get options :hooks)
-   :message-queue nil
    :on-message on-message
    :on-error on-error
    :connected-p nil))
@@ -2160,24 +2158,11 @@ Returns plist with :allow and :deny lists."
     (alist-get claude-agent-permission-preset claude-agent--preset-permissions
                nil nil #'string=)))
 
-(defun claude-agent-make-permission-hook (allow-patterns deny-patterns)
-  "Create a PreToolUse hook for permission checking.
-ALLOW-PATTERNS is list of patterns that allow tool use.
-DENY-PATTERNS is list of patterns that deny tool use.
-Returns a function that can be used with the hook system."
-  (lambda (input)
-    (let* ((tool-name (claude-agent-pre-tool-use-input-tool-name input))
-           (tool-input (claude-agent-pre-tool-use-input-tool-input input))
-           (decision (claude-agent-check-permission
-                      tool-name tool-input allow-patterns deny-patterns)))
-      (pcase decision
-        ('allow
-         '(:decision "allow"))
-        ('deny
-         '(:decision "deny" :reason "Denied by permission policy"))
-        ('ask
-         ;; Default to allow for now; could prompt user
-         '(:decision "allow"))))))
+;; NOTE: claude-agent-make-permission-hook was removed because it used
+;; undefined struct accessors (claude-agent-pre-tool-use-input-tool-name,
+;; claude-agent-pre-tool-use-input-tool-input). The struct was never defined.
+;; If hook-based permission checking is needed in the future, define the
+;; struct first: (cl-defstruct claude-agent-pre-tool-use-input tool-name tool-input)
 #+END_SRC
 
 * IDE Context
@@ -2535,25 +2520,73 @@ or outdated structure."
 
 #+BEGIN_SRC elisp
 (defun claude-agent-cancel-query (request-id)
-  "Cancel active query by REQUEST-ID.
-Sends SIGINT to process and marks state as cancelled.
-Returns t if cancelled, nil if not found."
+  "Cancel query by REQUEST-ID.
+Always marks as closed and unregisters, even if process is dead.
+Returns t if found and cancelled, nil if not found."
   (let ((state (claude-agent--get-active-query request-id)))
     (when state
-      (let ((process (claude-agent--process-state-process state)))
-        (when (and process (process-live-p process))
-          ;; Mark as cancelled
-          (setf (claude-agent--process-state-closed state) t)
-          ;; Send interrupt signal
-          (interrupt-process process)
-          (claude-agent--debug-log "Query cancelled: %s" request-id)
-          t)))))
+      ;; Always mark as closed first
+      (setf (claude-agent--process-state-closed state) t)
+      ;; Interrupt process if still alive
+      (when-let ((process (claude-agent--process-state-process state)))
+        (when (process-live-p process)
+          (interrupt-process process)))
+      ;; Always unregister from hash table
+      (claude-agent--unregister-query request-id)
+      (claude-agent--debug-log "Query cancelled: %s" request-id)
+      t)))
 
 (defun claude-agent-cancel-all-queries ()
   "Cancel all active queries."
   (maphash (lambda (id _state)
              (claude-agent-cancel-query id))
            claude-agent--active-queries))
+
+(defun claude-agent--query-active-p (state)
+  "Return t if STATE represents a truly active query.
+Checks both closed state and process liveness."
+  (and state
+       (claude-agent--process-state-p state)
+       (not (claude-agent--process-state-closed state))
+       ;; Process must be nil (not yet started) or alive
+       (let ((proc (claude-agent--process-state-process state)))
+         (or (null proc) (process-live-p proc)))))
+
+(defun claude-agent-cleanup ()
+  "Clean up all Claude agent state.
+Cancels active queries and removes stale entries."
+  (interactive)
+  (claude-agent-cancel-all-queries)
+  (claude-agent--cleanup-stale-queries))
+#+END_SRC
+
+** Periodic Cleanup Timer
+
+#+BEGIN_SRC elisp
+(defvar claude-agent--cleanup-timer nil
+  "Timer for periodic stale query cleanup.")
+
+(defcustom claude-agent-cleanup-interval 5
+  "Seconds between automatic stale query cleanup runs."
+  :type 'integer
+  :group 'claude-agent)
+
+(defun claude-agent--start-cleanup-timer ()
+  "Start periodic cleanup timer if not already running."
+  (unless claude-agent--cleanup-timer
+    (setq claude-agent--cleanup-timer
+          (run-with-timer claude-agent-cleanup-interval
+                          claude-agent-cleanup-interval
+                          #'claude-agent--cleanup-stale-queries))))
+
+(defun claude-agent--stop-cleanup-timer ()
+  "Stop periodic cleanup timer."
+  (when claude-agent--cleanup-timer
+    (cancel-timer claude-agent--cleanup-timer)
+    (setq claude-agent--cleanup-timer nil)))
+
+;; Start periodic cleanup on load
+(claude-agent--start-cleanup-timer)
 #+END_SRC
 
 * Activity Mode-Line
@@ -2582,14 +2615,11 @@ Shows spinner when queries are active, empty when idle.")
 
 #+BEGIN_SRC elisp
 (defun claude-agent-active-query-count ()
-  "Return count of currently active queries."
+  "Return count of currently active queries.
+Uses `claude-agent--query-active-p' to check both closed state and process liveness."
   (let ((count 0))
     (maphash (lambda (_id state)
-               (when (and state
-                          (claude-agent--process-state-p state)
-                          (not (claude-agent--process-state-closed state)))
-                 ;; Count as active if not closed, even if process ended
-                 ;; (process might be nil during cleanup)
+               (when (claude-agent--query-active-p state)
                  (cl-incf count)))
              claude-agent--active-queries)
     count))
@@ -2732,9 +2762,7 @@ Shows details about all active queries."
           (let ((has-queries nil))
             (maphash
              (lambda (id state)
-               (when (and state
-                          (claude-agent--process-state-p state)
-                          (not (claude-agent--process-state-closed state)))
+               (when (claude-agent--query-active-p state)
                  (setq has-queries t)
                  (let* ((start-time (claude-agent--process-state-start-time state))
                         (elapsed (claude-agent--format-elapsed start-time))
@@ -2793,9 +2821,7 @@ Shows details about all active queries."
               (local-count 0))
           (maphash
            (lambda (id state)
-             (when (and state
-                        (claude-agent--process-state-p state)
-                        (not (claude-agent--process-state-closed state)))
+             (when (claude-agent--query-active-p state)
                (setq has-queries t)
                (let* ((start-time (claude-agent--process-state-start-time state))
                       (elapsed (claude-agent--format-elapsed start-time))
@@ -3704,7 +3730,9 @@ Based on comint-mode for proper input handling.
     ;; Set the prompt using comint's mechanism
     (setq-local comint-prompt-read-only t)
     (insert claude-agent-chat-prompt)
-    (set-marker (process-mark (get-buffer-process (current-buffer))) (point))))
+    ;; Set process mark if process exists (guards against nil dereference)
+    (when-let ((proc (get-buffer-process (current-buffer))))
+      (set-marker (process-mark proc) (point)))))
 #+END_SRC
 
 ** Main Entry Point

@@ -317,8 +317,6 @@ Returns list of warning/error messages."
     "claude-org--insert-block-menu-dynamic"
     ;; Emacs version-specific functions
     "parse-iso8601-time-string"
-    ;; Intentionally forward-referenced
-    "claude-agent-cleanup"
     ;; Struct accessors referenced before struct is parsed
     "claude-agent-pre-tool-use-input-tool-name"
     "claude-agent-pre-tool-use-input-tool-input"

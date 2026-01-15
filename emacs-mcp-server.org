@@ -22,6 +22,7 @@ Prerequisites:
 #+BEGIN_SRC elisp
 (require 'json)
 (require 'cl-lib)
+(require 'eieio)  ; For with-slots macro used with ws-request objects
 (require 'web-server)
 #+END_SRC
 
@@ -471,28 +472,6 @@ Safely handles deleted processes without signaling errors."
           (when body
             (process-send-string process body)))
       (error nil))))  ;; Silently ignore errors on dead processes
-(defun emacs-mcp-server--send-raw-response (process status-code headers body)
-  "Send a complete HTTP response with STATUS-CODE, HEADERS, and BODY.
-HEADERS is an alist of (name . value) pairs."
-  (let* ((status-text (pcase status-code
-                        (200 "OK")
-                        (202 "Accepted")
-                        (400 "Bad Request")
-                        (404 "Not Found")
-                        (500 "Internal Server Error")
-                        (_ "Unknown")))
-         (response-line (format "HTTP/1.1 %d %s\r\n" status-code status-text)))
-    ;; Send status line
-    (process-send-string process response-line)
-    ;; Send headers
-    (dolist (header headers)
-      (process-send-string process
-                           (format "%s: %s\r\n" (car header) (cdr header))))
-    ;; End headers
-    (process-send-string process "\r\n")
-    ;; Send body
-    (when body
-      (process-send-string process body))))
 #+END_SRC
 
 *** Success Response Helper
@@ -697,23 +676,26 @@ Main entry point for HTTP requests.
 (defun emacs-mcp-server--handle-post (request)
   "Handle POST REQUEST to /mcp endpoint."
   (condition-case err
-      (let* ((body (ws-body request))
-             (json-obj (json-parse-string body :object-type 'alist))
-             (method (alist-get 'method json-obj))
-             (params (alist-get 'params json-obj))
-             (id (alist-get 'id json-obj)))
+      (let* ((body (ws-body request)))
+        ;; Validate body before JSON parsing
+        (unless (and body (stringp body) (> (length body) 0))
+          (signal 'json-parse-error '("Empty or missing request body")))
+        (let* ((json-obj (json-parse-string body :object-type 'alist))
+               (method (alist-get 'method json-obj))
+               (params (alist-get 'params json-obj))
+               (id (alist-get 'id json-obj)))
 
-        (if (null id)
-            ;; Notification - return 202 Accepted immediately
-            (emacs-mcp-server--send-accepted request)
-          ;; Request - dispatch and respond
-          (let ((result (emacs-mcp-server--dispatch method params)))
-            ;; Special handling for initialize - extract session ID
-            (if (and (equal method "initialize") (consp result) (stringp (car result)))
-                (let ((session-id (car result))
-                      (response (cdr result)))
-                  (emacs-mcp-server--send-response request id response session-id))
-              (emacs-mcp-server--send-response request id result)))))
+          (if (null id)
+              ;; Notification - return 202 Accepted immediately
+              (emacs-mcp-server--send-accepted request)
+            ;; Request - dispatch and respond
+            (let ((result (emacs-mcp-server--dispatch method params)))
+              ;; Special handling for initialize - extract session ID
+              (if (and (equal method "initialize") (consp result) (stringp (car result)))
+                  (let ((session-id (car result))
+                        (response (cdr result)))
+                    (emacs-mcp-server--send-response request id response session-id))
+                (emacs-mcp-server--send-response request id result))))))
 
     (json-parse-error
      (emacs-mcp-server--send-error request nil -32700 "Parse error"))
@@ -761,6 +743,8 @@ Returns the actual port number."
     (setq emacs-mcp-server--server nil
           emacs-mcp-server--port nil)
     (clrhash emacs-mcp-server--sessions)
+    ;; Stop spinner timer to avoid resource leak
+    (emacs-mcp-server--stop-spinner)
     (message "MCP server stopped")))
 #+END_SRC
 
