@@ -3238,15 +3238,36 @@ Builds title dynamically from CUSTOM_ID to show current heading hierarchy."
             title  ;; No truncation - show full hierarchy
             time-str)))
 
+(defun claude-org--custom-id-exists-p (custom-id)
+  "Check if CUSTOM_ID exists in the current buffer."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              t)
+          (error nil))))))
+
 (defun claude-org--collect-recent-blocks ()
   "Collect recent blocks for completing-read.
 Returns alist of (DISPLAY-STRING . ENTRY).
-Only includes entries with CUSTOM_ID.
+Only includes entries with CUSTOM_ID that still exist in the buffer.
 Limited by `claude-org-history-max-entries'."
   (claude-org--ensure-history-loaded)
-  (let* ((valid-entries (cl-remove-if-not
-                         (lambda (entry) (and (listp entry) (plist-get (cdr entry) :custom-id)))
-                         claude-org--block-history))
+  (let* ((entries-with-id (cl-remove-if-not
+                           (lambda (entry)
+                             (and (listp entry)
+                                  (plist-get (cdr entry) :custom-id)))
+                           claude-org--block-history))
+         ;; Filter to only entries whose CUSTOM_ID still exists in buffer
+         (valid-entries (cl-remove-if-not
+                         (lambda (entry)
+                           (claude-org--custom-id-exists-p
+                            (plist-get (cdr entry) :custom-id)))
+                         entries-with-id))
          (limited-entries (seq-take valid-entries claude-org-history-max-entries)))
     (mapcar (lambda (entry)
               (cons (claude-org--format-block-candidate entry) entry))

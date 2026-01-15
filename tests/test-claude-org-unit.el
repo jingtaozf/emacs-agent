@@ -861,41 +861,53 @@ Counts :claude_chat: tagged headings within session scope."
 ;;; Recent Blocks Collection Tests
 
 (ert-deftest test-claude-org-collect-recent-blocks ()
-  "Test recent blocks collection for completing-read."
+  "Test recent blocks collection for completing-read.
+Only entries with CUSTOM_IDs that exist in buffer are returned."
   :tags '(:unit :fast :stable :isolated :org :history)
-  (let ((claude-org--block-history
-         '(("block-1" :timestamp 1000.0 :status completed
-                      :custom-id "id-1" :title "First")))
-        (claude-org--history-loaded t)
-        (claude-org-history-max-entries 100))
-    (let ((candidates (claude-org--collect-recent-blocks)))
-      (should (= 1 (length candidates)))
-      (should (stringp (car (car candidates)))))))
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test :claude_chat:\n:PROPERTIES:\n:CUSTOM_ID: id-1\n:END:\n")
+    (setq-local claude-org--block-history
+                '(("block-1" :timestamp 1000.0 :status completed
+                             :custom-id "id-1" :title "First")))
+    (setq-local claude-org--history-loaded t)
+    (let ((claude-org-history-max-entries 100))
+      (let ((candidates (claude-org--collect-recent-blocks)))
+        (should (= 1 (length candidates)))
+        (should (stringp (car (car candidates))))))))
 
 (ert-deftest test-claude-org-collect-recent-blocks-respects-limit ()
   "Test that recent blocks collection respects the limit."
   :tags '(:unit :fast :stable :isolated :org :history)
-  (let ((claude-org--block-history
-         '(("block-1" :timestamp 1000.0 :status completed :custom-id "id-1" :title "First")
-           ("block-2" :timestamp 2000.0 :status completed :custom-id "id-2" :title "Second")
-           ("block-3" :timestamp 3000.0 :status completed :custom-id "id-3" :title "Third")))
-        (claude-org--history-loaded t)
-        (claude-org-history-max-entries 2))
-    (let ((candidates (claude-org--collect-recent-blocks)))
-      ;; Should only return 2 candidates
-      (should (= 2 (length candidates))))))
+  (with-temp-buffer
+    (org-mode)
+    (insert "* A :claude_chat:\n:PROPERTIES:\n:CUSTOM_ID: id-1\n:END:\n")
+    (insert "* B :claude_chat:\n:PROPERTIES:\n:CUSTOM_ID: id-2\n:END:\n")
+    (insert "* C :claude_chat:\n:PROPERTIES:\n:CUSTOM_ID: id-3\n:END:\n")
+    (setq-local claude-org--block-history
+                '(("block-1" :timestamp 1000.0 :status completed :custom-id "id-1" :title "First")
+                  ("block-2" :timestamp 2000.0 :status completed :custom-id "id-2" :title "Second")
+                  ("block-3" :timestamp 3000.0 :status completed :custom-id "id-3" :title "Third")))
+    (setq-local claude-org--history-loaded t)
+    (let ((claude-org-history-max-entries 2))
+      (let ((candidates (claude-org--collect-recent-blocks)))
+        ;; Should only return 2 candidates
+        (should (= 2 (length candidates)))))))
 
 (ert-deftest test-claude-org-collect-recent-blocks-filters-no-custom-id ()
   "Test that blocks without CUSTOM_ID are filtered out."
   :tags '(:unit :fast :stable :isolated :org :history)
-  (let ((claude-org--block-history
-         '(("block-1" :timestamp 1000.0 :status completed :custom-id "id-1" :title "Has ID")
-           ("block-2" :timestamp 2000.0 :status completed :title "No ID")))
-        (claude-org--history-loaded t)
-        (claude-org-history-max-entries 100))
-    (let ((candidates (claude-org--collect-recent-blocks)))
-      ;; Should only return 1 candidate (the one with custom-id)
-      (should (= 1 (length candidates))))))
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Has ID :claude_chat:\n:PROPERTIES:\n:CUSTOM_ID: id-1\n:END:\n")
+    (setq-local claude-org--block-history
+                '(("block-1" :timestamp 1000.0 :status completed :custom-id "id-1" :title "Has ID")
+                  ("block-2" :timestamp 2000.0 :status completed :title "No ID")))
+    (setq-local claude-org--history-loaded t)
+    (let ((claude-org-history-max-entries 100))
+      (let ((candidates (claude-org--collect-recent-blocks)))
+        ;; Should only return 1 candidate (the one with custom-id that exists)
+        (should (= 1 (length candidates)))))))
 
 
 ;;; Loop Session Key Tests
@@ -970,6 +982,55 @@ This ensures org-entry-get returns correct values when called during recovery."
          ;; Check that goto-char marker is called before collect-session-context
          (positions-cursor (string-match "goto-char marker" fn-str)))
     (should positions-cursor)))
+
+;;; History Custom ID Validation Tests
+
+(ert-deftest test-claude-org-custom-id-exists-p ()
+  "Test that custom-id-exists-p correctly checks for CUSTOM_ID existence."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test Section\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-valid-id\n")
+    (insert ":END:\n")
+    (insert "Content\n")
+    (insert "* Another Section\n")
+    (insert "No custom id here\n")
+    ;; Valid custom ID should be found
+    (should (claude-org--custom-id-exists-p "test-valid-id"))
+    ;; Non-existent custom ID should return nil
+    (should-not (claude-org--custom-id-exists-p "non-existent-id"))
+    ;; Nil custom ID should return nil
+    (should-not (claude-org--custom-id-exists-p nil))))
+
+(ert-deftest test-claude-org-collect-recent-blocks-filters-stale ()
+  "Test that collect-recent-blocks filters out entries with non-existent CUSTOM_IDs.
+This prevents 'Untitled' entries from appearing when SDD workflows are reset."
+  :tags '(:unit :fast :stable :isolated :org :history)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-history.org")
+    ;; Create a heading with a valid CUSTOM_ID
+    (insert "* Instruction 1 :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: existing-custom-id\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nTest query\n#+end_src\n")
+    ;; Simulate history with both valid and stale entries
+    (setq-local claude-org--block-history
+                '(("block-1" :timestamp 1000 :status completed :custom-id "existing-custom-id")
+                  ("block-2" :timestamp 900 :status completed :custom-id "deleted-custom-id")
+                  ("block-3" :timestamp 800 :status completed :custom-id "another-deleted-id")))
+    (setq-local claude-org--history-loaded t)
+    ;; Collect blocks - should only return the one with valid CUSTOM_ID
+    (let ((candidates (claude-org--collect-recent-blocks)))
+      ;; Should have exactly 1 candidate (the valid one)
+      (should (= 1 (length candidates)))
+      ;; The candidate should reference the existing custom-id
+      (let* ((entry (cdar candidates))
+             (custom-id (plist-get (cdr entry) :custom-id)))
+        (should (equal "existing-custom-id" custom-id))))))
 
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
