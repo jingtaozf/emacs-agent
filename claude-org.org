@@ -2432,6 +2432,83 @@ Only triggers when / is at the start of a line."
 
 Response handling for streaming tokens.
 
+** Response Section Boundary Detection
+
+Since Instruction and Response sections are siblings at the same level,
+=org-end-of-subtree= doesn't include Response sections. We need custom
+boundary detection to find where to insert new responses.
+
+#+BEGIN_SRC elisp
+(defun claude-org--find-response-boundary ()
+  "Find the boundary for searching response sections.
+Returns point of next non-:ai_output: sibling at same level,
+or next heading at higher level (parent boundary), or point-max.
+
+This is needed because Instruction and Response are SIBLINGS,
+not parent-child, so `org-end-of-subtree' doesn't include responses."
+  (save-excursion
+    (let ((current-level (org-current-level)))
+      (org-end-of-subtree t)  ; Move past current heading's content
+      (let ((found nil))
+        (while (and (not found)
+                    (re-search-forward "^\\*+ " nil t))
+          (let ((heading-level (1- (- (match-end 0) (match-beginning 0)))))
+            (cond
+             ;; Higher level (less stars) = parent boundary
+             ((< heading-level current-level)
+              (setq found (match-beginning 0)))
+             ;; Same level = check if :ai_output: sibling
+             ((= heading-level current-level)
+              (save-excursion
+                (goto-char (match-beginning 0))
+                (unless (looking-at (format ".*:%s:" claude-org-output-tag))
+                  ;; Not an output section = boundary
+                  (setq found (match-beginning 0))))))))
+        (or found (point-max))))))
+
+(defun claude-org--find-last-ai-output-sibling ()
+  "Find the last :ai_output: sibling section.
+Returns point at END of that section, or nil if none found."
+  (save-excursion
+    (let* ((current-level (org-current-level))
+           (block-end (claude-org--find-block-end))
+           (boundary (claude-org--find-response-boundary))
+           (last-output-end nil)
+           (output-pattern (format "^\\*\\{%d\\} .*:%s:"
+                                   current-level claude-org-output-tag)))
+      (when block-end
+        (goto-char block-end)
+        (while (re-search-forward output-pattern boundary t)
+          (setq last-output-end
+                (save-excursion (org-end-of-subtree t) (point)))))
+      last-output-end)))
+
+(defun claude-org--find-response-insert-point ()
+  "Find insertion point for new response section.
+Returns point after last :ai_output: sibling, or after #+end_src."
+  (or (claude-org--find-last-ai-output-sibling)
+      (claude-org--find-block-end)))
+
+(defun claude-org--create-response-section-header (instr-num timestamp &optional loop-info)
+  "Create response section header string.
+INSTR-NUM is the instruction number.
+TIMESTAMP is from LAST_AI_EXECUTED property (YYYY-MM-DD HH:MM:SS).
+LOOP-INFO is (CURRENT . MAX) for loop iterations, or nil.
+
+Returns a string like: \"** Response 1 (2025-01-13 08:00) :ai_output:\""
+  (let* ((level (claude-org--get-section-level))
+         (stars (make-string level ?*))
+         ;; Trim seconds for cleaner display: "2025-01-13 08:00:15" -> "2025-01-13 08:00"
+         (display-time (if (and timestamp (> (length timestamp) 16))
+                           (substring timestamp 0 16)
+                         (or timestamp (format-time-string "%Y-%m-%d %H:%M"))))
+         (loop-suffix (if loop-info
+                          (format "(%d/%d)" (car loop-info) (cdr loop-info))
+                        "")))
+    (format "%s Response %d%s (%s) :%s:\n\n"
+            stars instr-num loop-suffix display-time claude-org-output-tag)))
+#+END_SRC
+
 ** Debounced Font-Lock
 
 #+BEGIN_SRC elisp
@@ -2931,7 +3008,13 @@ Uses format: <basename>--<short-hash>.el for readability."
       (with-temp-file history-file
         (insert ";; -*- mode: lisp-data -*-\n")
         (insert ";; Claude-org block history - do not edit\n")
-        (pp data (current-buffer))))))
+        ;; `pp' respects `print-length' and `print-level' global settings.
+        ;; If user has these set (e.g., for debugging), large history data
+        ;; gets truncated with "..." which becomes symbol `\...' when read
+        ;; back, corrupting the history.  Bind to nil to ensure full output.
+        (let ((print-length nil)
+              (print-level nil))
+          (pp data (current-buffer)))))))
 
 (defun claude-org--prepare-history-for-save ()
   "Prepare history for saving by removing transient data.
@@ -3016,7 +3099,7 @@ If block with same CUSTOM_ID exists, updates it instead of creating duplicate."
     (when custom-id
       ;; Check if entry with this CUSTOM_ID already exists
       (let ((existing (cl-find-if (lambda (e)
-                                    (string= (plist-get (cdr e) :custom-id) custom-id))
+                                    (and (listp e) (string= (plist-get (cdr e) :custom-id) custom-id)))
                                   claude-org--block-history)))
         (if existing
             ;; Update existing entry - move to front and update timestamp/status
@@ -3162,7 +3245,7 @@ Only includes entries with CUSTOM_ID.
 Limited by `claude-org-history-max-entries'."
   (claude-org--ensure-history-loaded)
   (let* ((valid-entries (cl-remove-if-not
-                         (lambda (entry) (plist-get (cdr entry) :custom-id))
+                         (lambda (entry) (and (listp entry) (plist-get (cdr entry) :custom-id)))
                          claude-org--block-history))
          (limited-entries (seq-take valid-entries claude-org-history-max-entries)))
     (mapcar (lambda (entry)
@@ -3245,59 +3328,57 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
       (user-error "Empty ai block"))
     (when (claude-org--session-get session-key :busy)
       (user-error "Session is busy. Use C-c C-k to cancel or wait for completion"))
-    ;; Find insertion point (after #+end_src)
-    (let ((insert-point (claude-org--find-block-end))
-          (instr-num (claude-org--find-instruction-number)))
-      (unless insert-point
-        (user-error "Cannot find block end"))
-      ;; Set up marker at insertion point
+    ;; Record execution timestamp BEFORE creating response section
+    (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
       (save-excursion
-        (goto-char insert-point)
-        (insert "\n\n")
-        ;; Create Response section if enabled and we found an instruction number
-        (when (and claude-org-auto-create-response-section instr-num)
-          (let* ((level (claude-org--get-section-level))
-                 (stars (make-string level ?*)))
-            (if (> loop-max 1)
-                ;; Loop: include iteration in section name "Response N(1/M)"
-                (insert stars " Response " (number-to-string instr-num)
-                        "(1/" (number-to-string loop-max) ")"
-                        " :" claude-org-output-tag ":\n\n")
-              ;; Non-loop: original format "Response N"
-              (insert stars " Response " (number-to-string instr-num)
-                      " :" claude-org-output-tag ":\n\n"))))
-        (let ((marker (point-marker)))
-          (claude-org--session-put session-key :marker marker)
-          (claude-org--session-put session-key :original-prompt content)
-          (claude-org--session-put session-key :section-level (claude-org--get-section-level))
-          (claude-org--session-put session-key :start-time (float-time))
-          (claude-org--session-put session-key :busy t)
-          ;; Store loop state
-          (claude-org--session-put session-key :loop-max loop-max)
-          (claude-org--session-put session-key :loop-current 1)
-          (claude-org--session-put session-key :loop-interval loop-interval)
-          ;; Store instruction info for loop continuation
-          (claude-org--session-put session-key :instruction-num instr-num)
-          (claude-org--session-put session-key :custom-id custom-id)
-          ;; Run pre-execution hook
-          (run-hook-with-args 'claude-org-execute-hook session-key content marker)))
-      ;; Start spinner and send request
-      (claude-org--start-spinner session-key)
-      ;; Auto-generate title in parallel (using Haiku, separate session)
-      (when heading-marker
-        (claude-org--maybe-auto-generate-title content heading-marker))
-      ;; Build query-context for session manager (with loop info)
-      (let ((query-ctx (when instr-num
-                         (claude-agent-make-query-context
-                          :instruction-num instr-num
-                          :loop-current 1
-                          :loop-max loop-max
-                          :custom-id custom-id))))
-        ;; First iteration's section header already created above with Response N(1/M)
-        (claude-org--send-request content query-ctx))
-      ;; Run post-execution hook (after query sent)
-      (let ((marker (claude-org--session-get session-key :marker)))
-        (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))
+        (org-back-to-heading t)
+        (org-entry-put nil "LAST_AI_EXECUTED" timestamp))
+      ;; Find insertion point (after last :ai_output: sibling, or after #+end_src)
+      (let ((insert-point (claude-org--find-response-insert-point))
+            (instr-num (claude-org--find-instruction-number)))
+        (unless insert-point
+          (user-error "Cannot find block end"))
+        ;; Set up marker at insertion point
+        (save-excursion
+          (goto-char insert-point)
+          (insert "\n\n")
+          ;; Create Response section if enabled and we found an instruction number
+          (when (and claude-org-auto-create-response-section instr-num)
+            (let ((loop-info (when (> loop-max 1) (cons 1 loop-max))))
+              (insert (claude-org--create-response-section-header
+                       instr-num timestamp loop-info))))
+          (let ((marker (point-marker)))
+            (claude-org--session-put session-key :marker marker)
+            (claude-org--session-put session-key :original-prompt content)
+            (claude-org--session-put session-key :section-level (claude-org--get-section-level))
+            (claude-org--session-put session-key :start-time (float-time))
+            (claude-org--session-put session-key :busy t)
+            ;; Store loop state
+            (claude-org--session-put session-key :loop-max loop-max)
+            (claude-org--session-put session-key :loop-current 1)
+            (claude-org--session-put session-key :loop-interval loop-interval)
+            ;; Store instruction info for loop continuation
+            (claude-org--session-put session-key :instruction-num instr-num)
+            (claude-org--session-put session-key :custom-id custom-id)
+            ;; Run pre-execution hook
+            (run-hook-with-args 'claude-org-execute-hook session-key content marker)))
+        ;; Start spinner and send request
+        (claude-org--start-spinner session-key)
+        ;; Auto-generate title in parallel (using Haiku, separate session)
+        (when heading-marker
+          (claude-org--maybe-auto-generate-title content heading-marker))
+        ;; Build query-context for session manager (with loop info)
+        (let ((query-ctx (when instr-num
+                           (claude-agent-make-query-context
+                            :instruction-num instr-num
+                            :loop-current 1
+                            :loop-max loop-max
+                            :custom-id custom-id))))
+          ;; First iteration's section header already created above
+          (claude-org--send-request content query-ctx))
+        ;; Run post-execution hook (after query sent)
+        (let ((marker (claude-org--session-get session-key :marker)))
+          (run-hook-with-args 'claude-org-execute-after-hook session-key content marker))))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -3443,6 +3524,242 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
         (claude-org--session-put session-key :process-state state)))))
 #+END_SRC
 
+* Scheduled Execution
+
+Execute AI blocks automatically at scheduled times using org-mode's SCHEDULED property.
+
+** Data Structures
+
+#+BEGIN_SRC elisp
+(defvar claude-org--scheduled-blocks nil
+  "Alist of scheduled AI blocks.
+Keys are CUSTOM-ID strings.
+Values are plists: (:file FILE :scheduled-time TIME)
+where TIME is Emacs time from `org-get-scheduled-time'.")
+
+(defvar claude-org--scheduled-timer nil
+  "Timer that checks for due scheduled AI blocks every 60 seconds.")
+
+(defcustom claude-org-scheduled-files nil
+  "List of files to scan for scheduled AI blocks.
+If nil, uses `org-agenda-files'."
+  :type '(repeat file)
+  :group 'claude-org)
+#+END_SRC
+
+** Alist Management
+
+#+BEGIN_SRC elisp
+(defun claude-org-scheduled--update-entry (custom-id file scheduled-time)
+  "Update or add entry for CUSTOM-ID in scheduled blocks alist.
+FILE is the org file path.
+SCHEDULED-TIME is Emacs time from `org-get-scheduled-time'."
+  (setf (alist-get custom-id claude-org--scheduled-blocks nil nil #'string=)
+        (list :file file :scheduled-time scheduled-time)))
+
+(defun claude-org-scheduled--remove-entry (custom-id)
+  "Remove entry for CUSTOM-ID from scheduled blocks alist."
+  (setq claude-org--scheduled-blocks
+        (assoc-delete-all custom-id claude-org--scheduled-blocks #'string=)))
+#+END_SRC
+
+** Execution Decision Logic
+
+#+BEGIN_SRC elisp
+(defun claude-org-scheduled--should-execute-p (scheduled-time last-executed-str)
+  "Return t if AI block should execute based on times.
+SCHEDULED-TIME is Emacs time from `org-get-scheduled-time'.
+LAST-EXECUTED-STR is string from LAST_AI_EXECUTED property (or nil).
+
+Execution happens when:
+1. Scheduled time has arrived (scheduled-time <= now)
+2. AND either never executed OR scheduled after last execution"
+  (let ((now (current-time))
+        (last-executed (when (and last-executed-str
+                                  (not (string-empty-p last-executed-str)))
+                         (encode-time (parse-time-string last-executed-str)))))
+    (and
+     ;; Scheduled time has arrived
+     (not (time-less-p now scheduled-time))
+     ;; Either never executed, or scheduled after last execution
+     (or (null last-executed)
+         (time-less-p last-executed scheduled-time)))))
+#+END_SRC
+
+** AI Block Detection
+
+#+BEGIN_SRC elisp
+(defun claude-org-scheduled--has-ai-block-p ()
+  "Return t if heading at point contains an AI block in its subtree.
+Only searches within the current heading's subtree."
+  (save-excursion
+    (let ((subtree-end (save-excursion (org-end-of-subtree t) (point))))
+      (re-search-forward "#\\+begin_src ai" subtree-end t))))
+#+END_SRC
+
+** File Scanning
+
+#+BEGIN_SRC elisp
+(defun claude-org-scheduled--collect-from-file (file)
+  "Collect scheduled AI blocks from FILE.
+Returns alist of (CUSTOM-ID . (:file FILE :scheduled-time TIME))."
+  (let (results)
+    (when (file-exists-p file)
+      (with-current-buffer (find-file-noselect file)
+        (org-with-wide-buffer
+         (goto-char (point-min))
+         (while (re-search-forward "^\\*+ " nil t)
+           (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
+                  (scheduled-time (org-get-scheduled-time (point))))
+             (when (and custom-id scheduled-time
+                        (claude-org-scheduled--has-ai-block-p))
+               (push (cons custom-id
+                           (list :file file
+                                 :scheduled-time scheduled-time))
+                     results)))))))
+    results))
+
+(defun claude-org-scheduled-scan-all ()
+  "Scan org files and build scheduled blocks alist.
+Uses `claude-org-scheduled-files' or `org-agenda-files' if nil."
+  (interactive)
+  (setq claude-org--scheduled-blocks nil)
+  (let ((files (or claude-org-scheduled-files
+                   (and (fboundp 'org-agenda-files)
+                        (org-agenda-files 'unrestricted)))))
+    (dolist (file files)
+      (dolist (entry (claude-org-scheduled--collect-from-file file))
+        (push entry claude-org--scheduled-blocks)))
+    (message "Found %d scheduled AI block(s)"
+             (length claude-org--scheduled-blocks))))
+#+END_SRC
+
+** Timer System
+
+#+BEGIN_SRC elisp
+(defun claude-org-scheduled--check-and-execute ()
+  "Check all scheduled AI blocks and execute those that are due.
+Called by the timer every 60 seconds."
+  (dolist (entry claude-org--scheduled-blocks)
+    (let* ((custom-id (car entry))
+           (plist (cdr entry))
+           (file (plist-get plist :file))
+           (scheduled-time (plist-get plist :scheduled-time)))
+      (claude-org-scheduled--maybe-execute file custom-id scheduled-time))))
+
+(defun claude-org-scheduled--maybe-execute (file custom-id scheduled-time)
+  "Execute AI block if due and not already executed.
+FILE is the org file path.
+CUSTOM-ID identifies the heading.
+SCHEDULED-TIME is when the block should execute.
+Returns t if execution started, nil if skipped (busy, not due, etc)."
+  (when (file-exists-p file)
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (goto-char (point-min))
+       (when (re-search-forward
+              (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
+         (org-back-to-heading t)
+         (let ((last-exec-str (org-entry-get nil "LAST_AI_EXECUTED"))
+               (heading-pos (point)))
+           (when (claude-org-scheduled--should-execute-p
+                  scheduled-time last-exec-str)
+             ;; Find AI block within subtree
+             (let ((subtree-end (save-excursion (org-end-of-subtree t) (point))))
+               (when (re-search-forward "#\\+begin_src ai" subtree-end t)
+                 (forward-line 1)  ; Move INTO the block, not on begin_src line
+                 ;; Check if session is busy before executing
+                 (let ((session-key (claude-org--current-session-key)))
+                   (if (claude-org--session-get session-key :busy)
+                       (message "Skipping scheduled block %s - session busy" custom-id)
+                     ;; Session not busy, proceed with execution
+                     (message "Executing scheduled AI block: %s" custom-id)
+                     (claude-org-execute)
+                     ;; After execution, advance repeater if present
+                     (goto-char heading-pos)
+                     (let ((new-time (claude-org-scheduled--advance-repeater)))
+                       (when new-time
+                         ;; Update the in-memory alist with new scheduled time
+                         (claude-org-scheduled--update-entry custom-id file new-time)
+                         (message "Advanced repeater for %s to next occurrence"
+                                  custom-id)
+                         ;; Save the buffer to persist the change
+                         (save-buffer))))))))))))))
+
+(defun claude-org-scheduled--advance-repeater ()
+  "Advance the SCHEDULED timestamp if it has a repeater.
+Must be called with point on the heading.
+Returns the new scheduled time if advanced, nil otherwise."
+  (let ((repeat (org-get-repeat)))
+    (when repeat
+      (save-excursion
+        ;; Find the SCHEDULED line within the heading
+        (let ((heading-end (save-excursion (outline-next-heading) (point))))
+          (when (re-search-forward "SCHEDULED:" heading-end t)
+            ;; Find the timestamp on this line
+            (when (re-search-forward "<[^>]+>" (line-end-position) t)
+              (goto-char (match-beginning 0))
+              ;; Parse the repeater: +1d, +1w, +1m, .+1d, ++1d, etc.
+              (let* ((clean-repeat (if (string-match "^[.+]+" repeat)
+                                       (replace-match "" nil nil repeat)
+                                     repeat))
+                     (n (string-to-number (substring clean-repeat 0 -1)))
+                     (unit-char (substring clean-repeat -1))
+                     ;; Convert to days - org-timestamp-change works best with 'day
+                     (days (pcase unit-char
+                             ("d" n)
+                             ("w" (* n 7))
+                             ("m" (* n 30))  ; Approximate
+                             ("y" (* n 365)))))  ; Approximate
+                (when (and days (> days 0))
+                  (org-timestamp-change days 'day)
+                  ;; Return the new scheduled time
+                  (org-get-scheduled-time (point)))))))))))
+
+(defun claude-org-scheduled-start ()
+  "Start the scheduled AI block checker.
+Scans files and starts a timer that checks every 60 seconds.
+Call this from your init.el to enable scheduled execution."
+  (interactive)
+  (claude-org-scheduled-stop)
+  (claude-org-scheduled-scan-all)
+  (setq claude-org--scheduled-timer
+        (run-at-time 0 60 #'claude-org-scheduled--check-and-execute))
+  (message "Scheduled AI execution started (checking every 60s)"))
+
+(defun claude-org-scheduled-stop ()
+  "Stop the scheduled AI block checker."
+  (interactive)
+  (when (timerp claude-org--scheduled-timer)
+    (cancel-timer claude-org--scheduled-timer)
+    (setq claude-org--scheduled-timer nil))
+  (message "Scheduled AI execution stopped"))
+#+END_SRC
+
+** org-schedule Advice
+
+#+BEGIN_SRC elisp
+(defun claude-org-scheduled--after-schedule (&rest _)
+  "After advice for `org-schedule'.
+Updates the in-memory scheduled blocks list when user schedules a heading.
+Only active when scheduler is running."
+  (when claude-org--scheduled-timer  ; Only if scheduler is running
+    (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
+           (scheduled-time (org-get-scheduled-time (point)))
+           (file (buffer-file-name)))
+      (cond
+       ;; Has all required: update entry
+       ((and custom-id scheduled-time file
+             (claude-org-scheduled--has-ai-block-p))
+        (claude-org-scheduled--update-entry custom-id file scheduled-time)
+        (message "Updated schedule for AI block: %s" custom-id))
+       ;; Had custom-id but schedule removed: remove entry
+       ((and custom-id (not scheduled-time))
+        (claude-org-scheduled--remove-entry custom-id))))))
+
+(advice-add 'org-schedule :after #'claude-org-scheduled--after-schedule)
+#+END_SRC
+
 * Header Line
 
 Dynamic header line showing session status, IDE context, and thinking state.
@@ -3505,15 +3822,19 @@ Dynamic header line showing session status, IDE context, and thinking state.
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (bound-and-true-p claude-org-mode)
-          (claude-org--refresh-header-line)
-          ;; Advance spinner for busy sessions (guard against nil hash table)
-          (when (hash-table-p claude-org--sessions)
-            (maphash (lambda (key state)
-                       (when (plist-get state :busy)
-                         (let* ((frame (or (plist-get state :spinner) 0))
-                                (next-frame (mod (1+ frame) 4)))
-                           (plist-put state :spinner next-frame))))
-                     claude-org--sessions)))))))
+          ;; Skip indirect buffers to avoid org-element errors
+          ;; These can cause "Invalid search bound" errors when org-entry-get
+          ;; tries to parse with inheritance across buffer boundaries
+          (unless (buffer-base-buffer)
+            (claude-org--refresh-header-line)
+            ;; Advance spinner for busy sessions (guard against nil hash table)
+            (when (hash-table-p claude-org--sessions)
+              (maphash (lambda (key state)
+                         (when (plist-get state :busy)
+                           (let* ((frame (or (plist-get state :spinner) 0))
+                                  (next-frame (mod (1+ frame) 4)))
+                             (plist-put state :spinner next-frame))))
+                       claude-org--sessions))))))))
 
 (defun claude-org--refresh-header-line ()
   "Refresh the header line with current session status."

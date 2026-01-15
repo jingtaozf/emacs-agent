@@ -41,6 +41,16 @@
 (defvar test-claude-timeout 30
   "Default timeout for integration tests in seconds.")
 
+(defvar test-claude-project-root
+  (or (getenv "CLAUDE_TEST_PROJECT_ROOT")
+      ;; Default: parent of fixtures directory (i.e., project root)
+      (file-name-directory
+       (directory-file-name
+        (file-name-directory
+         (directory-file-name test-claude-fixture-dir)))))
+  "Project root for test fixtures.
+Can be overridden via CLAUDE_TEST_PROJECT_ROOT environment variable.")
+
 
 ;;; Environment Setup
 
@@ -64,9 +74,18 @@ Returns t if claude command is found, nil otherwise."
 
 (defun test-claude-copy-fixture ()
   "Create a temporary copy of test-session.org for testing.
-Returns the path to the temporary file."
+Returns the path to the temporary file.
+Dynamically replaces PROJECT_ROOT with `test-claude-project-root'."
   (let ((temp-file (make-temp-file "claude-test-" nil ".org")))
     (copy-file test-claude-session-org temp-file t)
+    ;; Replace PROJECT_ROOT placeholder with actual project root
+    (with-current-buffer (find-file-noselect temp-file)
+      (goto-char (point-min))
+      (when (re-search-forward "^#\\+PROPERTY: PROJECT_ROOT .*$" nil t)
+        (replace-match (format "#+PROPERTY: PROJECT_ROOT %s"
+                               test-claude-project-root)))
+      (save-buffer)
+      (kill-buffer))
     temp-file))
 
 (defun test-claude-clean-fixture (file)

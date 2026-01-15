@@ -79,6 +79,17 @@
     - [[#header-normalization][Header Normalization]]
     - [[#auto-line-breaking][Auto Line Breaking]]
     - [[#auto-title-generation][Auto Title Generation]]
+  - [[#ref-scheduled-execution][Scheduled AI Block Execution]]
+    - [[#requirements][Requirements]]
+    - [[#setup-1][Setup]]
+    - [[#example][Example]]
+    - [[#repeating-schedules][Repeating Schedules]]
+    - [[#how-it-works-1][How It Works]]
+    - [[#commands][Commands]]
+  - [[#ref-timestamped-responses][Timestamped Response Sections]]
+    - [[#response-structure][Response Structure]]
+    - [[#benefits][Benefits]]
+    - [[#loop-execution][Loop Execution]]
   - [[#error-analysis][Error Analysis]]
     - [[#usage][Usage]]
     - [[#automatic-analysis-recommended][Automatic Analysis (Recommended)]]
@@ -1010,6 +1021,8 @@ Control Claude's behavior through org tags and header arguments.
 | =:coverage= | NUMBER | Require minimum test coverage % |
 | =:strict= | t | Enable strict mode |
 | =:files= | PATTERN | Limit scope to specific files |
+| =:loop= | NUMBER | Re-execute block N times (for iterative refinement) |
+| =:interval= | NUMBER | Wait N seconds between loop iterations |
 
 *** Specialized Tags
 
@@ -1129,6 +1142,135 @@ generated using the Haiku model.
 ;; Only replace headings matching this pattern
 (setq claude-org-auto-title-heading-pattern "^Instruction [0-9]+$")
 #+END_SRC
+
+** Scheduled AI Block Execution
+:PROPERTIES:
+:CUSTOM_ID: ref-scheduled-execution
+:END:
+
+Execute AI blocks automatically at scheduled times using org-mode's =SCHEDULED= property.
+This is useful for recurring tasks like daily summaries or periodic data collection.
+
+*** Requirements
+
+Each scheduled AI block needs:
+1. =SCHEDULED= property with a timestamp (e.g., =<2025-01-13 Mon 08:00>=)
+2. =CUSTOM_ID= property for unique identification
+3. A =#+begin_src ai= block in the subtree
+
+*** Setup
+
+Add to your =init.el= to enable the scheduler:
+
+#+BEGIN_SRC elisp :load no
+;; Start the scheduler (uses org-agenda-files by default)
+(claude-org-scheduled-start)
+
+;; Or specify custom files to scan
+(setq claude-org-scheduled-files
+      '("~/org/tasks.org" "~/org/automation.org"))
+(claude-org-scheduled-start)
+#+END_SRC
+
+*Note:* If =claude-org-scheduled-files= is nil, the scheduler automatically uses
+=org-agenda-files= to find scheduled AI blocks.
+
+*** Example
+
+#+BEGIN_EXAMPLE
+,* Daily Summary
+SCHEDULED: <2025-01-13 Mon 08:00 +1d>
+:PROPERTIES:
+:CUSTOM_ID: daily-summary
+:END:
+
+,#+begin_src ai
+Summarize today's key events.
+,#+end_src
+#+END_EXAMPLE
+
+*** Repeating Schedules
+
+Use org-mode repeater syntax for recurring executions:
+
+| Repeater | Example | Effect |
+|----------+---------+--------|
+| =+1d= | =<2026-01-15 +1d>= | Daily |
+| =+1w= | =<2026-01-15 +1w>= | Weekly |
+| =+1m= | =<2026-01-15 +1m>= | Monthly |
+| =.+1d= | =<2026-01-15 .+1d>= | Daily (catch-up from today) |
+
+After each execution, the =SCHEDULED= timestamp advances to the next occurrence.
+
+*** How It Works
+
+- A 60-second timer checks for blocks that need execution
+- =LAST_AI_EXECUTED= property is set after each execution to prevent duplicates
+- Blocks only execute when: scheduled time is in the past AND no execution after scheduled time
+- For repeating schedules, the timestamp advances automatically after execution
+- Re-scheduling (changing =SCHEDULED=) will trigger a new execution
+
+*** Commands
+
+| Function | Description |
+|----------+-------------|
+| =claude-org-scheduled-start= | Start the scheduler timer |
+| =claude-org-scheduled-stop= | Stop the scheduler timer |
+| =claude-org-scheduled-scan-all= | Manually scan and update scheduled blocks |
+
+** Timestamped Response Sections
+:PROPERTIES:
+:CUSTOM_ID: ref-timestamped-responses
+:END:
+
+Each AI block execution creates a new timestamped response section, preserving
+the history of all responses.
+
+*** Response Structure
+
+When you execute an AI block, the response appears in a sibling section:
+
+#+BEGIN_EXAMPLE
+,** Instruction 1 :ai_instruction:
+
+,#+begin_src ai
+What is 2 + 2?
+,#+end_src
+
+,** Response 1 (2025-01-13 08:00) :ai_output:
+4
+
+,** Response 1 (2025-01-14 09:30) :ai_output:
+The answer is 4.
+#+END_EXAMPLE
+
+*** Benefits
+
+- *Full History*: Every execution is preserved with timestamp
+- *Comparison*: Compare responses from different times or after changes
+- *Audit Trail*: Track when and how AI blocks were executed
+- *Loop Support*: Works with =:loop= header for iterative refinement
+
+*** Loop Execution
+
+When using =:loop= header, each iteration gets its own response section:
+
+#+BEGIN_EXAMPLE
+,** Instruction :ai_instruction:
+
+,#+begin_src ai :loop 3 :interval 5
+Refine this code.
+,#+end_src
+
+,** Response 1(1/3) (2025-01-13 08:00) :ai_output:
+First iteration...
+
+,** Response 1(2/3) (2025-01-13 08:05) :ai_output:
+Second iteration...
+
+,** Response 1(3/3) (2025-01-13 08:10) :ai_output:
+Final iteration...
+#+END_EXAMPLE
 
 ** Error Analysis
 :PROPERTIES:
