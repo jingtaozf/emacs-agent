@@ -1127,8 +1127,19 @@ Returns a process state object."
                  :closed nil))
          ;; Note: We use :connection-type 'pipe in make-process below
          (default-directory (or cwd default-directory))
-         ;; Build process-environment with custom vars
+         ;; When cli-path is explicit, prepend its directory to exec-path
+         ;; This ensures #!/usr/bin/env node finds the correct node version
+         ;; (e.g., when using nvm with claude installed under a specific node)
+         (cli-dir (when (and raw-cli-path
+                             (not (claude-agent--docker-command-p raw-cli-path)))
+                    (file-name-directory (expand-file-name raw-cli-path))))
+         (exec-path (if cli-dir
+                        (cons cli-dir exec-path)
+                      exec-path))
+         ;; Build process-environment with custom vars and adjusted PATH
          (process-environment (append
+                              (when cli-dir
+                                (list (concat "PATH=" cli-dir ":" (getenv "PATH"))))
                               (mapcar (lambda (pair)
                                         (format "%s=%s" (car pair) (cdr pair)))
                                       env-vars)
