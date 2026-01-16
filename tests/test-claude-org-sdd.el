@@ -710,5 +710,206 @@ were not inherited because org-get-tags was called with LOCAL=t."
       (when (file-exists-p test-file)
         (delete-file test-file)))))
 
+;;; Unit Tests - Subsection Update Helper
+
+(ert-deftest test-sdd-update-subsection-creates-new ()
+  "Test claude-org-update-or-create-subsection creates new subsection when missing."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Feature\n")
+    (insert "** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n")
+    (insert "\n")
+    ;; Create new Goals subsection
+    (should (claude-org-update-or-create-subsection
+             "test-spec-sdd-12345"
+             "Goals"
+             "*** Goals\n\n- Goal 1\n- Goal 2"))
+    ;; Verify it was created
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
+    (should (re-search-forward "- Goal 1" nil t))
+    (should (re-search-forward "- Goal 2" nil t))))
+
+(ert-deftest test-sdd-update-subsection-replaces-existing ()
+  "Test claude-org-update-or-create-subsection replaces existing subsection."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Feature\n")
+    (insert "** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n\n")
+    (insert "*** Goals\n\n- Old Goal 1\n- Old Goal 2\n\n")
+    (insert "*** Non-Goals\n\n- Non-goal 1\n")
+    ;; Replace Goals subsection
+    (should (claude-org-update-or-create-subsection
+             "test-spec-sdd-12345"
+             "Goals"
+             "*** Goals\n\n- New Goal A\n- New Goal B\n- New Goal C"))
+    ;; Verify replacement
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
+    (should (re-search-forward "- New Goal A" nil t))
+    (should (re-search-forward "- New Goal B" nil t))
+    ;; Old content should be gone
+    (goto-char (point-min))
+    (should-not (re-search-forward "Old Goal" nil t))
+    ;; Non-Goals should still exist (sibling not affected)
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
+    (should (re-search-forward "- Non-goal 1" nil t))))
+
+(ert-deftest test-sdd-update-subsection-no-duplicates ()
+  "Test that repeated updates don't create duplicate subsections."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Feature\n")
+    (insert "** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n\n")
+    ;; First update - creates Goals
+    (claude-org-update-or-create-subsection
+     "test-spec-sdd-12345" "Goals" "*** Goals\n\n- Version 1")
+    ;; Second update - should replace, not append
+    (claude-org-update-or-create-subsection
+     "test-spec-sdd-12345" "Goals" "*** Goals\n\n- Version 2")
+    ;; Third update - should still replace
+    (claude-org-update-or-create-subsection
+     "test-spec-sdd-12345" "Goals" "*** Goals\n\n- Version 3")
+    ;; Count Goals headings - should be exactly 1
+    (goto-char (point-min))
+    (let ((count 0))
+      (while (re-search-forward "^\\*\\*\\* Goals" nil t)
+        (setq count (1+ count)))
+      (should (= 1 count)))
+    ;; Only latest version should exist
+    (goto-char (point-min))
+    (should (re-search-forward "- Version 3" nil t))
+    (goto-char (point-min))
+    (should-not (re-search-forward "- Version 1" nil t))
+    (should-not (re-search-forward "- Version 2" nil t))))
+
+(ert-deftest test-sdd-update-subsection-preserves-siblings ()
+  "Test that updating one subsection preserves other subsections."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Feature\n")
+    (insert "** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n\n")
+    (insert "*** Goals\n\n- Goal 1\n\n")
+    (insert "*** Non-Goals\n\n- Non-goal 1\n\n")
+    (insert "*** Technical Design\n\n- Design 1\n")
+    ;; Update only Non-Goals
+    (claude-org-update-or-create-subsection
+     "test-spec-sdd-12345" "Non-Goals" "*** Non-Goals\n\n- Updated non-goal")
+    ;; Verify Goals unchanged
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
+    (should (re-search-forward "- Goal 1" nil t))
+    ;; Verify Non-Goals updated
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
+    (should (re-search-forward "- Updated non-goal" nil t))
+    ;; Verify Technical Design unchanged
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Technical Design" nil t))
+    (should (re-search-forward "- Design 1" nil t))))
+
+(ert-deftest test-sdd-update-subsection-respects-level ()
+  "Test that subsection level is determined by parent level."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    ;; Parent at level 3 (not typical but should work)
+    (insert "* Feature\n")
+    (insert "** Category\n")
+    (insert "*** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n\n")
+    ;; Create Goals - should be level 4
+    (claude-org-update-or-create-subsection
+     "test-spec-sdd-12345" "Goals" "**** Goals\n\n- Goal at level 4")
+    ;; Verify level 4 heading
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\*\\* Goals" nil t))
+    ;; Should NOT match level 3
+    (goto-char (point-min))
+    (should-not (re-search-forward "^\\*\\*\\* Goals" nil t))))
+
+(ert-deftest test-sdd-update-subsection-handles-invalid-id ()
+  "Test that invalid CUSTOM_ID returns nil without error."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Feature\n")
+    (insert "** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n")
+    ;; Try with non-existent CUSTOM_ID - should return nil
+    (should-not (claude-org-update-or-create-subsection
+                 "nonexistent-custom-id"
+                 "Goals"
+                 "*** Goals\n\n- Goal 1"))))
+
+(ert-deftest test-sdd-update-multiple-subsections ()
+  "Test updating multiple subsections in sequence."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Feature\n")
+    (insert "** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n\n")
+    ;; Create all Spec subsections
+    (let ((spec-id "test-spec-sdd-12345"))
+      (claude-org-update-or-create-subsection
+       spec-id "Goals" "*** Goals\n\n- Goal 1")
+      (claude-org-update-or-create-subsection
+       spec-id "Non-Goals" "*** Non-Goals\n\n- Non-goal 1")
+      (claude-org-update-or-create-subsection
+       spec-id "Technical Design" "*** Technical Design\n\n- Design 1"))
+    ;; Verify all created
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Technical Design" nil t))
+    ;; Now update all of them
+    (let ((spec-id "test-spec-sdd-12345"))
+      (claude-org-update-or-create-subsection
+       spec-id "Goals" "*** Goals\n\n- Updated Goal")
+      (claude-org-update-or-create-subsection
+       spec-id "Non-Goals" "*** Non-Goals\n\n- Updated Non-goal")
+      (claude-org-update-or-create-subsection
+       spec-id "Technical Design" "*** Technical Design\n\n- Updated Design"))
+    ;; Verify no duplicates (count each heading)
+    (dolist (heading '("Goals" "Non-Goals" "Technical Design"))
+      (goto-char (point-min))
+      (let ((count 0))
+        (while (re-search-forward (format "^\\*\\*\\* %s" heading) nil t)
+          (setq count (1+ count)))
+        (should (= 1 count))))
+    ;; Verify updated content
+    (goto-char (point-min))
+    (should (re-search-forward "- Updated Goal" nil t))
+    (goto-char (point-min))
+    (should (re-search-forward "- Updated Non-goal" nil t))
+    (goto-char (point-min))
+    (should (re-search-forward "- Updated Design" nil t))))
+
 (provide 'test-claude-org-sdd)
 ;;; test-claude-org-sdd.el ends here

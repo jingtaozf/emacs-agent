@@ -1537,6 +1537,73 @@ Uses progressive disclosure - only Summary loaded, Claude reads full via link."
       static-prompt)))
 #+END_SRC
 
+*** SDD Subsection Update Helper
+
+Helper function for updating SDD subsections without creating duplicates.
+When updating Spec, Research Output, or Features sections, AI should use this
+to *replace* existing subsections rather than appending new ones.
+
+#+BEGIN_SRC elisp
+(defun claude-org-update-or-create-subsection (parent-id subsection-name content)
+  "Update existing subsection or create new one under PARENT-ID.
+PARENT-ID is the CUSTOM_ID of the parent section (e.g., Spec section).
+SUBSECTION-NAME is the heading text (e.g., \"Goals\", \"Non-Goals\").
+CONTENT is the full content including heading with correct level asterisks.
+
+This function prevents duplicate subsections when AI updates SDD sections
+multiple times. It searches for existing subsection and replaces it,
+or creates new one at end if not found.
+
+Returns t on success, nil on failure.
+
+Example usage in AI prompt:
+  (claude-org-update-or-create-subsection
+    \"myproject-spec-sdd-20260115-123456\"
+    \"Goals\"
+    \"*** Goals\\n\\n- Goal 1\\n- Goal 2\")"
+  (save-excursion
+    (condition-case err
+        (progn
+          ;; Navigate to parent section by CUSTOM_ID
+          (org-link-open-from-string (format "[[#%s]]" parent-id))
+          (let* ((parent-level (org-outline-level))
+                 (child-level (1+ parent-level))
+                 (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+                 ;; Match heading at exact child level with subsection name
+                 (search-pattern (format "^%s %s\\([ \t]\\|$\\)"
+                                         (regexp-quote (make-string child-level ?*))
+                                         (regexp-quote subsection-name))))
+            (if (re-search-forward search-pattern subtree-end t)
+                ;; Found existing subsection - replace it
+                (progn
+                  (beginning-of-line)
+                  (let ((section-start (point))
+                        section-end)
+                    ;; Find end of this subsection (next sibling or parent end)
+                    ;; Use org-end-of-subtree for reliability
+                    (save-excursion
+                      (org-end-of-subtree t)
+                      (setq section-end (point)))
+                    ;; Delete old content
+                    (delete-region section-start section-end)
+                    ;; Insert new content at current position (after delete, point is at section-start)
+                    (insert content)
+                    (unless (bolp) (insert "\n"))
+                    t))
+              ;; Not found - create at end of parent
+              (goto-char subtree-end)
+              ;; Ensure we're on a new line with blank line before
+              (unless (bolp) (insert "\n"))
+              (unless (save-excursion (forward-line -1) (looking-at-p "^[ \t]*$"))
+                (insert "\n"))
+              (insert content)
+              (unless (bolp) (insert "\n"))
+              t)))
+      (error
+       (message "claude-org-update-or-create-subsection error: %s" (error-message-string err))
+       nil))))
+#+END_SRC
+
 ** Header Prompt Lookup
 
 Loads prompt from =prompts/headers/=. Supports:
