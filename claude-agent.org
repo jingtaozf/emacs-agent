@@ -2504,24 +2504,57 @@ queries and allowing them to be interrupted.
   "Get process state for REQUEST-ID."
   (gethash request-id claude-agent--active-queries))
 
+(defcustom claude-agent-query-timeout 300
+  "Seconds after which a query is considered stale and should be cleaned up.
+Queries running longer than this are assumed to be zombie processes from
+network issues or other failures. Set to nil to disable timeout cleanup."
+  :type '(choice (integer :tag "Seconds")
+                 (const :tag "Disable" nil))
+  :group 'claude-agent)
+
+(defun claude-agent--query-timed-out-p (state)
+  "Return t if STATE represents a query that has timed out.
+Uses `claude-agent-query-timeout' to determine staleness."
+  (and claude-agent-query-timeout
+       (claude-agent--process-state-p state)
+       (claude-agent--process-state-start-time state)
+       (> (- (float-time) (claude-agent--process-state-start-time state))
+          claude-agent-query-timeout)))
+
 (defun claude-agent--cleanup-stale-queries ()
   "Remove stale entries from active-queries hash table.
-Called after code reload to clean up entries with dead processes
-or outdated structure."
-  (let ((stale-keys '()))
+Called after code reload to clean up entries with dead processes,
+outdated structure, or queries that have exceeded timeout."
+  (let ((stale-keys '())
+        (timed-out-keys '()))
     (maphash
      (lambda (key state)
-       (when (or (not (claude-agent--process-state-p state))
-                 (and (claude-agent--process-state-process state)
-                      (not (process-live-p
-                            (claude-agent--process-state-process state))))
-                 (claude-agent--process-state-closed state))
-         (push key stale-keys)))
+       (cond
+        ;; Invalid state, dead process, or closed
+        ((or (not (claude-agent--process-state-p state))
+             (and (claude-agent--process-state-process state)
+                  (not (process-live-p
+                        (claude-agent--process-state-process state))))
+             (claude-agent--process-state-closed state))
+         (push key stale-keys))
+        ;; Timed out - kill process and mark for removal
+        ((claude-agent--query-timed-out-p state)
+         (let ((proc (claude-agent--process-state-process state)))
+           (when (and proc (process-live-p proc))
+             (claude-agent--debug-log "Killing timed-out query: %s (age: %.0fs)"
+                                      key
+                                      (- (float-time)
+                                         (claude-agent--process-state-start-time state)))
+             (delete-process proc)))
+         (push key timed-out-keys))))
      claude-agent--active-queries)
-    (dolist (key stale-keys)
+    ;; Remove all stale and timed-out entries
+    (dolist (key (append stale-keys timed-out-keys))
       (remhash key claude-agent--active-queries))
     (when stale-keys
-      (claude-agent--debug-log "Cleaned up %d stale queries" (length stale-keys)))))
+      (claude-agent--debug-log "Cleaned up %d stale queries" (length stale-keys)))
+    (when timed-out-keys
+      (claude-agent--debug-log "Cleaned up %d timed-out queries" (length timed-out-keys)))))
 
 ;; Run cleanup on load
 (claude-agent--cleanup-stale-queries)
