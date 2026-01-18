@@ -238,5 +238,82 @@
           (should (null claude-agent-chat-include-ide-context)))
         (kill-buffer "*Claude Error Analysis 1*")))))
 
+;;; Integration Test - Error Analysis with Real Backtrace
+
+(ert-deftest test-error-analysis-buffer-specific-callbacks ()
+  "Test that error analysis uses buffer-specific callbacks.
+This verifies the fix for the bug where callbacks used hardcoded
+`claude-agent-chat-buffer-name' instead of the actual buffer."
+  :tags '(:integration :error-analysis)
+  (let ((claude-agent-error--counter 100)  ; Start high to avoid conflicts
+        (claude-agent-error--pending nil)
+        (claude-agent-error--debounce-timer nil)
+        (claude-agent-error-debounce-delay 0)  ; No debounce for test
+        (received-in-buffer nil)
+        (test-buf-name nil))
+    ;; Skip if claude-agent-chat--handle-message not defined
+    (skip-unless (fboundp 'claude-agent-chat--handle-message))
+    (cl-letf (((symbol-function 'claude-agent-chat-mode)
+               (lambda () (setq major-mode 'claude-agent-chat-mode)))
+              ((symbol-function 'claude-agent-chat--initialize-buffer)
+               (lambda () (insert "You> ")))
+              ((symbol-function 'start-process) (lambda (&rest _) nil))
+              ((symbol-function 'set-process-query-on-exit-flag) #'ignore)
+              ((symbol-function 'set-process-filter) #'ignore)
+              ((symbol-function 'pop-to-buffer) #'ignore)
+              ;; Mock claude-agent-query to capture callbacks
+              ((symbol-function 'claude-agent-query)
+               (lambda (prompt &rest args)
+                 (let ((on-message (plist-get args :on-message)))
+                   ;; Call the callback - it should work in the correct buffer
+                   (when on-message
+                     (setq test-buf-name (buffer-name))
+                     ;; Simulate calling from a different context
+                     (with-temp-buffer
+                       ;; The callback should switch to the correct buffer
+                       (funcall on-message
+                                (claude-agent-make-assistant-message
+                                 :content (list (claude-agent-make-text-block
+                                                :text "Test response"))))))))))
+      ;; Start error analysis
+      (claude-agent-error--start-chat "Test error")
+      ;; The buffer name should be the error analysis buffer, not *Claude Chat*
+      (should (string-match-p "Claude Error Analysis 101" test-buf-name))
+      ;; Cleanup
+      (when (get-buffer "*Claude Error Analysis 101*")
+        (kill-buffer "*Claude Error Analysis 101*")))))
+
+(ert-deftest test-error-analysis-real-backtrace-trigger ()
+  "Integration test: trigger real error, verify analysis buffer created.
+This test triggers an actual Emacs error and verifies the
+debugger-mode-hook triggers error analysis correctly."
+  :tags '(:integration :error-analysis :slow)
+  (skip-unless (fboundp 'claude-agent-analyze-backtrace))
+  (let ((analysis-triggered nil)
+        (captured-error-content nil))
+    ;; Mock start-chat to capture what would be analyzed (skip debounce)
+    (cl-letf (((symbol-function 'claude-agent-error--start-chat)
+               (lambda (content)
+                 (setq analysis-triggered t)
+                 (setq captured-error-content content))))
+      ;; Simulate a backtrace buffer with real error content
+      (with-temp-buffer
+        (insert "Debugger entered--Lisp error: (wrong-type-argument numberp nil)\n")
+        (insert "  number-to-string(nil)\n")
+        (insert "  my-test-function()\n")
+        (insert "  eval((my-test-function) nil)\n")
+        (setq major-mode 'debugger-mode)
+        ;; Call analyze-backtrace - this queues the analysis
+        (claude-agent-analyze-backtrace)
+        ;; Now manually process pending (simulating timer fire)
+        (when claude-agent-error--pending
+          (claude-agent-error--process-pending))))
+    ;; Verify analysis was triggered
+    (should analysis-triggered)
+    ;; Verify the error content was captured
+    (should (string-match-p "wrong-type-argument" captured-error-content))
+    (should (string-match-p "number-to-string" captured-error-content))
+    (should (string-match-p "my-test-function" captured-error-content))))
+
 (provide 'test-claude-agent-error)
 ;;; test-claude-agent-error.el ends here

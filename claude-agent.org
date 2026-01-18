@@ -81,6 +81,7 @@
 - [[#query-cancellation][Query Cancellation]]
   - [[#active-query-tracking][Active Query Tracking]]
   - [[#cancellation-functions][Cancellation Functions]]
+  - [[#periodic-cleanup-timer][Periodic Cleanup Timer]]
 - [[#activity-mode-line][Activity Mode-Line]]
   - [[#state-variables][State Variables]]
   - [[#activity-count][Activity Count]]
@@ -3585,60 +3586,57 @@ When non-nil, a <system-reminder> tag with context is prepended to each message.
       (insert text))))
 
 (defun claude-agent-chat--handle-message (msg)
-  "Handle incoming MSG from Claude."
-  (with-current-buffer claude-agent-chat-buffer-name
-    (let ((type (claude-agent-message-type msg)))
-      (pcase type
-        ('system
-         (when claude-agent-chat-show-system-messages
-           (let ((subtype (claude-agent-system-message-subtype msg)))
+  "Handle incoming MSG from Claude in current buffer."
+  (let ((type (claude-agent-message-type msg)))
+    (pcase type
+      ('system
+       (when claude-agent-chat-show-system-messages
+         (let ((subtype (claude-agent-system-message-subtype msg)))
+           (claude-agent-chat--insert
+            (format "\n[System: %s]\n" subtype)
+            'claude-agent-chat-info-face))))
+
+      ('assistant
+       (let ((text (claude-agent-extract-text msg)))
+         (when text
+           (setq claude-agent-chat--current-response text)
+           (claude-agent-chat--update-response text)))
+       ;; Check for tool use
+       (let ((content (claude-agent-assistant-message-content msg)))
+         (dolist (block content)
+           (when (claude-agent-tool-use-block-p block)
              (claude-agent-chat--insert
-              (format "\n[System: %s]\n" subtype)
-              'claude-agent-chat-info-face))))
+              (format "\n[Tool: %s]\n"
+                      (claude-agent-tool-use-block-name block))
+              'claude-agent-chat-tool-face)))))
 
-        ('assistant
-         (let ((text (claude-agent-extract-text msg)))
-           (when text
-             (setq claude-agent-chat--current-response text)
-             (claude-agent-chat--update-response text)))
-         ;; Check for tool use
-         (let ((content (claude-agent-assistant-message-content msg)))
-           (dolist (block content)
-             (when (claude-agent-tool-use-block-p block)
-               (claude-agent-chat--insert
-                (format "\n[Tool: %s]\n"
-                        (claude-agent-tool-use-block-name block))
-                'claude-agent-chat-tool-face)))))
-
-        ('result
-         (setq claude-agent-chat--session-id
-               (claude-agent-result-message-session-id msg))
-         (let ((cost (claude-agent-result-message-total-cost-usd msg)))
-           (when cost
-             (setq claude-agent-chat--total-cost
-                   (+ claude-agent-chat--total-cost cost))
-             (when claude-agent-chat-show-cost
-               (claude-agent-chat--insert
-                (format "\n[Cost: $%.4f | Session total: $%.4f]\n"
-                        cost claude-agent-chat--total-cost)
-                'claude-agent-chat-info-face)))))))))
+      ('result
+       (setq claude-agent-chat--session-id
+             (claude-agent-result-message-session-id msg))
+       (let ((cost (claude-agent-result-message-total-cost-usd msg)))
+         (when cost
+           (setq claude-agent-chat--total-cost
+                 (+ claude-agent-chat--total-cost cost))
+           (when claude-agent-chat-show-cost
+             (claude-agent-chat--insert
+              (format "\n[Cost: $%.4f | Session total: $%.4f]\n"
+                      cost claude-agent-chat--total-cost)
+              'claude-agent-chat-info-face))))))))
 
 (defun claude-agent-chat--handle-error (err)
-  "Handle error ERR from Claude."
-  (with-current-buffer claude-agent-chat-buffer-name
-    (claude-agent-chat--insert
-     (format "\n[Error: %s]\n" err)
-     'claude-agent-chat-error-face)
-    (setq claude-agent-chat--waiting nil)
-    (claude-agent-chat--show-prompt)))
+  "Handle error ERR from Claude in current buffer."
+  (claude-agent-chat--insert
+   (format "\n[Error: %s]\n" err)
+   'claude-agent-chat-error-face)
+  (setq claude-agent-chat--waiting nil)
+  (claude-agent-chat--show-prompt))
 
 (defun claude-agent-chat--handle-complete (_result)
-  "Handle completion of Claude's response."
-  (with-current-buffer claude-agent-chat-buffer-name
-    (setq claude-agent-chat--waiting nil)
-    (setq claude-agent-chat--current-response "")
-    (claude-agent-chat--insert "\n")
-    (claude-agent-chat--show-prompt)))
+  "Handle completion of Claude's response in current buffer."
+  (setq claude-agent-chat--waiting nil)
+  (setq claude-agent-chat--current-response "")
+  (claude-agent-chat--insert "\n")
+  (claude-agent-chat--show-prompt))
 
 (defun claude-agent-chat--show-prompt ()
   "Show the input prompt using comint."
@@ -3690,21 +3688,31 @@ When non-nil, a <system-reminder> tag with context is prepended to each message.
                                      (not (string-empty-p system-reminder)))
                                 (concat system-reminder "\n" input)
                               input)))
-        (claude-agent-query
-         actual-prompt
-         :options opts
-         :on-message #'claude-agent-chat--handle-message
-         :on-error #'claude-agent-chat--handle-error
-         :on-complete #'claude-agent-chat--handle-complete)))))
+        ;; Capture current buffer for closures (supports error analysis buffers)
+        (let ((chat-buf (current-buffer)))
+          (claude-agent-query
+           actual-prompt
+           :options opts
+           :on-message (lambda (msg)
+                         (when (buffer-live-p chat-buf)
+                           (with-current-buffer chat-buf
+                             (claude-agent-chat--handle-message msg))))
+           :on-error (lambda (err)
+                       (when (buffer-live-p chat-buf)
+                         (with-current-buffer chat-buf
+                           (claude-agent-chat--handle-error err))))
+           :on-complete (lambda (result)
+                          (when (buffer-live-p chat-buf)
+                            (with-current-buffer chat-buf
+                              (claude-agent-chat--handle-complete result))))))))))
 
 (defun claude-agent-chat-interrupt ()
-  "Interrupt the current Claude request."
+  "Interrupt the current Claude request in current buffer."
   (interactive)
   (claude-agent-cleanup)
-  (with-current-buffer claude-agent-chat-buffer-name
-    (setq claude-agent-chat--waiting nil)
-    (claude-agent-chat--insert "\n[Interrupted]\n" 'claude-agent-chat-error-face)
-    (claude-agent-chat--show-prompt)))
+  (setq claude-agent-chat--waiting nil)
+  (claude-agent-chat--insert "\n[Interrupted]\n" 'claude-agent-chat-error-face)
+  (claude-agent-chat--show-prompt))
 
 (defun claude-agent-chat-clear ()
   "Clear the chat buffer and reset the session."
@@ -4241,6 +4249,10 @@ Each error analysis gets its own chat buffer for follow-up questions.
         (set-process-query-on-exit-flag proc nil)
         (set-process-filter proc #'claude-agent-chat--comint-filter))
       (claude-agent-chat--initialize-buffer)
+      ;; Insert the prompt in the user input area (after "You> ")
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert initial-prompt))
       ;; Send initial error analysis request
       (claude-agent-chat--send-input initial-prompt))
     (pop-to-buffer buf)))
