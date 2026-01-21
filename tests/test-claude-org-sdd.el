@@ -911,5 +911,83 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (goto-char (point-min))
     (should (re-search-forward "- Updated Design" nil t))))
 
+;;; Tests for claude-org--adjust-heading-levels
+
+(ert-deftest test-sdd-adjust-heading-levels-basic ()
+  "Test basic level adjustment from 3 to 4."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((content "*** Goals\n\n- Goal 1\n- Goal 2"))
+    ;; Adjust from level 3 to level 4
+    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
+      (should (string-match-p "^\\*\\*\\*\\* Goals" adjusted))
+      (should-not (string-match-p "^\\*\\*\\* Goals" adjusted)))))
+
+(ert-deftest test-sdd-adjust-heading-levels-no-change ()
+  "Test that correct level is not changed."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((content "**** Goals\n\n- Goal 1"))
+    ;; Already at level 4
+    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
+      (should (string-equal content adjusted)))))
+
+(ert-deftest test-sdd-adjust-heading-levels-nested ()
+  "Test nested headings are all adjusted proportionally."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((content "*** Goals\n\n- Goal 1\n\n**** Subgoal\n\n- Detail"))
+    ;; Adjust all headings up by 1 level
+    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
+      ;; *** becomes ****
+      (should (string-match-p "^\\*\\*\\*\\* Goals" adjusted))
+      ;; **** becomes *****
+      (should (string-match-p "^\\*\\*\\*\\*\\* Subgoal" adjusted)))))
+
+(ert-deftest test-sdd-adjust-heading-levels-demote ()
+  "Test demotion (higher to lower level)."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((content "**** Goals\n\n- Goal 1"))
+    ;; Adjust from level 4 to level 3
+    (let ((adjusted (claude-org--adjust-heading-levels content 3)))
+      (should (string-match-p "^\\*\\*\\* Goals" adjusted))
+      (should-not (string-match-p "^\\*\\*\\*\\* Goals" adjusted)))))
+
+(ert-deftest test-sdd-adjust-heading-levels-no-heading ()
+  "Test content without heading is returned unchanged."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((content "Just some text\n- Item 1"))
+    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
+      (should (string-equal content adjusted)))))
+
+(ert-deftest test-sdd-adjust-heading-levels-min-level ()
+  "Test that level never goes below 1."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (let ((content "*** Goals\n\n- Goal 1"))
+    ;; Try to demote to level 1 (diff = -2)
+    (let ((adjusted (claude-org--adjust-heading-levels content 1)))
+      ;; Should become level 1, not level -1
+      (should (string-match-p "^\\* Goals" adjusted)))))
+
+(ert-deftest test-sdd-update-subsection-auto-adjusts-level ()
+  "Test that update function auto-adjusts wrong level in content."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    ;; Parent at level 3
+    (insert "* Feature\n")
+    (insert "** Category\n")
+    (insert "*** Spec :spec:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
+    (insert ":END:\n\n")
+    ;; Pass content with WRONG level (level 2 instead of 4)
+    ;; Function should auto-adjust to level 4
+    (claude-org-update-or-create-subsection
+     "test-spec-sdd-12345" "Goals" "** Goals\n\n- Goal at wrong level")
+    ;; Verify it became level 4 (parent 3 + 1)
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\*\\* Goals" nil t))
+    ;; Should NOT have level 2 heading
+    (goto-char (point-min))
+    (should-not (re-search-forward "^\\*\\* Goals" nil t))))
+
 (provide 'test-claude-org-sdd)
 ;;; test-claude-org-sdd.el ends here

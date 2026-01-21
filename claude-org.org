@@ -1553,11 +1553,41 @@ When updating Spec, Research Output, or Features sections, AI should use this
 to *replace* existing subsections rather than appending new ones.
 
 #+BEGIN_SRC elisp
+(defun claude-org--adjust-heading-levels (content target-level)
+  "Adjust all heading levels in CONTENT to be relative to TARGET-LEVEL.
+The first heading in CONTENT becomes TARGET-LEVEL, and all other headings
+are adjusted proportionally.
+
+For example, if CONTENT starts with '*** Foo' and TARGET-LEVEL is 4,
+'*** Foo' becomes '**** Foo' and '**** Bar' becomes '***** Bar'.
+
+This ensures correct hierarchy regardless of what level Claude uses in examples."
+  (if (string-match "^\\(\\*+\\) " content)
+      (let* ((content-level (length (match-string 1 content)))
+             (level-diff (- target-level content-level)))
+        (if (= level-diff 0)
+            content  ; Already correct
+          ;; Adjust all heading lines
+          (with-temp-buffer
+            (insert content)
+            (goto-char (point-min))
+            (while (re-search-forward "^\\(\\*+\\) " nil t)
+              (let* ((stars (match-string 1))
+                     (old-level (length stars))
+                     (new-level (max 1 (+ old-level level-diff)))  ; Ensure at least level 1
+                     (new-stars (make-string new-level ?*)))
+                (replace-match (concat new-stars " "))))
+            (buffer-string))))
+    ;; No heading found, return as-is
+    content))
+
 (defun claude-org-update-or-create-subsection (parent-id subsection-name content)
   "Update existing subsection or create new one under PARENT-ID.
 PARENT-ID is the CUSTOM_ID of the parent section (e.g., Spec section).
 SUBSECTION-NAME is the heading text (e.g., \"Goals\", \"Non-Goals\").
-CONTENT is the full content including heading with correct level asterisks.
+CONTENT is the full content including heading.  The heading level will be
+automatically adjusted to be one level below the parent, so callers don't
+need to know the exact level.
 
 This function prevents duplicate subsections when AI updates SDD sections
 multiple times. It searches for existing subsection and replaces it,
@@ -1569,7 +1599,9 @@ Example usage in AI prompt:
   (claude-org-update-or-create-subsection
     \"myproject-spec-sdd-20260115-123456\"
     \"Goals\"
-    \"*** Goals\\n\\n- Goal 1\\n- Goal 2\")"
+    \"*** Goals\\n\\n- Goal 1\\n- Goal 2\")
+
+Note: The '***' will be auto-adjusted to match parent+1 level."
   (save-excursion
     (condition-case err
         (progn
@@ -1577,6 +1609,8 @@ Example usage in AI prompt:
           (org-link-open-from-string (format "[[#%s]]" parent-id))
           (let* ((parent-level (org-outline-level))
                  (child-level (1+ parent-level))
+                 ;; Auto-adjust heading levels in content
+                 (adjusted-content (claude-org--adjust-heading-levels content child-level))
                  (subtree-end (save-excursion (org-end-of-subtree t) (point)))
                  ;; Match heading at exact child level with subsection name
                  (search-pattern (format "^%s %s\\([ \t]\\|$\\)"
@@ -1596,7 +1630,7 @@ Example usage in AI prompt:
                     ;; Delete old content
                     (delete-region section-start section-end)
                     ;; Insert new content at current position (after delete, point is at section-start)
-                    (insert content)
+                    (insert adjusted-content)
                     (unless (bolp) (insert "\n"))
                     t))
               ;; Not found - create at end of parent
@@ -1605,7 +1639,7 @@ Example usage in AI prompt:
               (unless (bolp) (insert "\n"))
               (unless (save-excursion (forward-line -1) (looking-at-p "^[ \t]*$"))
                 (insert "\n"))
-              (insert content)
+              (insert adjusted-content)
               (unless (bolp) (insert "\n"))
               t)))
       (error
