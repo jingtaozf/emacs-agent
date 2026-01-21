@@ -1032,5 +1032,87 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
              (custom-id (plist-get (cdr entry) :custom-id)))
         (should (equal "existing-custom-id" custom-id))))))
 
+
+;;; CUSTOM_ID Generation Tests
+
+(ert-deftest test-claude-org-generate-instruction-custom-id-basic ()
+  "Test basic CUSTOM_ID generation with timestamp."
+  :tags '(:unit :fast :stable :isolated :org :custom-id)
+  (let ((id (claude-org--generate-instruction-custom-id "myfile" 1 "sdd-20260121-100000")))
+    ;; Should have format: file-instruction-N-session-id-HHMMSS
+    (should (string-match "^myfile-instruction-1-sdd-20260121-100000-[0-9]\\{6\\}$" id))))
+
+(ert-deftest test-claude-org-generate-instruction-custom-id-no-session ()
+  "Test CUSTOM_ID generation without session ID."
+  :tags '(:unit :fast :stable :isolated :org :custom-id)
+  (let ((id (claude-org--generate-instruction-custom-id "myfile" 2 nil)))
+    ;; Should have format: file-instruction-N-HHMMSS (no session-id part)
+    (should (string-match "^myfile-instruction-2-[0-9]\\{6\\}$" id))))
+
+(ert-deftest test-claude-org-generate-instruction-custom-id-nil-file-base ()
+  "Test CUSTOM_ID generation returns nil when file-base is nil."
+  :tags '(:unit :fast :stable :isolated :org :custom-id)
+  (should (null (claude-org--generate-instruction-custom-id nil 1 "session"))))
+
+(ert-deftest test-claude-org-generate-instruction-custom-id-duplicate-suffix ()
+  "Test CUSTOM_ID generation adds -N suffix for duplicates."
+  :tags '(:unit :fast :stable :isolated :org :custom-id)
+  (with-temp-buffer
+    (org-mode)
+    ;; Create an existing heading with a CUSTOM_ID
+    (insert "* Test Section\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: testbuf-instruction-1-sess-123456\n")
+    (insert ":END:\n\n")
+    ;; Mock custom-id-exists-p to check our buffer
+    (cl-letf (((symbol-function 'claude-org--custom-id-exists-p)
+               (lambda (id)
+                 (save-excursion
+                   (goto-char (point-min))
+                   (search-forward (format ":CUSTOM_ID: %s" id) nil t)))))
+      ;; Mock timestamp to return fixed value
+      (cl-letf (((symbol-function 'format-time-string)
+                 (lambda (_fmt) "123456")))
+        ;; First call with same parameters should detect duplicate and add -2
+        (let ((id (claude-org--generate-instruction-custom-id "testbuf" 1 "sess")))
+          (should (equal id "testbuf-instruction-1-sess-123456-2")))))))
+
+(ert-deftest test-claude-org-generate-instruction-custom-id-multiple-duplicates ()
+  "Test CUSTOM_ID generation increments suffix for multiple duplicates."
+  :tags '(:unit :fast :stable :isolated :org :custom-id)
+  (with-temp-buffer
+    (org-mode)
+    ;; Create multiple existing headings with CUSTOM_IDs
+    (insert "* Section 1\n:PROPERTIES:\n:CUSTOM_ID: testbuf-instruction-1-sess-123456\n:END:\n\n")
+    (insert "* Section 2\n:PROPERTIES:\n:CUSTOM_ID: testbuf-instruction-1-sess-123456-2\n:END:\n\n")
+    (insert "* Section 3\n:PROPERTIES:\n:CUSTOM_ID: testbuf-instruction-1-sess-123456-3\n:END:\n\n")
+    (cl-letf (((symbol-function 'claude-org--custom-id-exists-p)
+               (lambda (id)
+                 (save-excursion
+                   (goto-char (point-min))
+                   (search-forward (format ":CUSTOM_ID: %s" id) nil t)))))
+      (cl-letf (((symbol-function 'format-time-string)
+                 (lambda (_fmt) "123456")))
+        ;; Should detect all duplicates and return -4
+        (let ((id (claude-org--generate-instruction-custom-id "testbuf" 1 "sess")))
+          (should (equal id "testbuf-instruction-1-sess-123456-4")))))))
+
+(ert-deftest test-claude-org-custom-id-exists-p ()
+  "Test custom-id-exists-p finds existing CUSTOM_IDs."
+  :tags '(:unit :fast :stable :isolated :org :custom-id)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test Section\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: my-test-id\n")
+    (insert ":END:\n")
+    ;; Should find existing ID
+    (should (claude-org--custom-id-exists-p "my-test-id"))
+    ;; Should not find non-existent ID
+    (should-not (claude-org--custom-id-exists-p "nonexistent-id"))
+    ;; Should handle nil
+    (should-not (claude-org--custom-id-exists-p nil))))
+
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

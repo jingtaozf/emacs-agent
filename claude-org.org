@@ -1878,12 +1878,21 @@ Returns non-nil if current heading or any parent heading has the output tag."
       (member claude-org-output-tag tags))))
 
 (defun claude-org--find-instruction-number ()
-  "Extract instruction number from current or parent heading.
-Returns nil if not in an Instruction heading."
+  "Extract instruction number from current or ancestor heading.
+Walks up the heading hierarchy to find the nearest Instruction N heading.
+Returns nil if not within an Instruction heading tree."
   (save-excursion
     (when (ignore-errors (org-back-to-heading t))
-      (when (looking-at "^\\*+ Instruction \\([0-9]+\\)")
-        (string-to-number (match-string 1))))))
+      ;; Check current heading first
+      (if (looking-at "^\\*+ Instruction \\([0-9]+\\)")
+          (string-to-number (match-string 1))
+        ;; Walk up parent headings
+        (let ((found nil))
+          (while (and (not found)
+                      (ignore-errors (org-up-heading-safe)))
+            (when (looking-at "^\\*+ Instruction \\([0-9]+\\)")
+              (setq found (string-to-number (match-string 1)))))
+          found)))))
 
 (defun claude-org--skip-to-after-output-section ()
   "Skip to after the current :ai_output: section.
@@ -2205,15 +2214,25 @@ Automatically generates a CUSTOM_ID for stable navigation."
     (forward-line -2)))
 
 (defun claude-org--generate-instruction-custom-id (file-base num session-id)
-  "Generate a CUSTOM_ID for an instruction block.
+  "Generate a unique CUSTOM_ID for an instruction block.
 FILE-BASE is the org file name without extension.
 NUM is the instruction number.
 SESSION-ID is the parent section's CLAUDE_SESSION_ID (can be nil).
-Returns a string like \"file-instruction-N-session-id\" or \"file-instruction-N\"."
-  (when file-base
-    (if session-id
-        (format "%s-instruction-%d-%s" file-base num session-id)
-      (format "%s-instruction-%d" file-base num))))
+
+Returns a string like \"file-instruction-N-session-id-HHMMSS\" with timestamp.
+If that ID already exists in the buffer, appends -2, -3, etc. until unique."
+  (let ((timestamp (format-time-string "%H%M%S")))
+    (when file-base
+      (let* ((base-id (if session-id
+                          (format "%s-instruction-%d-%s-%s" file-base num session-id timestamp)
+                        (format "%s-instruction-%d-%s" file-base num timestamp)))
+             (candidate base-id)
+             (counter 2))
+        ;; Check if ID exists and add -N suffix until unique
+        (while (claude-org--custom-id-exists-p candidate)
+          (setq candidate (format "%s-%d" base-id counter))
+          (setq counter (1+ counter)))
+        candidate))))
 
 (defun claude-org-insert-block ()
   "Insert an AI query block with optional workflow tags.
@@ -2568,11 +2587,12 @@ Returns point after last :ai_output: sibling, or after #+end_src."
 
 (defun claude-org--create-response-section-header (instr-num timestamp &optional loop-info)
   "Create response section header string.
-INSTR-NUM is the instruction number.
+INSTR-NUM is the instruction number (can be nil for non-Instruction headings).
 TIMESTAMP is from LAST_AI_EXECUTED property (YYYY-MM-DD HH:MM:SS).
 LOOP-INFO is (CURRENT . MAX) for loop iterations, or nil.
 
-Returns a string like: \"** Response 1 (2025-01-13 08:00) :ai_output:\""
+Returns a string like: \"** Response 1 (2025-01-13 08:00) :ai_output:\"
+Or without instr-num: \"** Response (2025-01-13 08:00) :ai_output:\""
   (let* ((level (claude-org--get-section-level))
          (stars (make-string level ?*))
          ;; Trim seconds for cleaner display: "2025-01-13 08:00:15" -> "2025-01-13 08:00"
@@ -2581,7 +2601,12 @@ Returns a string like: \"** Response 1 (2025-01-13 08:00) :ai_output:\""
                          (or timestamp (format-time-string "%Y-%m-%d %H:%M"))))
          (loop-suffix (if loop-info
                           (format "(%d/%d)" (car loop-info) (cdr loop-info))
-                        "")))
+                        ""))
+         (instr-part (if instr-num
+                         (format " %d" instr-num)
+                       "")))
+    (format "%s Response%s%s (%s) :%s:\n\n"
+            stars instr-part loop-suffix display-time claude-org-output-tag)))
     (format "%s Response %d%s (%s) :%s:\n\n"
             stars instr-num loop-suffix display-time claude-org-output-tag)))
 #+END_SRC
@@ -3422,6 +3447,9 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
          (loop-interval (if (stringp loop-interval) (string-to-number loop-interval) loop-interval))
          ;; Get CUSTOM_ID for session manager navigation (before buffer changes)
          (custom-id (claude-org--find-instruction-custom-id))
+         ;; Capture section level at AI block position BEFORE any buffer modifications
+         ;; This ensures loop iterations use the correct level even if AI generates nested headings
+         (section-level (claude-org--get-section-level))
          ;; Check for auto-title BEFORE any buffer modifications
          (should-auto-title (and claude-org-auto-generate-title
                                  (claude-org--heading-matches-auto-title-pattern-p)))
@@ -3449,14 +3477,14 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
           (goto-char insert-point)
           (insert "\n\n")
           ;; Create Response section if enabled and we found an instruction number
-          (when (and claude-org-auto-create-response-section instr-num)
+          (when claude-org-auto-create-response-section
             (let ((loop-info (when (> loop-max 1) (cons 1 loop-max))))
               (insert (claude-org--create-response-section-header
                        instr-num timestamp loop-info))))
           (let ((marker (point-marker)))
             (claude-org--session-put session-key :marker marker)
             (claude-org--session-put session-key :original-prompt content)
-            (claude-org--session-put session-key :section-level (claude-org--get-section-level))
+            (claude-org--session-put session-key :section-level section-level)
             (claude-org--session-put session-key :start-time (float-time))
             (claude-org--session-put session-key :busy t)
             ;; Store loop state
@@ -3481,7 +3509,7 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
                             :loop-max loop-max
                             :custom-id custom-id))))
           ;; First iteration's section header already created above
-          (claude-org--send-request content query-ctx))
+          (claude-org--send-request content query-ctx session-key))
         ;; Run post-execution hook (after query sent)
         (let ((marker (claude-org--session-get session-key :marker)))
           (run-hook-with-args 'claude-org-execute-after-hook session-key content marker))))))
@@ -3538,6 +3566,36 @@ SDK-UUID: Session UUID for resume"
 ** Iteration Sections
 
 #+BEGIN_SRC elisp
+(defun claude-org--insert-iteration-section (session-key iteration max instr-num)
+  "Insert new Response section for loop iteration.
+SESSION-KEY identifies the session.
+ITERATION is current iteration number (1-based).
+MAX is total iterations.
+INSTR-NUM is the instruction number for section naming (can be nil).
+
+Uses the session marker for position tracking - Emacs markers automatically
+adjust their position when text is inserted/deleted elsewhere in the buffer,
+so this works correctly even when the user is editing other parts of the file."
+  (let ((marker (claude-org--session-get session-key :marker))
+        (level (or (claude-org--session-get session-key :section-level)
+                   (claude-org--get-section-level))))
+    (when (and marker (marker-buffer marker))
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (let ((stars (make-string level ?*)))
+            (if instr-num
+                ;; With instruction number: "Response N(I/M)"
+                (insert "\n" stars " Response " (number-to-string instr-num)
+                        "(" (number-to-string iteration) "/"
+                        (number-to-string max) ")"
+                        " :" claude-org-output-tag ":\n\n")
+              ;; Without instruction number: "Response (I/M)"  
+              (insert "\n" stars " Response (" (number-to-string iteration) "/"
+                      (number-to-string max) ")"
+                      " :" claude-org-output-tag ":\n\n")))
+          (set-marker marker (point)))))))
+
 (defun claude-org--insert-iteration-section (session-key iteration max instr-num)
   "Insert new Response section for loop iteration.
 SESSION-KEY identifies the session.
@@ -4075,6 +4133,10 @@ Dynamic header line showing session status, IDE context, and thinking state.
                       (insert (format "\n[Cancelled at iteration %d/%d]\n" 
                                       (or loop-current 1) loop-max))
                     (insert "\n[Cancelled]\n"))))))
+          ;; Free marker immediately to prevent race with sentinel callback
+          ;; (sentinel's handle-complete would otherwise free the NEW marker
+          ;; if user quickly re-executes before sentinel runs)
+          (claude-org--free-marker session-key)
           (claude-org--refresh-header-line)
           (message "Query cancelled"))
       (message "No active query to cancel"))))
