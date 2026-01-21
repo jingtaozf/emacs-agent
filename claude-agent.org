@@ -840,7 +840,41 @@ Checks for:
      ;; Result message with is_error flag set to true (not :json-false)
      ((and (string= type "result")
            (claude-agent--json-true-p (plist-get parsed :is_error)))
-      (or (plist-get parsed :result) "Unknown error"))
+      ;; Try multiple fields that might contain the error message
+      (or (plist-get parsed :result)
+          (plist-get parsed :error)
+          (plist-get parsed :message)
+          ;; Check :error_details for session errors like "No conversation found"
+          (when-let ((details (plist-get parsed :error_details)))
+            (if (stringp details)
+                details
+              (format "%S" details)))
+          ;; Check subtype for specific error types
+          (let ((subtype (plist-get parsed :subtype)))
+            (cond
+             ;; error_during_execution typically means tool/API failure
+             ((string= subtype "error_during_execution")
+              "Execution error (Claude encountered an issue during tool use)")
+             ;; Include other subtypes with context
+             ((and subtype (not (string= subtype "")))
+              (format "Error: %s" subtype))
+             (t nil)))
+          ;; Search for meaningful error strings in the parsed data
+          ;; Skip generic subtype values like "error_during_execution"
+          (cl-labels ((find-error-string (obj)
+                        (cond
+                         ((stringp obj)
+                          ;; Look for descriptive error messages, not field values
+                          (when (and (> (length obj) 20)  ; Skip short field values
+                                     (string-match-p "\\(?:error\\|Error\\|failed\\|not found\\)" obj))
+                            obj))
+                         ((listp obj)
+                          (cl-some #'find-error-string obj))
+                         (t nil))))
+            (find-error-string parsed))
+          ;; Last resort: show what fields we do have
+          (format "Error (fields: %s)"
+                  (mapcar #'car (seq-partition (cdr parsed) 2)))))
      ;; Assistant message with error field containing a non-empty string
      ((and (string= type "assistant")
            (let ((msg (plist-get parsed :message)))

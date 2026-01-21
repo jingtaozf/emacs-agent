@@ -39,6 +39,8 @@ help:
 	@echo "  make test-agent-unit  - Run claude-agent unit tests"
 	@echo "  make test-org-unit    - Run claude-org unit tests"
 	@echo "  make test-permissions - Run permission functions tests"
+	@echo "  make test-extraction  - Run skill/rule extraction unit tests"
+	@echo "  make test-extraction-integration - Run extraction integration tests (API)"
 	@echo "  make test-mcp-ide     - Run MCP IDE diagnostics tests"
 	@echo "  make test-mcp-ide-unit - Run MCP IDE unit tests only"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
@@ -233,7 +235,8 @@ test-org-unit:
 		-l tests/test-claude-org-unit.el \
 		-l tests/test-claude-org-scheduled.el \
 		-l tests/test-claude-org-response.el \
-		-f ert-run-tests-batch-and-exit
+		-l tests/test-claude-org-extraction-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-agent-integration
 test-agent-integration:
@@ -277,6 +280,29 @@ test-org-permissions:
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
 		-l tests/test-claude-agent-permissions.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
+
+.PHONY: test-extraction
+test-extraction:
+	@echo "Running skill/rule extraction unit tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/test-claude-org-extraction-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :extraction))"
+
+.PHONY: test-extraction-integration
+test-extraction-integration:
+	@echo "Running skill/rule extraction integration tests (requires API key)..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/fixtures/test-config.el \
+		-l tests/test-claude-org-extraction-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(and (tag :extraction) (tag :integration)))"
 
 .PHONY: test-mcp-ide
 test-mcp-ide:
