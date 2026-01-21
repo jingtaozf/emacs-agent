@@ -1862,6 +1862,27 @@ enabling users to run queries while still composing them.
 
 #+END_SRC
 
+** Block Content Replacement
+
+Replace the content inside an AI block, preserving the begin/end markers.
+
+#+BEGIN_SRC elisp
+(defun claude-org--replace-block-content (new-content)
+  "Replace the content of the ai block at point with NEW-CONTENT.
+Returns t if successful, nil otherwise."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
+        (forward-line 1)
+        (let ((start (point)))
+          (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
+            (forward-line 0)
+            (delete-region start (point))
+            (goto-char start)
+            (insert new-content "\n")
+            t))))))
+#+END_SRC
+
 ** Output Section and Instruction Detection
 
 Output sections (tagged =:ai_output:=) contain Claude's responses.
@@ -2412,6 +2433,45 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (re-search-backward "^#\\+begin_src ai")
     (forward-line 1)
     (message "Created SDD '%s' with session ID: %s" name session-id)))
+#+END_SRC
+
+** Prompt Refinement
+
+Refine the current AI block prompt using Claude's assistance.
+
+#+NAME: block-refine-prompt
+#+BEGIN_SRC elisp
+(defun claude-org-refine-prompt ()
+  "Refine the AI prompt in the current block.
+Prompts for refinement intent, then calls Claude to improve the prompt.
+Result directly replaces block content. Use \\[undo] to revert."
+  (interactive)
+  (unless (claude-org--in-ai-block-p)
+    (user-error "Not inside an AI block"))
+  (let* ((content (claude-org--get-block-content))
+         ;; Capture buffer and position for async callback
+         (source-buffer (current-buffer))
+         (source-marker (point-marker))
+         intent)
+    (unless content
+      (user-error "Could not extract block content (missing #+end_src?)")
+      ;; Empty content is allowed - user can describe what they want to write
+    (setq intent (read-string "How to refine the prompt? "))
+    (when (string-empty-p intent)
+      (user-error "Refinement intent cannot be empty"))
+    (message "Refining prompt...")
+    (claude-agent-refine-prompt
+     content intent
+     :on-result (lambda (refined)
+                  (if (buffer-live-p source-buffer)
+                      (with-current-buffer source-buffer
+                        (save-excursion
+                          (goto-char source-marker)
+                          (if (claude-org--replace-block-content refined)
+                              (message "Prompt refined. Use C-/ to undo if needed.")
+                            (message "Failed to replace block content"))))
+                    (message "Source buffer no longer exists")))
+     :on-error (lambda (err) (message "Refinement failed: %s" err)))))
 #+END_SRC
 
 ** Session Info Display
@@ -4190,6 +4250,8 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
     ("c" "Execute (C-c C-c)" claude-org-execute)
     ("k" "Cancel query" claude-org-cancel)
     ("v" "Verbose output" claude-org-show-verbose)]
+   ["Edit"
+    ("r" "Refine prompt" claude-org-refine-prompt)]
    ["Insert"
     ("i" "New AI block" claude-org-insert-block)
     ("s" "Story section" claude-org-insert-story)
