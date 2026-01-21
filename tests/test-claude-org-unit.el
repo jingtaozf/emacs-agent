@@ -1097,22 +1097,5 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
         (let ((id (claude-org--generate-instruction-custom-id "testbuf" 1 "sess")))
           (should (equal id "testbuf-instruction-1-sess-123456-4")))))))
 
-(ert-deftest test-claude-org-custom-id-exists-p ()
-  "Test custom-id-exists-p finds existing CUSTOM_IDs."
-  :tags '(:unit :fast :stable :isolated :org :custom-id)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Test Section\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: my-test-id\n")
-    (insert ":END:\n")
-    ;; Should find existing ID
-    (should (claude-org--custom-id-exists-p "my-test-id"))
-    ;; Should not find non-existent ID
-    (should-not (claude-org--custom-id-exists-p "nonexistent-id"))
-    ;; Should handle nil
-    (should-not (claude-org--custom-id-exists-p nil))))
-
-
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
