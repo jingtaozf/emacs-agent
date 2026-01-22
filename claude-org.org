@@ -100,6 +100,9 @@
   - [[#ai-block-detection][AI Block Detection]]
   - [[#file-scanning][File Scanning]]
   - [[#timer-system][Timer System]]
+  - [[#mode-line-indicator][Mode-Line Indicator]]
+  - [[#timer-start-stop][Timer Start/Stop]]
+  - [[#list-buffer-mode][List Buffer Mode]]
   - [[#org-schedule-advice][org-schedule Advice]]
 - [[#header-line][Header Line]]
   - [[#state-variables-2][State Variables]]
@@ -3861,6 +3864,9 @@ Uses `claude-org-scheduled-files' or `org-agenda-files' if nil."
     (dolist (file files)
       (dolist (entry (claude-org-scheduled--collect-from-file file))
         (push entry claude-org--scheduled-blocks)))
+    ;; Update mode-line indicator
+    (when (fboundp 'claude-org-scheduled--update-mode-line)
+      (claude-org-scheduled--update-mode-line))
     (message "Found %d scheduled AI block(s)"
              (length claude-org--scheduled-blocks))))
 #+END_SRC
@@ -3946,7 +3952,44 @@ Returns the new scheduled time if advanced, nil otherwise."
                   (org-timestamp-change days 'day)
                   ;; Return the new scheduled time
                   (org-get-scheduled-time (point)))))))))))
+#+END_SRC
 
+** Mode-Line Indicator
+:PROPERTIES:
+:CUSTOM_ID: mode-line-indicator
+:END:
+
+Display scheduled AI blocks count in mode-line with clickable popup.
+
+#+BEGIN_SRC elisp
+(defvar claude-org-scheduled-string ""
+  "Mode-line string showing scheduled AI blocks count.
+Clickable to show list of scheduled blocks.")
+
+(defun claude-org-scheduled--update-mode-line ()
+  "Update the scheduled blocks mode-line indicator."
+  (let ((count (length claude-org--scheduled-blocks)))
+    (if (and claude-org--scheduled-timer (> count 0))
+        (setq claude-org-scheduled-string
+              (propertize (format " [S:%d]" count)
+                          'face 'font-lock-constant-face
+                          'help-echo (format "%d scheduled AI block(s)\nmouse-1: Show schedule list"
+                                             count)
+                          'mouse-face 'mode-line-highlight
+                          'local-map (let ((map (make-sparse-keymap)))
+                                       (define-key map [mode-line mouse-1]
+                                                   #'claude-org-scheduled-list)
+                                       map)))
+      (setq claude-org-scheduled-string "")))
+  (force-mode-line-update t))
+#+END_SRC
+
+** Timer Start/Stop
+:PROPERTIES:
+:CUSTOM_ID: timer-start-stop
+:END:
+
+#+BEGIN_SRC elisp
 (defun claude-org-scheduled-start ()
   "Start the scheduled AI block checker.
 Scans files and starts a timer that checks every 60 seconds.
@@ -3956,6 +3999,11 @@ Call this from your init.el to enable scheduled execution."
   (claude-org-scheduled-scan-all)
   (setq claude-org--scheduled-timer
         (run-at-time 0 60 #'claude-org-scheduled--check-and-execute))
+  ;; Enable mode-line indicator
+  (claude-org-scheduled--update-mode-line)
+  (unless (member '(:eval claude-org-scheduled-string) mode-line-misc-info)
+    (push '(:eval claude-org-scheduled-string) mode-line-misc-info))
+  (force-mode-line-update t)
   (message "Scheduled AI execution started (checking every 60s)"))
 
 (defun claude-org-scheduled-stop ()
@@ -3964,7 +4012,138 @@ Call this from your init.el to enable scheduled execution."
   (when (timerp claude-org--scheduled-timer)
     (cancel-timer claude-org--scheduled-timer)
     (setq claude-org--scheduled-timer nil))
+  ;; Remove mode-line indicator
+  (setq claude-org-scheduled-string "")
+  (setq mode-line-misc-info
+        (delete '(:eval claude-org-scheduled-string) mode-line-misc-info))
+  (force-mode-line-update t)
   (message "Scheduled AI execution stopped"))
+#+END_SRC
+
+** List Buffer Mode
+:PROPERTIES:
+:CUSTOM_ID: list-buffer-mode
+:END:
+
+A tabulated-list buffer for viewing and navigating to scheduled AI blocks.
+
+#+BEGIN_SRC elisp
+(defvar claude-org-scheduled-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map (kbd "g") #'claude-org-scheduled-list-refresh)
+    (define-key map (kbd "RET") #'claude-org-scheduled-list-goto)
+    map)
+  "Keymap for `claude-org-scheduled-list-mode'.")
+
+(define-derived-mode claude-org-scheduled-list-mode tabulated-list-mode
+  "Scheduled AI"
+  "Major mode for listing scheduled AI blocks.
+\\{claude-org-scheduled-list-mode-map}"
+  (setq tabulated-list-format
+        [("ID" 25 t)
+         ("File" 25 t)
+         ("Last Run" 18 t)
+         ("Next Run" 18 t)])
+  (setq tabulated-list-padding 2)
+  (setq tabulated-list-sort-key (cons "Next Run" nil))
+  (add-hook 'tabulated-list-revert-hook #'claude-org-scheduled--revert nil t)
+  (tabulated-list-init-header))
+
+(defun claude-org-scheduled--revert ()
+  "Revert function for scheduled list buffer.
+Called by `revert-buffer' via `tabulated-list-revert-hook'."
+  (claude-org-scheduled-scan-all)
+  (setq tabulated-list-entries (claude-org-scheduled--build-list-entries)))
+
+(defun claude-org-scheduled--get-last-executed (file custom-id)
+  "Get LAST_AI_EXECUTED property for CUSTOM-ID in FILE."
+  (when (file-exists-p file)
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (goto-char (point-min))
+       (when (re-search-forward
+              (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
+         (org-back-to-heading t)
+         (org-entry-get nil "LAST_AI_EXECUTED"))))))
+
+(defun claude-org-scheduled--format-time (time)
+  "Format TIME as human-readable string, or \"Never\" if nil."
+  (if time
+      (format-time-string "%Y-%m-%d %H:%M" time)
+    "Never"))
+
+(defun claude-org-scheduled--build-list-entries ()
+  "Build tabulated-list entries from scheduled blocks."
+  (mapcar
+   (lambda (entry)
+     (let* ((custom-id (car entry))
+            (plist (cdr entry))
+            (file (plist-get plist :file))
+            (scheduled-time (plist-get plist :scheduled-time))
+            (last-exec-str (claude-org-scheduled--get-last-executed file custom-id))
+            (last-time (when (and last-exec-str (not (string-empty-p last-exec-str)))
+                         (encode-time (parse-time-string last-exec-str))))
+            (file-basename (file-name-nondirectory file))
+            (overdue-p (and scheduled-time
+                            (time-less-p scheduled-time (current-time)))))
+       (list custom-id
+             (vector
+              ;; ID column - clickable
+              (propertize custom-id
+                          'face 'link
+                          'action #'claude-org-scheduled-list-goto
+                          'follow-link t
+                          'help-echo "Click to jump to this AI block")
+              ;; File column
+              file-basename
+              ;; Last Run column
+              (claude-org-scheduled--format-time last-time)
+              ;; Next Run column - highlight if overdue
+              (propertize (claude-org-scheduled--format-time scheduled-time)
+                          'face (if overdue-p 'warning 'default))))))
+   claude-org--scheduled-blocks))
+
+(defun claude-org-scheduled-list ()
+  "Display a list of all scheduled AI blocks."
+  (interactive)
+  (let ((buf (get-buffer-create "*Claude Scheduled Blocks*")))
+    (with-current-buffer buf
+      (claude-org-scheduled-list-mode)
+      (setq tabulated-list-entries (claude-org-scheduled--build-list-entries))
+      (tabulated-list-print t))
+    (pop-to-buffer buf)))
+
+(defun claude-org-scheduled-list-refresh ()
+  "Refresh the scheduled blocks list buffer."
+  (interactive)
+  (claude-org-scheduled-scan-all)
+  (setq tabulated-list-entries (claude-org-scheduled--build-list-entries))
+  (tabulated-list-print t)
+  (message "Scheduled blocks list refreshed"))
+
+(defun claude-org-scheduled-list-goto (&optional _button)
+  "Jump to the AI block at point.
+BUTTON argument is ignored; we always use `tabulated-list-get-id'."
+  (interactive)
+  (let ((custom-id (tabulated-list-get-id)))
+    (when custom-id
+      (claude-org-scheduled--goto-block custom-id))))
+
+(defun claude-org-scheduled--goto-block (custom-id)
+  "Navigate to the AI block with CUSTOM-ID."
+  (let ((entry (assoc custom-id claude-org--scheduled-blocks #'string=)))
+    (when entry
+      (let ((file (plist-get (cdr entry) :file)))
+        (when (file-exists-p file)
+          (find-file file)
+          (widen)
+          (goto-char (point-min))
+          (when (re-search-forward
+                 (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
+            (org-back-to-heading t)
+            (org-reveal)
+            (recenter)))))))
 #+END_SRC
 
 ** org-schedule Advice

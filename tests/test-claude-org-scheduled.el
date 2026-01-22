@@ -274,5 +274,180 @@ Test query
        (should (string-match-p "2026-01-16" after))
        (should (string-match-p "\\.\\+1d" after))))))
 
+;;; Mode-Line Indicator Tests
+
+(ert-deftest test-scheduled-mode-line-update-with-blocks ()
+  "Mode-line should show count when scheduler has blocks."
+  :tags '(:unit :fast :stable :isolated :scheduled :mode-line)
+  (let ((claude-org--scheduled-timer (current-time))  ; Fake active timer
+        (claude-org--scheduled-blocks
+         (list (cons "id1" (list :file "/path1.org" :scheduled-time (current-time)))
+               (cons "id2" (list :file "/path2.org" :scheduled-time (current-time)))))
+        (claude-org-scheduled-string ""))
+    (claude-org-scheduled--update-mode-line)
+    (should (string-match-p "\\[S:2\\]" claude-org-scheduled-string))
+    (should (get-text-property 0 'help-echo claude-org-scheduled-string))
+    (should (get-text-property 0 'local-map claude-org-scheduled-string))))
+
+(ert-deftest test-scheduled-mode-line-update-empty ()
+  "Mode-line should be empty when no scheduled blocks."
+  :tags '(:unit :fast :stable :isolated :scheduled :mode-line)
+  (let ((claude-org--scheduled-timer (current-time))  ; Fake active timer
+        (claude-org--scheduled-blocks nil)
+        (claude-org-scheduled-string "previous value"))
+    (claude-org-scheduled--update-mode-line)
+    (should (string-empty-p claude-org-scheduled-string))))
+
+(ert-deftest test-scheduled-mode-line-update-no-timer ()
+  "Mode-line should be empty when scheduler not running."
+  :tags '(:unit :fast :stable :isolated :scheduled :mode-line)
+  (let ((claude-org--scheduled-timer nil)  ; No active timer
+        (claude-org--scheduled-blocks
+         (list (cons "id1" (list :file "/path1.org"))))
+        (claude-org-scheduled-string "previous value"))
+    (claude-org-scheduled--update-mode-line)
+    (should (string-empty-p claude-org-scheduled-string))))
+
+;;; List Buffer Tests
+
+(ert-deftest test-scheduled-build-list-entries ()
+  "Should build tabulated list entries from scheduled blocks."
+  :tags '(:unit :fast :stable :isolated :scheduled :list-buffer)
+  (let* ((test-time (time-subtract (current-time) (seconds-to-time 3600)))
+         (claude-org--scheduled-blocks
+          (list (cons "test-block"
+                      (list :file "/nonexistent/test.org"
+                            :scheduled-time test-time)))))
+    (let ((entries (claude-org-scheduled--build-list-entries)))
+      (should (= 1 (length entries)))
+      (let ((entry (car entries)))
+        ;; Entry format: (ID [COL1 COL2 COL3 COL4])
+        (should (equal "test-block" (car entry)))
+        (let ((cols (cadr entry)))
+          (should (= 4 (length cols)))
+          ;; First column is ID (propertized)
+          (should (string-match-p "test-block" (aref cols 0)))
+          ;; Second column is file basename
+          (should (equal "test.org" (aref cols 1))))))))
+
+(ert-deftest test-scheduled-format-time ()
+  "Should format time correctly."
+  :tags '(:unit :fast :stable :isolated :scheduled :list-buffer)
+  ;; nil returns "Never"
+  (should (equal "Never" (claude-org-scheduled--format-time nil)))
+  ;; Non-nil returns formatted time
+  (let ((result (claude-org-scheduled--format-time (current-time))))
+    (should (string-match-p "[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}" result))))
+
+(ert-deftest test-scheduled-list-buffer-created ()
+  "List command should create buffer with correct mode."
+  :tags '(:unit :fast :stable :isolated :scheduled :list-buffer)
+  (let ((claude-org--scheduled-blocks nil)
+        (claude-org--scheduled-timer (current-time)))
+    (unwind-protect
+        (progn
+          (claude-org-scheduled-list)
+          (should (get-buffer "*Claude Scheduled Blocks*"))
+          (with-current-buffer "*Claude Scheduled Blocks*"
+            (should (eq major-mode 'claude-org-scheduled-list-mode))
+            (should (equal tabulated-list-sort-key '("Next Run" . nil)))))
+      (when (get-buffer "*Claude Scheduled Blocks*")
+        (kill-buffer "*Claude Scheduled Blocks*")))))
+
+(ert-deftest test-scheduled-list-columns ()
+  "List buffer should have correct columns."
+  :tags '(:unit :fast :stable :isolated :scheduled :list-buffer)
+  (let ((claude-org--scheduled-blocks nil))
+    (unwind-protect
+        (progn
+          (claude-org-scheduled-list)
+          (with-current-buffer "*Claude Scheduled Blocks*"
+            ;; Check column format: [("name" width sortable) ...]
+            ;; tabulated-list-format is a vector of lists like ("ID" 25 t)
+            (should (= 4 (length tabulated-list-format)))
+            (should (equal "ID" (car (aref tabulated-list-format 0))))
+            (should (equal "File" (car (aref tabulated-list-format 1))))
+            (should (equal "Last Run" (car (aref tabulated-list-format 2))))
+            (should (equal "Next Run" (car (aref tabulated-list-format 3))))))
+      (when (get-buffer "*Claude Scheduled Blocks*")
+        (kill-buffer "*Claude Scheduled Blocks*")))))
+
+;;; Navigation Tests
+
+(ert-deftest test-scheduled-goto-block ()
+  "Should navigate to AI block in file."
+  :tags '(:unit :fast :stable :isolated :scheduled :navigation)
+  (let ((temp-file (make-temp-file "test-nav" nil ".org")))
+    (unwind-protect
+        (progn
+          ;; Create test file
+          (with-temp-file temp-file
+            (insert "* Before
+
+* Target Task
+:PROPERTIES:
+:CUSTOM_ID: target-block
+:END:
+
+#+begin_src ai
+Test query
+#+end_src
+
+* After
+"))
+          ;; Setup scheduled blocks
+          (let ((claude-org--scheduled-blocks
+                 (list (cons "target-block"
+                             (list :file temp-file
+                                   :scheduled-time (current-time))))))
+            ;; Navigate
+            (claude-org-scheduled--goto-block "target-block")
+            ;; Verify we're at the right place
+            (should (equal temp-file (buffer-file-name)))
+            (should (string-match-p "Target Task"
+                                    (buffer-substring (line-beginning-position)
+                                                      (line-end-position))))))
+      (when (get-file-buffer temp-file)
+        (kill-buffer (get-file-buffer temp-file)))
+      (delete-file temp-file))))
+
+;;; Integration Tests (Start/Stop)
+
+(ert-deftest test-scheduled-start-adds-mode-line ()
+  "Starting scheduler should add mode-line indicator."
+  :tags '(:unit :fast :stable :isolated :scheduled :integration)
+  (let ((claude-org--scheduled-timer nil)
+        (claude-org--scheduled-blocks nil)
+        (claude-org-scheduled-string "")
+        (claude-org-scheduled-files nil)
+        (mode-line-misc-info nil))
+    (unwind-protect
+        (progn
+          ;; Mock org-agenda-files to return empty list
+          (cl-letf (((symbol-function 'org-agenda-files) (lambda (&rest _) nil)))
+            (claude-org-scheduled-start)
+            ;; Timer should be set
+            (should claude-org--scheduled-timer)
+            ;; Mode-line should be in misc-info
+            (should (member '(:eval claude-org-scheduled-string) mode-line-misc-info))))
+      ;; Cleanup
+      (when (timerp claude-org--scheduled-timer)
+        (cancel-timer claude-org--scheduled-timer)
+        (setq claude-org--scheduled-timer nil)))))
+
+(ert-deftest test-scheduled-stop-removes-mode-line ()
+  "Stopping scheduler should remove mode-line indicator."
+  :tags '(:unit :fast :stable :isolated :scheduled :integration)
+  (let ((claude-org--scheduled-timer (run-at-time nil nil #'ignore))
+        (claude-org-scheduled-string " [S:3]")
+        (mode-line-misc-info (list '(:eval claude-org-scheduled-string) 'other)))
+    (claude-org-scheduled-stop)
+    ;; Timer should be nil
+    (should-not claude-org--scheduled-timer)
+    ;; Mode-line string should be empty
+    (should (string-empty-p claude-org-scheduled-string))
+    ;; Should be removed from misc-info
+    (should-not (member '(:eval claude-org-scheduled-string) mode-line-misc-info))))
+
 (provide 'test-claude-org-scheduled)
 ;;; test-claude-org-scheduled.el ends here
