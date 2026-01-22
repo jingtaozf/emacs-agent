@@ -451,29 +451,67 @@ Message types mirror the Python SDK discriminated union.
   result)
 #+END_SRC
 
-** Hook Types
+** Message Event Hooks
 
-Hook matchers configure how callbacks are invoked during Claude's tool execution
-lifecycle. Each matcher can target specific tools by name pattern (or match all
-tools with nil) and includes a configurable timeout for async operations.
+Local Emacs hooks that fire when specific message patterns are observed from
+the Claude CLI. These are NOT control protocol hooks - they're for local
+monitoring and tracking.
 
-The supported hook events correspond to different stages of tool execution:
-- =PreToolUse= / =PostToolUse= - Before and after tool execution
-- =UserPromptSubmit= - When user submits a prompt
-- =Stop= / =SubagentStop= - When execution stops
+| Message Type | Event | Hook Variable |
+|--------------+-------+---------------|
+| =assistant= (tool_use) | PreToolUse | =claude-agent-pre-tool-use-functions= |
+| =user= (tool_result) | PostToolUse | =claude-agent-post-tool-use-functions= |
+| =result= | Stop | =claude-agent-stop-functions= |
 
 #+BEGIN_SRC elisp
-(cl-defstruct (claude-agent-hook-matcher
-               (:constructor claude-agent-make-hook-matcher)
-               (:copier nil))
-  "Hook matcher configuration."
-  matcher      ; String pattern (tool name) or nil for all
-  callbacks    ; List of callback functions
-  (timeout 60.0)) ; Timeout in seconds
+(defvar claude-agent-pre-tool-use-functions nil
+  "Hook called when assistant requests tool use.
+Each function receives (TOOL-NAME TOOL-INPUT TOOL-ID STATE).")
 
-(defconst claude-agent-hook-events
-  '(PreToolUse PostToolUse UserPromptSubmit Stop SubagentStop)
-  "List of supported hook event types.")
+(defvar claude-agent-post-tool-use-functions nil
+  "Hook called when tool result is received.
+Each function receives (TOOL-USE-ID RESULT IS-ERROR TOOL-USE-RESULT STATE).
+TOOL-USE-RESULT contains extra fields like isAsync, agentId for background tasks.")
+
+(defvar claude-agent-stop-functions nil
+  "Hook called when session ends (result message received).
+Each function receives (RESULT-MESSAGE STATE).")
+#+END_SRC
+
+** Event Dispatch Functions
+
+#+BEGIN_SRC elisp
+(defun claude-agent--dispatch-pre-tool-use (parsed state)
+  "Dispatch PreToolUse hooks for tool_use blocks in PARSED message.
+STATE is the process state struct."
+  (when-let* ((message (plist-get parsed :message))
+              (content (plist-get message :content)))
+    ;; Content must be a list of blocks, not a plain string
+    (when (and (listp content) (listp (car-safe content)))
+      (dolist (block content)
+        (when (equal (plist-get block :type) "tool_use")
+          (run-hook-with-args 'claude-agent-pre-tool-use-functions
+                              (plist-get block :name)
+                              (plist-get block :input)
+                              (plist-get block :id)
+                              state))))))
+
+(defun claude-agent--dispatch-post-tool-use (parsed state)
+  "Dispatch PostToolUse hooks for tool_result blocks in PARSED message.
+STATE is the process state struct."
+  (when-let ((message (plist-get parsed :message)))
+    (let ((content (plist-get message :content))
+          (tool-use-result (plist-get parsed :toolUseResult)))
+      ;; Content must be a list of blocks, not a plain string
+      (when (and content (listp content) (listp (car-safe content)))
+        (dolist (block content)
+          (when (equal (plist-get block :type) "tool_result")
+            (run-hook-with-args 'claude-agent-post-tool-use-functions
+                                (plist-get block :tool_use_id)
+                                (plist-get block :content)
+                                (plist-get block :is_error)
+                                tool-use-result
+                                state)))))))
 #+END_SRC
 
 * Process Management
@@ -906,6 +944,46 @@ Checks for:
      (t nil))))
 #+END_SRC
 
+*** Normal Message Processing
+
+Helper function to process non-control messages (user, assistant, result, etc.).
+Extracted to avoid duplication in the event dispatch logic.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--process-normal-message (parsed state callback token-callback
+                                                    error-callback process)
+  "Process a normal (non-control) message.
+PARSED is the JSON plist, STATE is process state.
+CALLBACK, TOKEN-CALLBACK, ERROR-CALLBACK are user callbacks.
+PROCESS is the CLI process."
+  (let ((json-error (claude-agent--extract-json-error parsed)))
+    (if json-error
+        ;; Error detected in JSON - call error callback
+        (progn
+          (claude-agent--debug-log "JSON error detected: %s" json-error)
+          (when error-callback
+            (funcall error-callback
+                     (list 'claude-agent-api-error
+                           :message json-error
+                           :parsed parsed))))
+      ;; Normal message processing
+      (progn
+        ;; Extract text for token callback (streaming)
+        (when token-callback
+          (claude-agent--extract-tokens parsed token-callback))
+        ;; Call message callback with parsed message
+        (let ((message (claude-agent--parse-message parsed)))
+          (when message
+            ;; Write to verbose buffer if session-key is set
+            (claude-agent--verbose-write-message
+             (claude-agent--process-state-session-key state) message)
+            ;; Call user callback
+            (when callback
+              (funcall callback message))))
+        ;; Close stdin when result is received (streaming mode)
+        (claude-agent--maybe-close-stdin process parsed)))))
+#+END_SRC
+
 *** JSON Buffer Processing
 
 Process accumulated JSON data line by line. Each complete line (terminated by
@@ -938,36 +1016,33 @@ Parses complete newline-delimited JSON and invokes callbacks."
                 (claude-agent--debug-log "Parsed JSON: %S" msg-type)
 
                 ;; Handle control requests (bidirectional protocol)
-                (if (equal msg-type "control_request")
-                    (claude-agent--handle-control-request process parsed)
+                (cond
+                 ((equal msg-type "control_request")
+                  (claude-agent--handle-control-request process parsed))
 
-                  ;; Normal message processing
-                  (let ((json-error (claude-agent--extract-json-error parsed)))
-                    (if json-error
-                        ;; Error detected in JSON - call error callback
-                        (progn
-                          (claude-agent--debug-log "JSON error detected: %s" json-error)
-                          (when error-callback
-                            (funcall error-callback
-                                     (list 'claude-agent-api-error
-                                           :message json-error
-                                           :parsed parsed))))
-                      ;; Normal message processing
-                      (progn
-                        ;; Extract text for token callback (streaming)
-                        (when token-callback
-                          (claude-agent--extract-tokens parsed token-callback))
-                        ;; Call message callback with parsed message
-                        (let ((message (claude-agent--parse-message parsed)))
-                          (when message
-                            ;; Write to verbose buffer if session-key is set
-                            (claude-agent--verbose-write-message
-                             (claude-agent--process-state-session-key state) message)
-                            ;; Call user callback
-                            (when callback
-                              (funcall callback message))))
-                        ;; Close stdin when result is received (streaming mode)
-                        (claude-agent--maybe-close-stdin process parsed))))))
+                 ;; Assistant message - dispatch PreToolUse hooks
+                 ((equal msg-type "assistant")
+                  (claude-agent--dispatch-pre-tool-use parsed state)
+                  (claude-agent--process-normal-message
+                   parsed state callback token-callback error-callback process))
+
+                 ;; User message - dispatch PostToolUse hooks
+                 ((equal msg-type "user")
+                  (claude-agent--dispatch-post-tool-use parsed state)
+                  (claude-agent--process-normal-message
+                   parsed state callback token-callback error-callback process))
+
+                 ;; Result message - dispatch Stop hooks
+                 ((equal msg-type "result")
+                  (let ((message (claude-agent--parse-message parsed)))
+                    (run-hook-with-args 'claude-agent-stop-functions message state))
+                  (claude-agent--process-normal-message
+                   parsed state callback token-callback error-callback process))
+
+                 ;; Other message types
+                 (t
+                  (claude-agent--process-normal-message
+                   parsed state callback token-callback error-callback process))))
             ((json-parse-error json-readtable-error json-end-of-file)
              ;; Line is not valid JSON - could be plain text error from CLI
              (claude-agent--debug-log "Non-JSON output: %s" line)
@@ -1052,6 +1127,8 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
             (delq state claude-agent--active-states))
       ;; Clear Docker path mappings (set during claude-agent-query)
       (setq emacs-mcp-server-path-mappings nil)
+      ;; Clear pending background tasks (prevent stale entries across sessions)
+      (clrhash claude-agent--pending-background-tasks)
       ;; Unregister from active queries
       (when-let* ((req-id (claude-agent--process-state-request-id state)))
         (claude-agent--unregister-query req-id))
@@ -1106,19 +1183,61 @@ Sends initialize control request, waits for response, then sends user message."
     (setf (claude-agent--process-state-ready state) t)))
 #+END_SRC
 
+** Background Task Tracking
+
+Track background tasks (launched with =run_in_background: true=) to keep the
+process alive until all tasks complete. The tracker is registered on the
+=claude-agent-post-tool-use-functions= hook.
+
+#+BEGIN_SRC elisp
+(defvar claude-agent--pending-background-tasks (make-hash-table :test 'equal)
+  "Hash table of agentId -> t for pending background tasks.")
+
+(defun claude-agent--background-task-tracker (_tool-use-id _result _is-error
+                                              tool-use-result _state)
+  "Track background tasks from PostToolUse hook.
+TOOL-USE-RESULT contains isAsync, agentId, task fields."
+  (when tool-use-result
+    ;; Async task launch: isAsync=t with agentId
+    (when (and (eq (plist-get tool-use-result :isAsync) t)
+               (plist-get tool-use-result :agentId))
+      (let ((agent-id (plist-get tool-use-result :agentId)))
+        (puthash agent-id t claude-agent--pending-background-tasks)
+        (claude-agent--debug-log "Background task started: %s" agent-id)))
+    ;; Task completion: task.status="completed"
+    (when-let* ((task (plist-get tool-use-result :task))
+                (task-id (plist-get task :task_id))
+                (status (plist-get task :status)))
+      (when (equal status "completed")
+        (remhash task-id claude-agent--pending-background-tasks)
+        (claude-agent--debug-log "Background task completed: %s" task-id)))))
+
+(defun claude-agent--has-pending-background-tasks-p ()
+  "Return non-nil if there are pending background tasks."
+  (> (hash-table-count claude-agent--pending-background-tasks) 0))
+
+;; Register tracker on PostToolUse hook
+(add-hook 'claude-agent-post-tool-use-functions
+          #'claude-agent--background-task-tracker)
+#+END_SRC
+
 ** Closing Stdin After Result
 
 We need to close stdin when we receive the result message to signal completion.
 This is handled in the process filter when a result message is received.
+If there are pending background tasks, we keep stdin open.
 
 #+BEGIN_SRC elisp
 (defun claude-agent--maybe-close-stdin (process parsed)
-  "Close stdin if PARSED is a result message.
+  "Close stdin if PARSED is a result message and no background tasks pending.
 PROCESS is the CLI process."
   (when (equal (plist-get parsed :type) "result")
-    (claude-agent--debug-log "Result received, closing stdin")
-    (when (process-live-p process)
-      (process-send-eof process))))
+    (if (claude-agent--has-pending-background-tasks-p)
+        (claude-agent--debug-log "Result received, %d background tasks pending"
+                                 (hash-table-count claude-agent--pending-background-tasks))
+      (claude-agent--debug-log "Result received, closing stdin")
+      (when (process-live-p process)
+        (process-send-eof process)))))
 #+END_SRC
 
 ** Process Creation
