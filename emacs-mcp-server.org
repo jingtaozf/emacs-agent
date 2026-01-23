@@ -420,6 +420,25 @@ in results."
 *** Built-in Tools Definition
 
 #+BEGIN_SRC elisp
+(defun emacs-mcp-server--handler-report-invocation (params _session)
+  "Handler for report_invocation tool.
+PARAMS contains type, name, and optional reason.
+Runs `claude-agent-invocation-hook' with the invocation details."
+  (let ((type (alist-get 'type params))
+        (name (alist-get 'name params))
+        (reason (alist-get 'reason params)))
+    (unless type
+      (error "Missing required parameter: type"))
+    (unless name
+      (error "Missing required parameter: name"))
+    (unless (member type '("skill" "rule"))
+      (error "type must be \"skill\" or \"rule\", got: %s" type))
+    ;; Run the hook if defined (claude-agent.org defines it)
+    (when (boundp 'claude-agent-invocation-hook)
+      (run-hook-with-args 'claude-agent-invocation-hook type name reason))
+    ;; Return acknowledgment
+    `(((type . "text") (text . ,(format "Recorded %s: %s" type name))))))
+
 (defconst emacs-mcp-server--builtin-tools
   `(((name . "evalElisp")
      (description . "Evaluate an Emacs Lisp expression and return the result. This is the single tool for all Emacs operations - use Skills to learn how to construct elisp code for specific tasks like buffer manipulation, variable inspection, navigation, etc.")
@@ -429,7 +448,18 @@ in results."
                                              (description . "Elisp code to evaluate")))
                                     (save_current_state . ((type . "boolean")
                                                            (description . "Whether to preserve buffer, point, and window state during evaluation. Default: true. Set to false only when you need the side effects (e.g., switching buffers).")))))
-                     (required . ["code"])))))
+                     (required . ["code"]))))
+    ((name . "report_invocation")
+     (description . "Report when a skill or rule is being invoked. Call this tool when you invoke a skill (like /commit, /review-pr) or apply a rule from CLAUDE.md or .mdrules files. This enables real-time monitoring of agent behavior.")
+     (handler . emacs-mcp-server--handler-report-invocation)
+     (inputSchema . ((type . "object")
+                     (properties . ((type . ((type . "string")
+                                             (description . "Type of invocation: \"skill\" or \"rule\"")))
+                                    (name . ((type . "string")
+                                             (description . "Identifier of the skill or rule (e.g., \"commit\", \"no-emojis\")")))
+                                    (reason . ((type . "string")
+                                               (description . "Optional context explaining why this skill/rule is being invoked")))))
+                     (required . ["type" "name"])))))
   "Built-in MCP tools.")
 #+END_SRC
 
