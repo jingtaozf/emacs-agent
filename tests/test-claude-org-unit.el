@@ -1097,5 +1097,59 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
         (let ((id (claude-org--generate-instruction-custom-id "testbuf" 1 "sess")))
           (should (equal id "testbuf-instruction-1-sess-123456-4")))))))
 
+;;; Template Insertion Tests
+
+(ert-deftest test-claude-org-template-get-string ()
+  "Test getting content from string template."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((claude-org-templates '(("Test" . "Hello World"))))
+    (should (equal "Hello World"
+                   (claude-org--get-template-content "Test")))))
+
+(ert-deftest test-claude-org-template-get-function ()
+  "Test getting content from function template."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((claude-org-templates
+         '(("Dynamic" . (lambda () (format "Time: %s" "now"))))))
+    (should (equal "Time: now"
+                   (claude-org--get-template-content "Dynamic")))))
+
+(ert-deftest test-claude-org-template-annotation-string ()
+  "Test annotation for string template."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((claude-org-templates '(("Review" . "Please review this code"))))
+    (should (string-match-p "Please review"
+                            (claude-org--template-annotation "Review")))))
+
+(ert-deftest test-claude-org-template-annotation-function ()
+  "Test annotation for function template."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((claude-org-templates '(("Backtrace" . claude-org-template--backtrace))))
+    (should (string-match-p "function"
+                            (claude-org--template-annotation "Backtrace")))))
+
+(ert-deftest test-claude-org-template-backtrace-no-buffer ()
+  "Test backtrace template errors when no backtrace buffer exists."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  ;; Ensure no backtrace buffer
+  (when (get-buffer "*Backtrace*")
+    (kill-buffer "*Backtrace*"))
+  (should-error (claude-org-template--backtrace)
+                :type 'user-error))
+
+(ert-deftest test-claude-org-template-backtrace-with-buffer ()
+  "Test backtrace template extracts content from backtrace buffer."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((buf (get-buffer-create "*Backtrace*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (erase-buffer)
+            (insert "Debugger entered--Lisp error: (void-variable foo)"))
+          (let ((result (claude-org-template--backtrace)))
+            (should (string-match-p "void-variable foo" result))
+            (should (string-match-p "Root Cause" result))))
+      (kill-buffer buf))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

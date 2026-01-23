@@ -74,6 +74,10 @@
     - [[#core-block-insertion][Core Block Insertion]]
   - [[#session-and-story-blocks][Session and Story Blocks]]
   - [[#session-info-display][Session Info Display]]
+- [[#template-insertion][Template Insertion]]
+  - [[#configuration][Configuration]]
+  - [[#built-in-template-functions][Built-in Template Functions]]
+  - [[#template-insertion-command][Template Insertion Command]]
 - [[#slash-command-completion][Slash Command Completion]]
   - [[#command-discovery][Command Discovery]]
   - [[#company-backend][Company Backend]]
@@ -2512,6 +2516,133 @@ Shows the session identity which is file_path + optional CLAUDE_SESSION_ID."
       (message "Session: %s (file path only, no CLAUDE_SESSION_ID property)" file-path))))
 #+END_SRC
 
+* Template Insertion
+
+Insert predefined prompts into AI blocks via menu selection.
+
+** Configuration
+
+#+BEGIN_SRC elisp
+(defcustom claude-org-templates
+  '(("Analyze Backtrace" . claude-org-template--backtrace)
+    ("Code Review" . "Please review this code for:
+1. Bugs and potential issues
+2. Code style and readability
+3. Performance concerns
+4. Security vulnerabilities
+
+")
+    ("Explain Code" . "Please explain what this code does, including:
+1. Overall purpose
+2. Key functions and their roles
+3. Data flow
+4. Any notable patterns or techniques
+
+")
+    ("Fix Error" . "Please help fix this error:
+
+Error:
+
+Context:
+
+")
+    ("Git Commit and Push" . "Please commit and push the changes.
+
+Note: If there are pre-commit hooks configured, please wait for them to complete
+before considering the commit successful. If hooks fail, fix the issues and retry.
+
+"))
+  "Alist of templates for AI block insertion.
+Each entry is (NAME . TEMPLATE) where:
+- NAME is a string displayed in the completion menu
+- TEMPLATE is either:
+  - A string to insert verbatim
+  - A function (no args) returning a string
+
+Templates are inserted at point within the current AI block."
+  :type '(alist :key-type (string :tag "Template name")
+                :value-type (choice (string :tag "Template text")
+                                    (function :tag "Generator function")))
+  :group 'claude-org)
+#+END_SRC
+
+** Built-in Template Functions
+
+#+BEGIN_SRC elisp
+(defun claude-org-template--backtrace ()
+  "Generate a prompt to analyze the current Emacs backtrace.
+Returns a formatted string with backtrace content, or signals error if no backtrace.
+Uses markdown code fences since this is inserted inside an AI source block."
+  (let ((content (cond
+                  ((eq major-mode 'debugger-mode)
+                   (buffer-string))
+                  ((get-buffer "*Backtrace*")
+                   (with-current-buffer "*Backtrace*"
+                     (buffer-string)))
+                  (t nil))))
+    (if content
+        (format "Please analyze this Emacs backtrace error:
+
+```
+%s
+```
+
+Provide:
+1. Root Cause - what caused this error
+2. Explanation - why this happened
+3. Fix - concrete steps to resolve
+4. Prevention - how to avoid in future
+
+" content)
+      (user-error "No backtrace buffer found. Trigger an error first"))))
+#+END_SRC
+
+** Template Insertion Command
+
+#+BEGIN_SRC elisp
+(defun claude-org--template-annotation (name)
+  "Return annotation for template NAME in completion."
+  (let ((template (cdr (assoc name claude-org-templates))))
+    (cond
+     ((functionp template)
+      "  [function]")
+     ((stringp template)
+      (let ((preview (substring template 0 (min 40 (length template)))))
+        (format "  %s..." (string-trim (replace-regexp-in-string "\n" " " preview)))))
+     (t ""))))
+
+(defun claude-org--get-template-content (name)
+  "Get the content for template NAME.
+Calls function templates, returns string templates verbatim."
+  (let ((template (cdr (assoc name claude-org-templates))))
+    (cond
+     ((functionp template) (funcall template))
+     ((stringp template) template)
+     (t (user-error "Invalid template: %s" name)))))
+
+;;;###autoload
+(defun claude-org-insert-template ()
+  "Insert a template into the current AI block.
+Shows completion menu with available templates from `claude-org-templates'.
+If not inside an AI block, creates one first."
+  (interactive)
+  ;; Ensure we're in an AI block (or create one)
+  (unless (claude-org--in-ai-block-p)
+    (claude-org--do-insert-block nil)
+    ;; Move inside the newly created block
+    (forward-line -1)
+    (end-of-line))
+  ;; Select and insert template
+  (let* ((names (mapcar #'car claude-org-templates))
+         (completion-extra-properties
+          (list :annotation-function #'claude-org--template-annotation))
+         (selected (completing-read "Template: " names nil t)))
+    (when selected
+      (let ((content (claude-org--get-template-content selected)))
+        (insert content)
+        (message "Inserted template: %s" selected)))))
+#+END_SRC
+
 * Slash Command Completion
 
 Auto-completion for Claude Code slash commands in AI blocks.
@@ -4633,6 +4764,7 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
     ("r" "Refine prompt" claude-org-refine-prompt)]
    ["Insert"
     ("i" "New AI block" claude-org-insert-block)
+    ("t" "Template" claude-org-insert-template)
     ("s" "Story section" claude-org-insert-story)
     ("d" "SDD structure" claude-org-insert-sdd)]
    ["Navigate"
