@@ -1233,17 +1233,76 @@ We need to close stdin when we receive the result message to signal completion.
 This is handled in the process filter when a result message is received.
 If there are pending background tasks, we keep stdin open.
 
+*** Why Delayed Stdin Close is Necessary
+
+The Claude Code CLI uses a bidirectional protocol over stdin/stdout:
+- We send: user prompts, control responses (permissions, hooks)
+- CLI sends: messages, control requests (can_use_tool, mcp_message, hook_callback)
+
+When we receive a =result= message, it signals the end of the conversation turn.
+However, closing stdin immediately can cause issues:
+
+1. *Process Filter Timing*: The =result= message is processed inside
+   =claude-agent--process-filter=. If we call =process-send-eof= synchronously,
+   it may trigger process termination before the current filter completes.
+
+2. *MCP Server Communication*: With =emacs-mcp-server= active, there may be
+   pending =mcp_message= control requests or responses in flight.
+
+3. *Hook Callbacks*: Any pending hook callbacks need to complete before
+   the connection closes.
+
+The Python SDK handles this by waiting for the result event before closing
+stdin when MCP servers or hooks are present (see =stream_input= in query.py).
+
+Our solution: Use =run-at-time= with a small delay (0.1s) to:
+- Let the current process filter invocation complete
+- Allow any pending filter calls to run
+- Give MCP communication time to settle
+- Then close stdin cleanly
+
 #+BEGIN_SRC elisp
+(defcustom claude-agent-stdin-close-delay 0.1
+  "Delay in seconds before closing stdin after receiving result message.
+This delay allows pending process filter invocations and MCP communication
+to complete before signaling end-of-input to the Claude CLI.
+
+The Python SDK uses a similar approach, waiting for the result event
+before closing stdin when MCP servers are active.
+
+Set to 0 to close immediately (original behavior, may cause early exit issues).
+Set to nil to disable automatic stdin close (for debugging)."
+  :type '(choice (number :tag "Delay in seconds")
+                 (const :tag "Disable auto-close" nil))
+  :group 'claude-agent)
+
 (defun claude-agent--maybe-close-stdin (process parsed)
   "Close stdin if PARSED is a result message and no background tasks pending.
-PROCESS is the CLI process."
+PROCESS is the CLI process.
+
+This function schedules stdin closure with a small delay to ensure:
+1. The current process filter completes processing
+2. Any pending MCP control requests/responses finish
+3. Hook callbacks have time to execute
+
+The delay is controlled by `claude-agent-stdin-close-delay'."
   (when (equal (plist-get parsed :type) "result")
     (if (claude-agent--has-pending-background-tasks-p)
         (claude-agent--debug-log "Result received, %d background tasks pending"
                                  (hash-table-count claude-agent--pending-background-tasks))
-      (claude-agent--debug-log "Result received, closing stdin")
-      (when (process-live-p process)
-        (process-send-eof process)))))
+      ;; Schedule stdin close with delay to allow pending communication to complete
+      (let ((delay (or claude-agent-stdin-close-delay 0)))
+        (claude-agent--debug-log "Result received, scheduling stdin close in %.1fs" delay)
+        (if (zerop delay)
+            ;; Immediate close (original behavior)
+            (when (process-live-p process)
+              (process-send-eof process))
+          ;; Delayed close - let filter complete and MCP settle
+          (run-at-time delay nil
+                       (lambda ()
+                         (when (process-live-p process)
+                           (claude-agent--debug-log "Closing stdin after delay")
+                           (process-send-eof process)))))))))
 #+END_SRC
 
 ** Process Creation
