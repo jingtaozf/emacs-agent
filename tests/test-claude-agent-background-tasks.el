@@ -324,7 +324,8 @@ Simulates the actual failure scenario that was occurring."
     (should (= 0 (length hook-calls)))))
 
 (ert-deftest test-dispatch-post-tool-use ()
-  "Test dispatch-post-tool-use calls hook with correct args."
+  "Test dispatch-post-tool-use calls hook with correct args.
+Uses :tool_use_result (snake_case) matching actual JSON from CLI."
   (let ((hook-calls nil))
     (cl-letf (((symbol-function 'run-hook-with-args)
                (lambda (&rest args) (push args hook-calls))))
@@ -334,7 +335,7 @@ Simulates the actual failure scenario that was occurring."
                               :tool_use_id "toolu_123"
                               :content "file contents"
                               :is_error nil)))
-         :toolUseResult (:isAsync t :agentId "abc"))
+         :tool_use_result (:isAsync t :agentId "abc"))
        'mock-state))
     (should (= 1 (length hook-calls)))
     (let ((call (car hook-calls)))
@@ -398,6 +399,82 @@ Simulates the actual failure scenario that was occurring."
                 ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
         (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
       (should closed))))
+
+;;; Test: JSON Key Name Fix (tool_use_result vs toolUseResult)
+;;;
+;;; The bug: dispatch-post-tool-use was looking for :toolUseResult (camelCase)
+;;; but json-read-from-string with json-key-type 'keyword converts
+;;; "tool_use_result" to :tool_use_result (snake_case).
+
+(ert-deftest test-dispatch-post-tool-use-json-key-format ()
+  "Test that dispatch uses :tool_use_result (snake_case) matching JSON parsing.
+This is the critical fix - JSON key names use underscores, not camelCase."
+  (let ((hook-calls nil))
+    (cl-letf (((symbol-function 'run-hook-with-args)
+               (lambda (&rest args) (push args hook-calls))))
+      ;; Simulate parsed JSON from actual CLI output
+      ;; JSON: {\"tool_use_result\": {\"backgroundTaskId\": \"bee9495\"}}
+      ;; After json-read: (:tool_use_result (:backgroundTaskId "bee9495"))
+      (claude-agent--dispatch-post-tool-use
+       '(:type "user"
+         :message (:content ((:type "tool_result"
+                              :tool_use_id "toolu_01Test"
+                              :content "Command running in background"
+                              :is_error nil)))
+         :tool_use_result (:stdout "" :stderr "" :interrupted nil
+                           :isImage nil :backgroundTaskId "bee9495"))
+       'mock-state))
+    ;; Hook should be called with the tool_use_result data
+    (should (= 1 (length hook-calls)))
+    (let* ((call (car hook-calls))
+           (tool-use-result (nth 4 call)))
+      ;; Verify backgroundTaskId is passed through correctly
+      (should (equal (plist-get tool-use-result :backgroundTaskId) "bee9495")))))
+
+(ert-deftest test-json-parsing-produces-snake-case-keys ()
+  "Verify that json-read-from-string produces :snake_case keywords.
+This confirms the fix is correct for the actual JSON format."
+  (let* ((json-object-type 'plist)
+         (json-array-type 'list)
+         (json-key-type 'keyword)
+         ;; Actual JSON from Claude CLI verbose buffer
+         (json-str "{\"type\":\"user\",\"tool_use_result\":{\"backgroundTaskId\":\"test123\"}}")
+         (parsed (json-read-from-string json-str)))
+    ;; Key should be :tool_use_result NOT :toolUseResult
+    (should (plist-get parsed :tool_use_result))
+    (should-not (plist-get parsed :toolUseResult))
+    ;; Nested key backgroundTaskId uses camelCase in original JSON
+    (let ((result (plist-get parsed :tool_use_result)))
+      (should (equal (plist-get result :backgroundTaskId) "test123")))))
+
+(ert-deftest test-full-json-to-tracker-flow ()
+  "Test complete flow: JSON parsing -> dispatch -> tracker -> pending hash.
+Uses actual event data from verbose buffer session sdd-20260126-132710."
+  (clrhash claude-agent--pending-background-tasks)
+  ;; Actual JSON from verbose buffer (simplified, key structure preserved)
+  (let* ((json-object-type 'plist)
+         (json-array-type 'list)
+         (json-key-type 'keyword)
+         (json-str (concat
+                    "{\"type\":\"user\","
+                    "\"message\":{\"role\":\"user\","
+                    "\"content\":[{\"tool_use_id\":\"toolu_01TestBg\","
+                    "\"type\":\"tool_result\","
+                    "\"content\":[{\"type\":\"text\",\"text\":\"Running in background\"}]}]},"
+                    "\"tool_use_result\":{\"stdout\":\"\",\"stderr\":\"\","
+                    "\"interrupted\":false,\"isImage\":false,"
+                    "\"backgroundTaskId\":\"bee9495\"}}"))
+         (parsed (json-read-from-string json-str)))
+
+    ;; Set up tracker on hook
+    (let ((claude-agent-post-tool-use-functions
+           (list #'claude-agent--background-task-tracker)))
+      ;; Dispatch should call tracker which should add to pending
+      (claude-agent--dispatch-post-tool-use parsed 'mock-state))
+
+    ;; Verify the background task was tracked
+    (should (gethash "bee9495" claude-agent--pending-background-tasks))
+    (should (= 1 (hash-table-count claude-agent--pending-background-tasks)))))
 
 (provide 'test-claude-agent-background-tasks)
 ;;; test-claude-agent-background-tasks.el ends here
