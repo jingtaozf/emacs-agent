@@ -235,7 +235,6 @@ test-org-unit:
 		-l tests/test-claude-org-unit.el \
 		-l tests/test-claude-org-scheduled.el \
 		-l tests/test-claude-org-response.el \
-		-l tests/test-claude-org-extraction-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-agent-integration
