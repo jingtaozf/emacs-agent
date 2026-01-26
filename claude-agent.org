@@ -186,6 +186,7 @@ The library mirrors the Python Claude Agent SDK API, providing:
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
+(require 'cl)  ; For lexical-let (needed in literate-elisp which ignores lexical-binding: t)
 (require 'json)
 (require 'subr-x)
 #+END_SRC
@@ -1195,21 +1196,35 @@ Track background tasks (launched with =run_in_background: true=) to keep the
 process alive until all tasks complete. The tracker is registered on the
 =claude-agent-post-tool-use-functions= hook.
 
+Two types of background tasks exist:
+1. *Task tool* (subagents): Returns =isAsync: true= with =agentId=
+2. *Bash tool*: Returns =backgroundTaskId= field (no =isAsync= flag)
+
+Both must be tracked to prevent premature stdin close.
+
 #+BEGIN_SRC elisp
 (defvar claude-agent--pending-background-tasks (make-hash-table :test 'equal)
-  "Hash table of agentId -> t for pending background tasks.")
+  "Hash table of task-id -> t for pending background tasks.
+Tracks both Task subagents (agentId) and Bash background tasks (backgroundTaskId).")
 
 (defun claude-agent--background-task-tracker (_tool-use-id _result _is-error
                                               tool-use-result _state)
   "Track background tasks from PostToolUse hook.
-TOOL-USE-RESULT contains isAsync, agentId, task fields."
+TOOL-USE-RESULT contains:
+- For Task tool: isAsync=t, agentId (e.g., \"a4b3ecf\")
+- For Bash tool: backgroundTaskId (e.g., \"b8406fe\")
+- For TaskOutput: task.task_id, task.status"
   (when tool-use-result
-    ;; Async task launch: isAsync=t with agentId
+    ;; Case 1: Task tool async launch - isAsync=t with agentId
     (when (and (eq (plist-get tool-use-result :isAsync) t)
                (plist-get tool-use-result :agentId))
       (let ((agent-id (plist-get tool-use-result :agentId)))
         (puthash agent-id t claude-agent--pending-background-tasks)
-        (claude-agent--debug-log "Background task started: %s" agent-id)))
+        (claude-agent--debug-log "Background Task started: %s" agent-id)))
+    ;; Case 2: Bash tool background - backgroundTaskId field
+    (when-let ((bg-task-id (plist-get tool-use-result :backgroundTaskId)))
+      (puthash bg-task-id t claude-agent--pending-background-tasks)
+      (claude-agent--debug-log "Background Bash started: %s" bg-task-id))
     ;; Task completion: task.status="completed"
     (when-let* ((task (plist-get tool-use-result :task))
                 (task-id (plist-get task :task_id))
@@ -1298,11 +1313,13 @@ The delay is controlled by `claude-agent-stdin-close-delay'."
             (when (process-live-p process)
               (process-send-eof process))
           ;; Delayed close - let filter complete and MCP settle
-          (run-at-time delay nil
-                       (lambda ()
-                         (when (process-live-p process)
-                           (claude-agent--debug-log "Closing stdin after delay")
-                           (process-send-eof process)))))))))
+          ;; Use lexical-let to capture process (literate-elisp ignores lexical-binding: t)
+          (lexical-let ((proc process))
+            (run-at-time delay nil
+                         (lambda ()
+                           (when (process-live-p proc)
+                             (claude-agent--debug-log "Closing stdin after delay")
+                             (process-send-eof proc))))))))))
 #+END_SRC
 
 ** Process Creation

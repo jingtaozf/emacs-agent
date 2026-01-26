@@ -88,6 +88,148 @@
    nil)
   (should (= 0 (hash-table-count claude-agent--pending-background-tasks))))
 
+;;; Test: Bash Background Task Tracking (NEW - using actual event data)
+
+(ert-deftest test-background-task-tracker-bash-launch ()
+  "Test Bash background task launch detection.
+Uses actual event data from verbose buffer session sdd-20260124-180353."
+  (clrhash claude-agent--pending-background-tasks)
+  ;; Actual Bash background launch result (from verbose buffer)
+  (claude-agent--background-task-tracker
+   "toolu_019K8M7SZr24P17tDHmxcbe1" nil nil
+   '(:stdout "" :stderr "" :interrupted nil :isImage nil :backgroundTaskId "b8406fe")
+   nil)
+  (should (gethash "b8406fe" claude-agent--pending-background-tasks))
+  (should (= 1 (hash-table-count claude-agent--pending-background-tasks))))
+
+(ert-deftest test-background-task-tracker-bash-completion ()
+  "Test Bash background task completion removes from tracking.
+Uses actual TaskOutput result pattern."
+  (clrhash claude-agent--pending-background-tasks)
+  (puthash "b8406fe" t claude-agent--pending-background-tasks)
+  ;; TaskOutput with status=completed for Bash task
+  (claude-agent--background-task-tracker
+   "toolu_01RPJxtBAeJ4VhmA92XnL7hm" nil nil
+   '(:retrieval_status "success"
+     :task (:task_id "b8406fe" :task_type "local_bash" :status "completed"
+            :description "Run real LLM test with sample turns"))
+   nil)
+  ;; Should be removed
+  (should-not (gethash "b8406fe" claude-agent--pending-background-tasks)))
+
+(ert-deftest test-background-task-tracker-bash-running ()
+  "Test Bash task running state doesn't remove from tracking.
+Uses actual timeout pattern from verbose buffer."
+  (clrhash claude-agent--pending-background-tasks)
+  (puthash "b8406fe" t claude-agent--pending-background-tasks)
+  ;; TaskOutput with status=running (timeout case)
+  (claude-agent--background-task-tracker
+   "toolu_019K8M7SZr24P17tDHmxcbe1" nil nil
+   '(:retrieval_status "timeout"
+     :task (:task_id "b8406fe" :task_type "local_bash" :status "running"
+            :description "Run real LLM test with sample turns"))
+   nil)
+  ;; Should still be tracked
+  (should (gethash "b8406fe" claude-agent--pending-background-tasks)))
+
+(ert-deftest test-background-task-tracker-mixed-task-and-bash ()
+  "Test tracking both Task subagent and Bash background simultaneously.
+Uses actual event data from verbose buffer."
+  (clrhash claude-agent--pending-background-tasks)
+  ;; Launch Task subagent (actual data from session)
+  (claude-agent--background-task-tracker
+   "toolu_01LzRMXCp9YFivQQwHzC2ayK" nil nil
+   '(:isAsync t :status "async_launched" :agentId "a4b3ecf"
+     :description "Explore mega_code source"
+     :prompt "Explore the mega_code source code structure...")
+   nil)
+  ;; Launch Bash background (actual data from session)
+  (claude-agent--background-task-tracker
+   "toolu_019K8M7SZr24P17tDHmxcbe1" nil nil
+   '(:stdout "" :stderr "" :interrupted nil :isImage nil :backgroundTaskId "b8406fe")
+   nil)
+  ;; Both should be tracked
+  (should (= 2 (hash-table-count claude-agent--pending-background-tasks)))
+  (should (gethash "a4b3ecf" claude-agent--pending-background-tasks))
+  (should (gethash "b8406fe" claude-agent--pending-background-tasks))
+
+  ;; Complete Task subagent
+  (claude-agent--background-task-tracker
+   "toolu_01NJeYeAJ9iE3ep58dzQkzc8" nil nil
+   '(:retrieval_status "success"
+     :task (:task_id "a4b3ecf" :task_type "local_agent" :status "completed"))
+   nil)
+  (should (= 1 (hash-table-count claude-agent--pending-background-tasks)))
+  (should-not (gethash "a4b3ecf" claude-agent--pending-background-tasks))
+  (should (gethash "b8406fe" claude-agent--pending-background-tasks))
+
+  ;; Complete Bash task
+  (claude-agent--background-task-tracker
+   "toolu_01RPJxtBAeJ4VhmA92XnL7hm" nil nil
+   '(:retrieval_status "success"
+     :task (:task_id "b8406fe" :task_type "local_bash" :status "completed"))
+   nil)
+  (should (= 0 (hash-table-count claude-agent--pending-background-tasks))))
+
+(ert-deftest test-stdin-not-closed-with-pending-bash ()
+  "Test stdin not closed when Bash background task is pending.
+This is the critical fix - Bash tasks must prevent early exit."
+  (clrhash claude-agent--pending-background-tasks)
+  ;; Launch Bash background task
+  (claude-agent--background-task-tracker
+   "toolu_bg" nil nil
+   '(:stdout "" :stderr "" :backgroundTaskId "b8406fe")
+   nil)
+  ;; Result message arrives - stdin should NOT close
+  (let ((closed nil))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+    (should-not closed)))
+
+(ert-deftest test-bash-background-full-flow ()
+  "Test complete Bash background task lifecycle.
+Simulates the actual failure scenario that was occurring."
+  (clrhash claude-agent--pending-background-tasks)
+  (let ((claude-agent-stdin-close-delay 0))  ; Immediate close for testing
+
+    ;; 1. Bash task launched with run_in_background: true
+    (claude-agent--background-task-tracker
+     "toolu_01" nil nil
+     '(:stdout "" :stderr "" :backgroundTaskId "b8406fe")
+     nil)
+    (should (claude-agent--has-pending-background-tasks-p))
+
+    ;; 2. Result message arrives (from prior turn) - stdin should NOT close
+    (let ((closed nil))
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+      (should-not closed))
+
+    ;; 3. TaskOutput with block:true, timeout:180000 - task still running
+    (claude-agent--background-task-tracker
+     "toolu_02" nil nil
+     '(:retrieval_status "timeout"
+       :task (:task_id "b8406fe" :task_type "local_bash" :status "running"))
+     nil)
+    (should (claude-agent--has-pending-background-tasks-p))
+
+    ;; 4. TaskOutput finally returns completed
+    (claude-agent--background-task-tracker
+     "toolu_03" nil nil
+     '(:retrieval_status "success"
+       :task (:task_id "b8406fe" :task_type "local_bash" :status "completed"))
+     nil)
+    (should-not (claude-agent--has-pending-background-tasks-p))
+
+    ;; 5. Now result should close stdin
+    (let ((closed nil))
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+      (should closed))))
+
 ;;; Test: Has Pending Background Tasks
 
 (ert-deftest test-has-pending-background-tasks-empty ()
@@ -116,7 +258,8 @@
 (ert-deftest test-maybe-close-stdin-no-pending ()
   "Test stdin closed when no background tasks pending."
   (clrhash claude-agent--pending-background-tasks)
-  (let ((closed nil))
+  (let ((closed nil)
+        (claude-agent-stdin-close-delay 0))  ; Immediate close for testing
     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
               ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
       (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
@@ -219,41 +362,42 @@
 (ert-deftest test-background-task-full-flow ()
   "Test complete background task lifecycle."
   (clrhash claude-agent--pending-background-tasks)
+  (let ((claude-agent-stdin-close-delay 0))  ; Immediate close for testing
 
-  ;; 1. Task launched
-  (claude-agent--background-task-tracker
-   "toolu_01" nil nil
-   '(:isAsync t :agentId "agent123")
-   nil)
-  (should (claude-agent--has-pending-background-tasks-p))
+    ;; 1. Task launched
+    (claude-agent--background-task-tracker
+     "toolu_01" nil nil
+     '(:isAsync t :agentId "agent123")
+     nil)
+    (should (claude-agent--has-pending-background-tasks-p))
 
-  ;; 2. First result - stdin should NOT close
-  (let ((closed nil))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should-not closed))
+    ;; 2. First result - stdin should NOT close
+    (let ((closed nil))
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+      (should-not closed))
 
-  ;; 3. TaskOutput shows running - still pending
-  (claude-agent--background-task-tracker
-   "toolu_02" nil nil
-   '(:task (:task_id "agent123" :status "running"))
-   nil)
-  (should (claude-agent--has-pending-background-tasks-p))
+    ;; 3. TaskOutput shows running - still pending
+    (claude-agent--background-task-tracker
+     "toolu_02" nil nil
+     '(:task (:task_id "agent123" :status "running"))
+     nil)
+    (should (claude-agent--has-pending-background-tasks-p))
 
-  ;; 4. TaskOutput shows completed - removed
-  (claude-agent--background-task-tracker
-   "toolu_03" nil nil
-   '(:task (:task_id "agent123" :status "completed"))
-   nil)
-  (should-not (claude-agent--has-pending-background-tasks-p))
+    ;; 4. TaskOutput shows completed - removed
+    (claude-agent--background-task-tracker
+     "toolu_03" nil nil
+     '(:task (:task_id "agent123" :status "completed"))
+     nil)
+    (should-not (claude-agent--has-pending-background-tasks-p))
 
-  ;; 5. Now result should close stdin
-  (let ((closed nil))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should closed)))
+    ;; 5. Now result should close stdin
+    (let ((closed nil))
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+      (should closed))))
 
 (provide 'test-claude-agent-background-tasks)
 ;;; test-claude-agent-background-tasks.el ends here
