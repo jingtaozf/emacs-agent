@@ -1136,6 +1136,8 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
       (setq emacs-mcp-server-path-mappings nil)
       ;; Clear pending background tasks (prevent stale entries across sessions)
       (clrhash claude-agent--pending-background-tasks)
+      ;; Clear pending control requests (prevent stale entries across sessions)
+      (claude-agent--clear-pending-control-requests)
       ;; Unregister from active queries
       (when-let* ((req-id (claude-agent--process-state-request-id state)))
         (claude-agent--unregister-query req-id))
@@ -1242,6 +1244,41 @@ TOOL-USE-RESULT contains:
           #'claude-agent--background-task-tracker)
 #+END_SRC
 
+** Pending Control Request Tracking
+
+Track pending control_requests that need responses. The CLI sends permission
+requests (can_use_tool) and expects control_responses. If stdin is closed
+before all control_responses are sent, the CLI will exit unexpectedly.
+
+#+BEGIN_SRC elisp
+(defvar claude-agent--pending-control-requests (make-hash-table :test 'equal)
+  "Hash table of request-id -> timestamp for pending control requests.
+Tracks control_requests that need control_responses before stdin can be closed.")
+
+(defun claude-agent--track-control-request (request-id)
+  "Track REQUEST-ID as pending a response."
+  (puthash request-id (current-time) claude-agent--pending-control-requests)
+  (claude-agent--debug-log "Control request pending: %s (total: %d)"
+                          request-id
+                          (hash-table-count claude-agent--pending-control-requests)))
+
+(defun claude-agent--untrack-control-request (request-id)
+  "Remove REQUEST-ID from pending tracking after response sent."
+  (remhash request-id claude-agent--pending-control-requests)
+  (claude-agent--debug-log "Control request resolved: %s (remaining: %d)"
+                          request-id
+                          (hash-table-count claude-agent--pending-control-requests)))
+
+(defun claude-agent--has-pending-control-requests-p ()
+  "Return non-nil if there are pending control requests awaiting responses."
+  (> (hash-table-count claude-agent--pending-control-requests) 0))
+
+(defun claude-agent--clear-pending-control-requests ()
+  "Clear all pending control request tracking.
+Called during session cleanup."
+  (clrhash claude-agent--pending-control-requests))
+#+END_SRC
+
 ** Closing Stdin After Result
 
 We need to close stdin when we receive the result message to signal completion.
@@ -1292,8 +1329,12 @@ Set to nil to disable automatic stdin close (for debugging)."
   :group 'claude-agent)
 
 (defun claude-agent--maybe-close-stdin (process parsed)
-  "Close stdin if PARSED is a result message and no background tasks pending.
+  "Close stdin if PARSED is a result message and no pending work.
 PROCESS is the CLI process.
+
+Checks for both:
+1. Pending background tasks (Task/Bash with run_in_background)
+2. Pending control requests awaiting responses (permissions, hooks)
 
 This function schedules stdin closure with a small delay to ensure:
 1. The current process filter completes processing
@@ -1302,10 +1343,17 @@ This function schedules stdin closure with a small delay to ensure:
 
 The delay is controlled by `claude-agent-stdin-close-delay'."
   (when (equal (plist-get parsed :type) "result")
-    (if (claude-agent--has-pending-background-tasks-p)
-        (claude-agent--debug-log "Result received, %d background tasks pending"
-                                 (hash-table-count claude-agent--pending-background-tasks))
-      ;; Schedule stdin close with delay to allow pending communication to complete
+    (cond
+     ;; Check for pending background tasks
+     ((claude-agent--has-pending-background-tasks-p)
+      (claude-agent--debug-log "Result received, %d background tasks pending"
+                               (hash-table-count claude-agent--pending-background-tasks)))
+     ;; Check for pending control requests awaiting responses
+     ((claude-agent--has-pending-control-requests-p)
+      (claude-agent--debug-log "Result received, %d control requests pending response"
+                               (hash-table-count claude-agent--pending-control-requests)))
+     ;; No pending work - schedule stdin close
+     (t
       (let ((delay (or claude-agent-stdin-close-delay 0)))
         (claude-agent--debug-log "Result received, scheduling stdin close in %.1fs" delay)
         (if (zerop delay)
@@ -1315,11 +1363,15 @@ The delay is controlled by `claude-agent-stdin-close-delay'."
           ;; Delayed close - let filter complete and MCP settle
           ;; Use lexical-let to capture process (literate-elisp ignores lexical-binding: t)
           (lexical-let ((proc process))
-            (run-at-time delay nil
-                         (lambda ()
-                           (when (process-live-p proc)
-                             (claude-agent--debug-log "Closing stdin after delay")
-                             (process-send-eof proc))))))))))
+            (run-at-time
+             delay nil
+             (lambda ()
+               ;; Re-check for pending work before closing
+               (when (and (process-live-p proc)
+                          (not (claude-agent--has-pending-background-tasks-p))
+                          (not (claude-agent--has-pending-control-requests-p)))
+                 (claude-agent--debug-log "Closing stdin after delay")
+                 (process-send-eof proc)))))))))))
 #+END_SRC
 
 ** Process Creation
@@ -1911,7 +1963,9 @@ Handle incoming control requests from Claude CLI and send responses.
 
 REQUEST-ID: string matching the request
 SUBTYPE: \"success\" or \"error\"
-RESPONSE-DATA: plist with response fields or :error string"
+RESPONSE-DATA: plist with response fields or :error string
+
+Also untracks the request from pending control requests."
   (let* ((response (list :type "control_response"
                         :response (list :subtype subtype
                                        :request_id request-id
@@ -1922,7 +1976,11 @@ RESPONSE-DATA: plist with response fields or :error string"
          (json (concat (json-encode response) "\n")))
     (claude-agent--debug-log "Sending control response: %s"
                             (substring json 0 (min 200 (length json))))
-    (process-send-string process json)))
+    ;; Untrack the request now that we're sending the response
+    (claude-agent--untrack-control-request request-id)
+    ;; Only send if process is still alive
+    (when (process-live-p process)
+      (process-send-string process json))))
 
 (defun claude-agent--handle-control-request (process request)
   "Handle control_request from Claude CLI.
@@ -1930,12 +1988,16 @@ RESPONSE-DATA: plist with response fields or :error string"
 PROCESS: The Claude CLI process
 REQUEST: Parsed control_request plist
 
-Invokes appropriate Emacs hooks and sends control_response."
+Invokes appropriate Emacs hooks and sends control_response.
+Tracks pending requests to prevent premature stdin close."
   (let* ((request-id (plist-get request :request_id))
          (request-data (plist-get request :request))
          (subtype (plist-get request-data :subtype)))
 
     (claude-agent--debug-log "Control request: %s (id=%s)" subtype request-id)
+
+    ;; Track this request as pending (will be untracked when response is sent)
+    (claude-agent--track-control-request request-id)
 
     (condition-case err
         (cond
