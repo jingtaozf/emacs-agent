@@ -302,5 +302,155 @@
     (should (string-match-p "report this as an error and stop"
                             (plist-get result :message)))))
 
+;;; AskUserQuestion Tool Tests
+
+(ert-deftest test-ask-user-question-function-exists ()
+  "Test that AskUserQuestion permission function exists."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (should (fboundp 'claude-agent-permission-ask-user-question)))
+
+(ert-deftest test-ask-user-question-ignores-other-tools ()
+  "Test that function returns nil for non-AskUserQuestion tools."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (should-not (claude-agent-permission-ask-user-question
+               "Read" '(:file_path "/tmp/test.txt") nil))
+  (should-not (claude-agent-permission-ask-user-question
+               "Write" '(:file_path "/tmp/test.txt") nil))
+  (should-not (claude-agent-permission-ask-user-question
+               "Bash" '(:command "ls") nil)))
+
+(ert-deftest test-format-question-options-basic ()
+  "Test formatting question options for completing-read."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (let ((options (list (list :label "Option1" :description "First option")
+                       (list :label "Option2" :description "Second option"))))
+    (let ((formatted (claude-agent--format-question-options options)))
+      (should (= 2 (length formatted)))
+      (should (equal (car (nth 0 formatted)) "Option1 - First option"))
+      (should (equal (cdr (nth 0 formatted)) "Option1"))
+      (should (equal (car (nth 1 formatted)) "Option2 - Second option"))
+      (should (equal (cdr (nth 1 formatted)) "Option2")))))
+
+(ert-deftest test-format-question-options-no-description ()
+  "Test formatting options without descriptions."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (let ((options (list (list :label "JustLabel"))))
+    (let ((formatted (claude-agent--format-question-options options)))
+      (should (= 1 (length formatted)))
+      (should (equal (car (nth 0 formatted)) "JustLabel"))
+      (should (equal (cdr (nth 0 formatted)) "JustLabel")))))
+
+(ert-deftest test-format-question-options-empty ()
+  "Test formatting empty options list."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (let ((formatted (claude-agent--format-question-options nil)))
+    (should (null formatted))))
+
+(ert-deftest test-ask-user-question-with-mock-single-select ()
+  "Test AskUserQuestion with mocked completing-read for single-select."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt _choices &rest _args)
+               "Summary - Brief overview")))
+    (let* ((tool-input (list :questions
+                             (list (list :question "How should I format?"
+                                        :header "Format"
+                                        :options (list (list :label "Summary"
+                                                            :description "Brief overview")
+                                                      (list :label "Detailed"
+                                                            :description "Full info"))
+                                        :multiSelect nil))))
+           (result (claude-agent-permission-ask-user-question
+                    "AskUserQuestion" tool-input nil)))
+      (should result)
+      (should (equal (plist-get result :behavior) "allow"))
+      (let* ((updated (plist-get result :updated-input))
+             (answers (plist-get updated :answers)))
+        (should answers)
+        ;; answers is an alist
+        (should (equal (cdr (assoc "How should I format?" answers)) "Summary"))))))
+
+(ert-deftest test-ask-user-question-with-mock-multi-select ()
+  "Test AskUserQuestion with mocked completing-read-multiple for multi-select."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (cl-letf (((symbol-function 'completing-read-multiple)
+             (lambda (_prompt _choices &rest _args)
+               '("Option1 - First" "Option2 - Second"))))
+    (let* ((tool-input (list :questions
+                             (list (list :question "Which features?"
+                                        :header "Features"
+                                        :options (list (list :label "Option1"
+                                                            :description "First")
+                                                      (list :label "Option2"
+                                                            :description "Second"))
+                                        :multiSelect t))))
+           (result (claude-agent-permission-ask-user-question
+                    "AskUserQuestion" tool-input nil)))
+      (should result)
+      (should (equal (plist-get result :behavior) "allow"))
+      (let* ((updated (plist-get result :updated-input))
+             (answers (plist-get updated :answers)))
+        (should answers)
+        ;; Multi-select joins labels with ", "
+        (should (equal (cdr (assoc "Which features?" answers)) "Option1, Option2"))))))
+
+(ert-deftest test-ask-user-question-other-free-text ()
+  "Test AskUserQuestion when user chooses 'Other' for free-text."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (let ((read-string-called nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt _choices &rest _args)
+                 "Other (type your answer)"))
+              ((symbol-function 'read-string)
+               (lambda (_prompt)
+                 (setq read-string-called t)
+                 "My custom answer")))
+      (let* ((tool-input (list :questions
+                               (list (list :question "Pick something"
+                                          :header "Pick"
+                                          :options (list (list :label "A" :description "Option A"))
+                                          :multiSelect nil))))
+             (result (claude-agent-permission-ask-user-question
+                      "AskUserQuestion" tool-input nil)))
+        (should read-string-called)
+        (should result)
+        (let* ((updated (plist-get result :updated-input))
+               (answers (plist-get updated :answers)))
+          (should (equal (cdr (assoc "Pick something" answers)) "My custom answer")))))))
+
+(ert-deftest test-ask-user-question-passes-through-questions ()
+  "Test that original questions are passed through in response."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt _choices &rest _args) "Test - desc")))
+    (let* ((questions (list (list :question "Test question"
+                                 :header "Test"
+                                 :options (list (list :label "Test" :description "desc"))
+                                 :multiSelect nil)))
+           (tool-input (list :questions questions))
+           (result (claude-agent-permission-ask-user-question
+                    "AskUserQuestion" tool-input nil)))
+      (let* ((updated (plist-get result :updated-input))
+             (returned-questions (plist-get updated :questions)))
+        ;; Should pass through original questions
+        (should (equal returned-questions questions))))))
+
+(ert-deftest test-ask-user-question-user-cancel ()
+  "Test AskUserQuestion returns deny when user cancels with C-g."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (_prompt _choices &rest _args)
+               (signal 'quit nil))))
+    (let* ((tool-input (list :questions
+                             (list (list :question "Test"
+                                        :header "T"
+                                        :options (list (list :label "X"))
+                                        :multiSelect nil))))
+           (result (claude-agent-permission-ask-user-question
+                    "AskUserQuestion" tool-input nil)))
+      (should result)
+      (should (equal (plist-get result :behavior) "deny"))
+      (should (string-match-p "cancelled" (plist-get result :message))))))
+
 (provide 'test-claude-agent-permissions)
 ;;; test-claude-agent-permissions.el ends here

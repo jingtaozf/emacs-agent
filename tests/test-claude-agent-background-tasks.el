@@ -476,5 +476,150 @@ Uses actual event data from verbose buffer session sdd-20260126-132710."
     (should (gethash "bee9495" claude-agent--pending-background-tasks))
     (should (= 1 (hash-table-count claude-agent--pending-background-tasks)))))
 
+;;; Test: Pending Control Request Tracking
+;;;
+;;; Control requests (permission prompts) must be tracked to prevent
+;;; premature stdin close while awaiting control_response.
+
+(ert-deftest test-control-request-tracking-basic ()
+  "Test basic control request tracking functions."
+  (claude-agent--clear-pending-control-requests)
+  ;; Initially empty
+  (should-not (claude-agent--has-pending-control-requests-p))
+
+  ;; Track a request
+  (claude-agent--track-control-request "req-001")
+  (should (claude-agent--has-pending-control-requests-p))
+
+  ;; Track another
+  (claude-agent--track-control-request "req-002")
+  (should (= 2 (hash-table-count claude-agent--pending-control-requests)))
+
+  ;; Untrack one
+  (claude-agent--untrack-control-request "req-001")
+  (should (claude-agent--has-pending-control-requests-p))
+
+  ;; Untrack the other
+  (claude-agent--untrack-control-request "req-002")
+  (should-not (claude-agent--has-pending-control-requests-p)))
+
+(ert-deftest test-control-request-clear ()
+  "Test clearing all pending control requests."
+  (claude-agent--clear-pending-control-requests)
+  (claude-agent--track-control-request "req-001")
+  (claude-agent--track-control-request "req-002")
+  (should (= 2 (hash-table-count claude-agent--pending-control-requests)))
+
+  (claude-agent--clear-pending-control-requests)
+  (should-not (claude-agent--has-pending-control-requests-p))
+  (should (= 0 (hash-table-count claude-agent--pending-control-requests))))
+
+(ert-deftest test-stdin-not-closed-with-pending-control-request ()
+  "Test stdin not closed when control request is pending response.
+This is the critical fix for the early exit bug."
+  (clrhash claude-agent--pending-background-tasks)
+  (claude-agent--clear-pending-control-requests)
+  ;; Simulate pending control request (permission prompt awaiting response)
+  (claude-agent--track-control-request "c8b57b4d-8e9e-4010-b2ce-bfa736df4ea2")
+  ;; Result message arrives - stdin should NOT close
+  (let ((closed nil)
+        (claude-agent-stdin-close-delay 0))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+    (should-not closed)))
+
+(ert-deftest test-stdin-closes-after-control-response ()
+  "Test stdin closes after all control requests are resolved."
+  (clrhash claude-agent--pending-background-tasks)
+  (claude-agent--clear-pending-control-requests)
+  (let ((closed nil)
+        (claude-agent-stdin-close-delay 0))
+    ;; Track a control request
+    (claude-agent--track-control-request "req-001")
+    ;; Result arrives - should NOT close
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+    (should-not closed)
+
+    ;; Response sent - untrack
+    (claude-agent--untrack-control-request "req-001")
+    ;; Now result should close stdin
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+    (should closed)))
+
+(ert-deftest test-control-request-and-background-task-combined ()
+  "Test both control requests and background tasks block stdin close."
+  (clrhash claude-agent--pending-background-tasks)
+  (claude-agent--clear-pending-control-requests)
+  (let ((closed nil)
+        (claude-agent-stdin-close-delay 0))
+    ;; Both pending
+    (claude-agent--track-control-request "ctrl-001")
+    (puthash "bg-task-001" t claude-agent--pending-background-tasks)
+
+    ;; Should not close
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+    (should-not closed)
+
+    ;; Resolve control request only - should still not close
+    (claude-agent--untrack-control-request "ctrl-001")
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+    (should-not closed)
+
+    ;; Resolve background task - now should close
+    (remhash "bg-task-001" claude-agent--pending-background-tasks)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+    (should closed)))
+
+(ert-deftest test-handle-control-request-tracks-request ()
+  "Test that handle-control-request tracks the request for response."
+  (claude-agent--clear-pending-control-requests)
+  ;; Create a mock process
+  (let ((responses-sent nil))
+    (cl-letf (((symbol-function 'process-get) (lambda (_ _) nil))
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-string)
+               (lambda (_ str) (push str responses-sent)))
+              ((symbol-function 'claude-agent--run-permission-functions)
+               (lambda (_ _ _) '(:behavior "allow"))))
+      ;; Handle a can_use_tool request
+      (claude-agent--handle-control-request
+       'mock-process
+       '(:request_id "test-req-001"
+         :request (:subtype "can_use_tool"
+                   :tool_name "Read"
+                   :input (:file_path "/test.el")))))
+    ;; Request should have been tracked then untracked (response was sent)
+    ;; After response is sent, request is untracked
+    (should-not (claude-agent--has-pending-control-requests-p))
+    ;; Response should have been sent
+    (should (= 1 (length responses-sent)))))
+
+(ert-deftest test-send-control-response-untracks-request ()
+  "Test that send-control-response untracks the request."
+  (claude-agent--clear-pending-control-requests)
+  ;; Pre-track a request
+  (claude-agent--track-control-request "req-to-untrack")
+  (should (claude-agent--has-pending-control-requests-p))
+
+  ;; Send response (should untrack)
+  (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+            ((symbol-function 'process-send-string) (lambda (_ _) nil)))
+    (claude-agent--send-control-response
+     'mock-process "req-to-untrack" "success" '(:behavior "allow")))
+
+  ;; Should be untracked now
+  (should-not (claude-agent--has-pending-control-requests-p)))
+
 (provide 'test-claude-agent-background-tasks)
 ;;; test-claude-agent-background-tasks.el ends here
