@@ -674,5 +674,108 @@ This test ensures all helper functions called exist."
       (should (get-text-property 0 'help-echo claude-agent-activity-string))
       (claude-agent--unregister-query "req-test"))))
 
+;;; Session Recovery Unit Tests
+
+(ert-deftest test-claude-agent-recovery-abnormal-exit-detection ()
+  "Test the abnormal exit detection logic for automatic recovery."
+  :tags '(:unit :fast :stable :isolated :recovery)
+
+  (let ((claude-agent-auto-recovery t))
+    ;; Test 1: Signal kill should trigger recovery (if session-id available)
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should (claude-agent--is-abnormal-exit-p "killed: 9" state)))
+
+    ;; Test 2: Abnormal exit should trigger recovery
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should (claude-agent--is-abnormal-exit-p "exited abnormally with code 1" state)))
+
+    ;; Test 3: Normal finish without result should trigger recovery
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should (claude-agent--is-abnormal-exit-p "finished" state)))
+
+    ;; Test 4: Normal finish WITH result should NOT trigger recovery
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid"
+                  :got-result t)))
+      (should-not (claude-agent--is-abnormal-exit-p "finished" state)))
+
+    ;; Test 5: No session-id means no recovery possible
+    (let ((state (claude-agent--make-process-state)))
+      (should-not (claude-agent--is-abnormal-exit-p "killed: 9" state)))
+
+    ;; Test 6: Recovery disabled globally
+    (let ((claude-agent-auto-recovery nil)
+          (state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should-not (claude-agent--is-abnormal-exit-p "killed: 9" state)))))
+
+(ert-deftest test-claude-agent-recovery-message-format ()
+  "Test that the recovery message has the expected format."
+  :tags '(:unit :fast :stable :isolated :recovery)
+
+  ;; Create a mock state with token-callback
+  (let ((received-message nil))
+    (let ((state (claude-agent--make-process-state
+                  :token-callback (lambda (text)
+                                    (setq received-message text)))))
+      ;; Test with kill signal
+      (claude-agent--insert-recovery-message state "killed: 9")
+      (should received-message)
+      (should (string-match-p "Session interrupted" received-message))
+      (should (string-match-p "killed: 9" received-message))
+      (should (string-match-p "automatic recovery" received-message)))))
+
+(ert-deftest test-claude-agent-recovery-message-exit-code ()
+  "Test recovery message format with exit code."
+  :tags '(:unit :fast :stable :isolated :recovery)
+
+  (let ((received-message nil))
+    (let ((state (claude-agent--make-process-state
+                  :token-callback (lambda (text)
+                                    (setq received-message text)))))
+      ;; Test with exit code
+      (claude-agent--insert-recovery-message state "exited abnormally with code 137")
+      (should received-message)
+      (should (string-match-p "exit code: 137" received-message)))))
+
+(ert-deftest test-claude-agent-recovery-message-no-callback ()
+  "Test that recovery message gracefully handles missing token-callback."
+  :tags '(:unit :fast :stable :isolated :recovery)
+
+  ;; State without token-callback should not crash
+  (let ((state (claude-agent--make-process-state)))
+    (should-not (claude-agent--insert-recovery-message state "killed: 9"))))
+
+(ert-deftest test-claude-agent-recovery-config-default ()
+  "Test that auto-recovery is enabled by default."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (should (boundp 'claude-agent-auto-recovery))
+  (should claude-agent-auto-recovery))
+
+(ert-deftest test-claude-agent-recovery-prompt-defined ()
+  "Test that recovery prompt is defined and non-empty."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (should (boundp 'claude-agent-recovery-prompt))
+  (should (stringp claude-agent-recovery-prompt))
+  (should (> (length claude-agent-recovery-prompt) 0)))
+
+(ert-deftest test-claude-agent-process-state-recovery-fields ()
+  "Test that process-state struct has the recovery fields."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (let ((state (claude-agent--make-process-state
+                :session-id "test-session-id"
+                :got-result t)))
+    ;; Test session-id field
+    (should (equal "test-session-id" (claude-agent--process-state-session-id state)))
+    ;; Test got-result field
+    (should (eq t (claude-agent--process-state-got-result state)))
+    ;; Test default values
+    (let ((default-state (claude-agent--make-process-state)))
+      (should-not (claude-agent--process-state-session-id default-state))
+      (should-not (claude-agent--process-state-got-result default-state)))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

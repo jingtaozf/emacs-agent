@@ -222,6 +222,22 @@ If nil, the CLI will be searched in PATH and common locations."
   :type 'boolean
   :group 'claude-agent)
 
+(defcustom claude-agent-auto-recovery t
+  "When non-nil, automatically resume session on abnormal CLI exit.
+Abnormal exits include signal kills (e.g., SIGKILL), non-zero exit codes,
+and exits without receiving a result message. The recovery will insert
+a warning message at the current response position and resume the session."
+  :type 'boolean
+  :group 'claude-agent)
+
+(defcustom claude-agent-recovery-prompt
+  "Please continue if previous task is not finished yet due to abnormal exit."
+  "Prompt to send when resuming a session after abnormal exit.
+This prompt is used instead of the original AI block instructions to avoid
+repetition and provide clear context about the recovery."
+  :type 'string
+  :group 'claude-agent)
+
 (defcustom claude-agent-docker-auto-start t
   "When non-nil, auto-start Docker container if CLI path is a docker command.
 This allows seamless Docker execution without manually running docker compose up."
@@ -805,6 +821,10 @@ Internal state structure for managing async process communication.
   docker-mode       ; Non-nil when running in Docker sandbox
   path-mappings     ; Path mappings for Docker mode ((host . container) ...)
   edited-files      ; List of files edited during query (container paths)
+  ;; Recovery state fields
+  session-id        ; Claude session ID (from result message) for resumption
+  original-prompt   ; Original prompt for recovery context
+  (got-result nil)  ; Boolean: true if result message was received
   (ready nil)       ; Boolean ready state
   (closed nil))     ; Boolean closed state
 
@@ -981,6 +1001,15 @@ PROCESS is the CLI process."
         ;; Call message callback with parsed message
         (let ((message (claude-agent--parse-message parsed)))
           (when message
+            ;; Capture session-id from system/init message (available at start)
+            ;; This is critical for recovery - result message comes too late
+            (when (and (claude-agent-system-message-p message)
+                       (equal (claude-agent-system-message-subtype message) "init"))
+              (when-let ((sid (plist-get (claude-agent-system-message-data message) :session_id)))
+                (setf (claude-agent--process-state-session-id state) sid)))
+            ;; Set got-result flag when result message received
+            (when (claude-agent-result-message-p message)
+              (setf (claude-agent--process-state-got-result state) t))
             ;; Write to verbose buffer if session-key is set
             (claude-agent--verbose-write-message
              (claude-agent--process-state-session-key state) message)
@@ -1096,54 +1125,180 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
   (let ((state (process-get process 'claude-agent-state)))
     (claude-agent--debug-log "Process event: %s" (string-trim event))
     (when state
+      ;; Always log process exit to verbose buffer for diagnostics
+      (when-let ((session-key (claude-agent--process-state-session-key state)))
+        (claude-agent--verbose-insert session-key
+                                      (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
+                                              (string-trim event)
+                                              (hash-table-count claude-agent--pending-background-tasks)
+                                              (hash-table-count claude-agent--pending-control-requests))))
       (setf (claude-agent--process-state-closed state) t)
       (setf (claude-agent--process-state-ready state) nil)
       ;; Process any remaining JSON in buffer
       (claude-agent--process-json-buffer process)
-      ;; Handle any remaining content without trailing newline (e.g., "Prompt is too long")
+      ;; Handle any remaining content without trailing newline
+      ;; This can happen when CLI sends data but dies before the newline
+      ;; IMPORTANT: Check if it's a valid JSON message (especially control_request)
       (let ((remaining (claude-agent--process-state-json-buffer state)))
         (when (and remaining (not (string-empty-p (string-trim remaining))))
-          (let ((error-callback (claude-agent--process-state-error-callback state)))
-            (claude-agent--debug-log "Remaining non-JSON output: %s" remaining)
-            (when error-callback
-              (funcall error-callback
-                       (list 'claude-agent-cli-error
-                             :message (string-trim remaining)
-                             :original-error nil))))))
-      ;; Call completion callback
-      (let ((complete-cb (claude-agent--process-state-complete-callback state)))
-        (cond
-         ((string-match-p "finished" event)
-          (when complete-cb
-            (funcall complete-cb nil)))
-         ((string-match-p "exited abnormally" event)
-          (let ((exit-code (when (string-match "code \\([0-9]+\\)" event)
-                             (string-to-number (match-string 1 event)))))
+          (let ((trimmed (string-trim remaining))
+                (error-callback (claude-agent--process-state-error-callback state))
+                (session-key (claude-agent--process-state-session-key state)))
+            (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
+            ;; Try to parse as JSON - might be a control_request that arrived just before exit
+            (condition-case nil
+                (let* ((json-object-type 'plist)
+                       (json-array-type 'list)
+                       (json-key-type 'keyword)
+                       (parsed (json-read-from-string trimmed))
+                       (msg-type (plist-get parsed :type)))
+                  (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
+                  ;; Handle control_request specially - CLI died waiting for our response
+                  (if (equal msg-type "control_request")
+                      (progn
+                        (when session-key
+                          (claude-agent--verbose-insert
+                           session-key
+                           (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
+                        (message "Claude: control_request received but CLI died before we could respond"))
+                    ;; Other message types - just log
+                    (when session-key
+                      (claude-agent--verbose-insert
+                       session-key
+                       (format ">>> INFO: Final message without newline: %s" msg-type)))))
+              ;; Not valid JSON - treat as error message (original behavior)
+              (error
+               (when error-callback
+                 (funcall error-callback
+                          (list 'claude-agent-cli-error
+                                :message trimmed
+                                :original-error nil))))))))
+      ;; Check for automatic recovery before normal completion handling
+      (if (claude-agent--is-abnormal-exit-p event state)
+          ;; Abnormal exit - attempt recovery
+          (progn
+            (when-let ((session-key (claude-agent--process-state-session-key state)))
+              (claude-agent--verbose-insert session-key
+                                            (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
+            ;; Insert recovery message at current response position
+            (claude-agent--insert-recovery-message state event)
+            ;; Minimal cleanup for recovery (don't clear everything - resumed session needs some state)
+            (setq claude-agent--active-states
+                  (delq state claude-agent--active-states))
+            (when-let* ((req-id (claude-agent--process-state-request-id state)))
+              (claude-agent--unregister-query req-id))
+            (when-let* ((buf (claude-agent--process-state-buffer state)))
+              (when (buffer-live-p buf)
+                (kill-buffer buf)))
+            ;; Resume the session (will create new process with same callbacks)
+            (claude-agent--resume-session state))
+        ;; Normal exit - standard completion and cleanup
+        (let ((complete-cb (claude-agent--process-state-complete-callback state)))
+          (cond
+           ((string-match-p "finished" event)
+            (when complete-cb
+              (funcall complete-cb nil)))
+           ((string-match-p "exited abnormally" event)
+            (let ((exit-code (when (string-match "code \\([0-9]+\\)" event)
+                               (string-to-number (match-string 1 event)))))
+              (when complete-cb
+                (funcall complete-cb
+                         (list 'claude-agent-process-error
+                               :message "Process exited abnormally"
+                               :exit-code exit-code)))))
+           (t
             (when complete-cb
               (funcall complete-cb
                        (list 'claude-agent-process-error
-                             :message "Process exited abnormally"
-                             :exit-code exit-code)))))
-         (t
-          (when complete-cb
-            (funcall complete-cb
-                     (list 'claude-agent-process-error
-                           :message (format "Process event: %s" event)))))))
-      ;; Cleanup
-      (setq claude-agent--active-states
-            (delq state claude-agent--active-states))
-      ;; Clear Docker path mappings (set during claude-agent-query)
-      (setq emacs-mcp-server-path-mappings nil)
-      ;; Clear pending background tasks (prevent stale entries across sessions)
-      (clrhash claude-agent--pending-background-tasks)
-      ;; Clear pending control requests (prevent stale entries across sessions)
-      (claude-agent--clear-pending-control-requests)
-      ;; Unregister from active queries
-      (when-let* ((req-id (claude-agent--process-state-request-id state)))
-        (claude-agent--unregister-query req-id))
-      (when-let* ((buf (claude-agent--process-state-buffer state)))
-        (when (buffer-live-p buf)
-          (kill-buffer buf))))))
+                             :message (format "Process event: %s" event)))))))
+        ;; Cleanup
+        (setq claude-agent--active-states
+              (delq state claude-agent--active-states))
+        ;; Clear Docker path mappings (set during claude-agent-query)
+        (setq emacs-mcp-server-path-mappings nil)
+        ;; Clear pending background tasks (prevent stale entries across sessions)
+        (clrhash claude-agent--pending-background-tasks)
+        ;; Clear pending control requests (prevent stale entries across sessions)
+        (claude-agent--clear-pending-control-requests)
+        ;; Unregister from active queries
+        (when-let* ((req-id (claude-agent--process-state-request-id state)))
+          (claude-agent--unregister-query req-id))
+        (when-let* ((buf (claude-agent--process-state-buffer state)))
+          (when (buffer-live-p buf)
+            (kill-buffer buf)))))))
+#+END_SRC
+
+** Session Recovery
+
+Automatic session recovery when CLI exits abnormally (e.g., killed by signal).
+
+*** Abnormal Exit Detection
+
+#+BEGIN_SRC elisp
+(defun claude-agent--is-abnormal-exit-p (event state)
+  "Check if EVENT represents an abnormal exit that should trigger recovery.
+STATE is the process state. Returns t if:
+- Process was killed by signal (e.g., \"killed: 9\")
+- Process exited with non-zero code
+- Process finished but no result message was received"
+  (and claude-agent-auto-recovery
+       (claude-agent--process-state-session-id state)  ; Need session-id to resume
+       (not (claude-agent--process-state-got-result state))  ; No result received
+       (or (string-match-p "killed" event)
+           (string-match-p "exited abnormally" event)
+           ;; Also treat "finished" without result as abnormal
+           (string-match-p "finished" event))))
+#+END_SRC
+
+*** Recovery Message Insertion
+
+#+BEGIN_SRC elisp
+(defun claude-agent--insert-recovery-message (state event)
+  "Insert a recovery warning message using token-callback.
+STATE is the process state, EVENT is the exit event."
+  (when-let ((token-callback (claude-agent--process-state-token-callback state)))
+    (let* ((signal-info (cond
+                         ((string-match "killed: \\([0-9]+\\)" event)
+                          (format "killed: %s" (match-string 1 event)))
+                         ((string-match "code \\([0-9]+\\)" event)
+                          (format "exit code: %s" (match-string 1 event)))
+                         (t (string-trim event))))
+           (message (format "\n\n⚠️ *Session interrupted (%s)* Attempting automatic recovery...\n\n"
+                           signal-info)))
+      (funcall token-callback message))))
+#+END_SRC
+
+*** Session Resumption
+
+#+BEGIN_SRC elisp
+(defun claude-agent--resume-session (state)
+  "Resume a session after abnormal exit.
+STATE is the previous process state containing session-id and callbacks."
+  (let* ((session-id (claude-agent--process-state-session-id state))
+         (original-options (claude-agent--process-state-options state))
+         (session-key (claude-agent--process-state-session-key state))
+         ;; Build new options with resume flag
+         (new-options (plist-put (copy-sequence original-options) :resume session-id)))
+
+    ;; Log the recovery attempt
+    (when session-key
+      (claude-agent--verbose-insert session-key
+                                    (format ">>> RECOVERY: Resuming session %s" session-id)))
+    (claude-agent--debug-log "Resuming session after abnormal exit: %s" session-id)
+
+    ;; Start new query with recovery prompt and resume flag
+    (claude-agent-query
+     claude-agent-recovery-prompt  ; Use configurable recovery prompt
+     :options new-options
+     :on-message (claude-agent--process-state-callback state)
+     :on-token (claude-agent--process-state-token-callback state)
+     :on-error (claude-agent--process-state-error-callback state)
+     :on-complete (claude-agent--process-state-complete-callback state)
+     :session-key session-key
+     :source-buffer (claude-agent--process-state-source-buffer state)
+     :query-context (claude-agent--process-state-query-context state)
+     :source-location-fn (claude-agent--process-state-source-location-fn state)
+     :source-location-args (claude-agent--process-state-source-location-args state))))
 #+END_SRC
 
 ** Streaming Mode Initialization
@@ -1973,14 +2128,29 @@ Also untracks the request from pending control requests."
          (json-object-type 'plist)
          (json-array-type 'list)
          (json-key-type 'keyword)
-         (json (concat (json-encode response) "\n")))
+         (json (concat (json-encode response) "\n"))
+         (state (process-get process 'claude-agent-state))
+         (session-key (and state (claude-agent--process-state-session-key state))))
     (claude-agent--debug-log "Sending control response: %s"
                             (substring json 0 (min 200 (length json))))
+    ;; Log to verbose buffer for debugging
+    (when session-key
+      (claude-agent--verbose-insert session-key
+                                    (format ">>> STDIN (control_response): %s"
+                                            (substring json 0 (min 300 (length json))))))
     ;; Untrack the request now that we're sending the response
     (claude-agent--untrack-control-request request-id)
     ;; Only send if process is still alive
-    (when (process-live-p process)
-      (process-send-string process json))))
+    (if (process-live-p process)
+        (process-send-string process json)
+      ;; Log when we can't send the response - this indicates the CLI died unexpectedly
+      (claude-agent--debug-log "WARNING: Cannot send control_response - process is dead (id=%s)"
+                               request-id)
+      (when session-key
+        (claude-agent--verbose-insert session-key
+                                      (format ">>> ERROR: control_response DROPPED (process dead) id=%s"
+                                              request-id)))
+      (message "Claude: control_response dropped - CLI process died (request-id: %s)" request-id))))
 
 (defun claude-agent--handle-control-request (process request)
   "Handle control_request from Claude CLI.
@@ -2016,14 +2186,18 @@ Tracks pending requests to prevent premature stdin close."
                  (org-section (process-get process :org-section))
                  (context (list :session-id session-id
                                :org-section org-section
-                               :suggestions (plist-get request-data :permission_suggestions)))
-                 (result (claude-agent--run-permission-functions
-                         tool-name tool-input context)))
-            (claude-agent--send-control-response
-             process request-id "success"
-             (list :behavior (or (plist-get result :behavior) "allow")
-                   :updatedInput (or (plist-get result :updated-input) tool-input)
-                   :message (plist-get result :message)))))
+                               :suggestions (plist-get request-data :permission_suggestions))))
+            (claude-agent--debug-log "Running permission functions for %s (id=%s)"
+                                     tool-name request-id)
+            (let ((result (claude-agent--run-permission-functions
+                          tool-name tool-input context)))
+              (claude-agent--debug-log "Permission result for %s: %S (id=%s)"
+                                       tool-name result request-id)
+              (claude-agent--send-control-response
+               process request-id "success"
+               (list :behavior (or (plist-get result :behavior) "allow")
+                     :updatedInput (or (plist-get result :updated-input) tool-input)
+                     :message (plist-get result :message))))))
 
          (t
           ;; Unsupported subtype
@@ -2099,6 +2273,7 @@ Each function can return:
 - =(:behavior "deny" :message "...")= - Deny with message
 
 Built-in functions:
+- =claude-agent-permission-ask-user-question= - Handle AskUserQuestion tool interactively
 - =claude-agent-permission-check-patterns= - Pattern-based allow/deny
 - =claude-agent-permission-prompt= - Interactive y-or-n-p
 - =claude-agent-permission-auto-allow= - Auto-approve everything
@@ -2254,9 +2429,59 @@ Groups similar operations by directory or command prefix."
 
 *** Default Implementation: Interactive Prompt
 
+The interactive prompt needs to handle the CLI's response timeout gracefully.
+If the user doesn't respond in time, we auto-allow rather than killing the session.
+
 #+BEGIN_SRC elisp
+(defcustom claude-agent-permission-prompt-timeout 5
+  "Timeout in seconds for permission prompts.
+If user doesn't respond within this time, the tool is auto-allowed
+to prevent CLI timeout and session death.
+Set to nil to disable timeout (use standard blocking y-or-n-p)."
+  :type '(choice (number :tag "Timeout in seconds")
+                 (const :tag "No timeout (blocking)" nil))
+  :group 'claude-agent)
+
+(defun claude-agent--permission-prompt-with-timeout (prompt timeout)
+  "Prompt user with PROMPT, auto-allow after TIMEOUT seconds.
+Returns t for allow, nil for deny.
+If TIMEOUT is nil, uses standard blocking y-or-n-p."
+  (if (null timeout)
+      ;; No timeout - use standard blocking prompt
+      (y-or-n-p prompt)
+    ;; Timeout version - auto-allow if no response
+    (let ((answer nil)
+          (done nil)
+          (start-time (float-time)))
+      (message "%s (auto-allow in %ds) " prompt timeout)
+      ;; Check for input with timeout
+      (while (and (not done)
+                  (< (- (float-time) start-time) timeout))
+        (when (input-pending-p)
+          (let ((char (read-char)))
+            (cond
+             ((memq char '(?y ?Y ?\s))  ; y, Y, or space = yes
+              (setq answer t done t))
+             ((memq char '(?n ?N ?\d))  ; n, N, or DEL = no
+              (setq answer nil done t))
+             (t
+              ;; Invalid key, remind user
+              (message "%s (y or n, auto-allow in %ds) "
+                       prompt (- timeout (truncate (- (float-time) start-time))))))))
+        (unless done
+          (sit-for 0.1 t)))  ; Check every 100ms, allow redisplay
+      (if done
+          (progn
+            (message "%s %s" prompt (if answer "y" "n"))
+            answer)
+        ;; Timeout - auto-allow
+        (message "%s auto-allowed (timeout)" prompt)
+        t))))
+
 (defun claude-agent-permission-prompt (tool-name tool-input context)
-  "Prompt user with y-or-n-p, cache decision per session."
+  "Prompt user with timeout, cache decision per session.
+Auto-allows after `claude-agent-permission-prompt-timeout' seconds
+to prevent CLI timeout and session termination."
   (let* ((session-id (plist-get context :session-id))
          (cache (claude-agent--permission-cache-load session-id))
          (key (claude-agent--permission-cache-key tool-name tool-input))
@@ -2266,13 +2491,14 @@ Groups similar operations by directory or command prefix."
         (if (eq (car cached) 'allow)
             '(:behavior "allow")
           '(:behavior "deny" :message "Previously denied"))
-      ;; Prompt user
+      ;; Prompt user with timeout
       (let* ((desc (claude-agent--describe-tool-use tool-name tool-input))
              (section (plist-get context :org-section))
              (prompt (if section
-                         (format "[%s] Allow %s? " section desc)
-                       (format "Allow %s? " desc)))
-             (allowed (y-or-n-p prompt)))
+                         (format "[%s] Allow %s?" section desc)
+                       (format "Allow %s?" desc)))
+             (allowed (claude-agent--permission-prompt-with-timeout
+                       prompt claude-agent-permission-prompt-timeout)))
         ;; Cache and save
         (puthash key (cons (if allowed 'allow 'deny) (current-time)) cache)
         (claude-agent--permission-cache-save session-id cache)
@@ -2287,6 +2513,102 @@ Groups similar operations by directory or command prefix."
 (defun claude-agent-permission-auto-allow (_tool-name _tool-input _context)
   "Auto-approve all tool requests."
   '(:behavior "allow"))
+#+END_SRC
+
+*** AskUserQuestion Tool Handling
+
+When Claude needs clarification, it calls the =AskUserQuestion= tool which triggers
+the =can_use_tool= permission flow. This function intercepts those requests and
+presents questions to the user using =completing-read=.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-question-options (options)
+  "Format OPTIONS list for completing-read.
+Each option is a plist with :label and :description.
+Returns alist of (\"LABEL - DESCRIPTION\" . \"LABEL\")."
+  (mapcar (lambda (opt)
+            (let ((label (plist-get opt :label))
+                  (desc (plist-get opt :description)))
+              (cons (if desc
+                        (format "%s - %s" label desc)
+                      label)
+                    label)))
+          options))
+
+(defun claude-agent--ask-single-question (question options header)
+  "Ask a single-select QUESTION with OPTIONS.
+HEADER is a short label for the question.
+Returns the selected label string, or user's free-text if \"Other\" chosen."
+  (let* ((formatted (claude-agent--format-question-options options))
+         (choices (append (mapcar #'car formatted)
+                          '("Other (type your answer)")))
+         (prompt (format "[%s] %s " header question))
+         (selection (completing-read prompt choices nil t)))
+    (if (string= selection "Other (type your answer)")
+        ;; Free-text input
+        (read-string (format "[%s] Enter your answer: " header))
+      ;; Return the label for the selected option
+      (or (cdr (assoc selection formatted))
+          selection))))
+
+(defun claude-agent--ask-multi-question (question options header)
+  "Ask a multi-select QUESTION with OPTIONS.
+HEADER is a short label for the question.
+Returns comma-separated labels, or user's free-text if \"Other\" chosen."
+  (let* ((formatted (claude-agent--format-question-options options))
+         (choices (append (mapcar #'car formatted)
+                          '("Other (type your answer)")))
+         (prompt (format "[%s] %s (comma-separated): " header question))
+         ;; Use completing-read-multiple for multi-select
+         (selections (completing-read-multiple prompt choices nil t)))
+    (if (member "Other (type your answer)" selections)
+        ;; Free-text input
+        (read-string (format "[%s] Enter your answer: " header))
+      ;; Map display strings back to labels and join
+      (mapconcat (lambda (sel)
+                   (or (cdr (assoc sel formatted)) sel))
+                 selections
+                 ", "))))
+
+(defun claude-agent-permission-ask-user-question (tool-name tool-input _context)
+  "Handle AskUserQuestion tool by prompting user interactively.
+
+When TOOL-NAME is \"AskUserQuestion\", parse questions from TOOL-INPUT,
+present them to user via completing-read, and return answers.
+
+Returns:
+  - Plist with :behavior \"allow\" and :updated-input containing answers
+  - Or (:behavior \"deny\" :message ...) if user cancels with C-g
+  - Or nil if not an AskUserQuestion tool (pass to next handler)"
+  (when (string= tool-name "AskUserQuestion")
+    (condition-case nil
+        (let* ((questions (plist-get tool-input :questions))
+               (answers (make-hash-table :test 'equal)))
+          (unless questions
+            (error "AskUserQuestion tool missing 'questions' field"))
+          ;; Process each question
+          (dolist (q questions)
+            (let* ((question-text (plist-get q :question))
+                   (header (or (plist-get q :header) "Question"))
+                   (options (plist-get q :options))
+                   (multi-select (plist-get q :multiSelect))
+                   (answer (if multi-select
+                               (claude-agent--ask-multi-question
+                                question-text options header)
+                             (claude-agent--ask-single-question
+                              question-text options header))))
+              (puthash question-text answer answers)))
+          ;; Build response with questions passthrough and answers
+          ;; Convert hash-table to alist for JSON serialization
+          (let ((answers-alist nil))
+            (maphash (lambda (k v) (push (cons k v) answers-alist)) answers)
+            (list :behavior "allow"
+                  :updated-input (list :questions questions
+                                       :answers answers-alist))))
+      ;; User cancelled with C-g
+      (quit
+       (list :behavior "deny"
+             :message "User cancelled the question prompt")))))
 #+END_SRC
 
 ** Permission Presets

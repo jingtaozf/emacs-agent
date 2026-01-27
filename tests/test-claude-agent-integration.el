@@ -328,5 +328,201 @@ Translates 'Hello, world!' to Chinese and verifies output contains Chinese chara
     ;; Clean up
     (kill-buffer buf)))
 
+;;; Automatic Recovery Tests
+
+(ert-deftest test-integration-recovery-session-id-capture ()
+  "Test that session-id is captured from system/init message.
+This is critical for recovery to work - session-id must be available
+before the result message."
+  :tags '(:integration :slow :api :stable :recovery)
+  (test-claude-skip-unless-cli-available)
+
+  (let ((session-id-from-init nil)
+        (session-id-from-result nil)
+        (completed nil))
+    (claude-agent-query
+     "What is 2+2? Just the number."
+     :on-message (lambda (msg)
+                   ;; Capture session-id from system/init message
+                   (when (and (claude-agent-system-message-p msg)
+                              (equal (claude-agent-system-message-subtype msg) "init"))
+                     (setq session-id-from-init
+                           (plist-get (claude-agent-system-message-data msg) :session_id)))
+                   ;; Also capture from result for comparison
+                   (when (claude-agent-result-message-p msg)
+                     (setq session-id-from-result
+                           (claude-agent-result-message-session-id msg))))
+     :on-complete (lambda (_result)
+                    (setq completed t)))
+
+    (should (test-claude-wait-until (lambda () completed) 30))
+    ;; Session ID should be available from init message
+    (should session-id-from-init)
+    (should (stringp session-id-from-init))
+    (should (> (length session-id-from-init) 0))
+    ;; Should match the one from result message
+    (should (equal session-id-from-init session-id-from-result))))
+
+(ert-deftest test-integration-recovery-on-kill ()
+  "Test automatic recovery when CLI process is killed.
+Starts a long-running query, kills the process, and verifies:
+1. Recovery message is inserted
+2. Session resumes automatically
+3. Query eventually completes"
+  :tags '(:integration :slow :api :flaky :recovery)
+  (test-claude-skip-unless-cli-available)
+
+  ;; Ensure auto-recovery is enabled
+  (let ((claude-agent-auto-recovery t)
+        (state nil)
+        (tokens '())
+        (recovery-seen nil)
+        (completed nil)
+        (final-response nil))
+
+    ;; Start a query that will take some time
+    (setq state (claude-agent-query
+                 "Count slowly from 1 to 20, saying each number on a new line."
+                 :session-key "recovery-test"
+                 :on-token (lambda (text)
+                             (push text tokens)
+                             ;; Check for recovery message
+                             (when (string-match-p "Session interrupted" text)
+                               (setq recovery-seen t)))
+                 :on-message (lambda (msg)
+                               (when (claude-agent-assistant-message-p msg)
+                                 (setq final-response
+                                       (claude-agent-extract-text msg))))
+                 :on-complete (lambda (_result)
+                                (setq completed t))))
+
+    ;; Wait for query to start and session-id to be captured
+    (should (test-claude-wait-until
+             (lambda ()
+               (and state
+                    (claude-agent--process-state-session-id state)))
+             10))
+
+    ;; Give it a moment to start generating output
+    (sleep-for 1)
+
+    ;; Kill the process (simulating external kill)
+    (let ((process (claude-agent--process-state-process state)))
+      (when (and process (process-live-p process))
+        (kill-process process)))
+
+    ;; Wait for recovery and eventual completion
+    ;; This may take longer as it needs to resume
+    (should (test-claude-wait-until (lambda () completed) 60))
+
+    ;; Verify recovery happened
+    (should recovery-seen)
+    ;; Should have received some response
+    (should (> (length tokens) 0))))
+
+(ert-deftest test-integration-recovery-disabled ()
+  "Test that recovery does not happen when disabled.
+When `claude-agent-auto-recovery' is nil, killing the process
+should just trigger the error callback without recovery."
+  :tags '(:integration :slow :api :stable :recovery)
+  (test-claude-skip-unless-cli-available)
+
+  ;; Disable auto-recovery
+  (let ((claude-agent-auto-recovery nil)
+        (state nil)
+        (error-received nil)
+        (completed nil)
+        (recovery-seen nil))
+
+    (setq state (claude-agent-query
+                 "Count from 1 to 100 slowly."
+                 :session-key "recovery-disabled-test"
+                 :on-token (lambda (text)
+                             (when (string-match-p "Session interrupted" text)
+                               (setq recovery-seen t)))
+                 :on-error (lambda (_err)
+                             (setq error-received t))
+                 :on-complete (lambda (result)
+                                (setq completed t)
+                                ;; Check if completed with error
+                                (when result
+                                  (setq error-received t)))))
+
+    ;; Wait for query to start
+    (should (test-claude-wait-until
+             (lambda ()
+               (and state
+                    (claude-agent--process-state-process state)
+                    (process-live-p (claude-agent--process-state-process state))))
+             10))
+
+    (sleep-for 0.5)
+
+    ;; Kill the process
+    (let ((process (claude-agent--process-state-process state)))
+      (when (and process (process-live-p process))
+        (kill-process process)))
+
+    ;; Wait for completion (should be quick since no recovery)
+    (should (test-claude-wait-until
+             (lambda () (or completed error-received))
+             10))
+
+    ;; Recovery should NOT have happened
+    (should-not recovery-seen)))
+
+(ert-deftest test-integration-recovery-message-format ()
+  "Test that the recovery message has the expected format."
+  :tags '(:integration :unit :recovery)
+  ;; This is more of a unit test but placed here for context
+
+  ;; Create a mock state with token-callback
+  (let ((received-message nil))
+    (let ((state (claude-agent--make-process-state
+                  :token-callback (lambda (text)
+                                    (setq received-message text)))))
+      ;; Test with kill signal
+      (claude-agent--insert-recovery-message state "killed: 9")
+      (should received-message)
+      (should (string-match-p "Session interrupted" received-message))
+      (should (string-match-p "killed: 9" received-message))
+      (should (string-match-p "automatic recovery" received-message)))))
+
+(ert-deftest test-integration-abnormal-exit-detection ()
+  "Test the abnormal exit detection logic."
+  :tags '(:integration :unit :recovery)
+
+  (let ((claude-agent-auto-recovery t))
+    ;; Test 1: Signal kill should trigger recovery (if session-id available)
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should (claude-agent--is-abnormal-exit-p "killed: 9" state)))
+
+    ;; Test 2: Abnormal exit should trigger recovery
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should (claude-agent--is-abnormal-exit-p "exited abnormally with code 1" state)))
+
+    ;; Test 3: Normal finish without result should trigger recovery
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should (claude-agent--is-abnormal-exit-p "finished" state)))
+
+    ;; Test 4: Normal finish WITH result should NOT trigger recovery
+    (let ((state (claude-agent--make-process-state
+                  :session-id "test-uuid"
+                  :got-result t)))
+      (should-not (claude-agent--is-abnormal-exit-p "finished" state)))
+
+    ;; Test 5: No session-id means no recovery possible
+    (let ((state (claude-agent--make-process-state)))
+      (should-not (claude-agent--is-abnormal-exit-p "killed: 9" state)))
+
+    ;; Test 6: Recovery disabled
+    (let ((claude-agent-auto-recovery nil)
+          (state (claude-agent--make-process-state
+                  :session-id "test-uuid")))
+      (should-not (claude-agent--is-abnormal-exit-p "killed: 9" state)))))
+
 (provide 'test-claude-agent-integration)
 ;;; test-claude-agent-integration.el ends here
