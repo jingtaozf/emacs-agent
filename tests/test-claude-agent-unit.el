@@ -777,5 +777,69 @@ This test ensures all helper functions called exist."
       (should-not (claude-agent--process-state-session-id default-state))
       (should-not (claude-agent--process-state-got-result default-state)))))
 
+(ert-deftest test-claude-agent-recovery-error-result-sets-got-result ()
+  "Test that error result messages set got-result to prevent infinite recovery loops.
+This is a regression test for the bug where CLI returning error_during_execution
+would trigger infinite recovery loops because got-result was only set for
+successful results."
+  :tags '(:unit :fast :stable :isolated :recovery)
+
+  ;; Simulate error result message from CLI (e.g., when resume fails)
+  (let* ((error-result '(:type "result"
+                         :subtype "error_during_execution"
+                         :is_error t
+                         :duration_ms 0
+                         :num_turns 0
+                         :session_id "test-session"))
+         (state (claude-agent--make-process-state :session-id "test-session"))
+         (error-called nil))
+
+    ;; Process the error result message
+    (claude-agent--process-normal-message
+     error-result
+     state
+     nil  ; callback
+     nil  ; token-callback
+     (lambda (_err) (setq error-called t))  ; error-callback
+     nil) ; process
+
+    ;; Verify got-result is set even for error results
+    (should (claude-agent--process-state-got-result state))
+    ;; Error callback should have been called
+    (should error-called)
+
+    ;; Now verify that abnormal exit detection does NOT trigger recovery
+    ;; because got-result is true
+    (let ((claude-agent-auto-recovery t))
+      (should-not (claude-agent--is-abnormal-exit-p "exited abnormally with code 1" state)))))
+
+(ert-deftest test-claude-agent-recovery-success-result-sets-got-result ()
+  "Test that successful result messages also set got-result correctly."
+  :tags '(:unit :fast :stable :isolated :recovery)
+
+  ;; Simulate successful result message
+  (let* ((success-result '(:type "result"
+                           :subtype "success"
+                           :is_error :json-false
+                           :duration_ms 1000
+                           :num_turns 1
+                           :session_id "test-session"))
+         (state (claude-agent--make-process-state :session-id "test-session"))
+         (message-received nil))
+
+    ;; Process the success result message
+    (claude-agent--process-normal-message
+     success-result
+     state
+     (lambda (msg) (setq message-received msg))  ; callback
+     nil  ; token-callback
+     nil  ; error-callback
+     nil) ; process
+
+    ;; Verify got-result is set
+    (should (claude-agent--process-state-got-result state))
+    ;; Message callback should have been called
+    (should message-received)))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here
