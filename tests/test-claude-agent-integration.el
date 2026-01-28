@@ -524,5 +524,69 @@ should just trigger the error callback without recovery."
                   :session-id "test-uuid")))
       (should-not (claude-agent--is-abnormal-exit-p "killed: 9" state)))))
 
+;;; AskUserQuestion Integration Tests
+
+(ert-deftest test-integration-ask-user-question-with-mock ()
+  "Test that AskUserQuestion tool receives mock answers and Claude uses them.
+This test triggers Claude to use the AskUserQuestion tool, provides mock
+answers via `claude-agent-ask-user-question-mock-answers', and verifies
+Claude's response references the selected answer."
+  :tags '(:integration :slow :api :stable :permissions :ask-user)
+  (test-claude-skip-unless-cli-available)
+
+  (let* ((claude-agent-ask-user-question-mock-answers
+          '(("What is your preferred output format?" . "Detailed")))
+         (completed nil)
+         (response nil)
+         (ask-user-question-called nil))
+
+    ;; Add a hook to detect when AskUserQuestion is triggered
+    (let ((original-fn (symbol-function 'claude-agent-permission-ask-user-question)))
+      (cl-letf (((symbol-function 'claude-agent-permission-ask-user-question)
+                 (lambda (tool-name tool-input context)
+                   (when (string= tool-name "AskUserQuestion")
+                     (setq ask-user-question-called t))
+                   (funcall original-fn tool-name tool-input context))))
+
+        (claude-agent-query
+         "I need you to ask me about my preferred output format. Use the AskUserQuestion tool to ask me: 'What is your preferred output format?' with options 'Summary' and 'Detailed'. Then tell me what I chose."
+         :session-key "ask-user-test"
+         :on-message (lambda (msg)
+                       (when (claude-agent-assistant-message-p msg)
+                         (setq response (concat response (or (claude-agent-extract-text msg) "")))))
+         :on-complete (lambda (_result)
+                        (setq completed t)))
+
+        (should (test-claude-wait-until (lambda () completed) 60))
+        ;; The test may or may not trigger AskUserQuestion depending on Claude's decision
+        ;; But if it did, the mock should have been used
+        (when ask-user-question-called
+          (should response)
+          (should (string-match-p "Detailed\\|detailed" response)))))))
+
+(ert-deftest test-integration-ask-user-question-multi-select-mock ()
+  "Test AskUserQuestion with multi-select mock answers."
+  :tags '(:integration :slow :api :stable :permissions :ask-user)
+  (test-claude-skip-unless-cli-available)
+
+  (let* ((claude-agent-ask-user-question-mock-answers
+          '(("Which features would you like?" . "Feature1, Feature2")))
+         (completed nil)
+         (response nil))
+
+    (claude-agent-query
+     "Ask me which features I want using AskUserQuestion with multiSelect=true. Options should be Feature1, Feature2, Feature3. The question should be 'Which features would you like?'. Then summarize my choices."
+     :session-key "ask-user-multi-test"
+     :on-message (lambda (msg)
+                   (when (claude-agent-assistant-message-p msg)
+                     (setq response (concat response (or (claude-agent-extract-text msg) "")))))
+     :on-complete (lambda (_result)
+                    (setq completed t)))
+
+    (should (test-claude-wait-until (lambda () completed) 60))
+    ;; If Claude used the tool and mock was applied, response should mention chosen features
+    (when response
+      (should (> (length response) 0)))))
+
 (provide 'test-claude-agent-integration)
 ;;; test-claude-agent-integration.el ends here

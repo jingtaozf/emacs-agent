@@ -1723,12 +1723,14 @@ Returns a process state object."
 (cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete
                                      session-key source-buffer query-context
                                      source-location-fn source-location-args
-                                     cli-path path-mappings project-root)
+                                     cli-path path-mappings project-root
+                                     org-section)
   "Send a one-shot query to Claude.
 
 PROMPT is the query string to send.
 
 OPTIONS is an optional plist created with `claude-agent-options'.
+ORG-SECTION is the name of the org section/story for display in permission prompts.
 
 ON-MESSAGE is called with each message as it arrives.
   Function signature: (lambda (message) ...)
@@ -1817,19 +1819,25 @@ Docker example:
     (setq emacs-mcp-server-path-mappings path-mappings)
     ;; Execute query
     (let ((claude-agent-cli-path effective-cli-path))
-      (claude-agent--start-process
-       prompt
-       opts
-       on-message
-       on-error
-       on-complete
-       on-token
-       nil  ; request-id (auto-generated)
-       session-key
-       source-buffer
-       query-context
-       source-location-fn
-       source-location-args))))
+      (let ((state (claude-agent--start-process
+                    prompt
+                    opts
+                    on-message
+                    on-error
+                    on-complete
+                    on-token
+                    nil  ; request-id (auto-generated)
+                    session-key
+                    source-buffer
+                    query-context
+                    source-location-fn
+                    source-location-args)))
+        ;; Store org-section on the process for permission callbacks
+        (when (and state org-section)
+          (let ((process (claude-agent--process-state-process state)))
+            (when process
+              (process-put process :org-section org-section))))
+        state))))
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
@@ -2290,7 +2298,8 @@ Built-in functions:
 
 #+BEGIN_SRC elisp
 (defvar claude-agent-permission-functions
-  '(claude-agent-permission-check-patterns
+  '(claude-agent-permission-ask-user-question
+    claude-agent-permission-check-patterns
     claude-agent-permission-prompt)
   "Hook for permission checking when Claude requests tool access.
 
@@ -2532,6 +2541,13 @@ the =can_use_tool= permission flow. This function intercepts those requests and
 presents questions to the user using =completing-read=.
 
 #+BEGIN_SRC elisp
+(defvar claude-agent-ask-user-question-mock-answers nil
+  "When non-nil, use mock answers instead of prompting user.
+This is for testing purposes. Format is an alist mapping question text
+to answer string. Example:
+  ((\"How should I format?\" . \"Summary\")
+   (\"Which features?\" . \"Option1, Option2\"))")
+
 (defun claude-agent--format-question-options (options)
   "Format OPTIONS list for completing-read.
 Each option is a plist with :label and :description.
@@ -2545,46 +2561,65 @@ Returns alist of (\"LABEL - DESCRIPTION\" . \"LABEL\")."
                     label)))
           options))
 
-(defun claude-agent--ask-single-question (question options header)
+(defun claude-agent--ask-single-question (question options header &optional session-name)
   "Ask a single-select QUESTION with OPTIONS.
 HEADER is a short label for the question.
+SESSION-NAME is optional session/story identifier to show in prompt.
 Returns the selected label string, or user's free-text if \"Other\" chosen."
   (let* ((formatted (claude-agent--format-question-options options))
          (choices (append (mapcar #'car formatted)
                           '("Other (type your answer)")))
-         (prompt (format "[%s] %s " header question))
+         (prefix (if session-name
+                     (format "[%s|%s]" session-name header)
+                   (format "[%s]" header)))
+         (prompt (format "%s %s " prefix question))
          (selection (completing-read prompt choices nil t)))
     (if (string= selection "Other (type your answer)")
         ;; Free-text input
-        (read-string (format "[%s] Enter your answer: " header))
+        (read-string (format "%s Enter your answer: " prefix))
       ;; Return the label for the selected option
       (or (cdr (assoc selection formatted))
           selection))))
 
-(defun claude-agent--ask-multi-question (question options header)
+(defun claude-agent--ask-multi-question (question options header &optional session-name)
   "Ask a multi-select QUESTION with OPTIONS.
 HEADER is a short label for the question.
+SESSION-NAME is optional session/story identifier to show in prompt.
 Returns comma-separated labels, or user's free-text if \"Other\" chosen."
   (let* ((formatted (claude-agent--format-question-options options))
          (choices (append (mapcar #'car formatted)
                           '("Other (type your answer)")))
-         (prompt (format "[%s] %s (comma-separated): " header question))
+         (prefix (if session-name
+                     (format "[%s|%s]" session-name header)
+                   (format "[%s]" header)))
+         (prompt (format "%s %s (comma-separated): " prefix question))
          ;; Use completing-read-multiple for multi-select
          (selections (completing-read-multiple prompt choices nil t)))
     (if (member "Other (type your answer)" selections)
         ;; Free-text input
-        (read-string (format "[%s] Enter your answer: " header))
+        (read-string (format "%s Enter your answer: " prefix))
       ;; Map display strings back to labels and join
       (mapconcat (lambda (sel)
                    (or (cdr (assoc sel formatted)) sel))
                  selections
                  ", "))))
 
-(defun claude-agent-permission-ask-user-question (tool-name tool-input _context)
+(defun claude-agent--get-mock-answer (question-text)
+  "Get mock answer for QUESTION-TEXT from `claude-agent-ask-user-question-mock-answers'.
+Returns the answer string if found, nil otherwise."
+  (when claude-agent-ask-user-question-mock-answers
+    (cdr (assoc question-text claude-agent-ask-user-question-mock-answers))))
+
+(defun claude-agent-permission-ask-user-question (tool-name tool-input context)
   "Handle AskUserQuestion tool by prompting user interactively.
 
 When TOOL-NAME is \"AskUserQuestion\", parse questions from TOOL-INPUT,
 present them to user via completing-read, and return answers.
+
+CONTEXT provides session information including :org-section (the story/session name).
+
+If `claude-agent-ask-user-question-mock-answers' is non-nil, use mock
+answers for testing instead of prompting the user.
 
 Returns:
   - Plist with :behavior \"allow\" and :updated-input containing answers
@@ -2593,6 +2628,7 @@ Returns:
   (when (string= tool-name "AskUserQuestion")
     (condition-case nil
         (let* ((questions (plist-get tool-input :questions))
+               (session-name (plist-get context :org-section))
                (answers (make-hash-table :test 'equal)))
           (unless questions
             (error "AskUserQuestion tool missing 'questions' field"))
@@ -2602,11 +2638,14 @@ Returns:
                    (header (or (plist-get q :header) "Question"))
                    (options (plist-get q :options))
                    (multi-select (plist-get q :multiSelect))
-                   (answer (if multi-select
-                               (claude-agent--ask-multi-question
-                                question-text options header)
-                             (claude-agent--ask-single-question
-                              question-text options header))))
+                   ;; Check for mock answer first
+                   (mock-answer (claude-agent--get-mock-answer question-text))
+                   (answer (or mock-answer
+                               (if multi-select
+                                   (claude-agent--ask-multi-question
+                                    question-text options header session-name)
+                                 (claude-agent--ask-single-question
+                                  question-text options header session-name)))))
               (puthash question-text answer answers)))
           ;; Build response with questions passthrough and answers
           ;; Convert hash-table to alist for JSON serialization

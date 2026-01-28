@@ -452,5 +452,73 @@
       (should (equal (plist-get result :behavior) "deny"))
       (should (string-match-p "cancelled" (plist-get result :message))))))
 
+(ert-deftest test-ask-user-question-mock-answers ()
+  "Test AskUserQuestion uses mock answers when set."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (let ((claude-agent-ask-user-question-mock-answers
+         '(("How should I format?" . "Summary")
+           ("Which features?" . "Option1, Option2")))
+        (completing-read-called nil))
+    ;; Mock completing-read to track if it's called
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt _choices &rest _args)
+                 (setq completing-read-called t)
+                 "Should not be used")))
+      (let* ((tool-input (list :questions
+                               (list (list :question "How should I format?"
+                                          :header "Format"
+                                          :options (list (list :label "Summary")
+                                                        (list :label "Detailed"))
+                                          :multiSelect nil))))
+             (result (claude-agent-permission-ask-user-question
+                      "AskUserQuestion" tool-input nil)))
+        ;; completing-read should NOT be called when mock is set
+        (should-not completing-read-called)
+        (should result)
+        (should (equal (plist-get result :behavior) "allow"))
+        (let* ((updated (plist-get result :updated-input))
+               (answers (plist-get updated :answers)))
+          (should (equal (cdr (assoc "How should I format?" answers)) "Summary")))))))
+
+(ert-deftest test-ask-user-question-mock-answers-multi-select ()
+  "Test AskUserQuestion mock answers work for multi-select."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (let ((claude-agent-ask-user-question-mock-answers
+         '(("Which options?" . "A, B"))))
+    (let* ((tool-input (list :questions
+                             (list (list :question "Which options?"
+                                        :header "Options"
+                                        :options (list (list :label "A")
+                                                      (list :label "B")
+                                                      (list :label "C"))
+                                        :multiSelect t))))
+           (result (claude-agent-permission-ask-user-question
+                    "AskUserQuestion" tool-input nil)))
+      (should result)
+      (let* ((updated (plist-get result :updated-input))
+             (answers (plist-get updated :answers)))
+        (should (equal (cdr (assoc "Which options?" answers)) "A, B"))))))
+
+(ert-deftest test-ask-user-question-mock-partial ()
+  "Test AskUserQuestion falls back to prompt for questions not in mock."
+  :tags '(:unit :fast :stable :isolated :permissions :ask-user)
+  (let ((claude-agent-ask-user-question-mock-answers
+         '(("Known question" . "Mock answer")))
+        (completing-read-called nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt _choices &rest _args)
+                 (setq completing-read-called t)
+                 "Unknown - Real answer")))
+      (let* ((tool-input (list :questions
+                               (list (list :question "Unknown question"
+                                          :header "Unknown"
+                                          :options (list (list :label "Unknown"))
+                                          :multiSelect nil))))
+             (result (claude-agent-permission-ask-user-question
+                      "AskUserQuestion" tool-input nil)))
+        ;; Should fall back to completing-read for unknown questions
+        (should completing-read-called)
+        (should result)))))
+
 (provide 'test-claude-agent-permissions)
 ;;; test-claude-agent-permissions.el ends here

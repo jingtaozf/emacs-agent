@@ -1365,6 +1365,7 @@ Each session state contains:
   :loop-max      - total loop iterations
   :loop-current  - current iteration (1-based)
   :loop-interval - seconds between iterations
+  :pending-queue - list of queued blocks awaiting execution
 
 Initialized to a new hash table when `claude-org-mode' is enabled.")
 
@@ -1426,6 +1427,44 @@ Returns just the custom part after :: or a shortened file path."
   "Format elapsed time since START-TIME as human-readable string.
 Uses verbose format for header-line display."
   (claude-agent-format-elapsed-time start-time 'verbose))
+#+END_SRC
+
+** Pending Block Queue
+
+Functions for managing queued blocks that execute when session becomes free.
+
+#+BEGIN_SRC elisp
+(defun claude-org--queue-block (session-key block-info)
+  "Add BLOCK-INFO to pending queue for SESSION-KEY.
+BLOCK-INFO is a plist with :custom-id, :content, :marker, :instr-num."
+  (let ((queue (claude-org--session-get session-key :pending-queue)))
+    (claude-org--session-put session-key :pending-queue
+                             (append queue (list block-info)))))
+
+(defun claude-org--dequeue-block (session-key)
+  "Remove and return next block from SESSION-KEY queue.
+Returns nil if queue is empty."
+  (let ((queue (claude-org--session-get session-key :pending-queue)))
+    (when queue
+      (claude-org--session-put session-key :pending-queue (cdr queue))
+      (car queue))))
+
+(defun claude-org--clear-queue (session-key)
+  "Clear all pending blocks for SESSION-KEY."
+  (claude-org--session-put session-key :pending-queue nil))
+
+(defun claude-org--queue-count (session-key)
+  "Return number of queued blocks for SESSION-KEY."
+  (length (claude-org--session-get session-key :pending-queue)))
+
+(defun claude-org--total-queue-count ()
+  "Return total number of queued blocks across all sessions in current buffer."
+  (let ((total 0))
+    (when (hash-table-p claude-org--sessions)
+      (maphash (lambda (_key state)
+                 (cl-incf total (length (plist-get state :pending-queue))))
+               claude-org--sessions))
+    total))
 #+END_SRC
 
 * Behavior Prompts
@@ -3199,7 +3238,12 @@ Markers hold references to buffers; must be explicitly freed."
     (when (>= loop-current loop-max)
       (claude-org--free-marker session-key)))
   ;; Check for loop continuation
-  (claude-org--maybe-continue-loop session-key))
+  (claude-org--maybe-continue-loop session-key)
+  ;; Process pending queue if loop is complete and session not busy
+  ;; (loop continuation sets :busy t, so this only runs when truly done)
+  (unless (claude-org--session-get session-key :busy)
+    (when-let ((next-block (claude-org--dequeue-block session-key)))
+      (claude-org--execute-queued-block session-key next-block))))
 #+END_SRC
 
 ** Error Handling
@@ -3265,6 +3309,11 @@ Attempts session recovery if error indicates expired session or context too long
           (insert (format "\n[Error: %s]\n" error-msg))))))
   ;; Free marker to prevent memory leak
   (claude-org--free-marker session-key)
+  ;; Clear pending queue on error (don't continue with queued blocks)
+  (let ((queue-count (claude-org--queue-count session-key)))
+    (when (> queue-count 0)
+      (claude-org--clear-queue session-key)
+      (message "Cleared %d queued block(s) due to error" queue-count)))
   (claude-org--refresh-header-line)
   ;; Run completion hook with error status
   (run-hook-with-args 'claude-org-complete-hook session-key error-msg 'error))
@@ -3659,8 +3708,11 @@ Supports loop execution via header arguments:
 When `claude-org-auto-create-response-section' is non-nil, creates a Response
 section with :ai_output: tag for flat pattern organization.
 When `claude-org-auto-generate-title' is non-nil, generates a title for
-headings matching `claude-org-auto-title-heading-pattern' using Haiku."
+headings matching `claude-org-auto-title-heading-pattern' using Haiku.
+
+If the session is busy, queues the block for execution when current query completes."
   (interactive)
+  (cl-block claude-org-execute
   (unless (claude-org--in-ai-block-p)
     (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
   (let* ((content (claude-org--get-block-content))
@@ -3687,8 +3739,20 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
                              (copy-marker (point))))))
     (unless content
       (user-error "Empty ai block"))
+    ;; If session is busy, queue the block instead of erroring
     (when (claude-org--session-get session-key :busy)
-      (user-error "Session is busy. Use C-c C-k to cancel or wait for completion"))
+      (let ((block-info (list :custom-id custom-id
+                              :content content
+                              :marker (copy-marker (point))
+                              :loop-max loop-max
+                              :loop-interval loop-interval
+                              :section-level section-level
+                              :should-auto-title should-auto-title
+                              :heading-marker heading-marker)))
+        (claude-org--queue-block session-key block-info)
+        (message "Queued [%d]. Will run after current query completes."
+                 (claude-org--queue-count session-key))
+        (cl-return-from claude-org-execute nil)))
     ;; Record execution timestamp BEFORE creating response section
     (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
       (save-excursion
@@ -3739,7 +3803,7 @@ headings matching `claude-org-auto-title-heading-pattern' using Haiku."
           (claude-org--send-request content query-ctx session-key))
         ;; Run post-execution hook (after query sent)
         (let ((marker (claude-org--session-get session-key :marker)))
-          (run-hook-with-args 'claude-org-execute-after-hook session-key content marker))))))
+          (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -3854,23 +3918,32 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
          ;; Capture source context for session manager display
          (source-buf (current-buffer))
          (custom-id (when query-context (claude-agent-query-context-custom-id query-context))))
-    ;; Use lexical-let to properly capture variables for callbacks
-    (lexical-let ((buf source-buf)
-                  (session-key session-key))
-      ;; Send query via claude-agent
-      ;; Pass :cli-path and :path-mappings for Docker mode support
-      ;; Pass :source-location-fn and :source-location-args for session manager navigation
-      (let ((state (claude-agent-query
-                    full-prompt
-                    :options options
-                    :session-key session-key
-                    :source-buffer source-buf
-                    :query-context query-context
-                    :source-location-fn (when custom-id 'claude-org-goto-custom-id)
-                    :source-location-args (when custom-id (list custom-id))
-                    :cli-path cli-path
-                    :path-mappings path-mappings
-                    :project-root project-root
+    ;; Get session heading name for permission prompts
+    ;; Need to position at heading first since we might be inside a src block
+    (let ((org-section-name
+           (save-excursion
+             (ignore-errors (org-back-to-heading t))
+             (when-let ((heading-pos (claude-org--find-session-scope-heading)))
+               (goto-char heading-pos)
+               (substring-no-properties (org-get-heading t t t t))))))
+      ;; Use lexical-let to properly capture variables for callbacks
+      (lexical-let ((buf source-buf)
+                    (session-key session-key))
+        ;; Send query via claude-agent
+        ;; Pass :cli-path and :path-mappings for Docker mode support
+        ;; Pass :source-location-fn and :source-location-args for session manager navigation
+        (let ((state (claude-agent-query
+                      full-prompt
+                      :options options
+                      :session-key session-key
+                      :source-buffer source-buf
+                      :query-context query-context
+                      :source-location-fn (when custom-id 'claude-org-goto-custom-id)
+                      :source-location-args (when custom-id (list custom-id))
+                      :cli-path cli-path
+                      :path-mappings path-mappings
+                      :project-root project-root
+                      :org-section org-section-name
                     :on-token (lambda (text)
                                 (when (buffer-live-p buf)
                                   (with-current-buffer buf
@@ -3887,8 +3960,86 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
                                    (when (buffer-live-p buf)
                                      (with-current-buffer buf
                                        (claude-org--handle-complete session-key result)))))))
-        ;; Store process state for cancellation
-        (claude-org--session-put session-key :process-state state)))))
+          ;; Store process state for cancellation
+          (claude-org--session-put session-key :process-state state))))))
+
+(defun claude-org--execute-queued-block (session-key block-info)
+  "Execute a queued BLOCK-INFO for SESSION-KEY.
+BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
+  (cl-block claude-org--execute-queued-block
+  (let ((custom-id (plist-get block-info :custom-id))
+        (content (plist-get block-info :content))
+        (orig-marker (plist-get block-info :marker))
+        (loop-max (plist-get block-info :loop-max))
+        (loop-interval (plist-get block-info :loop-interval))
+        (section-level (plist-get block-info :section-level))
+        (should-auto-title (plist-get block-info :should-auto-title))
+        (heading-marker (plist-get block-info :heading-marker)))
+    ;; Check if marker is still valid (block not deleted)
+    (unless (and orig-marker (marker-buffer orig-marker))
+      (message "Skipping queued block - marker invalid (block deleted?)")
+      ;; Try next in queue
+      (when-let ((next (claude-org--dequeue-block session-key)))
+        (claude-org--execute-queued-block session-key next))
+      (cl-return-from claude-org--execute-queued-block nil))
+    ;; Navigate to the original position and execute
+    (with-current-buffer (marker-buffer orig-marker)
+      (save-excursion
+        (goto-char orig-marker)
+        (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
+          ;; Record execution timestamp
+          (save-excursion
+            (org-back-to-heading t)
+            (org-entry-put nil "LAST_AI_EXECUTED" timestamp))
+          ;; Find insertion point
+          (let ((insert-point (claude-org--find-response-insert-point))
+                (instr-num (claude-org--find-instruction-number)))
+            (unless insert-point
+              (message "Cannot find block end for queued block")
+              (set-marker orig-marker nil)  ; Free marker before early return
+              (cl-return-from claude-org--execute-queued-block nil))
+            ;; Set up marker at insertion point
+            (save-excursion
+              (goto-char insert-point)
+              (insert "\n\n")
+              ;; Create Response section if enabled
+              (when claude-org-auto-create-response-section
+                (let ((loop-info (when (> loop-max 1) (cons 1 loop-max))))
+                  (insert (claude-org--create-response-section-header
+                           instr-num timestamp loop-info))))
+              (let ((marker (point-marker)))
+                (claude-org--session-put session-key :marker marker)
+                (claude-org--session-put session-key :original-prompt content)
+                (claude-org--session-put session-key :section-level section-level)
+                (claude-org--session-put session-key :start-time (float-time))
+                (claude-org--session-put session-key :busy t)
+                ;; Store loop state
+                (claude-org--session-put session-key :loop-max loop-max)
+                (claude-org--session-put session-key :loop-current 1)
+                (claude-org--session-put session-key :loop-interval loop-interval)
+                ;; Store instruction info
+                (claude-org--session-put session-key :instruction-num instr-num)
+                (claude-org--session-put session-key :custom-id custom-id)
+                ;; Run pre-execution hook
+                (run-hook-with-args 'claude-org-execute-hook session-key content marker)))
+            ;; Start spinner and send request
+            (claude-org--start-spinner session-key)
+            ;; Auto-generate title if needed
+            (when heading-marker
+              (claude-org--maybe-auto-generate-title content heading-marker))
+            ;; Build query-context and send
+            (let ((query-ctx (when instr-num
+                               (claude-agent-make-query-context
+                                :instruction-num instr-num
+                                :loop-current 1
+                                :loop-max loop-max
+                                :custom-id custom-id))))
+              (claude-org--send-request content query-ctx session-key))
+            ;; Run post-execution hook
+            (let ((marker (claude-org--session-get session-key :marker)))
+              (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))
+    ;; Free original marker
+    (set-marker orig-marker nil)))))
 #+END_SRC
 
 * Scheduled Execution
@@ -4446,13 +4597,25 @@ Dynamic header line showing session status, IDE context, and thinking state.
                                                   (claude-org--get-permission-mode-display))))
          ;; Active session count badge with thinking indicator
          (active-count (claude-org--active-session-count))
-         (active-str (if (> active-count 0)
-                         (propertize (format " [%d thinking...]" active-count)
-                                     'face '(:weight bold)
-                                     'help-echo (claude-org--format-session-tooltip)
-                                     'mouse-face 'mode-line-highlight
-                                     'local-map claude-org--session-badge-map)
-                       ""))
+         ;; Total queued blocks across all sessions
+         (total-queued (claude-org--total-queue-count))
+         (active-str (cond
+                      ;; Active with queue
+                      ((and (> active-count 0) (> total-queued 0))
+                       (propertize (format " [%d thinking... Q:%d]" active-count total-queued)
+                                   'face '(:weight bold)
+                                   'help-echo (claude-org--format-session-tooltip)
+                                   'mouse-face 'mode-line-highlight
+                                   'local-map claude-org--session-badge-map))
+                      ;; Active only
+                      ((> active-count 0)
+                       (propertize (format " [%d thinking...]" active-count)
+                                   'face '(:weight bold)
+                                   'help-echo (claude-org--format-session-tooltip)
+                                   'mouse-face 'mode-line-highlight
+                                   'local-map claude-org--session-badge-map))
+                      ;; Neither
+                      (t "")))
          ;; Project root
          (project-root (claude-org--get-project-root))
          (project-str (if project-root
@@ -4488,12 +4651,13 @@ Dynamic header line showing session status, IDE context, and thinking state.
 
 #+BEGIN_SRC elisp
 (defun claude-org-cancel ()
-  "Cancel the current session's active query and stop any loop."
+  "Cancel the current session's active query, stop any loop, and clear queue."
   (interactive)
   (let* ((session-key (claude-org--current-session-key))
          (process-state (claude-org--session-get session-key :process-state))
          (loop-current (claude-org--session-get session-key :loop-current))
-         (loop-max (claude-org--session-get session-key :loop-max)))
+         (loop-max (claude-org--session-get session-key :loop-max))
+         (queue-count (claude-org--queue-count session-key)))
     (if (and process-state (claude-org--session-get session-key :busy))
         (progn
           ;; Stop loop by setting current = max
@@ -4502,6 +4666,9 @@ Dynamic header line showing session status, IDE context, and thinking state.
           (claude-agent-query-interrupt process-state)
           (claude-org--session-put session-key :busy nil)
           (claude-org--stop-spinner session-key)
+          ;; Clear pending queue
+          (when (> queue-count 0)
+            (claude-org--clear-queue session-key))
           (let ((marker (claude-org--session-get session-key :marker)))
             (when (and marker (marker-buffer marker))
               (with-current-buffer (marker-buffer marker)
@@ -4509,7 +4676,7 @@ Dynamic header line showing session status, IDE context, and thinking state.
                   (goto-char marker)
                   ;; Show loop cancellation info if in a loop
                   (if (and loop-max (> loop-max 1))
-                      (insert (format "\n[Cancelled at iteration %d/%d]\n" 
+                      (insert (format "\n[Cancelled at iteration %d/%d]\n"
                                       (or loop-current 1) loop-max))
                     (insert "\n[Cancelled]\n"))))))
           ;; Free marker immediately to prevent race with sentinel callback
@@ -4517,14 +4684,23 @@ Dynamic header line showing session status, IDE context, and thinking state.
           ;; if user quickly re-executes before sentinel runs)
           (claude-org--free-marker session-key)
           (claude-org--refresh-header-line)
-          (message "Query cancelled"))
+          (if (> queue-count 0)
+              (message "Query cancelled, cleared %d queued block(s)" queue-count)
+            (message "Query cancelled")))
       (message "No active query to cancel"))))
 
 (defun claude-org-cancel-all ()
-  "Cancel all active queries in this buffer."
+  "Cancel all active queries in this buffer and clear all queues."
   (interactive)
-  (let ((cancelled 0))
+  (let ((cancelled 0)
+        (queued-cleared 0))
     (maphash (lambda (key state)
+               ;; Clear queue
+               (let ((q-count (length (plist-get state :pending-queue))))
+                 (when (> q-count 0)
+                   (cl-incf queued-cleared q-count)
+                   (plist-put state :pending-queue nil)))
+               ;; Cancel active query
                (when (plist-get state :busy)
                  (let ((process-state (plist-get state :process-state)))
                    (when process-state
@@ -4533,7 +4709,9 @@ Dynamic header line showing session status, IDE context, and thinking state.
                      (cl-incf cancelled)))))
              claude-org--sessions)
     (claude-org--refresh-header-line)
-    (message "Cancelled %d queries" cancelled)))
+    (if (> queued-cleared 0)
+        (message "Cancelled %d queries, cleared %d queued blocks" cancelled queued-cleared)
+      (message "Cancelled %d queries" cancelled))))
 #+END_SRC
 
 * Verbose Output
@@ -4561,18 +4739,23 @@ Dynamic header line showing session status, IDE context, and thinking state.
       (maphash (lambda (key state)
 		 (push (list key
 			     (if (plist-get state :busy) "busy" "idle")
-			     (claude-org--format-elapsed (plist-get state :start-time)))
+			     (claude-org--format-elapsed (plist-get state :start-time))
+                             (length (plist-get state :pending-queue)))
 		       sessions))
 	       claude-org--sessions))
     (if sessions
         (with-output-to-temp-buffer "*Claude Org Sessions*"
           (princ "Claude Org Sessions\n")
           (princ "==================\n\n")
+          (princ (format "%-40s  %-6s  %-8s  %s\n" "Session" "Status" "Elapsed" "Queued"))
+          (princ (make-string 70 ?-))
+          (princ "\n")
           (dolist (session (nreverse sessions))
-            (princ (format "%-40s  %-6s  %s\n"
+            (princ (format "%-40s  %-6s  %-8s  %d\n"
                            (claude-org--session-display-name (nth 0 session))
                            (nth 1 session)
-                           (nth 2 session)))))
+                           (nth 2 session)
+                           (nth 3 session)))))
       (message "No sessions in this buffer"))))
 #+END_SRC
 

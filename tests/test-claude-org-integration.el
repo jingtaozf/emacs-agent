@@ -926,5 +926,154 @@ This tests the timer callback function's scan logic."
          (should scheduled-time)
          (should-not (claude-org-scheduled--should-execute-p scheduled-time nil)))))))
 
+;;; Pending Queue Tests
+
+(ert-deftest test-org-integration-queue-basic ()
+  "Test that executing while busy queues the block.
+Execute Block A, then immediately execute Block B - B should be queued."
+  :tags '(:integration :slow :api :org :queue)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Navigate to instruction 20 (Block A)
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         ;; Execute Block A
+         (claude-org-execute)
+         ;; Session should be busy now
+         (should (claude-org--session-get session-key :busy))
+         ;; Queue should be empty
+         (should (= 0 (claude-org--queue-count session-key)))
+
+         ;; Now navigate to instruction 21 (Block B) and execute while A is running
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         ;; Execute Block B - should be queued since session is busy
+         (claude-org-execute)
+         ;; Queue should have 1 entry
+         (should (= 1 (claude-org--queue-count session-key)))
+
+         ;; Wait for both to complete (Block A completes, then Block B auto-starts)
+         (test-claude-wait-for-completion session-key 90)
+         ;; After A completes, B should start automatically
+         ;; Wait again for B to complete
+         (test-claude-wait-for-completion session-key 60)
+
+         ;; Queue should be empty now
+         (should (= 0 (claude-org--queue-count session-key)))
+         ;; Session should not be busy
+         (should-not (claude-org--session-get session-key :busy)))))))
+
+(ert-deftest test-org-integration-queue-multiple ()
+  "Test queueing multiple blocks in sequence.
+Execute A, then queue B and C - both should execute in order."
+  :tags '(:integration :slow :api :org :queue)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Execute Block A (Instruction 20)
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+
+         ;; Queue Block B (Instruction 21)
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         (should (= 1 (claude-org--queue-count session-key)))
+
+         ;; Queue Block C (Instruction 22)
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 22" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         (should (= 2 (claude-org--queue-count session-key)))
+
+         ;; Wait for all to complete (A, then B, then C)
+         (test-claude-wait-for-completion session-key 120)
+         (test-claude-wait-for-completion session-key 60)
+         (test-claude-wait-for-completion session-key 60)
+
+         ;; All done
+         (should (= 0 (claude-org--queue-count session-key)))
+         (should-not (claude-org--session-get session-key :busy)))))))
+
+(ert-deftest test-org-integration-queue-cancel-clears ()
+  "Test that canceling clears the queue."
+  :tags '(:integration :slow :api :org :queue)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Execute Block A
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+
+         ;; Queue Block B
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         (should (= 1 (claude-org--queue-count session-key)))
+
+         ;; Cancel - should clear queue
+         (claude-org-cancel)
+
+         ;; Queue should be cleared
+         (should (= 0 (claude-org--queue-count session-key)))
+         ;; Session should not be busy
+         (should-not (claude-org--session-get session-key :busy)))))))
+
+(ert-deftest test-org-integration-queue-response-appears ()
+  "Test that queued blocks produce responses in the buffer."
+  :tags '(:integration :slow :api :org :queue)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Execute Block A
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+
+         ;; Queue Block B
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+
+         ;; Wait for both to complete
+         (test-claude-wait-for-completion session-key 90)
+         (test-claude-wait-for-completion session-key 60)
+
+         ;; Check that Block B's response appears in the buffer
+         (goto-char (point-min))
+         (should (re-search-forward "Block B executed" nil t)))))))
+
 (provide 'test-claude-org-integration)
 ;;; test-claude-org-integration.el ends here
