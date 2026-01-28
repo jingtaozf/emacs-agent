@@ -841,5 +841,40 @@ successful results."
     ;; Message callback should have been called
     (should message-received)))
 
+(ert-deftest test-claude-agent-extract-json-error-uses-errors-array ()
+  "Test that :errors array takes priority over generic subtype messages.
+This is a regression test for the bug where CLI returning error_during_execution
+with specific errors in the :errors array would show a generic message instead
+of the actual error like 'No conversation found with session ID: ...'."
+  :tags '(:unit :fast :stable :isolated)
+
+  ;; Simulate error result with :errors array (like when resume fails)
+  (let ((error-result '(:type "result"
+                        :subtype "error_during_execution"
+                        :is_error t
+                        :duration_ms 0
+                        :session_id "test-session"
+                        :errors ("No conversation found with session ID: abc-123"))))
+    (let ((error-msg (claude-agent--extract-json-error error-result)))
+      ;; Should extract the specific error from :errors array
+      (should error-msg)
+      (should (string-match-p "No conversation found" error-msg))
+      ;; Should NOT return the generic "Execution error" message
+      (should-not (string-match-p "Execution error" error-msg)))))
+
+(ert-deftest test-claude-agent-extract-json-error-falls-back-to-subtype ()
+  "Test that generic subtype message is used when :errors is empty."
+  :tags '(:unit :fast :stable :isolated)
+
+  ;; Error result without :errors array
+  (let ((error-result '(:type "result"
+                        :subtype "error_during_execution"
+                        :is_error t
+                        :duration_ms 0)))
+    (let ((error-msg (claude-agent--extract-json-error error-result)))
+      ;; Should fall back to generic message
+      (should error-msg)
+      (should (string-match-p "Execution error" error-msg)))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here
