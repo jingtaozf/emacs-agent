@@ -156,5 +156,194 @@
       (claude-org--session-put session-key :busy nil)
       (should (not (claude-org--session-get session-key :busy))))))
 
+;;; Duplicate Prevention Tests
+
+(ert-deftest test-claude-org-queue-no-duplicate-by-marker ()
+  "Test that the same block (same marker position) cannot be queued twice."
+  :tags '(:unit :fast :stable :isolated :org :queue)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-queue-dup.org")
+    (insert "* Test\n#+begin_src ai\ntest\n#+end_src\n")
+    (setq-local claude-org--sessions (make-hash-table :test 'equal))
+    (let ((session-key "/tmp/test-queue-dup.org::test-session")
+          (marker (save-excursion
+                    (goto-char (point-min))
+                    (re-search-forward "begin_src ai" nil t)
+                    (copy-marker (point)))))
+      ;; Queue block first time
+      (claude-org--queue-block session-key
+                               (list :custom-id "block-1"
+                                     :content "test"
+                                     :marker marker))
+      (should (= 1 (claude-org--queue-count session-key)))
+      ;; Queue the SAME block again (same marker position)
+      (let ((marker2 (copy-marker (marker-position marker))))
+        (claude-org--queue-block session-key
+                                 (list :custom-id "block-1"
+                                       :content "test"
+                                       :marker marker2))
+        ;; Should still be 1, not 2
+        (should (= 1 (claude-org--queue-count session-key)))))))
+
+(ert-deftest test-claude-org-queue-allows-different-blocks ()
+  "Test that different blocks can still be queued."
+  :tags '(:unit :fast :stable :isolated :org :queue)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-queue-diff.org")
+    (insert "* Block A\n#+begin_src ai\nA\n#+end_src\n")
+    (insert "* Block B\n#+begin_src ai\nB\n#+end_src\n")
+    (setq-local claude-org--sessions (make-hash-table :test 'equal))
+    (let ((session-key "/tmp/test-queue-diff.org::test-session"))
+      ;; Queue block A
+      (let ((marker-a (save-excursion
+                        (goto-char (point-min))
+                        (re-search-forward "begin_src ai" nil t)
+                        (copy-marker (point)))))
+        (claude-org--queue-block session-key
+                                 (list :custom-id "block-a"
+                                       :content "A"
+                                       :marker marker-a)))
+      (should (= 1 (claude-org--queue-count session-key)))
+      ;; Queue block B (different block)
+      (let ((marker-b (save-excursion
+                        (goto-char (point-min))
+                        (search-forward "Block B" nil t)
+                        (re-search-forward "begin_src ai" nil t)
+                        (copy-marker (point)))))
+        (claude-org--queue-block session-key
+                                 (list :custom-id "block-b"
+                                       :content "B"
+                                       :marker marker-b)))
+      ;; Both should be queued
+      (should (= 2 (claude-org--queue-count session-key))))))
+
+;;; Cancel Behavior Tests
+
+(ert-deftest test-claude-org-cancel-queue-only-preserves-running ()
+  "Test that cancel-queue only clears queued blocks, not the running one."
+  :tags '(:unit :fast :stable :isolated :org :queue :cancel)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-cancel.org")
+    (insert "* Test\n#+begin_src ai\ntest\n#+end_src\n")
+    (setq-local claude-org--sessions (make-hash-table :test 'equal))
+    ;; Navigate into AI block so claude-org--current-session-key works
+    (goto-char (point-min))
+    (re-search-forward "begin_src ai" nil t)
+    (forward-line 1)
+    ;; Get the actual session key that will be computed
+    (let ((session-key (claude-org--current-session-key)))
+      ;; Simulate running query
+      (claude-org--session-put session-key :busy t)
+      (claude-org--session-put session-key :process-state 'fake-process)
+      ;; Queue some blocks
+      (claude-org--queue-block session-key '(:custom-id "q1"))
+      (claude-org--queue-block session-key '(:custom-id "q2"))
+      (should (= 2 (claude-org--queue-count session-key)))
+      (should (claude-org--session-get session-key :busy))
+      ;; Cancel queue only
+      (claude-org-cancel-queue)
+      ;; Queue should be empty but session should still be busy
+      ;; (running query not interrupted)
+      (should (= 0 (claude-org--queue-count session-key)))
+      (should (claude-org--session-get session-key :busy)))))
+
+(ert-deftest test-claude-org-queue-duplicate-prevention-integration ()
+  "Integration test: same block position cannot be queued multiple times."
+  :tags '(:unit :fast :stable :isolated :org :queue)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-dup-int.org")
+    (insert "* Block 1\n#+begin_src ai\nfirst\n#+end_src\n")
+    (insert "* Block 2\n#+begin_src ai\nsecond\n#+end_src\n")
+    (setq-local claude-org--sessions (make-hash-table :test 'equal))
+    (let* ((session-key "/tmp/test-dup-int.org::test-session")
+           ;; Get marker for first block
+           (marker1 (save-excursion
+                      (goto-char (point-min))
+                      (re-search-forward "#\\+begin_src ai" nil t)
+                      (copy-marker (line-beginning-position)))))
+      ;; Queue first block
+      (claude-org--queue-block session-key
+                               (list :custom-id "b1" :marker marker1))
+      (should (= 1 (claude-org--queue-count session-key)))
+      ;; Try to queue same block again (different marker object, same position)
+      (let ((marker1-copy (save-excursion
+                            (goto-char (point-min))
+                            (re-search-forward "#\\+begin_src ai" nil t)
+                            (copy-marker (line-beginning-position)))))
+        (claude-org--queue-block session-key
+                                 (list :custom-id "b1" :marker marker1-copy))
+        ;; Should still be 1, not 2 - duplicate rejected
+        (should (= 1 (claude-org--queue-count session-key))))
+      ;; But different block should be allowed
+      (let ((marker2 (save-excursion
+                       (goto-char (point-min))
+                       (search-forward "Block 2" nil t)
+                       (re-search-forward "#\\+begin_src ai" nil t)
+                       (copy-marker (line-beginning-position)))))
+        (claude-org--queue-block session-key
+                                 (list :custom-id "b2" :marker marker2))
+        ;; Now should be 2
+        (should (= 2 (claude-org--queue-count session-key)))))))
+
+(ert-deftest test-claude-org-queue-block-returns-status ()
+  "Test that queue-block returns whether block was added."
+  :tags '(:unit :fast :stable :isolated :org :queue)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-return.org")
+    (insert "* Test\n#+begin_src ai\ntest\n#+end_src\n")
+    (setq-local claude-org--sessions (make-hash-table :test 'equal))
+    (let* ((session-key "/tmp/test-return.org::test-session")
+           (marker (save-excursion
+                     (goto-char (point-min))
+                     (re-search-forward "#\\+begin_src ai" nil t)
+                     (copy-marker (line-beginning-position)))))
+      ;; First add should return t (or non-nil)
+      (let ((result1 (claude-org--queue-block session-key
+                                              (list :custom-id "b1" :marker marker))))
+        (should result1))
+      ;; Duplicate add should return nil
+      (let ((marker2 (copy-marker (marker-position marker))))
+        (let ((result2 (claude-org--queue-block session-key
+                                                (list :custom-id "b1" :marker marker2))))
+          (should (null result2)))))))
+
+(ert-deftest test-claude-org-queue-running-block-rejected ()
+  "Test that the currently running block cannot be queued.
+If Block A is running (its marker stored in :marker), trying to
+queue the same block should be rejected."
+  :tags '(:unit :fast :stable :isolated :org :queue)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-running.org")
+    (insert "* Test\n#+begin_src ai\ntest\n#+end_src\n")
+    (setq-local claude-org--sessions (make-hash-table :test 'equal))
+    (let* ((session-key "/tmp/test-running.org::test-session")
+           ;; Create marker at the ai block position
+           (marker (save-excursion
+                     (goto-char (point-min))
+                     (re-search-forward "#\\+begin_src ai" nil t)
+                     (copy-marker (line-beginning-position)))))
+      ;; Simulate that this block is already running
+      ;; The running block's marker is stored in :marker session state
+      (claude-org--session-put session-key :busy t)
+      (claude-org--session-put session-key :marker marker)
+      ;; Queue should be empty
+      (should (= 0 (claude-org--queue-count session-key)))
+      ;; Now try to queue the SAME block (same position)
+      ;; This simulates user pressing C-c C-c on the running block
+      (let ((same-marker (copy-marker (marker-position marker))))
+        (let ((result (claude-org--queue-block session-key
+                                                (list :custom-id "b1"
+                                                      :marker same-marker))))
+          ;; Should be rejected - cannot queue the running block
+          (should (null result))))
+      ;; Queue should still be empty
+      (should (= 0 (claude-org--queue-count session-key))))))
+
 (provide 'test-claude-org-queue)
 ;;; test-claude-org-queue.el ends here

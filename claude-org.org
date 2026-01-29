@@ -1436,10 +1436,28 @@ Functions for managing queued blocks that execute when session becomes free.
 #+BEGIN_SRC elisp
 (defun claude-org--queue-block (session-key block-info)
   "Add BLOCK-INFO to pending queue for SESSION-KEY.
-BLOCK-INFO is a plist with :custom-id, :content, :marker, :instr-num."
-  (let ((queue (claude-org--session-get session-key :pending-queue)))
-    (claude-org--session-put session-key :pending-queue
-                             (append queue (list block-info)))))
+BLOCK-INFO is a plist with :custom-id, :content, :marker, :instr-num.
+Returns t if block was added, nil if already queued or currently running."
+  (let* ((queue (claude-org--session-get session-key :pending-queue))
+         (running-marker (claude-org--session-get session-key :marker))
+         (new-marker (plist-get block-info :marker))
+         (new-pos (and new-marker (marker-position new-marker)))
+         ;; Check if same block is currently running
+         (running-pos (and running-marker (marker-position running-marker)))
+         (is-running (and new-pos running-pos (= new-pos running-pos)))
+         ;; Check if same block is already in queue
+         (in-queue (and new-pos
+                        (cl-some (lambda (queued)
+                                   (let ((m (plist-get queued :marker)))
+                                     (and m (= (marker-position m) new-pos))))
+                                 queue))))
+    (cond
+     (is-running nil)  ; Cannot queue the running block
+     (in-queue nil)    ; Already queued
+     (t
+      (claude-org--session-put session-key :pending-queue
+                               (append queue (list block-info)))
+      t))))
 
 (defun claude-org--dequeue-block (session-key)
   "Remove and return next block from SESSION-KEY queue.
@@ -3749,9 +3767,11 @@ If the session is busy, queues the block for execution when current query comple
                               :section-level section-level
                               :should-auto-title should-auto-title
                               :heading-marker heading-marker)))
-        (claude-org--queue-block session-key block-info)
-        (message "Queued [%d]. Will run after current query completes."
-                 (claude-org--queue-count session-key))
+        (if (claude-org--queue-block session-key block-info)
+            (message "Queued [%d]. Will run after current query completes."
+                     (claude-org--queue-count session-key))
+          (message "Block already queued [%d in queue]."
+                   (claude-org--queue-count session-key)))
         (cl-return-from claude-org-execute nil)))
     ;; Record execution timestamp BEFORE creating response section
     (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
@@ -4712,6 +4732,18 @@ Dynamic header line showing session status, IDE context, and thinking state.
     (if (> queued-cleared 0)
         (message "Cancelled %d queries, cleared %d queued blocks" cancelled queued-cleared)
       (message "Cancelled %d queries" cancelled))))
+
+(defun claude-org-cancel-queue ()
+  "Cancel only queued blocks, leaving the running query intact."
+  (interactive)
+  (let* ((session-key (claude-org--current-session-key))
+         (queue-count (claude-org--queue-count session-key)))
+    (if (> queue-count 0)
+        (progn
+          (claude-org--clear-queue session-key)
+          (claude-org--refresh-header-line)
+          (message "Cleared %d queued block(s), running query continues" queue-count))
+      (message "No queued blocks to cancel"))))
 #+END_SRC
 
 * Verbose Output
@@ -4777,6 +4809,7 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
    ["Execute"
     ("c" "Execute (C-c C-c)" claude-org-execute)
     ("k" "Cancel query" claude-org-cancel)
+    ("K" "Cancel queue only" claude-org-cancel-queue)
     ("v" "Verbose output" claude-org-show-verbose)]
    ["Edit"
     ("r" "Refine prompt" claude-org-refine-prompt)]

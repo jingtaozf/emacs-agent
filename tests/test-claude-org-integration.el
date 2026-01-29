@@ -1075,5 +1075,116 @@ Execute A, then queue B and C - both should execute in order."
          (goto-char (point-min))
          (should (re-search-forward "Block B executed" nil t)))))))
 
+(ert-deftest test-org-integration-queue-no-duplicate ()
+  "Test that the same block cannot be queued multiple times.
+Execute Block A, then try to queue Block B twice - second attempt should be rejected."
+  :tags '(:integration :slow :api :org :queue)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Execute Block A (Instruction 20)
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+         (should (claude-org--session-get session-key :busy))
+
+         ;; Navigate to Block B (Instruction 21) and queue it
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         (should (= 1 (claude-org--queue-count session-key)))
+
+         ;; Try to queue the SAME Block B again - should NOT add a duplicate
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         ;; Queue should still have only 1 entry, not 2
+         (should (= 1 (claude-org--queue-count session-key)))
+
+         ;; Clean up - cancel everything
+         (claude-org-cancel))))))
+
+(ert-deftest test-org-integration-queue-running-block-rejected ()
+  "Test that trying to queue the CURRENTLY RUNNING block is rejected.
+Execute Block A, then try to queue Block A again - should be rejected.
+This tests Issue 1: prevent queueing a block that is already running."
+  :tags '(:integration :slow :api :org :queue)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Execute Block A (Instruction 20)
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+         (should (claude-org--session-get session-key :busy))
+         ;; Queue should be empty (the running block is not in queue)
+         (should (= 0 (claude-org--queue-count session-key)))
+
+         ;; Try to execute the SAME Block A again while it's running
+         ;; This should be REJECTED - cannot queue the running block
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 20" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         ;; Queue should STILL be empty - running block cannot be queued
+         (should (= 0 (claude-org--queue-count session-key)))
+
+         ;; Clean up - cancel
+         (claude-org-cancel))))))
+
+(ert-deftest test-org-integration-queue-cancel-preserves-running ()
+  "Test that canceling queued blocks does NOT cancel the running query.
+Execute Block A, queue Block B, then cancel queue - A should keep running."
+  :tags '(:integration :slow :api :org :queue)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+       ;; Execute Block A (Instruction 20)
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+         (should (claude-org--session-get session-key :busy))
+
+         ;; Queue Block B (Instruction 21)
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         (should (= 1 (claude-org--queue-count session-key)))
+
+         ;; Cancel the queue only (not the running query)
+         (claude-org-cancel-queue)
+
+         ;; Queue should be cleared
+         (should (= 0 (claude-org--queue-count session-key)))
+         ;; But the running query should STILL be active
+         (should (claude-org--session-get session-key :busy))
+         (should (claude-org--session-get session-key :process-state))
+
+         ;; Wait for Block A to complete naturally
+         (test-claude-wait-for-completion session-key 60)
+         ;; Verify Block A completed (not cancelled)
+         (should-not (claude-org--session-get session-key :busy)))))))
+
 (provide 'test-claude-org-integration)
 ;;; test-claude-org-integration.el ends here
