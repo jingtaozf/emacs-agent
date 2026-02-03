@@ -185,9 +185,284 @@ Each AI block can be tagged with a phase for focused behavior:
 | Research | =:research:= | Explore codebase | → Research Output section |
 | Design | =:design:= | Technical RFC | → Spec section |
 | Planning | =:planning:= | Task breakdown | → Features section (TODOs) |
-| Implementation | =:implementation:= | Write code | → Mark TODOs as DONE |
+| Implementation | =:implementation:= | *Write tests THEN code* | → Tests (RED) → Code (GREEN) → Refactor |
 
 Select phase tags when inserting new AI blocks via =C-c C-/= → =n=.
+
+*** TDD Compliance in Implementation Phase (MANDATORY)
+
+When implementing features, follow Test-Driven Development (TDD).
+*This is not optional* - it prevents "self-deception" where tests and code
+are written together, potentially verifying the wrong behavior.
+
+**** The TDD Cycle: RED → GREEN → REFACTOR
+
+| Step | Name | Action | Verification |
+|------+------+--------+--------------|
+| 1 | *RED* | Write failing tests | Run tests - must FAIL |
+| 2 | *GREEN* | Write minimal implementation | Run tests - must PASS |
+| 3 | *REFACTOR* | Clean up code | Run tests - must stay PASS |
+
+**** Core TDD Principles (INVIOLABLE)
+
+*These principles are non-negotiable.* Violating them defeats the purpose of TDD.
+
+| # | Principle | Rationale |
+|---+-----------+-----------|
+| 1 | *Tests FIRST* | Tests define the specification; code fulfills it |
+| 2 | *Tests are IMMUTABLE* | Once written, tests cannot change during implementation |
+| 3 | *See RED before GREEN* | A test you haven't seen fail hasn't proven it detects bugs |
+
+***** Principle 1: Tests FIRST (Before Any Code)
+
+- Write tests that describe *what* the code should do
+- Tests are written from the *specification*, not from implementation knowledge
+- If you can't write a test, the requirement isn't clear enough
+
+***** Principle 2: Tests are IMMUTABLE During Implementation
+
+*CRITICAL*: Once you commit to a test, you CANNOT modify it to make implementation easier.
+
+| Allowed | NOT Allowed |
+|---------+-------------|
+| Fix typos in test | Change assertions to match implementation |
+| Add *new* tests | Weaken existing test expectations |
+| Refactor test setup (same behavior) | Remove "inconvenient" test cases |
+
+If a test seems wrong during implementation:
+1. *STOP* - Do not modify the test
+2. *THINK* - Is the test wrong, or is your implementation approach wrong?
+3. *DISCUSS* - If test is truly wrong, it's a *spec change* requiring review
+4. *DOCUMENT* - Record why the spec changed before modifying test
+
+***** Principle 3: RED Phase is Mandatory
+
+Running tests and *seeing them fail* proves:
+- The test actually runs (no silent skip)
+- The test detects the absence of the feature
+- Your test infrastructure works
+
+**** Why TDD Matters
+
+1. *Tests define behavior* before code exists - prevents "wishful testing"
+2. *Failing tests prove testability* - confirms tests can detect failures
+3. *Minimal implementation* avoids over-engineering
+4. *Refactoring is safe* when tests protect against regressions
+5. *Immutable tests* prevent "spec drift" where implementation redefines correctness
+
+**** TDD Workflow Steps
+
+1. *Write failing tests FIRST* before any implementation code
+2. Tests should be tagged with =:tdd= to track test-first metrics
+3. Run tests to confirm they fail for the right reason
+4. Implement the minimal code to make tests pass
+5. Refactor while keeping tests green
+
+**** Required TDD Tags
+
+Add =:tdd= tag to tests written before implementation:
+
+#+begin_example elisp
+(ert-deftest test-my-feature ()
+  "TDD: Description of expected behavior."
+  :tags '(:unit :fast :stable :tdd)
+  ...)
+#+end_example
+
+**** Security-Critical Code
+
+For security-sensitive code paths (permissions, input validation, etc.),
+TDD tests are *mandatory* before implementation:
+
+#+begin_example
+;; REQUIRED: Tests in test file with :tdd :security tags
+(ert-deftest test-permission-error-must-deny ()
+  "TDD: Permission function errors must deny, not allow."
+  :tags '(:unit :tdd :security)
+  ...)
+#+end_example
+
+**** Implementation Order (Strict)
+
+For each Feature TODO, follow this *exact* sequence:
+
+| Phase | Action | Gate |
+|-------+--------+------|
+| 1. TEST | Write tests in =tests/test-*.el= | Tests must compile |
+| 2. RED | Run tests | *Must FAIL* (proves tests work) |
+| 3. COMMIT | Commit tests separately | Tests locked - no more changes |
+| 4. CODE | Implement in =.org= or =.el= | Tests remain untouched |
+| 5. GREEN | Run tests | *Must PASS* |
+| 6. REFACTOR | Clean up (optional) | Tests must stay PASS |
+| 7. DONE | Mark Feature TODO complete | |
+
+*Key constraint*: After step 3 (COMMIT), test files are *read-only* for this feature.
+Any test modification requires going back to step 1 with justification.
+
+***** What If Tests Seem Wrong?
+
+During implementation, if you think a test is incorrect:
+
+1. *DO NOT* modify the test
+2. Ask: "Is my implementation approach wrong?"
+3. If test is truly wrong, it's a *specification error*:
+   - Document why the spec was wrong
+   - Get approval for spec change
+   - Create *new* commit changing the test
+   - Then continue implementation
+
+**** Common TDD Mistakes to Avoid
+
+| Mistake | Why It's Wrong | Fix |
+|---------+----------------+-----|
+| Writing tests after code | Tests verify implementation, not specification | Write tests FIRST |
+| *Modifying tests during implementation* | Defeats TDD - tests no longer define spec | Tests are IMMUTABLE |
+| Not running tests when they should fail | Can't confirm test is actually testing | Always see RED first |
+| Tests that are too broad | Hard to pinpoint failures | One assertion per behavior |
+| Hardcoding test data from implementation | Tests just mirror code | Derive test data from spec |
+| Skipping RED phase "because I know it'll fail" | No proof test works | *Always* run and see failure |
+| Weakening assertions to pass | Implementation redefines correctness | Fix implementation, not test |
+
+*The Cardinal Sin*: Changing a test assertion because your implementation produces
+different output. This means your implementation is *wrong*, not the test.
+
+**** TDD Test Structure
+
+#+begin_example elisp
+(ert-deftest test-[feature]-[behavior] ()
+  "TDD: [Describe expected behavior in terms of spec, not implementation]."
+  :tags '(:unit :fast :stable :tdd)  ; MUST include :tdd
+  ;; ARRANGE: Set up preconditions
+  (let ((input ...))
+    ;; ACT: Perform the action
+    (let ((result (function-under-test input)))
+      ;; ASSERT: Verify expected outcome
+      (should (expected-condition result)))))
+#+end_example
+
+**** Integration Testing Principles
+
+**Prefer real collaborators over mocks** - excessive mocking is a code smell
+indicating design issues in the code under test.
+
+| Use Case | Approach |
+|----------+----------|
+| Normal dependencies | Real collaborators (no mocks) |
+| Network failures | Mocks acceptable |
+| External APIs | Contract tests + occasional mocks |
+| Database | Real DB or in-memory equivalent |
+| Time-sensitive | Inject clock, don't mock system time |
+
+***** When Mocks Are Acceptable
+
+- Simulating hard-to-reproduce conditions (network timeouts, disk full)
+- External services with rate limits or costs
+- Non-deterministic behavior that must be controlled
+
+***** When Mocks Are a Code Smell
+
+- Mocking internal classes you own
+- Mocking more than 2-3 dependencies
+- Mock setup longer than test itself
+- Mocks that need updating when implementation changes
+
+***** API Contract Testing
+
+When testing against external APIs:
+
+1. Generate tests from OpenAPI/Swagger specifications
+2. *Explicitly request error scenarios*:
+   - 400 Bad Request (validation errors)
+   - 401 Unauthorized (auth failures)
+   - 404 Not Found (missing resources)
+   - 500 Internal Server Error (server failures)
+3. Test backward compatibility when API versions change
+4. Use recorded responses for deterministic replay
+
+**** TDD Anti-Patterns (From Production Experience)
+
+These patterns indicate TDD discipline breakdown:
+
+***** Anti-Pattern 1: Tests After Code
+
+| Symptom | Problem |
+|---------+---------|
+| Tests written after implementation | Tests validate bugs, not catch them |
+| Tests pass on first run | Never proven they can detect failures |
+| Test mirrors implementation logic | Circular validation - both wrong together |
+
+*Fix*: Always write tests FIRST. See them FAIL before implementing.
+
+***** Anti-Pattern 2: Modifying Tests to Pass
+
+| Symptom | Problem |
+|---------+---------|
+| Changing assertions during implementation | Implementation redefines correctness |
+| Deleting "inconvenient" test cases | Spec coverage shrinks |
+| Weakening expected values | Bugs become "features" |
+
+*Fix*: Tests are IMMUTABLE. Fix implementation, never the test.
+
+***** Anti-Pattern 3: AI Deletes/Modifies Tests
+
+AI agents will attempt to modify or delete tests when struggling to implement.
+
+| AI Behavior | Your Response |
+|-------------+---------------|
+| "Let me update the test to match..." | *STOP* - Reject immediately |
+| "This test expectation seems wrong..." | Investigate - is impl wrong? |
+| "I'll simplify the test..." | *REJECT* unless purely cosmetic |
+
+Explicitly instruct: "Do NOT modify tests. Keep iterating until implementation passes."
+
+***** Anti-Pattern 4: Hardcoded Returns
+
+AI may hardcode expected outputs instead of implementing logic:
+
+#+begin_example elisp
+;; WRONG - hardcoded to pass test
+(defun sort-list (lst) '(1 2 3))
+
+;; RIGHT - actual implementation
+(defun sort-list (lst) (sort lst #'<))
+#+end_example
+
+*Detection*: Add multiple test cases with different inputs.
+
+***** Anti-Pattern 5: Context Poisoning
+
+Accumulated context degrades AI output quality:
+
+| Symptom | Fix |
+|---------+-----|
+| AI repeating earlier mistakes | Clear context between tasks |
+| Inconsistent code style | Start fresh conversation |
+| Not making progress after 3 attempts | Abandon and restart |
+
+***** Anti-Pattern 6: Sunk Cost Fallacy
+
+Continuing on wrong paths because of invested effort:
+
+| Symptom | Fix |
+|---------+-----|
+| Patching fundamentally flawed approach | Delete and restart |
+| "Just one more fix" loop | Step back, reconsider design |
+| Fighting the tests | Tests are right; rethink approach |
+
+**** Human vs AI Responsibilities in TDD
+
+| Responsibility | Human | AI |
+|----------------+-------+----|
+| Write specification tests | ✓ | |
+| Define edge cases | ✓ | Suggest, human approves |
+| Establish test patterns | ✓ | |
+| Expand test coverage | Review | ✓ |
+| Generate boilerplate | | ✓ |
+| Implement to pass tests | Review | ✓ |
+| Modify tests during impl | *NEVER* | *NEVER* |
+
+*Key insight*: Humans own specifications (tests). AI implements to spec.
+
 
 ** Key Principles
 
@@ -196,6 +471,45 @@ Select phase tags when inserting new AI blocks via =C-c C-/= → =n=.
 3. *Atomic Features*: Each TODO should be completable in one session
 4. *40-60 Rule*: Aim for 40-60% completion, humans refine the rest
 5. *Update as you go*: Keep Research Output, Spec, Features current
+6. *TDD Is Mandatory*: Write tests BEFORE implementation - see RED first
+7. *Tests Are IMMUTABLE*: NEVER modify tests during implementation - fix code, not tests
+8. *Test Tags*: Use =:tdd= tag to track test-first development
+9. *Verify Failure*: A test you haven't seen fail hasn't proven it can detect bugs
+10. *Prefer Real Collaborators*: Minimize mocks - they're a design smell
+
+
+** TDD Quality Metrics
+
+Track Test-Driven Development compliance:
+
+*** Counting TDD Tests
+
+Run this to count TDD tests:
+
+#+begin_example bash
+# Count TDD tests
+grep -r ":tdd" tests/*.el | wc -l
+
+# Count total tests
+grep -r "ert-deftest" tests/*.el | wc -l
+
+# Calculate TDD percentage
+echo "TDD %: $(( 100 * $(grep -r ":tdd" tests/*.el | wc -l) / $(grep -r "ert-deftest" tests/*.el | wc -l) ))"
+#+end_example
+
+*** Target Metrics
+
+| Metric | Target | Description |
+|--------+--------+-------------|
+| TDD % overall | ≥ 30% | Tests written test-first |
+| TDD % security | 100% | Security tests must be TDD |
+| TDD % new code | ≥ 70% | New features require TDD |
+
+*** Running TDD Tests Only
+
+#+begin_example elisp
+(ert-run-tests-batch-and-exit '(tag :tdd))
+#+end_example
 
 ** Navigating SDD Sections (CRITICAL)
 

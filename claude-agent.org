@@ -256,6 +256,19 @@ in the project hierarchy."
   "Docker compose service name for Claude container."
   :type 'string
   :group 'claude-agent)
+
+(defcustom claude-agent-max-answer-length 10000
+  "Maximum length of user answer text.
+This prevents denial-of-service via extremely large answers in
+AskUserQuestion tool responses."
+  :type 'integer
+  :group 'claude-agent)
+
+(defcustom claude-agent-max-command-length 100000
+  "Maximum length of bash command strings.
+This prevents denial-of-service via extremely large commands."
+  :type 'integer
+  :group 'claude-agent)
 #+END_SRC
 
 * Error Handling
@@ -1030,6 +1043,41 @@ PROCESS is the CLI process."
         (claude-agent--maybe-close-stdin process parsed)))))
 #+END_SRC
 
+*** JSON Validation
+
+Validate JSON messages before processing. This catches malformed responses
+early and prevents invalid data from propagating through the system.
+
+#+NAME: filter-json-validation
+#+BEGIN_SRC elisp
+(defun claude-agent--validate-json-message (parsed)
+  "Validate that PARSED is a well-formed JSON message.
+Returns PARSED if valid, nil if invalid.
+
+A valid message must:
+- Be a plist (or alist convertible to plist)
+- Have a :type key with a non-empty string value
+
+Unknown message types are considered valid (forward compatibility)."
+  (and parsed
+       (listp parsed)
+       (let ((msg-type (plist-get parsed :type)))
+         (and msg-type
+              (stringp msg-type)
+              (not (string-empty-p msg-type))))
+       parsed))
+
+(defun claude-agent--is-cli-text-output-p (line)
+  "Check if LINE is plain CLI text output (not JSON).
+Returns t for plain text, nil for attempted JSON.
+
+Plain text includes CLI startup messages, error messages, etc.
+Attempted JSON has opening braces or brackets."
+  (or (null line)
+      (string-empty-p line)
+      (not (string-match-p "^[[:space:]]*[{[]" line))))
+#+END_SRC
+
 *** JSON Buffer Processing
 
 Process accumulated JSON data line by line. Each complete line (terminated by
@@ -1089,7 +1137,7 @@ Parses complete newline-delimited JSON and invokes callbacks."
                  (t
                   (claude-agent--process-normal-message
                    parsed state callback token-callback error-callback process))))
-            ((json-parse-error json-readtable-error json-end-of-file)
+            ((json-parse-error json-readtable-error json-end-of-file json-unknown-keyword)
              ;; Line is not valid JSON - could be plain text error from CLI
              (claude-agent--debug-log "Non-JSON output: %s" line)
              (when error-callback
@@ -1985,25 +2033,38 @@ The client API provides bidirectional interactive conversations.
                (:copier nil))
   "Interactive Claude client for bidirectional conversations.
 
-Use `claude-agent-client-create' to construct instances."
-  state           ; Process state
-  options         ; Options plist
-  session-id      ; Current session ID
+Use `claude-agent-client-create' to construct instances.
+
+For persistent clients, use `claude-agent-client-connect' once,
+then `claude-agent-client-send-message' for subsequent queries."
+  state           ; Process state (claude-agent--process-state struct)
+  options         ; Options plist (created with claude-agent-options)
+  session-id      ; Current session ID (SDK UUID)
+  session-key     ; Org session key (e.g., /path/file.org::my-session)
   (connected-p nil) ; Boolean connection state
   hooks           ; Alist of (event . matchers)
   on-message      ; Default message callback
-  on-error)       ; Default error callback
+  on-error        ; Default error callback
+  on-complete     ; Callback when response completes
+  on-disconnect   ; Callback when client disconnects
+  (query-count 0) ; Number of queries sent through this client
+  (created-at nil) ; Timestamp when client was created
+  (last-activity nil)) ; Timestamp of last query/response
 #+END_SRC
 
 ** Client Creation
 
 #+BEGIN_SRC elisp
-(cl-defun claude-agent-client-create (&key options on-message on-error)
+(cl-defun claude-agent-client-create (&key options on-message on-error on-complete
+                                          on-disconnect session-key)
   "Create a new Claude client.
 
 OPTIONS is a plist created with `claude-agent-options'.
 ON-MESSAGE is the default callback for received messages.
 ON-ERROR is the default callback for errors.
+ON-COMPLETE is called when each query response completes.
+ON-DISCONNECT is called when the client disconnects.
+SESSION-KEY is the org session key for this client (optional).
 
 Returns a `claude-agent-client' struct.
 
@@ -2013,13 +2074,20 @@ Example:
          :options (claude-agent-options
                    :model \"claude-sonnet-4-5\"
                    :permission-mode 'accept-edits)
-         :on-message (lambda (msg) (message \"Got: %s\" msg))))"
+         :on-message (lambda (msg) (message \"Got: %s\" msg))
+         :session-key \"/path/to/file.org::my-session\"))"
   (claude-agent--make-client
    :options (or options (claude-agent-options))
    :hooks (plist-get options :hooks)
    :on-message on-message
    :on-error on-error
-   :connected-p nil))
+   :on-complete on-complete
+   :on-disconnect on-disconnect
+   :session-key session-key
+   :connected-p nil
+   :query-count 0
+   :created-at (float-time)
+   :last-activity nil))
 #+END_SRC
 
 ** Client Methods
@@ -2056,18 +2124,17 @@ Starts the CLI process in streaming mode."
     client))
 
 (cl-defun claude-agent-client-send (client message &key on-response on-error)
-  "Send MESSAGE through CLIENT.
+  "Send MESSAGE through CLIENT (legacy - starts new process).
 
 MESSAGE is a string to send to Claude.
 ON-RESPONSE is called with each response message.
 ON-ERROR is called if an error occurs.
 
-Note: This creates a new query process. For true bidirectional
-streaming, use the streaming input mode (future feature)."
+Note: This creates a new query process for each message.
+For persistent bidirectional streaming, use `claude-agent-client-send-message'."
   (unless (claude-agent-client-connected-p client)
     (error "Client is not connected"))
-  ;; For now, start a new process for each message
-  ;; Future: implement true bidirectional streaming
+  ;; Legacy: start a new process for each message
   (let* ((options (claude-agent-client-options client))
          ;; Continue from previous session if we have one
          (session-id (claude-agent-client-session-id client))
@@ -2084,20 +2151,72 @@ streaming, use the streaming input mode (future feature)."
              (when (and result (claude-agent-client-on-error client))
                (funcall (claude-agent-client-on-error client) result)))))))
 
+(cl-defun claude-agent-client-send-message (client message &key on-message on-error
+                                                   on-complete token-callback)
+  "Send MESSAGE through CLIENT's persistent connection.
+
+This sends the message through the existing process without spawning a new one.
+Requires the client to be connected with `claude-agent-client-connect'.
+
+MESSAGE is the prompt string to send.
+ON-MESSAGE is called for each response message (overrides client default).
+ON-ERROR is called if an error occurs (overrides client default).
+ON-COMPLETE is called when the response completes (overrides client default).
+TOKEN-CALLBACK is called with each text token for streaming display.
+
+Returns non-nil if the message was sent successfully."
+  (unless (claude-agent-client-connected-p client)
+    (error "Client is not connected"))
+  (let* ((state (claude-agent-client-state client))
+         (process (claude-agent--process-state-process state))
+         (session-key (claude-agent-client-session-key client)))
+    (unless (and process (process-live-p process))
+      (error "Client process is not alive"))
+    ;; Update client callbacks if provided
+    (when on-message
+      (setf (claude-agent--process-state-callback state)
+            (lambda (msg)
+              ;; Track session ID from result messages
+              (when (claude-agent-result-message-p msg)
+                (setf (claude-agent-client-session-id client)
+                      (claude-agent-result-message-session-id msg))
+                ;; Call on-complete when we get result
+                (when (or on-complete (claude-agent-client-on-complete client))
+                  (funcall (or on-complete (claude-agent-client-on-complete client)) msg)))
+              (funcall on-message msg))))
+    (when on-error
+      (setf (claude-agent--process-state-error-callback state) on-error))
+    (when token-callback
+      (setf (claude-agent--process-state-token-callback state) token-callback))
+    ;; Update client metadata
+    (cl-incf (claude-agent-client-query-count client))
+    (setf (claude-agent-client-last-activity client) (float-time))
+    ;; Send user message through existing process
+    (let ((user-message (list :type "user"
+                              :message (list :role "user"
+                                            :content message))))
+      (claude-agent--send-stdin process user-message session-key))
+    t))
+
 (defun claude-agent-client-disconnect (client)
   "Disconnect CLIENT from Claude.
 
-Cleans up process and resources."
+Cleans up process and resources, calls on-disconnect callback if set."
   (when (claude-agent-client-connected-p client)
-    (when-let ((state (claude-agent-client-state client)))
-      (when-let ((process (claude-agent--process-state-process state)))
-        (when (process-live-p process)
-          (delete-process process)))
-      (when-let ((buf (claude-agent--process-state-buffer state)))
-        (when (buffer-live-p buf)
-          (kill-buffer buf))))
-    (setf (claude-agent-client-connected-p client) nil)
-    (setf (claude-agent-client-state client) nil)))
+    (let ((on-disconnect (claude-agent-client-on-disconnect client))
+          (session-key (claude-agent-client-session-key client)))
+      (when-let ((state (claude-agent-client-state client)))
+        (when-let ((process (claude-agent--process-state-process state)))
+          (when (process-live-p process)
+            (delete-process process)))
+        (when-let ((buf (claude-agent--process-state-buffer state)))
+          (when (buffer-live-p buf)
+            (kill-buffer buf))))
+      (setf (claude-agent-client-connected-p client) nil)
+      (setf (claude-agent-client-state client) nil)
+      ;; Call on-disconnect callback
+      (when on-disconnect
+        (funcall on-disconnect client)))))
 
 (defun claude-agent-client-interrupt (client)
   "Send interrupt signal through CLIENT."
@@ -2124,6 +2243,24 @@ Must be called before `claude-agent-client-connect'."
   "Get the current session ID from CLIENT.
 Returns nil if not yet available."
   (claude-agent-client-session-id client))
+
+(defun claude-agent-client-alive-p (client)
+  "Return non-nil if CLIENT's process is alive and responsive."
+  (and (claude-agent-client-connected-p client)
+       (when-let ((state (claude-agent-client-state client)))
+         (when-let ((process (claude-agent--process-state-process state)))
+           (process-live-p process)))))
+
+(defun claude-agent-client-busy-p (client)
+  "Return non-nil if CLIENT is currently processing a query.
+A client is busy if it has sent a message and hasn't received a result yet."
+  (and (claude-agent-client-alive-p client)
+       (when-let ((state (claude-agent-client-state client)))
+         ;; Check if we're waiting for a result
+         (and (claude-agent--process-state-ready state)
+              (not (claude-agent--process-state-closed state))
+              ;; Also check if there are pending responses
+              (not (claude-agent--process-state-got-result state))))))
 #+END_SRC
 
 ** Control Request Handling
@@ -2274,6 +2411,61 @@ Tests are tagged for selective execution:
 - =:api= - Tests making actual API calls
 - =:slow= - Long-running tests
 - =:stable= - Tests that reliably pass
+- =:tdd= - Tests written test-first (TDD)
+- =:security= - Security-related tests
+
+* Input Validation
+
+Input validation layer to prevent security issues and denial-of-service attacks.
+
+** Answer Validation
+
+#+BEGIN_SRC elisp
+(defun claude-agent--validate-answer (answer)
+  "Validate ANSWER string for AskUserQuestion responses.
+Signals error if answer exceeds `claude-agent-max-answer-length'.
+Returns t if valid, nil for nil/empty input (valid no-answer)."
+  (cond
+   ((null answer) t)
+   ((stringp answer)
+    (if (> (length answer) claude-agent-max-answer-length)
+        (error "Answer exceeds maximum length of %d characters"
+               claude-agent-max-answer-length)
+      t))
+   (t (error "Answer must be a string or nil"))))
+#+END_SRC
+
+** File Path Validation
+
+#+BEGIN_SRC elisp
+(defun claude-agent--validate-file-path (path)
+  "Validate file PATH for suspicious patterns.
+Signals error if path contains null bytes or other dangerous patterns.
+Returns t if valid."
+  (cond
+   ((null path) (error "File path cannot be nil"))
+   ((not (stringp path)) (error "File path must be a string"))
+   ;; Null bytes can truncate path security checks
+   ((string-match-p "\x00" path)
+    (error "File path contains null byte"))
+   (t t)))
+#+END_SRC
+
+** Command Validation
+
+#+BEGIN_SRC elisp
+(defun claude-agent--validate-command (command)
+  "Validate COMMAND string for Bash tool.
+Signals error if command exceeds `claude-agent-max-command-length'.
+Returns t if valid."
+  (cond
+   ((null command) (error "Command cannot be nil"))
+   ((not (stringp command)) (error "Command must be a string"))
+   ((> (length command) claude-agent-max-command-length)
+    (error "Command exceeds maximum length of %d characters"
+           claude-agent-max-command-length))
+   (t t)))
+#+END_SRC
 
 * Permission System
 
@@ -2322,6 +2514,23 @@ Example - Add custom protection:
 Example - Replace default behavior:
   (setq claude-agent-permission-functions
         '(my-custom-checker claude-agent-permission-auto-allow))")
+(defun claude-agent--validate-permission-result (result)
+  "Validate that RESULT is a proper permission result.
+Returns RESULT if valid, nil if invalid.
+Valid results: nil, or plist with :behavior being \"allow\" or \"deny\"."
+  (cond
+   ;; nil is valid (pass to next function)
+   ((null result) nil)
+   ;; Must be a list (plist)
+   ((not (listp result)) nil)
+   ;; Must have :behavior key
+   ((not (plist-member result :behavior)) nil)
+   ;; :behavior must be string "allow" or "deny"
+   ((not (stringp (plist-get result :behavior))) nil)
+   ((not (member (plist-get result :behavior) '("allow" "deny"))) nil)
+   ;; Valid
+   (t result)))
+
 (defun claude-agent--run-permission-functions (tool-name tool-input context)
   "Run permission functions hook and return first non-nil result.
 
@@ -2329,18 +2538,39 @@ TOOL-NAME: string like \"Read\", \"Write\", \"Bash\"
 TOOL-INPUT: plist with tool-specific parameters
 CONTEXT: plist with :session-id, :org-section, :suggestions
 
-Returns: plist with :behavior (\"allow\" or \"deny\") and optional :message"
-  (catch 'permission-result
-    (dolist (fn claude-agent-permission-functions)
-      (when (functionp fn)
-        (condition-case err
-            (let ((result (funcall fn tool-name tool-input context)))
-              (when result
-                (throw 'permission-result result)))
-          (error
-           (message "Permission function error: %s" (error-message-string err))))))
-    ;; Default: allow
-    (list :behavior "allow")))
+Returns: plist with :behavior (\"allow\" or \"deny\") and optional :message
+
+SECURITY: This function DENIES on any error. This prevents the vulnerability
+where permission function crashes could silently allow dangerous operations."
+  (let ((had-error nil)
+        (error-fn nil)
+        (error-msg nil))
+    (catch 'permission-result
+      (dolist (fn claude-agent-permission-functions)
+        (when (functionp fn)
+          (condition-case err
+              (let* ((raw-result (funcall fn tool-name tool-input context))
+                     (result (claude-agent--validate-permission-result raw-result)))
+                ;; Check for invalid return type
+                (when (and raw-result (not result))
+                  (setq had-error t
+                        error-fn fn
+                        error-msg (format "Invalid return type: %S" (type-of raw-result)))
+                  (message "Permission function %s returned invalid result: %S" fn raw-result))
+                (when result
+                  (throw 'permission-result result)))
+            (error
+             (setq had-error t
+                   error-fn fn
+                   error-msg (error-message-string err))
+             (message "Permission function %s error: %s" fn error-msg)))))
+      ;; SECURITY: If any error occurred, DENY (not allow)
+      (if had-error
+          (list :behavior "deny"
+                :reason "permission-error"
+                :message (format "Permission function error: %s" error-msg))
+        ;; Default: allow (only when no errors occurred)
+        (list :behavior "allow")))))
 (defun claude-agent-permission-check-patterns (tool-name tool-input _context)
   "Check TOOL-NAME against allow/deny patterns.
 Uses `claude-agent-allow-patterns' and `claude-agent-deny-patterns'.
@@ -3205,7 +3435,7 @@ Uses `claude-agent-query-timeout' to determine staleness."
           claude-agent-query-timeout)))
 
 (defun claude-agent--cleanup-stale-queries ()
-  "Remove stale entries from active-queries hash table.
+  "Remove stale entries from active-queries hash table and active-states list.
 Called after code reload to clean up entries with dead processes,
 outdated structure, or queries that have exceeded timeout."
   (let ((stale-keys '())
@@ -3231,13 +3461,26 @@ outdated structure, or queries that have exceeded timeout."
              (delete-process proc)))
          (push key timed-out-keys))))
      claude-agent--active-queries)
-    ;; Remove all stale and timed-out entries
+    ;; Remove all stale and timed-out entries from hash table
     (dolist (key (append stale-keys timed-out-keys))
       (remhash key claude-agent--active-queries))
     (when stale-keys
       (claude-agent--debug-log "Cleaned up %d stale queries" (length stale-keys)))
     (when timed-out-keys
-      (claude-agent--debug-log "Cleaned up %d timed-out queries" (length timed-out-keys)))))
+      (claude-agent--debug-log "Cleaned up %d timed-out queries" (length timed-out-keys))))
+  ;; Also clean up active-states list (may accumulate dead entries)
+  (let ((initial-count (length claude-agent--active-states)))
+    (setq claude-agent--active-states
+          (cl-remove-if
+           (lambda (state)
+             (or (not (claude-agent--process-state-p state))
+                 (claude-agent--process-state-closed state)
+                 (let ((proc (claude-agent--process-state-process state)))
+                   (and proc (not (process-live-p proc))))))
+           claude-agent--active-states))
+    (let ((removed (- initial-count (length claude-agent--active-states))))
+      (when (> removed 0)
+        (claude-agent--debug-log "Cleaned up %d stale states" removed)))))
 
 ;; Run cleanup on load
 (claude-agent--cleanup-stale-queries)
@@ -3312,8 +3555,16 @@ Cancels active queries and removes stale entries."
     (cancel-timer claude-agent--cleanup-timer)
     (setq claude-agent--cleanup-timer nil)))
 
+(defun claude-agent--kill-emacs-cleanup ()
+  "Kill all Claude processes before Emacs exits.
+Registered on `kill-emacs-hook' to ensure clean shutdown."
+  (claude-agent-kill-all-processes))
+
 ;; Start periodic cleanup on load
 (claude-agent--start-cleanup-timer)
+
+;; Register cleanup on Emacs exit
+(add-hook 'kill-emacs-hook #'claude-agent--kill-emacs-cleanup)
 #+END_SRC
 
 * Activity Mode-Line

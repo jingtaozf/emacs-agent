@@ -1151,5 +1151,178 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
             (should (string-match-p "Root Cause" result))))
       (kill-buffer buf))))
 
+;;; Persistent Client Registry Tests
+
+(ert-deftest test-claude-org-persistent-client-registry-empty ()
+  "Test empty persistent client registry."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  ;; Clear registry first
+  (clrhash claude-org--persistent-clients)
+  (should (= 0 (claude-org--persistent-client-count)))
+  (should (null (claude-org--list-persistent-clients))))
+
+(ert-deftest test-claude-org-register-persistent-client ()
+  "Test registering a persistent client."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  (clrhash claude-org--persistent-clients)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test.org")
+    (let ((mock-client (claude-agent--make-client
+                        :session-key "/tmp/test.org::test-session"
+                        :connected-p nil)))
+      (claude-org--register-persistent-client
+       "/tmp/test.org::test-session"
+       mock-client
+       (current-buffer)
+       1)
+      ;; Should be registered
+      (should (= 1 (claude-org--persistent-client-count)))
+      ;; Should be retrievable
+      (should (eq mock-client (claude-org--get-persistent-client "/tmp/test.org::test-session")))
+      ;; Should be in list
+      (let ((clients (claude-org--list-persistent-clients)))
+        (should (= 1 (length clients)))
+        (should (equal "/tmp/test.org::test-session" (caar clients))))
+      ;; Cleanup
+      (clrhash claude-org--persistent-clients))))
+
+(ert-deftest test-claude-org-disconnect-persistent-client ()
+  "Test disconnecting a persistent client."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  (clrhash claude-org--persistent-clients)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test.org")
+    (let ((mock-client (claude-agent--make-client
+                        :session-key "/tmp/test.org::test-session"
+                        :connected-p nil)))
+      (claude-org--register-persistent-client
+       "/tmp/test.org::test-session"
+       mock-client
+       (current-buffer)
+       1)
+      (should (= 1 (claude-org--persistent-client-count)))
+      ;; Disconnect
+      (claude-org--disconnect-persistent-client "/tmp/test.org::test-session")
+      ;; Should be removed
+      (should (= 0 (claude-org--persistent-client-count)))
+      (should (null (claude-org--get-persistent-client "/tmp/test.org::test-session"))))))
+
+(ert-deftest test-claude-org-disconnect-all-clients-for-buffer ()
+  "Test disconnecting all clients for a buffer."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  (clrhash claude-org--persistent-clients)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test.org")
+    (let ((buf (current-buffer))
+          (mock-client-1 (claude-agent--make-client
+                          :session-key "/tmp/test.org::session-1"
+                          :connected-p nil))
+          (mock-client-2 (claude-agent--make-client
+                          :session-key "/tmp/test.org::session-2"
+                          :connected-p nil)))
+      ;; Register two clients for same buffer
+      (claude-org--register-persistent-client
+       "/tmp/test.org::session-1" mock-client-1 buf 1)
+      (claude-org--register-persistent-client
+       "/tmp/test.org::session-2" mock-client-2 buf 10)
+      (should (= 2 (claude-org--persistent-client-count)))
+      ;; Disconnect all for this buffer
+      (claude-org--disconnect-all-clients-for-buffer buf)
+      ;; Both should be removed
+      (should (= 0 (claude-org--persistent-client-count))))))
+
+(ert-deftest test-claude-org-update-persistent-client-activity ()
+  "Test updating persistent client activity timestamp."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  (clrhash claude-org--persistent-clients)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test.org")
+    (let ((mock-client (claude-agent--make-client
+                        :session-key "/tmp/test.org::test-session"
+                        :connected-p nil)))
+      (claude-org--register-persistent-client
+       "/tmp/test.org::test-session"
+       mock-client
+       (current-buffer)
+       1)
+      ;; Get initial state
+      (let* ((entry (gethash "/tmp/test.org::test-session"
+                             claude-org--persistent-clients))
+             (initial-count (plist-get entry :query-count)))
+        (should (= 0 initial-count))
+        ;; Update activity
+        (claude-org--update-persistent-client-activity "/tmp/test.org::test-session")
+        ;; Check updated
+        (let ((updated-entry (gethash "/tmp/test.org::test-session"
+                                      claude-org--persistent-clients)))
+          (should (= 1 (plist-get updated-entry :query-count)))
+          (should (plist-get updated-entry :last-activity))))
+      ;; Cleanup
+      (clrhash claude-org--persistent-clients))))
+
+(ert-deftest test-claude-org-persistent-sessions-default-nil ()
+  "Test that persistent sessions is disabled by default."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  ;; Should be nil by default (legacy behavior)
+  (should (null claude-org-persistent-sessions)))
+
+;;; Lifecycle Hook Tests
+
+(ert-deftest test-claude-org-on-buffer-kill-cleans-clients ()
+  "Test that buffer kill hook cleans up persistent clients."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  (clrhash claude-org--persistent-clients)
+  (let ((test-buf (generate-new-buffer "*test-org*")))
+    (unwind-protect
+        (with-current-buffer test-buf
+          (org-mode)
+          (setq buffer-file-name "/tmp/test-kill.org")
+          (let ((mock-client (claude-agent--make-client
+                              :session-key "/tmp/test-kill.org::session"
+                              :connected-p nil)))
+            (claude-org--register-persistent-client
+             "/tmp/test-kill.org::session"
+             mock-client
+             test-buf
+             1)
+            (should (= 1 (claude-org--persistent-client-count)))
+            ;; Call the hook function directly
+            (claude-org--on-buffer-kill)
+            ;; Should be cleaned up
+            (should (= 0 (claude-org--persistent-client-count)))))
+      (kill-buffer test-buf))))
+
+(ert-deftest test-claude-org-on-todo-state-change-disconnects ()
+  "Test that TODO state change to DONE disconnects persistent client."
+  :tags '(:unit :fast :stable :isolated :org :persistent)
+  (clrhash claude-org--persistent-clients)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-todo.org")
+    (insert "* Task\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: todo-session\n")
+    (insert ":END:\n")
+    (let ((mock-client (claude-agent--make-client
+                        :session-key "/tmp/test-todo.org::todo-session"
+                        :connected-p nil)))
+      (claude-org--register-persistent-client
+       "/tmp/test-todo.org::todo-session"
+       mock-client
+       (current-buffer)
+       1)
+      (should (= 1 (claude-org--persistent-client-count)))
+      ;; Simulate TODO state change to DONE
+      (goto-char (point-min))
+      (re-search-forward "^\\* Task")
+      (let ((org-state "DONE"))
+        (claude-org--on-todo-state-change))
+      ;; Should be disconnected
+      (should (= 0 (claude-org--persistent-client-count))))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

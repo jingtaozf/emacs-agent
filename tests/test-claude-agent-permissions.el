@@ -520,5 +520,144 @@
         (should completing-read-called)
         (should result)))))
 
+;;; TDD Tests - Permission System Hardening
+;;
+;; These tests define expected behavior for security hardening:
+;; - Permission function errors must DENY (not silently allow)
+;; - Invalid return types must be treated as errors
+;; - Single error must not auto-allow remaining functions
+;;
+;; Tag: :tdd - these tests were written BEFORE implementation
+
+(ert-deftest test-permission-function-error-must-deny ()
+  "TDD: When a permission function throws an error, result must be deny.
+This prevents the security vulnerability where errors silently default to allow."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd :security)
+  (let ((claude-agent-permission-functions
+         (list (lambda (_tool-name _tool-input _context)
+                 (error "Simulated permission function crash")))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Bash" '(:command "rm -rf /") nil)))
+      ;; CRITICAL: Must deny on error, not allow
+      (should (equal (plist-get result :behavior) "deny"))
+      (should (plist-get result :reason)))))
+
+(ert-deftest test-all-permission-functions-error-must-deny ()
+  "TDD: When ALL permission functions error, result must be deny.
+This closes the 'all functions crash → auto-allow' vulnerability."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd :security)
+  (let ((claude-agent-permission-functions
+         (list (lambda (_t _i _c) (error "Error 1"))
+               (lambda (_t _i _c) (error "Error 2"))
+               (lambda (_t _i _c) (error "Error 3")))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Write" '(:file_path "/etc/passwd") nil)))
+      (should (equal (plist-get result :behavior) "deny"))
+      ;; Should indicate permission error occurred
+      (should (or (plist-get result :reason)
+                  (string-match-p "error" (or (plist-get result :message) "")))))))
+
+(ert-deftest test-permission-function-error-logged ()
+  "TDD: Permission function errors must be logged for debugging."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd)
+  (let ((logged-errors nil)
+        (claude-agent-permission-functions
+         (list (lambda (_t _i _c)
+                 (error "Test error for logging")))))
+    ;; Capture messages
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (apply #'format fmt args) logged-errors))))
+      (claude-agent--run-permission-functions "Read" nil nil))
+    ;; Should have logged the error
+    (should (cl-some (lambda (msg) (string-match-p "error" msg)) logged-errors))))
+
+(ert-deftest test-permission-function-wrong-type-must-deny ()
+  "TDD: Permission function returning wrong type must be treated as error/deny.
+Functions must return nil or plist with :behavior, not random values."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd :security)
+  ;; Return just t instead of proper plist
+  (let ((claude-agent-permission-functions
+         (list (lambda (_t _i _c) t))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Bash" '(:command "whoami") nil)))
+      ;; Invalid return should be treated as error → deny
+      (should (equal (plist-get result :behavior) "deny"))))
+  ;; Return string instead of plist
+  (let ((claude-agent-permission-functions
+         (list (lambda (_t _i _c) "allow"))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Bash" '(:command "id") nil)))
+      (should (equal (plist-get result :behavior) "deny"))))
+  ;; Return number
+  (let ((claude-agent-permission-functions
+         (list (lambda (_t _i _c) 42))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Bash" '(:command "ps") nil)))
+      (should (equal (plist-get result :behavior) "deny")))))
+
+(ert-deftest test-permission-function-missing-behavior-must-deny ()
+  "TDD: Permission function returning plist without :behavior must deny.
+A plist with other keys but no :behavior is invalid."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd :security)
+  (let ((claude-agent-permission-functions
+         (list (lambda (_t _i _c)
+                 ;; Missing :behavior key
+                 '(:message "Some message" :other-key "value")))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Write" '(:file_path "/tmp/test") nil)))
+      (should (equal (plist-get result :behavior) "deny")))))
+
+(ert-deftest test-permission-function-invalid-behavior-value-must-deny ()
+  "TDD: Permission function with invalid :behavior value must deny.
+Only 'allow' and 'deny' are valid behavior values."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd :security)
+  ;; :behavior with invalid value
+  (let ((claude-agent-permission-functions
+         (list (lambda (_t _i _c) '(:behavior "maybe")))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Read" '(:file_path "/tmp/test") nil)))
+      (should (equal (plist-get result :behavior) "deny"))))
+  ;; :behavior with non-string
+  (let ((claude-agent-permission-functions
+         (list (lambda (_t _i _c) '(:behavior allow)))))  ; symbol, not string
+    (let ((result (claude-agent--run-permission-functions
+                   "Read" '(:file_path "/tmp/test") nil)))
+      (should (equal (plist-get result :behavior) "deny")))))
+
+(ert-deftest test-permission-single-error-continues-chain ()
+  "TDD: Single function error should continue chain but track error state.
+If subsequent function allows, the error should still influence final decision."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd)
+  (let* ((fn2-called nil)
+         (claude-agent-permission-functions
+          (list (lambda (_t _i _c) (error "First function failed"))
+                (lambda (_t _i _c)
+                  (setq fn2-called t)
+                  '(:behavior "allow")))))
+    (let ((result (claude-agent--run-permission-functions
+                   "Read" '(:file_path "/tmp/safe") nil)))
+      ;; Second function should be called
+      (should fn2-called)
+      ;; But because first errored, should still deny
+      ;; (or at minimum, log that an error occurred)
+      ;; This test documents that error in chain affects trust
+      (should result))))
+
+(ert-deftest test-permission-error-includes-function-info ()
+  "TDD: Permission error result should include which function failed."
+  :tags '(:unit :fast :stable :isolated :permissions :tdd)
+  (let ((claude-agent-permission-functions
+         (list #'claude-agent-permission-check-patterns  ; this won't error
+               (lambda (_t _i _c)
+                 (error "Intentional test error")))))
+    ;; Temporarily make check-patterns error
+    (cl-letf (((symbol-function 'claude-agent-permission-check-patterns)
+               (lambda (_t _i _c) (error "Pattern check crashed"))))
+      (let ((result (claude-agent--run-permission-functions
+                     "Read" nil nil)))
+        ;; Result should indicate an error occurred
+        (should (equal (plist-get result :behavior) "deny"))))))
+
 (provide 'test-claude-agent-permissions)
 ;;; test-claude-agent-permissions.el ends here

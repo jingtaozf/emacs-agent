@@ -306,11 +306,11 @@
       (let ((result1 (claude-org--queue-block session-key
                                               (list :custom-id "b1" :marker marker))))
         (should result1))
-      ;; Duplicate add should return nil
+      ;; Duplicate add should return 'in-queue (not 'queued)
       (let ((marker2 (copy-marker (marker-position marker))))
         (let ((result2 (claude-org--queue-block session-key
                                                 (list :custom-id "b1" :marker marker2))))
-          (should (null result2)))))))
+          (should (eq result2 'in-queue)))))))
 
 (ert-deftest test-claude-org-queue-running-block-rejected ()
   "Test that the currently running block cannot be queued.
@@ -340,8 +340,8 @@ queue the same block should be rejected."
         (let ((result (claude-org--queue-block session-key
                                                 (list :custom-id "b1"
                                                       :marker same-marker))))
-          ;; Should be rejected - cannot queue the running block
-          (should (null result))))
+          ;; Should be rejected - returns 'running (not 'queued)
+          (should (eq result 'running))))
       ;; Queue should still be empty
       (should (= 0 (claude-org--queue-count session-key))))))
 
