@@ -202,7 +202,8 @@ query
 #+end_src
 "
    (re-search-forward "^\\*\\* Instruction 1")
-   (let ((header (claude-org--create-response-section-header 1 "2025-01-13 08:00:15")))
+   ;; Pass section-level=2 explicitly (matching the ** Instruction level)
+   (let ((header (claude-org--create-response-section-header 1 "2025-01-13 08:00:15" nil 2)))
      (should (string-match-p "\\*\\* Response 1 (2025-01-13 08:00) :ai_output:" header))
      ;; Should trim seconds
      (should-not (string-match-p "08:00:15" header)))))
@@ -218,7 +219,8 @@ query
 #+end_src
 "
    (re-search-forward "^\\*\\* Instruction 1")
-   (let ((header (claude-org--create-response-section-header 1 "2025-01-13 08:00:15" '(2 . 5))))
+   ;; Pass section-level=2 explicitly (matching the ** Instruction level)
+   (let ((header (claude-org--create-response-section-header 1 "2025-01-13 08:00:15" '(2 . 5) 2)))
      (should (string-match-p "Response 1(2/5)" header)))))
 
 (provide 'test-claude-org-response)
