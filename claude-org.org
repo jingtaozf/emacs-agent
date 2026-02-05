@@ -896,46 +896,57 @@ Returns list of (question . response) pairs for recovery."
      original-prompt)))
 
 (defun claude-org--recover-session (session-key &optional reason)
-  "Recover session for SESSION-KEY by collecting context and retrying.
+  "Recover session for SESSION-KEY by creating a new response section.
 REASON can be 'context-limit or 'expired (default).
 
-IMPORTANT: This is called from async error handler where cursor may have moved.
-All cursor-dependent operations (org-entry-get, collect-session-context) must
-be done within the marker's buffer with cursor positioned at marker location.
-
-If marker is invalid, recovery will fail gracefully and show error to user."
+Uses query-id based recovery:
+1. Find current response section by query-id
+2. Create NEW recovery response section after it
+3. Generate new query-id for recovery query
+4. Old query's callbacks will be ignored (query-id mismatch)"
   (claude-org--session-put session-key :recovering t)
-  (let ((marker (claude-org--session-get session-key :marker))
-        (msg (pcase reason
-               ('context-limit "/Context limit reached, recovering with history.../")
-               (_ "/Session expired, recovering with context.../"))))
-    ;; Check marker validity - if invalid, we can't recover
-    (if (not (claude-org--marker-valid-p marker))
-        (progn
-          (message "Claude: Cannot recover session - marker invalid")
-          (claude-org--session-put session-key :recovering nil)
-          (claude-org--session-put session-key :busy nil)
-          (claude-org--stop-spinner session-key)
-          (claude-org--refresh-header-line))
-      ;; Marker is valid - proceed with recovery
-      (with-current-buffer (marker-buffer marker)
-        ;; Position cursor at marker for all org-entry-get calls to work correctly
+  (let* ((old-query-id (claude-org--session-get session-key :query-id))
+         (reason-str (pcase reason
+                       ('context-limit "context_limit")
+                       (_ "session_expired"))))
+    ;; Try to find response section by query-id (marker-free approach)
+    (let ((response-pos (claude-org--find-response-by-query-id old-query-id)))
+      (if (not response-pos)
+          ;; Can't find response section - fail gracefully
+          (progn
+            (message "Claude: Cannot recover session - response section not found")
+            (claude-org--session-put session-key :recovering nil)
+            (claude-org--session-put session-key :busy nil)
+            (claude-org--stop-spinner session-key)
+            (claude-org--refresh-header-line))
+        ;; Found response section - create recovery section
         (save-excursion
-          (goto-char marker)
-          ;; Insert recovery message
-          (insert (format "\n%s\n\n" msg))
-          (set-marker marker (point)))
+          (goto-char response-pos)
+          ;; Move to end of current response section
+          (org-end-of-subtree t)
+          ;; Insert newlines and create NEW recovery response section
+          (insert "\n\n")
+          ;; Generate new query-id for recovery
+          (let ((new-query-id (claude-org--generate-query-id)))
+            ;; Update session with new query-id BEFORE creating section
+            (claude-org--session-put session-key :query-id new-query-id)
+            ;; Create recovery response section with parent reference
+            (claude-org--create-response-section
+             session-key new-query-id 'recovery old-query-id reason-str)
+            ;; Insert recovery message in the new section
+            (let ((recovery-msg (pcase reason
+                                  ('context-limit "/Context limit reached, recovering with history.../")
+                                  (_ "/Session expired, recovering with context.../"))))
+              (insert recovery-msg "\n\n"))))
         ;; Clear old session UUID from org property
         (claude-org--clear-sdk-uuid)
-        ;; Collect context while still positioned in correct buffer
-        ;; NOTE: collect-session-context uses org-entry-get which depends on cursor position
-        ;; but uses save-excursion internally, so being in the right buffer is sufficient
-        (let* ((context (save-excursion
-                          (goto-char marker)
-                          (claude-org--collect-session-context)))
+        ;; Collect context and send recovery request
+        (let* ((context (claude-org--collect-session-context))
                (original-prompt (claude-org--session-get session-key :original-prompt))
                (recovery-prompt (claude-org--build-recovery-prompt context original-prompt)))
-          ;; Retry with recovery prompt, passing session-key explicitly
+          ;; Clear recovering flag - the new query-id protects us now
+          (claude-org--session-put session-key :recovering nil)
+          ;; Send recovery request with new query-id already in session
           (claude-org--send-request recovery-prompt nil session-key))))))
 #+END_SRC
 
@@ -1644,6 +1655,158 @@ Uses verbose format for header-line display."
   (claude-agent-format-elapsed-time start-time 'verbose))
 #+END_SRC
 
+** Query-ID System
+
+Query-IDs provide reliable, marker-free response tracking. Each query gets a
+unique ID stored as an org property, enabling:
+- Race-free callback validation (old queries ignored)
+- Persistent response location (survives buffer kill/Emacs restart)
+- Clear audit trail (every response traceable to its query)
+
+*** Query-ID Generation
+
+#+BEGIN_SRC elisp
+(defun claude-org--generate-query-id ()
+  "Generate a unique query ID.
+Format: YYYYMMDD-HHMMSS-XXXX where XXXX is a 4-char random suffix.
+Example: 20260204-103025-a7f3"
+  (let* ((timestamp (format-time-string "%Y%m%d-%H%M%S"))
+         (random-suffix (substring (md5 (format "%s%s" (random) (current-time))) 0 4)))
+    (format "%s-%s" timestamp random-suffix)))
+#+END_SRC
+
+*** Response Section Creation
+
+#+BEGIN_SRC elisp
+(defun claude-org--create-response-section (session-key query-id query-type
+                                            &optional parent-query-id recovery-reason)
+  "Create a response section for SESSION-KEY with QUERY-ID.
+QUERY-TYPE is 'normal or 'recovery.
+For recovery queries, PARENT-QUERY-ID and RECOVERY-REASON should be provided.
+
+Returns the position where content should be inserted (after properties)."
+  (let* ((section-level (or (claude-org--session-get session-key :section-level) 1))
+         ;; Response should be at SAME level as instruction (sibling), not child
+         ;; section-level is the instruction heading level, so use it directly
+         (response-level section-level)
+         (stars (make-string response-level ?*))
+         ;; Get instruction number from session or find by :claude_chat: tag
+         ;; Note: claude-org--find-instruction-number returns nil if no :claude_chat: heading found
+         (instr-num (or (claude-org--session-get session-key :instruction-num)
+                        (claude-org--find-instruction-number)))
+         (timestamp (format-time-string "%Y-%m-%d %H:%M"))
+         ;; For recovery, use N.M numbering; for normal, just the number
+         ;; If no instruction number found, omit the number from heading
+         (response-num (cond
+                        ((null instr-num)
+                         ;; No instruction found - use timestamp-based identifier
+                         (format-time-string "%H%M%S"))
+                        ((eq query-type 'recovery)
+                         (let ((recovery-count (or (claude-org--session-get session-key :recovery-count) 0)))
+                           (claude-org--session-put session-key :recovery-count (1+ recovery-count))
+                           (format "%s.%d" instr-num (1+ recovery-count))))
+                        (t
+                         (number-to-string instr-num))))
+         (tags (if (eq query-type 'recovery)
+                   ":ai_output:recovery:"
+                 ":ai_output:"))
+         (heading (format "%s Response %s (%s) %s" stars response-num timestamp tags)))
+    (save-excursion
+      ;; Insert heading
+      (insert heading "\n")
+      ;; Insert properties
+      (insert ":PROPERTIES:\n")
+      (insert (format ":QUERY_ID: %s\n" query-id))
+      (insert (format ":QUERY_TYPE: %s\n" (symbol-name query-type)))
+      (when (and (eq query-type 'recovery) parent-query-id)
+        (insert (format ":PARENT_QUERY_ID: %s\n" parent-query-id)))
+      (when (and (eq query-type 'recovery) recovery-reason)
+        (insert (format ":RECOVERY_REASON: %s\n" recovery-reason)))
+      (insert ":END:\n\n")
+      ;; Return current position (where content will be inserted)
+      (point))))
+#+END_SRC
+
+*** Query-ID Based Response Lookup
+
+#+BEGIN_SRC elisp
+(defun claude-org--find-response-by-query-id (query-id)
+  "Find response section by QUERY-ID property.
+Returns the heading position, or nil if not found."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward
+           (format ":QUERY_ID: +%s *$" (regexp-quote query-id)) nil t)
+      (org-back-to-heading t)
+      (point))))
+#+END_SRC
+
+*** Marker-Free Token Insertion
+
+#+BEGIN_SRC elisp
+(defun claude-org--insert-at-response (session-key text)
+  "Insert TEXT at end of response section for SESSION-KEY.
+Uses query-id property lookup instead of marker.
+Returns t if insertion succeeded, nil otherwise."
+  (let ((query-id (claude-org--session-get session-key :query-id)))
+    (when query-id
+      (save-excursion
+        (let ((heading-pos (claude-org--find-response-by-query-id query-id)))
+          (when heading-pos
+            (goto-char heading-pos)
+            ;; Find the :END: of the PROPERTIES drawer
+            (if (re-search-forward "^:END:" nil t)
+                (progn
+                  ;; Skip past :END: to the blank line after it
+                  (forward-line 1)
+                  ;; Skip ONE blank line if present (the standard separator)
+                  (when (looking-at "^$")
+                    (forward-line 1))
+                  ;; If we're now at a heading, insert BEFORE it (go back to blank line)
+                  (if (looking-at "^\\*+ ")
+                      (progn
+                        (forward-line -1)
+                        (end-of-line)
+                        (insert text)
+                        t)
+                    ;; Otherwise, find the end of content in this section
+                    (let ((insert-pos (line-end-position)))
+                      ;; Search forward for next heading or end of buffer
+                      (while (and (not (eobp))
+                                  (not (looking-at "^\\*+ ")))
+                        (setq insert-pos (line-end-position))
+                        (forward-line 1))
+                      ;; insert-pos now points to end of last content line
+                      (goto-char insert-pos)
+                      (insert text)
+                      t)))
+              ;; No :END: found, fall back to end of heading line
+              (end-of-line)
+              (insert "\n" text)
+              t)))))))
+
+(defun claude-org--handle-token-v2 (session-key text)
+  "Handle incoming TEXT token for SESSION-KEY using query-id lookup.
+Normalizes org headers, auto-breaks long lines, and inserts at response section.
+This is the marker-free version using query-id."
+  (let ((query-id (claude-org--session-get session-key :query-id)))
+    (when query-id
+      (let* ((target-level (1+ (or (claude-org--session-get session-key :section-level) 0)))
+             (normalized-text (claude-org--normalize-headers-in-text text target-level))
+             ;; Auto-break long lines
+             (current-line-len (or (claude-org--session-get session-key :current-line-length) 0))
+             (break-result (claude-org--auto-break-lines normalized-text current-line-len))
+             (final-text (car break-result))
+             (new-line-len (cdr break-result)))
+        ;; Update line length state
+        (claude-org--session-put session-key :current-line-length new-line-len)
+        ;; Insert processed text using query-id lookup
+        (when (> (length final-text) 0)
+          (claude-org--insert-at-response session-key final-text))
+        ;; Schedule fontification
+        (claude-org--schedule-fontlock)))))
+#+END_SRC
+
 ** Marker Lifecycle Management
 
 Robust marker validation to prevent crashes when markers become invalid
@@ -2288,6 +2451,23 @@ Output sections (tagged =:ai_output:=) contain Claude's responses.
 Instruction detection finds which numbered instruction contains the cursor,
 used for maintaining conversation context and navigation.
 
+*** Design Note: Instruction Identification
+
+*IMPORTANT*: Instruction sections are identified by the =:claude_chat:= tag,
+NOT by heading text patterns like "Instruction N".
+
+Users may rename instruction headings to descriptive titles like
+"Fix Authentication Bug" or "Implement User Dashboard". The system must
+work correctly regardless of heading text.
+
+| Identifier | Used For | Example |
+|--------------+-------------------------------+-----------------------------------|
+| =:claude_chat:= | Finding instruction heading | =** My Task :claude_chat:= |
+| =:ai_output:= | Finding response sections | =** Response 1 :ai_output:= |
+
+All functions that need to find instruction sections MUST use
+=claude-org--find-instruction-heading= which searches by tag.
+
 #+NAME: block-detect-output-instruction
 #+BEGIN_SRC elisp
 (defun claude-org--in-output-section-p ()
@@ -2297,22 +2477,70 @@ Returns non-nil if current heading or any parent heading has the output tag."
     (let ((tags (org-get-tags nil t)))
       (member claude-org-output-tag tags))))
 
-(defun claude-org--find-instruction-number ()
-  "Extract instruction number from current or ancestor heading.
-Walks up the heading hierarchy to find the nearest Instruction N heading.
-Returns nil if not within an Instruction heading tree."
+(defun claude-org--find-instruction-heading ()
+  "Find the instruction heading for point.
+Instruction headings are identified by the :claude_chat: tag.
+
+Search order:
+1. Current heading (if it has :claude_chat: tag)
+2. Parent headings (walk up the hierarchy, checking each for tag)
+3. At each level, also check previous siblings for the tag
+
+Returns the position of the instruction heading, or nil if not found.
+
+NOTE: This function identifies instructions by TAG, not by heading text.
+Headings like \"Fix Bug :claude_chat:\" and \"Instruction 1 :claude_chat:\"
+are both valid instruction headings."
   (save-excursion
     (when (ignore-errors (org-back-to-heading t))
-      ;; Check current heading first
-      (if (looking-at "^\\*+ Instruction \\([0-9]+\\)")
-          (string-to-number (match-string 1))
-        ;; Walk up parent headings
-        (let ((found nil))
-          (while (and (not found)
-                      (ignore-errors (org-up-heading-safe)))
-            (when (looking-at "^\\*+ Instruction \\([0-9]+\\)")
-              (setq found (string-to-number (match-string 1)))))
-          found)))))
+      (let ((found nil)
+            (done nil))
+        ;; Search current heading and all ancestors
+        (while (and (not found) (not done))
+          ;; Check current heading
+          (when (member claude-org-heading-tag (org-get-tags nil t))
+            (setq found (point)))
+          ;; If not found, check previous siblings at this level
+          (unless found
+            (let ((current-level (org-current-level))
+                  (search-pos (point)))
+              (save-excursion
+                (while (and (not found)
+                            (org-get-previous-sibling))
+                  (when (and (= (org-current-level) current-level)
+                             (member claude-org-heading-tag (org-get-tags nil t)))
+                    (setq found (point)))))
+              ;; If still not found, go up one level
+              (unless found
+                (goto-char search-pos)
+                (unless (org-up-heading-safe)
+                  ;; Can't go up further, exit loop
+                  (setq done t))))))
+        found))))
+
+(defun claude-org--find-instruction-number ()
+  "Find the next response number for the current instruction section.
+Uses `claude-org--find-instruction-heading' to locate the instruction
+by its :claude_chat: tag, then counts existing Response N siblings.
+
+Returns the next available response number (max existing + 1).
+Returns nil if no instruction heading is found (caller must handle this)."
+  (save-excursion
+    (let ((instr-pos (claude-org--find-instruction-heading)))
+      (when instr-pos
+        (goto-char instr-pos)
+        (let ((instruction-level (org-current-level))
+              (max-response-num 0))
+          ;; Search forward for Response N siblings at same level
+          (save-excursion
+            (while (org-get-next-sibling)
+              (when (and (= (org-current-level) instruction-level)
+                         (looking-at "^\\*+ Response \\([0-9]+\\)"))
+                (let ((num (string-to-number (match-string 1))))
+                  (when (> num max-response-num)
+                    (setq max-response-num num))))))
+          ;; Return next number (max + 1), or 1 if no responses found
+          (1+ max-response-num))))))
 
 (defun claude-org--skip-to-after-output-section ()
   "Skip to after the current :ai_output: section.
@@ -3613,31 +3841,26 @@ Markers hold references to buffers; must be explicitly freed."
     (claude-org--session-put session-key :marker nil)))
 
 (defun claude-org--handle-complete (session-key result)
-  "Handle query completion for SESSION-KEY with RESULT."
+  "Handle query completion for SESSION-KEY with RESULT.
+Uses query-id based architecture - no markers to free."
   (claude-org--session-put session-key :busy nil)
   (claude-org--session-put session-key :recovering nil)
   (claude-org--stop-spinner session-key)
-  ;; Add newlines after response
-  (let ((marker (claude-org--session-get session-key :marker)))
-    (when (and marker (marker-buffer marker))
-      (with-current-buffer (marker-buffer marker)
-        (save-excursion
-          (goto-char marker)
-          (insert "\n")))))
+  ;; Add newline after response using query-id lookup (marker-free)
+  (let ((query-id (claude-org--session-get session-key :query-id)))
+    (when query-id
+      (claude-org--insert-at-response session-key "\n")))
   ;; Update header line
   (claude-org--refresh-header-line)
-  ;; Run completion hook (BEFORE freeing marker - hooks may need it)
+  ;; Run completion hook (no marker to pass - we're marker-free)
   (run-hook-with-args 'claude-org-complete-hook session-key result 'completed)
-  ;; Free marker to prevent memory leak (unless loop continues)
-  ;; Done AFTER hooks so extraction can use the marker
+  ;; Set status to completed (unless loop continues)
   (let ((loop-max (or (claude-org--session-get session-key :loop-max) 1))
         (loop-current (or (claude-org--session-get session-key :loop-current) 1)))
     (when (>= loop-current loop-max)
       ;; Set status to completed, but only if not already cancelled (race condition)
       (unless (equal (claude-org--get-exec-status-for-session session-key) "cancelled")
-        (claude-org--set-exec-status-for-session session-key "completed"))
-      ;; Now free the marker
-      (claude-org--free-marker session-key)))
+        (claude-org--set-exec-status-for-session session-key "completed"))))
   ;; Check for loop continuation
   (claude-org--maybe-continue-loop session-key)
   ;; Process pending queue if loop is complete and session not busy
@@ -4194,36 +4417,36 @@ If the session is busy, queues the block for execution when current query comple
             (instr-num (claude-org--find-instruction-number)))
         (unless insert-point
           (user-error "Cannot find block end"))
-        ;; Set up marker at insertion point
         ;; Capture exec-status-marker at instruction heading BEFORE inserting Response section
-        ;; (org-back-to-heading would find the new Response heading otherwise)
         (let ((exec-status-marker (save-excursion
                                     (org-back-to-heading t)
                                     (copy-marker (point)))))
-          (save-excursion
-            (goto-char insert-point)
-            (insert "\n\n")
-            ;; Create Response section if enabled and we found an instruction number
-            (when claude-org-auto-create-response-section
-              (let ((loop-info (when (> loop-max 1) (cons 1 loop-max))))
-                (insert (claude-org--create-response-section-header
-                         instr-num timestamp loop-info section-level))))
-            (let ((marker (point-marker)))
-              (claude-org--session-put session-key :marker marker)
-              (claude-org--session-put session-key :exec-status-marker exec-status-marker)
-              (claude-org--session-put session-key :original-prompt content)
-              (claude-org--session-put session-key :section-level section-level)
-              (claude-org--session-put session-key :start-time (float-time))
-              (claude-org--session-put session-key :busy t)
-              ;; Store loop state
-              (claude-org--session-put session-key :loop-max loop-max)
-              (claude-org--session-put session-key :loop-current 1)
-              (claude-org--session-put session-key :loop-interval loop-interval)
-              ;; Store instruction info for loop continuation
-              (claude-org--session-put session-key :instruction-num instr-num)
-              (claude-org--session-put session-key :custom-id custom-id)
-              ;; Run pre-execution hook
-              (run-hook-with-args 'claude-org-execute-hook session-key content marker))))
+          ;; Generate query-id FIRST (marker-free architecture)
+          (let ((query-id (claude-org--generate-query-id)))
+            ;; Store session state BEFORE creating response section
+            (claude-org--session-put session-key :query-id query-id)
+            (claude-org--session-put session-key :exec-status-marker exec-status-marker)
+            (claude-org--session-put session-key :original-prompt content)
+            (claude-org--session-put session-key :section-level section-level)
+            (claude-org--session-put session-key :start-time (float-time))
+            (claude-org--session-put session-key :busy t)
+            ;; Store loop state
+            (claude-org--session-put session-key :loop-max loop-max)
+            (claude-org--session-put session-key :loop-current 1)
+            (claude-org--session-put session-key :loop-interval loop-interval)
+            ;; Store instruction info for loop continuation
+            (claude-org--session-put session-key :instruction-num instr-num)
+            (claude-org--session-put session-key :custom-id custom-id)
+            ;; Reset recovery count for new query
+            (claude-org--session-put session-key :recovery-count 0)
+            ;; Create Response section with query-id (marker-free)
+            (save-excursion
+              (goto-char insert-point)
+              (insert "\n\n")
+              (when claude-org-auto-create-response-section
+                (claude-org--create-response-section session-key query-id 'normal)))
+            ;; Run pre-execution hook (pass nil for marker - we're marker-free now)
+            (run-hook-with-args 'claude-org-execute-hook session-key content nil))
           ;; Start spinner and send request
           (claude-org--start-spinner session-key)
           ;; Auto-generate title in parallel (using Haiku, separate session)
@@ -4236,11 +4459,10 @@ If the session is busy, queues the block for execution when current query comple
                               :loop-current 1
                               :loop-max loop-max
                               :custom-id custom-id))))
-            ;; First iteration's section header already created above
+            ;; Send request - query-id already stored in session
             (claude-org--send-request content query-ctx session-key))
-          ;; Run post-execution hook (after query sent)
-          (let ((marker (claude-org--session-get session-key :marker)))
-            (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))))
+          ;; Run post-execution hook (pass nil for marker - we're marker-free now)
+          (run-hook-with-args 'claude-org-execute-after-hook session-key content nil)))))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -4370,61 +4592,87 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
         (if claude-org-persistent-sessions
             ;; Persistent client mode: reuse long-running process
             (let ((client (claude-org--get-or-create-persistent-client session-key options)))
-              (claude-agent-client-send-message
-               client
-               full-prompt
-               :token-callback (lambda (text)
+              ;; Generate query-id for persistent client mode too
+              (let ((query-id (claude-org--session-get session-key :query-id)))
+                (claude-agent-client-send-message
+                 client
+                 full-prompt
+                 :token-callback (lexical-let ((qid query-id))
+                                   (lambda (text)
+                                     (when (buffer-live-p buf)
+                                       (with-current-buffer buf
+                                         (when (equal qid (claude-org--session-get session-key :query-id))
+                                           ;; Use marker-free v2 handler
+                                           (claude-org--handle-token-v2 session-key text))))))
+                 :on-message (lexical-let ((qid query-id))
+                               (lambda (msg)
                                  (when (buffer-live-p buf)
                                    (with-current-buffer buf
-                                     (claude-org--handle-token session-key text))))
-               :on-message (lambda (msg)
-                             (when (buffer-live-p buf)
-                               (with-current-buffer buf
-                                 (claude-org--handle-message session-key msg))))
-               :on-error (lambda (err)
-                           (when (buffer-live-p buf)
-                             (with-current-buffer buf
-                               (claude-org--handle-error session-key err))))
-               :on-complete (lambda (result)
-                              (when (buffer-live-p buf)
-                                (with-current-buffer buf
-                                  (claude-org--handle-complete session-key result)))))
-              ;; Store client state for cancellation
-              (claude-org--session-put session-key :process-state
-                                       (claude-agent-client-state client))
+                                     (when (equal qid (claude-org--session-get session-key :query-id))
+                                       (claude-org--handle-message session-key msg))))))
+                 :on-error (lexical-let ((qid query-id))
+                             (lambda (err)
+                               (when (buffer-live-p buf)
+                                 (with-current-buffer buf
+                                   (when (equal qid (claude-org--session-get session-key :query-id))
+                                     (claude-org--handle-error session-key err))))))
+                 :on-complete (lexical-let ((qid query-id))
+                                (lambda (result)
+                                  (when (buffer-live-p buf)
+                                    (with-current-buffer buf
+                                      (when (equal qid (claude-org--session-get session-key :query-id))
+                                        (claude-org--handle-complete session-key result)))))))
+                ;; Store client state and query-id
+                (claude-org--session-put session-key :process-state
+                                         (claude-agent-client-state client))
+                (claude-org--session-put session-key :query-id query-id))
               ;; Update activity timestamp
               (claude-org--update-persistent-client-activity session-key))
           ;; Legacy mode: spawn new process for each query
-          (let ((state (claude-agent-query
-                        full-prompt
-                        :options options
-                        :session-key session-key
-                        :source-buffer source-buf
-                        :query-context query-context
-                        :source-location-fn (when custom-id 'claude-org-goto-custom-id)
-                        :source-location-args (when custom-id (list custom-id))
-                        :cli-path cli-path
-                        :path-mappings path-mappings
-                        :project-root project-root
-                        :org-section org-section-name
-                        :on-token (lambda (text)
-                                    (when (buffer-live-p buf)
-                                      (with-current-buffer buf
-                                        (claude-org--handle-token session-key text))))
-                        :on-message (lambda (msg)
-                                      (when (buffer-live-p buf)
-                                        (with-current-buffer buf
-                                          (claude-org--handle-message session-key msg))))
-                        :on-error (lambda (err)
-                                    (when (buffer-live-p buf)
-                                      (with-current-buffer buf
-                                        (claude-org--handle-error session-key err))))
-                        :on-complete (lambda (result)
+          ;; Use query-id from session (already generated by claude-org-execute or recovery)
+          ;; This ensures callback validation works correctly
+          (let* ((query-id (claude-org--session-get session-key :query-id))
+                 (state (claude-agent-query
+                         full-prompt
+                         :options options
+                         :session-key session-key
+                         :source-buffer source-buf
+                         :query-context query-context
+                         :source-location-fn (when custom-id 'claude-org-goto-custom-id)
+                         :source-location-args (when custom-id (list custom-id))
+                         :cli-path cli-path
+                         :path-mappings path-mappings
+                         :project-root project-root
+                         :org-section org-section-name
+                         :on-token (lexical-let ((qid query-id))
+                                     (lambda (text)
                                        (when (buffer-live-p buf)
                                          (with-current-buffer buf
-                                           (claude-org--handle-complete session-key result)))))))
-            ;; Store process state for cancellation
-            (claude-org--session-put session-key :process-state state)))))))
+                                           ;; Only process if this is the current query
+                                           (when (equal qid (claude-org--session-get session-key :query-id))
+                                             ;; Use marker-free v2 handler
+                                             (claude-org--handle-token-v2 session-key text))))))
+                         :on-message (lexical-let ((qid query-id))
+                                       (lambda (msg)
+                                         (when (buffer-live-p buf)
+                                           (with-current-buffer buf
+                                             (when (equal qid (claude-org--session-get session-key :query-id))
+                                               (claude-org--handle-message session-key msg))))))
+                         :on-error (lexical-let ((qid query-id))
+                                     (lambda (err)
+                                       (when (buffer-live-p buf)
+                                         (with-current-buffer buf
+                                           (when (equal qid (claude-org--session-get session-key :query-id))
+                                             (claude-org--handle-error session-key err))))))
+                         :on-complete (lexical-let ((qid query-id))
+                                        (lambda (result)
+                                          (when (buffer-live-p buf)
+                                            (with-current-buffer buf
+                                              (when (equal qid (claude-org--session-get session-key :query-id))
+                                                (claude-org--handle-complete session-key result)))))))))
+            ;; Store process state and query-id
+            (claude-org--session-put session-key :process-state state)
+            (claude-org--session-put session-key :query-id query-id)))))))
 
 (defun claude-org--execute-queued-block (session-key block-info)
   "Execute a queued BLOCK-INFO for SESSION-KEY.

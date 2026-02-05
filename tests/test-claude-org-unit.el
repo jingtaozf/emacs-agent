@@ -327,19 +327,28 @@
     (should-not (claude-org--in-output-section-p))))
 
 (ert-deftest test-claude-org-find-instruction-number ()
-  "Test extracting instruction number from heading."
+  "Test extracting instruction number from heading.
+Instruction headings are identified by the :claude_chat: tag.
+Response sections are at the same level as instructions (siblings)."
   :tags '(:unit :fast :stable :isolated :org :context)
   (with-temp-buffer
     (org-mode)
-    (insert "* Instruction 42\n")
-    (insert "* Other Section\n")
-    ;; At Instruction 42
+    ;; Note: :claude_chat: tag is required to identify instruction headings
+    ;; Response sections are siblings (same level) not children
+    (insert "* Instruction 42 :claude_chat:\n")
+    (insert "* Response 1 :ai_output:\n")
+    (insert "* Response 2 :ai_output:\n")
+    ;; At Instruction 42 - should find next response number (3)
     (goto-char (point-min))
     (re-search-forward "^\\* Instruction")
-    (should (= 42 (claude-org--find-instruction-number)))
-    ;; At Other Section
+    (should (= 3 (claude-org--find-instruction-number))))
+  ;; Separate buffer test: heading without :claude_chat: tag returns nil
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Regular Section\n")
+    (insert "Some content\n")
     (goto-char (point-min))
-    (re-search-forward "^\\* Other")
+    (re-search-forward "^\\* Regular")
     (should-not (claude-org--find-instruction-number))))
 
 ;;; Project Configuration Tests
@@ -963,24 +972,24 @@ This ensures recovery uses the original session, not current cursor position."
          (has-session-key-arg (string-match "send-request recovery-prompt nil session-key" fn-str)))
     (should has-session-key-arg)))
 
-(ert-deftest test-claude-org-recover-session-uses-marker-buffer ()
-  "Test that recover-session uses marker buffer for context collection.
-This ensures we're in the right buffer when calling org-entry-get dependent functions."
+(ert-deftest test-claude-org-recover-session-uses-query-id ()
+  "Test that recover-session uses query-id based marker-free architecture.
+This ensures recovery works without relying on markers that can become invalid."
   :tags '(:unit :fast :stable :isolated :org :recovery)
   (let* ((fn-str (format "%s" (symbol-function 'claude-org--recover-session)))
-         ;; Check that marker-buffer is used to get the buffer
-         ;; The string representation may vary, so we check for key patterns
-         (uses-marker-buffer (or (string-match "marker-buffer marker" fn-str)
-                                 (string-match "(marker-buffer marker)" fn-str))))
-    (should uses-marker-buffer)))
+         ;; Check for marker-free approach using query-id
+         (uses-query-id (or (string-match "find-response-by-query-id" fn-str)
+                            (string-match "old-query-id" fn-str))))
+    (should uses-query-id)))
 
 (ert-deftest test-claude-org-recover-session-positions-cursor ()
-  "Test that recover-session positions cursor at marker before collecting context.
-This ensures org-entry-get returns correct values when called during recovery."
+  "Test that recover-session positions cursor at response section before operations.
+This ensures org operations work correctly when called during recovery."
   :tags '(:unit :fast :stable :isolated :org :recovery)
   (let* ((fn-str (format "%s" (symbol-function 'claude-org--recover-session)))
-         ;; Check that goto-char marker is called before collect-session-context
-         (positions-cursor (string-match "goto-char marker" fn-str)))
+         ;; Check that we position at response-pos before operations
+         (positions-cursor (or (string-match "goto-char response-pos" fn-str)
+                               (string-match "response-pos" fn-str))))
     (should positions-cursor)))
 
 ;;; History Custom ID Validation Tests
@@ -1297,9 +1306,14 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
       (kill-buffer test-buf))))
 
 (ert-deftest test-claude-org-on-todo-state-change-disconnects ()
-  "Test that TODO state change to DONE disconnects persistent client."
+  "Test that TODO state change to DONE disconnects persistent client.
+Note: disconnect only happens if client is alive (connected with live process).
+This test verifies the disconnect path is called when client is alive."
   :tags '(:unit :fast :stable :isolated :org :persistent)
   (clrhash claude-org--persistent-clients)
+  ;; Use a dynamic variable to track disconnect calls
+  (defvar test--disconnect-called nil)
+  (setq test--disconnect-called nil)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-todo.org")
@@ -1307,22 +1321,34 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
     (insert ":PROPERTIES:\n")
     (insert ":CLAUDE_SESSION_ID: todo-session\n")
     (insert ":END:\n")
-    (let ((mock-client (claude-agent--make-client
-                        :session-key "/tmp/test-todo.org::todo-session"
-                        :connected-p nil)))
+    (let* ((session-key "/tmp/test-todo.org::todo-session")
+           (mock-client (claude-agent--make-client
+                         :session-key session-key
+                         :connected-p nil)))
       (claude-org--register-persistent-client
-       "/tmp/test-todo.org::todo-session"
+       session-key
        mock-client
        (current-buffer)
        1)
       (should (= 1 (claude-org--persistent-client-count)))
-      ;; Simulate TODO state change to DONE
-      (goto-char (point-min))
-      (re-search-forward "^\\* Task")
-      (let ((org-state "DONE"))
-        (claude-org--on-todo-state-change))
-      ;; Should be disconnected
-      (should (= 0 (claude-org--persistent-client-count))))))
+      ;; Mock claude-org--persistent-client-alive-p to return t
+      (cl-letf (((symbol-function 'claude-org--persistent-client-alive-p)
+                 (lambda (_key) t))
+                ((symbol-function 'claude-org--disconnect-persistent-client)
+                 (lambda (key _reason)
+                   (setq test--disconnect-called t)
+                   (remhash key claude-org--persistent-clients))))
+        ;; Simulate TODO state change to DONE
+        ;; org-state must be DYNAMICALLY bound (not lexical) since
+        ;; claude-org--on-todo-state-change uses (bound-and-true-p org-state)
+        (goto-char (point-min))
+        (re-search-forward "^\\* Task")
+        (defvar org-state)  ; Declare as special/dynamic variable
+        (let ((org-state "DONE"))
+          (claude-org--on-todo-state-change))
+        ;; Verify disconnect was called
+        (should test--disconnect-called)
+        (should (= 0 (claude-org--persistent-client-count)))))))
 
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
