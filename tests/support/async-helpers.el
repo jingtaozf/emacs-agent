@@ -16,9 +16,12 @@
 
 ;;; Adaptive Waiting
 
+(defconst test-claude-default-timeout 60
+  "Default timeout in seconds for async wait operations.")
+
 (cl-defun test-claude-wait-until (predicate
                                    &key
-                                   (timeout 30)
+                                   (timeout test-claude-default-timeout)
                                    (initial-interval 0.05)
                                    (max-interval 0.5)
                                    (backoff-factor 1.5)
@@ -26,7 +29,7 @@
   "Wait for PREDICATE with adaptive backoff.
 Returns predicate result on success, nil on timeout.
 
-TIMEOUT: Maximum seconds to wait (default 30).
+TIMEOUT: Maximum seconds to wait (default `test-claude-default-timeout').
 INITIAL-INTERVAL: Starting poll interval in seconds (default 50ms).
 MAX-INTERVAL: Maximum poll interval in seconds (default 500ms).
 BACKOFF-FACTOR: Multiplier for increasing interval (default 1.5).
@@ -53,20 +56,22 @@ DESCRIPTION: Description for timeout message."
 
 (defun test-claude-wait-for-completion (session-key &optional timeout)
   "Wait for SESSION-KEY to complete with optimized polling.
-Uses adaptive backoff for efficiency."
+Uses adaptive backoff for efficiency.
+TIMEOUT defaults to `test-claude-default-timeout'."
   (test-claude-wait-until
    (lambda () (not (claude-org--session-get session-key :busy)))
-   :timeout (or timeout 30)
+   :timeout (or timeout test-claude-default-timeout)
    :initial-interval 0.05  ;; Start fast (50ms)
    :max-interval 0.3       ;; Cap at 300ms for session checks
    :description (format "session '%s' completion" session-key)))
 
 (defun test-claude-wait-for-response (response-var &optional timeout)
   "Wait for RESPONSE-VAR (symbol) to be set.
-Optimized for fast responses with quick initial polling."
+Optimized for fast responses with quick initial polling.
+TIMEOUT defaults to `test-claude-default-timeout'."
   (test-claude-wait-until
    (lambda () (symbol-value response-var))
-   :timeout (or timeout 30)
+   :timeout (or timeout test-claude-default-timeout)
    :initial-interval 0.01  ;; Very fast start (10ms)
    :max-interval 0.1       ;; Cap at 100ms for responses
    :backoff-factor 2.0     ;; Faster backoff

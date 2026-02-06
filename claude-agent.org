@@ -269,6 +269,14 @@ AskUserQuestion tool responses."
 This prevents denial-of-service via extremely large commands."
   :type 'integer
   :group 'claude-agent)
+
+(defcustom claude-agent-stdin-chunk-size 4096
+  "Maximum bytes to send in one write to prevent pipe buffer blocking.
+When sending large JSON messages to the CLI, messages are chunked into
+pieces of this size with output draining between chunks. This prevents
+deadlock when the pipe buffer fills up (typically 64KB on Linux, 16KB on macOS)."
+  :type 'integer
+  :group 'claude-agent)
 #+END_SRC
 
 * Error Handling
@@ -1359,6 +1367,68 @@ STATE is the previous process state containing session-id and callbacks."
      :source-location-args (claude-agent--process-state-source-location-args state))))
 #+END_SRC
 
+** Pipe Deadlock Prevention
+
+When using pipes for bidirectional communication, deadlock can occur if:
+1. The CLI writes to stdout faster than Emacs reads
+2. The pipe buffer fills up (64KB Linux, 16KB macOS)
+3. The CLI blocks waiting for buffer space
+4. Emacs blocks waiting for CLI to accept stdin
+
+Solution: Always drain pending output before writing to stdin, and chunk
+large messages with interleaved draining.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--drain-output (process &optional timeout-ms)
+  "Drain pending output from PROCESS before sending input.
+TIMEOUT-MS is milliseconds to wait per drain cycle, defaults to 50ms.
+Returns t if any output was drained, nil otherwise."
+  (let ((timeout-secs (/ (or timeout-ms 50) 1000.0))
+        (drained nil))
+    (while (and (process-live-p process)
+                (accept-process-output process timeout-secs nil t))
+      (setq drained t))
+    drained))
+
+(defun claude-agent--send-json-safe (process json-str session-key)
+  "Send JSON-STR to PROCESS with deadlock prevention.
+Drains output before sending, chunks large messages.
+SESSION-KEY is used for verbose logging."
+  ;; Log to verbose buffer
+  (when session-key
+    (claude-agent--verbose-insert session-key
+                                  (format ">>> STDIN: %s" json-str)))
+  (claude-agent--debug-log "Sending to stdin: %s"
+                           (substring json-str 0 (min 200 (length json-str))))
+  ;; Only send if process is alive
+  (when (process-live-p process)
+    ;; CRITICAL: Drain stdout first to prevent deadlock
+    (claude-agent--drain-output process)
+    ;; Send in chunks with interleaved draining for large messages
+    (let ((len (length json-str))
+          (pos 0)
+          (chunk-size claude-agent-stdin-chunk-size))
+      (while (< pos len)
+        ;; Drain between chunks (except first)
+        (when (> pos 0)
+          (claude-agent--drain-output process 10))
+        (let ((chunk (substring json-str pos (min (+ pos chunk-size) len))))
+          (process-send-string process chunk))
+        (setq pos (+ pos chunk-size))))))
+
+(defun claude-agent--configure-process-io (process)
+  "Configure PROCESS for optimal I/O throughput.
+Sets buffer sizes and encoding for reliable bidirectional communication."
+  (with-current-buffer (process-buffer process)
+    ;; Increase read chunk size (Emacs 27+)
+    (when (boundp 'read-process-output-max)
+      (setq-local read-process-output-max (* 1024 1024)))
+    ;; Disable adaptive buffering for lower latency
+    (setq-local process-adaptive-read-buffering nil))
+  ;; UTF-8 encoding (already set in make-process, but be explicit)
+  (set-process-coding-system process 'utf-8-unix 'utf-8-unix))
+#+END_SRC
+
 ** Streaming Mode Initialization
 
 In streaming mode, we need to:
@@ -1369,19 +1439,16 @@ In streaming mode, we need to:
 
 #+BEGIN_SRC elisp
 (defun claude-agent--send-stdin (process json-data session-key)
-  "Send JSON-DATA to PROCESS stdin and log to verbose buffer.
-SESSION-KEY is used for verbose logging."
+  "Send JSON-DATA to PROCESS stdin with deadlock prevention.
+SESSION-KEY is used for verbose logging.
+Uses `claude-agent--send-json-safe' to drain output before sending
+and chunk large messages to prevent pipe buffer blocking."
   (let* ((json-object-type 'plist)
          (json-array-type 'list)
          (json-key-type 'keyword)
          (json-str (concat (json-encode json-data) "\n")))
-    ;; Log to verbose buffer
-    (when session-key
-      (claude-agent--verbose-insert session-key
-                                    (format ">>> STDIN: %s" json-str)))
-    (claude-agent--debug-log "Sending to stdin: %s"
-                            (substring json-str 0 (min 200 (length json-str))))
-    (process-send-string process json-str)))
+    ;; Use safe send with draining and chunking
+    (claude-agent--send-json-safe process json-str session-key)))
 
 (defun claude-agent--streaming-init (process state prompt)
   "Initialize streaming mode for PROCESS with STATE and send PROMPT.
@@ -1676,6 +1743,8 @@ Returns a process state object."
       (process-put process 'claude-agent-state state)
       (setf (claude-agent--process-state-process state) process)
       (setf (claude-agent--process-state-buffer state) (process-buffer process))
+      ;; Configure I/O for optimal throughput and deadlock prevention
+      (claude-agent--configure-process-io process)
       ;; Register query for cancellation tracking
       (claude-agent--register-query req-id state)
       ;; Initialize verbose buffer for session if session-key provided
@@ -2297,7 +2366,10 @@ Also untracks the request from pending control requests."
     (claude-agent--untrack-control-request request-id)
     ;; Only send if process is still alive
     (if (process-live-p process)
-        (process-send-string process json)
+        (progn
+          ;; CRITICAL: Drain pending output before sending to prevent deadlock
+          (claude-agent--drain-output process)
+          (process-send-string process json))
       ;; Log when we can't send the response - this indicates the CLI died unexpectedly
       (claude-agent--debug-log "WARNING: Cannot send control_response - process is dead (id=%s)"
                                request-id)
@@ -4832,19 +4904,26 @@ target language interactively.
 *** Core Translation Function
 
 #+BEGIN_SRC elisp
-(defun claude-agent-translate (text language)
-  "Translate TEXT to LANGUAGE with streaming output."
+(defun claude-agent-translate (text language &optional extra-options)
+  "Translate TEXT to LANGUAGE with streaming output.
+EXTRA-OPTIONS is an optional plist to merge with default options."
   (when claude-agent-translate--active-state
     (user-error "Translation already in progress"))
   (let* ((prompt (format "Translate the following text to %s. \
 Preserve all formatting, structure, code blocks, and markup. \
 Output only the translation without any explanation:\n\n%s"
                          language text))
-         (buf (claude-agent-translate--setup-buffer language text)))
+         (buf (claude-agent-translate--setup-buffer language text))
+         (base-options (claude-agent-options :model claude-agent-translate-model))
+         (options (if extra-options
+                      (apply #'claude-agent-options
+                             :model claude-agent-translate-model
+                             extra-options)
+                    base-options)))
     (setq claude-agent-translate--active-state
           (claude-agent-query
            prompt
-           :options (claude-agent-options :model claude-agent-translate-model)
+           :options options
            :on-token #'claude-agent-translate--insert-token
            :on-error (lambda (err)
                        (claude-agent-translate--complete

@@ -26,6 +26,12 @@
 (when (boundp 'emacs-mcp-server-default-port)
   (setq emacs-mcp-server-default-port 0))
 
+;; IMPORTANT: Skip user-level settings (plugins) during tests
+;; This prevents tests from hanging due to plugin updates/git operations
+;; By using "local" setting-source, we only use project-local settings
+(defvar test-claude-default-setting-sources '("local")
+  "Default setting-sources for tests to skip slow plugin loading.")
+
 ;;; Configuration Variables
 
 (defvar test-claude-fixture-dir
@@ -38,7 +44,7 @@
   (expand-file-name "test-session.org" test-claude-fixture-dir)
   "Path to test session org file.")
 
-(defvar test-claude-timeout 30
+(defvar test-claude-timeout 60
   "Default timeout for integration tests in seconds.")
 
 (defvar test-claude-project-root
@@ -58,6 +64,13 @@ Can be overridden via CLAUDE_TEST_PROJECT_ROOT environment variable.")
   "Check if Claude CLI is available.
 Returns t if claude command is found, nil otherwise."
   (executable-find "claude"))
+
+(defun test-claude-default-options (&rest args)
+  "Create default options for tests, merged with ARGS.
+Uses `test-claude-default-setting-sources' to skip slow plugin loading."
+  (apply #'claude-agent-options
+         :setting-sources test-claude-default-setting-sources
+         args))
 
 (defun test-claude-skip-unless-cli-available ()
   "Skip test if Claude CLI is not available."

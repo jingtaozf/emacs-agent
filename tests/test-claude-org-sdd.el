@@ -18,6 +18,37 @@
 
 ;;; Unit Tests - Structure Creation
 
+(ert-deftest test-sdd-insert-creates-system-prompt-first ()
+  "Test that claude-org-insert-sdd creates System Prompt as the first subsection.
+The default content should indicate the current SDD story name."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd.org")
+    (cl-letf (((symbol-function 'read-string) (lambda (_) "My SDD Story")))
+      (claude-org-insert-sdd))
+    ;; Verify System Prompt exists with :system_prompt: tag
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
+    ;; Verify it has CUSTOM_ID
+    (should (org-entry-get nil "CUSTOM_ID"))
+    ;; Verify it comes BEFORE Workflow (first subsection)
+    (let ((system-prompt-pos (point)))
+      (goto-char (point-min))
+      (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
+      (let ((workflow-pos (point)))
+        (should (< system-prompt-pos workflow-pos))))
+    ;; Verify default content contains the SDD story name
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+    (forward-line 1)
+    ;; Skip past PROPERTIES drawer
+    (when (looking-at ":PROPERTIES:")
+      (re-search-forward ":END:" nil t)
+      (forward-line 1))
+    ;; Should find the default content with the story name
+    (should (re-search-forward "The current SDD story is \"My SDD Story\"" nil t))))
+
 (ert-deftest test-sdd-insert-creates-four-sections ()
   "Test that claude-org-insert-sdd creates Workflow, Research Output, Spec, and Features sections."
   :tags '(:unit :fast :stable :isolated :org :sdd)
@@ -659,6 +690,8 @@ were not inherited because org-get-tags was called with LOCAL=t."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (let ((links (claude-org--generate-sdd-links "/tmp/test.org" "My Feature" "sdd-12345")))
     (should (stringp links))
+    ;; Should include System Prompt section (first, for AI to update SDD guidance)
+    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-system-prompt-sdd-12345\\]\\[System Prompt\\]\\]" links))
     ;; Should use #custom-id format with file-base-section-session pattern
     (should (string-match-p "\\[\\[file:/tmp/test.org::#test-research-output-sdd-12345\\]\\[Research Output\\]\\]" links))
     (should (string-match-p "\\[\\[file:/tmp/test.org::#test-spec-sdd-12345\\]\\[Spec\\]\\]" links))

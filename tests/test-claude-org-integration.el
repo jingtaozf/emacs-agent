@@ -73,8 +73,9 @@
 (ert-deftest test-org-integration-independent-sessions ()
   "Test that :claude_session: tagged sections are independent.
 Session A remembers '42', Session B remembers 'blue'.
-Session B should NOT know about '42' from Session A."
-  :tags '(:integration :slow :api :org :session)
+Session B should NOT know about '42' from Session A.
+FLAKY: Depends on Claude's context management and response timing."
+  :tags '(:integration :slow :api :org :session :flaky)
   (test-claude-skip-unless-cli-available)
 
   (test-claude-with-fixture
@@ -280,7 +281,7 @@ should be able to execute in parallel without interference."
              (should active-header))
 
            ;; Wait for completion
-           (test-claude-wait-for-completion session-key 30)
+           (test-claude-wait-for-completion session-key 60)
 
            ;; Header should still exist after completion
            (let ((final-header header-line-format))
@@ -443,7 +444,7 @@ should be able to execute in parallel without interference."
          (should (get-buffer "*Claude Org Sessions*"))
 
          ;; Clean up - wait for completion and kill session buffer
-         (test-claude-wait-for-completion session-key 30)
+         (test-claude-wait-for-completion session-key 60)
          (when (get-buffer "*Claude Org Sessions*")
            (kill-buffer "*Claude Org Sessions*")))))))
 
@@ -514,7 +515,7 @@ generated in parallel using Haiku and the heading should be updated."
            (let ((session-key (claude-org--current-session-key)))
              (claude-org-execute)
              ;; Wait for main query to complete
-             (test-claude-wait-for-completion session-key 30)
+             (test-claude-wait-for-completion session-key 60)
              ;; Wait a bit more for title generation (runs in parallel, may finish after)
              (sleep-for 2.0)
              (accept-process-output nil 1.0)
@@ -548,7 +549,7 @@ Headings that don't match 'Instruction N' pattern should not be changed."
              (let ((session-key (claude-org--current-session-key))
                    (claude-org-auto-generate-title t))
                (claude-org-execute)
-               (test-claude-wait-for-completion session-key 30)
+               (test-claude-wait-for-completion session-key 60)
                ;; Wait for potential title generation
                (sleep-for 2.0)
                (accept-process-output nil 1.0)
@@ -615,7 +616,7 @@ buffer and instruction number for better identification."
              ;; Should contain "#1" for instruction number
              (should (string-match-p "#1" identity))))
          ;; Wait for completion
-         (test-claude-wait-for-completion session-key 30))))))
+         (test-claude-wait-for-completion session-key 60))))))
 
 (ert-deftest test-org-integration-mode-line-shows-identity ()
   "Test that mode-line shows query identity for single active query."
@@ -645,7 +646,7 @@ buffer and instruction number for better identification."
            ;; For single query with source info, should show "#1"
            (when (= 1 (claude-agent-active-query-count))
              (should (string-match-p "#1" claude-agent-activity-string))))
-         (test-claude-wait-for-completion session-key 30))))))
+         (test-claude-wait-for-completion session-key 60))))))
 
 ;;; Link Resolution Tests
 
@@ -667,8 +668,9 @@ Instruction 17 asks Claude to read [[*Important Config]] and find the value."
 
 (ert-deftest test-org-integration-resolve-file-link-heading ()
   "Test that Claude resolves file links with heading [[file:path::*Heading]].
-Instruction 18 asks Claude to resolve [[file:test-session.org::*Project Guidelines]]."
-  :tags '(:integration :slow :api :org :links)
+Instruction 18 asks Claude to resolve [[file:test-session.org::*Project Guidelines]].
+FLAKY: Depends on MCP server responsiveness and Claude's link resolution."
+  :tags '(:integration :slow :api :org :links :flaky)
   (test-claude-skip-unless-cli-available)
   (test-claude-skip-unless-mcp-server-available)
 

@@ -29,6 +29,7 @@
         (completed nil))
     (claude-agent-query
      "What is 2+2? Answer with just the number."
+     :options (test-claude-default-options)
      :on-token (lambda (text)
                  (push text tokens))
      :on-message (lambda (msg)
@@ -55,6 +56,7 @@ so :on-token is called once per message with the full text content."
         (completed nil))
     (claude-agent-query
      "Count from 1 to 3 slowly: one, two, three."
+     :options (test-claude-default-options)
      :on-token (lambda (text)
                  (cl-incf token-count)
                  (setq token-text (concat token-text text)))
@@ -82,6 +84,7 @@ so :on-token is called once per message with the full text content."
     ;; First query - establish session
     (claude-agent-query
      "Remember this number: 42. Just confirm you remember it."
+     :options (test-claude-default-options)
      :session-key session-key
      :on-message (lambda (msg)
                    (when (claude-agent-result-message-p msg)
@@ -98,7 +101,7 @@ so :on-token is called once per message with the full text content."
     ;; Second query - continue session
     (claude-agent-query
      "What number did I ask you to remember? Just the number."
-     :options (claude-agent-options :resume sdk-uuid)
+     :options (test-claude-default-options :resume sdk-uuid)
      :session-key session-key
      :on-message (lambda (msg)
                    (when (claude-agent-assistant-message-p msg)
@@ -133,7 +136,7 @@ NOTE: This test can be flaky due to API variability."
         (error-occurred nil))
     (claude-agent-query
      "Use the Read tool to read the file README.md and tell me the first word."
-     :options (claude-agent-options
+     :options (test-claude-default-options
                :cwd (expand-file-name "~/projects/claude-agent")
                :permission-mode "acceptEdits")
      :on-message (lambda (msg)
@@ -175,7 +178,7 @@ NOTE: This test can be flaky due to API variability."
         (error-occurred nil))
     (claude-agent-query
      "What is 2+2? Just give me the number."
-     :options (claude-agent-options
+     :options (test-claude-default-options
                :cwd (expand-file-name "~/projects/claude-agent")
                :permission-mode "default")
      :on-message (lambda (msg)
@@ -206,6 +209,7 @@ an auth error since CLI ignores the environment variable."
         (error-occurred nil))
     (claude-agent-query
      "What is 2+2?"
+     :options (test-claude-default-options)
      :on-message (lambda (msg)
                    (when (claude-agent-assistant-message-p msg)
                      (setq response (claude-agent-extract-text msg))))
@@ -234,6 +238,7 @@ an auth error since CLI ignores the environment variable."
     ;; Start first query
     (claude-agent-query
      "What is 2+2?"
+     :options (test-claude-default-options)
      :session-key "concurrent-1"
      :on-message (lambda (msg)
                    (when (claude-agent-assistant-message-p msg)
@@ -244,6 +249,7 @@ an auth error since CLI ignores the environment variable."
     ;; Start second query immediately
     (claude-agent-query
      "What is 3+3?"
+     :options (test-claude-default-options)
      :session-key "concurrent-2"
      :on-message (lambda (msg)
                    (when (claude-agent-assistant-message-p msg)
@@ -271,6 +277,7 @@ an auth error since CLI ignores the environment variable."
     ;; Start a slow query
     (setq state (claude-agent-query
                  "Write a very long story about numbers..."
+                 :options (test-claude-default-options)
                  :session-key "cancellation-test"
                  :on-complete (lambda (_result)
                                 ;; Should not complete
@@ -305,8 +312,9 @@ Translates 'Hello, world!' to Chinese and verifies output contains Chinese chara
   (when-let ((buf (get-buffer claude-agent-translate-buffer-name)))
     (kill-buffer buf))
 
-  ;; Run translation
-  (claude-agent-translate "Hello, world!" "Chinese")
+  ;; Run translation (with setting-sources to skip slow plugin loading)
+  (claude-agent-translate "Hello, world!" "Chinese"
+                          (list :setting-sources test-claude-default-setting-sources))
 
   ;; Wait for completion (translation should be quick with haiku model)
   (should (test-claude-wait-until
@@ -342,6 +350,7 @@ before the result message."
         (completed nil))
     (claude-agent-query
      "What is 2+2? Just the number."
+     :options (test-claude-default-options)
      :on-message (lambda (msg)
                    ;; Capture session-id from system/init message
                    (when (and (claude-agent-system-message-p msg)
@@ -383,6 +392,7 @@ Starts a long-running query, kills the process, and verifies:
     ;; Start a query that will take some time
     (setq state (claude-agent-query
                  "Count slowly from 1 to 20, saying each number on a new line."
+                 :options (test-claude-default-options)
                  :session-key "recovery-test"
                  :on-token (lambda (text)
                              (push text tokens)
@@ -436,6 +446,7 @@ should just trigger the error callback without recovery."
 
     (setq state (claude-agent-query
                  "Count from 1 to 100 slowly."
+                 :options (test-claude-default-options)
                  :session-key "recovery-disabled-test"
                  :on-token (lambda (text)
                              (when (string-match-p "Session interrupted" text)
@@ -550,6 +561,7 @@ Claude's response references the selected answer."
 
         (claude-agent-query
          "I need you to ask me about my preferred output format. Use the AskUserQuestion tool to ask me: 'What is your preferred output format?' with options 'Summary' and 'Detailed'. Then tell me what I chose."
+         :options (test-claude-default-options)
          :session-key "ask-user-test"
          :on-message (lambda (msg)
                        (when (claude-agent-assistant-message-p msg)
@@ -576,6 +588,7 @@ Claude's response references the selected answer."
 
     (claude-agent-query
      "Ask me which features I want using AskUserQuestion with multiSelect=true. Options should be Feature1, Feature2, Feature3. The question should be 'Which features would you like?'. Then summarize my choices."
+     :options (test-claude-default-options)
      :session-key "ask-user-multi-test"
      :on-message (lambda (msg)
                    (when (claude-agent-assistant-message-p msg)

@@ -51,6 +51,11 @@
   - [[#persistent-client-registry][Persistent Client Registry]]
   - [[#lifecycle-hooks][Lifecycle Hooks]]
   - [[#session-state-accessors][Session State Accessors]]
+  - [[#query-id-system][Query-ID System]]
+    - [[#query-id-generation][Query-ID Generation]]
+    - [[#response-section-creation][Response Section Creation]]
+    - [[#query-id-based-response-lookup][Query-ID Based Response Lookup]]
+    - [[#marker-free-token-insertion][Marker-Free Token Insertion]]
   - [[#marker-lifecycle-management][Marker Lifecycle Management]]
   - [[#pending-block-queue][Pending Block Queue]]
   - [[#execution-status-property][Execution Status Property]]
@@ -71,6 +76,7 @@
   - [[#ai-block-boundary-detection][AI Block Boundary Detection]]
   - [[#block-content-replacement][Block Content Replacement]]
   - [[#output-section-and-instruction-detection][Output Section and Instruction Detection]]
+    - [[#design-note-instruction-identification][Design Note: Instruction Identification]]
 - [[#block-insertion][Block Insertion]]
   - [[#instruction-numbering][Instruction Numbering]]
   - [[#standard-block-insertion][Standard Block Insertion]]
@@ -2063,7 +2069,8 @@ Returns a formatted string with links to Research Output, Spec, Features,
 including their heading levels so AI knows correct subsection depth.
 Returns nil if session-id is missing (legacy SDD without proper IDs)."
   (when (and file-path sdd-root session-id)
-    (let ((sections '(("Research Output" . "research_output")
+    (let ((sections '(("System Prompt" . "system_prompt")
+                      ("Research Output" . "research_output")
                       ("Spec" . "spec")
                       ("Features" . "features")))
           (file-base (file-name-base file-path)))
@@ -2988,13 +2995,15 @@ property starting with 'sdd-'. Returns the level (integer) or nil if not found."
 
 (defun claude-org-insert-sdd ()
   "Insert an SDD (Spec-Driven Development) structure.
-Creates four sections in order:
-1. Workflow :sdd: with a single AI block (user adds phase tags manually)
-2. Research Output :research_output: with Patterns/Files/External subsections
-3. Spec :spec: with Goals/Non-Goals/Proposed Solution/Technical Design
-4. Features :features: with ORDERED property for TODO tracking
+Creates five sections in order:
+1. System Prompt :system_prompt: for AI guidance instructions
+2. Workflow :sdd: with a single AI block (user adds phase tags manually)
+3. Research Output :research_output: with Patterns/Files/External subsections
+4. Spec :spec: with Goals/Non-Goals/Proposed Solution/Technical Design
+5. Features :features: with ORDERED property for TODO tracking
 
 The structure follows the Atomic workflow pattern:
+- System Prompt: Instructions to guide AI behavior and output structure
 - Workflow: AI interaction happens here (user selects phase tags per block)
 - Research Output: Synthesized findings from exploration
 - Spec: Living RFC document that evolves with the project
@@ -3021,7 +3030,14 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":CLAUDE_SESSION_ID: " session-id "\n")
     (insert ":END:\n\n")
 
-    ;; 1. Insert Workflow section with single AI block (no phase tags)
+    ;; 1. Insert System Prompt section for AI guidance
+    (insert stars2 " System Prompt :system_prompt:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "System Prompt" file-base) "\n")
+    (insert ":END:\n\n")
+    (insert (format "The current SDD story is \"%s\"\n\n" name))
+
+    ;; 2. Insert Workflow section with single AI block (no phase tags)
     (insert stars2 " Workflow :sdd:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Workflow" file-base) "\n")
@@ -3033,7 +3049,7 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":END:\n\n")
     (insert "#+begin_src ai\n\n#+end_src\n\n")
 
-    ;; 2. Insert Research Output section for findings
+    ;; 3. Insert Research Output section for findings
     (insert stars2 " Research Output :research_output:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Research Output" file-base) "\n")
@@ -3041,7 +3057,7 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (dolist (section '("Codebase Patterns" "Relevant Files" "External References"))
       (insert stars3 " " section "\n\n"))
 
-    ;; 3. Insert Spec section with subsections
+    ;; 4. Insert Spec section with subsections
     (insert stars2 " Spec :spec:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Spec" file-base) "\n")
@@ -3049,7 +3065,7 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (dolist (section '("Goals" "Non-Goals" "Proposed Solution" "Technical Design"))
       (insert stars3 " " section "\n\n"))
 
-    ;; 4. Insert Features section with ORDERED property and CUSTOM_ID
+    ;; 5. Insert Features section with ORDERED property and CUSTOM_ID
     (insert stars2 " Features :features:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Features" file-base) "\n")
@@ -3842,9 +3858,10 @@ Markers hold references to buffers; must be explicitly freed."
 
 (defun claude-org--handle-complete (session-key result)
   "Handle query completion for SESSION-KEY with RESULT.
-Uses query-id based architecture - no markers to free."
+Uses query-id based architecture with marker for queue duplicate detection."
   (claude-org--session-put session-key :busy nil)
   (claude-org--session-put session-key :recovering nil)
+  (claude-org--free-marker session-key)
   (claude-org--stop-spinner session-key)
   ;; Add newline after response using query-id lookup (marker-free)
   (let ((query-id (claude-org--session-get session-key :query-id)))
@@ -4422,10 +4439,13 @@ If the session is busy, queues the block for execution when current query comple
                                     (org-back-to-heading t)
                                     (copy-marker (point)))))
           ;; Generate query-id FIRST (marker-free architecture)
-          (let ((query-id (claude-org--generate-query-id)))
+          (let ((query-id (claude-org--generate-query-id))
+                ;; Create marker at current AI block position for queue duplicate detection
+                (block-marker (copy-marker (point))))
             ;; Store session state BEFORE creating response section
             (claude-org--session-put session-key :query-id query-id)
             (claude-org--session-put session-key :exec-status-marker exec-status-marker)
+            (claude-org--session-put session-key :marker block-marker)
             (claude-org--session-put session-key :original-prompt content)
             (claude-org--session-put session-key :section-level section-level)
             (claude-org--session-put session-key :start-time (float-time))
