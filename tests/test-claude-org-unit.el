@@ -1160,6 +1160,115 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
             (should (string-match-p "Root Cause" result))))
       (kill-buffer buf))))
 
+;;; External Template Loading Tests
+
+(ert-deftest test-claude-org-templates-file-path ()
+  "Test that template file path resolves to a file in the package directory."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((path (claude-org--templates-file-path)))
+    (should (stringp path))
+    (should (string-match-p "claude-org-templates\\.el$" path))))
+
+(ert-deftest test-claude-org-load-templates-from-file ()
+  "Test loading templates from a data file."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((tmp-file (make-temp-file "claude-org-templates-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp-file
+            (insert "((\"Test A\" . \"prompt A\")\n")
+            (insert " (\"Test B\" . \"prompt B\"))\n"))
+          (let ((result (claude-org--load-templates-from-file tmp-file)))
+            (should (listp result))
+            (should (= 2 (length result)))
+            (should (equal "prompt A" (cdr (assoc "Test A" result))))
+            (should (equal "prompt B" (cdr (assoc "Test B" result))))))
+      (delete-file tmp-file))))
+
+(ert-deftest test-claude-org-load-templates-from-file-with-functions ()
+  "Test loading templates that reference function symbols."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((tmp-file (make-temp-file "claude-org-templates-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp-file
+            (insert "((\"Backtrace\" . claude-org-template--backtrace)\n")
+            (insert " (\"Simple\" . \"hello\"))\n"))
+          (let ((result (claude-org--load-templates-from-file tmp-file)))
+            (should (= 2 (length result)))
+            (should (eq 'claude-org-template--backtrace
+                        (cdr (assoc "Backtrace" result))))
+            (should (equal "hello" (cdr (assoc "Simple" result))))))
+      (delete-file tmp-file))))
+
+(ert-deftest test-claude-org-load-templates-skips-comments ()
+  "Test that loader skips elisp comments before the data form."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((tmp-file (make-temp-file "claude-org-templates-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp-file
+            (insert ";;; my-templates.el --- custom templates\n\n")
+            (insert ";; A comment\n\n")
+            (insert "((\"Only\" . \"one\"))\n"))
+          (let ((result (claude-org--load-templates-from-file tmp-file)))
+            (should (= 1 (length result)))
+            (should (equal "one" (cdr (assoc "Only" result))))))
+      (delete-file tmp-file))))
+
+(ert-deftest test-claude-org-load-templates-missing-file ()
+  "Test that loading from a missing file returns nil."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (should (null (claude-org--load-templates-from-file
+                 "/nonexistent/path/templates.el"))))
+
+(ert-deftest test-claude-org-load-templates-malformed-file ()
+  "Test that loading from a malformed file returns nil."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((tmp-file (make-temp-file "claude-org-templates-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp-file
+            (insert "this is not valid elisp (((\n"))
+          (should (null (claude-org--load-templates-from-file tmp-file))))
+      (delete-file tmp-file))))
+
+(ert-deftest test-claude-org-load-templates-empty-file ()
+  "Test that loading from an empty file returns nil."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((tmp-file (make-temp-file "claude-org-templates-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp-file
+            (insert ""))
+          (should (null (claude-org--load-templates-from-file tmp-file))))
+      (delete-file tmp-file))))
+
+(ert-deftest test-claude-org-define-templates-sets-value ()
+  "Test that claude-org-define-templates sets the templates variable."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((claude-org-templates nil)
+        (templates '(("X" . "prompt X"))))
+    (claude-org-define-templates templates)
+    (should (equal templates claude-org-templates))))
+
+(ert-deftest test-claude-org-default-templates-file-exists ()
+  "Test that the default templates file exists in the package."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((path (claude-org--templates-file-path)))
+    (should (file-exists-p path))))
+
+(ert-deftest test-claude-org-default-templates-file-loadable ()
+  "Test that the default templates file loads successfully."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((path (claude-org--templates-file-path)))
+    (let ((result (claude-org--load-templates-from-file path)))
+      (should (listp result))
+      (should (> (length result) 0))
+      ;; Should have known default templates
+      (should (assoc "Code Review" result))
+      (should (assoc "Analyze Backtrace" result)))))
+
 ;;; Persistent Client Registry Tests
 
 (ert-deftest test-claude-org-persistent-client-registry-empty ()

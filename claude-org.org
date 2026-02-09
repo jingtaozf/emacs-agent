@@ -3204,35 +3204,47 @@ Insert predefined prompts into AI blocks via menu selection.
 ** Configuration
 
 #+BEGIN_SRC elisp
+(defun claude-org--templates-file-path ()
+  "Return the path to the default templates file.
+Derives the package directory from `claude-org-prompts-directory' (which is
+resolved at load time) and looks for `claude-org-templates.el' there."
+  (let ((pkg-dir (file-name-directory
+                  (directory-file-name claude-org-prompts-directory))))
+    (expand-file-name "claude-org-templates.el" pkg-dir)))
+
+(defun claude-org-define-templates (templates)
+  "Set `claude-org-templates' to TEMPLATES.
+TEMPLATES is an alist of (NAME . VALUE) where VALUE is a string or function symbol."
+  (setq claude-org-templates templates))
+
+(defun claude-org--load-templates-from-file (file)
+  "Load templates from FILE as data and return the alist.
+Returns nil if FILE does not exist or cannot be read.
+The file should contain a single top-level alist as its first readable form."
+  (when (and file (file-exists-p file))
+    (condition-case nil
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          ;; Skip comments and whitespace to find the data form
+          (while (forward-comment 1))
+          (let ((data (read (current-buffer))))
+            (when (listp data) data)))
+      (error nil))))
+
+(defcustom claude-org-templates-file nil
+  "Path to external file containing template definitions.
+When nil, uses the default `claude-org-templates.el' in the package directory.
+The file should contain a single alist as its first readable form.
+Set to a custom path to override the default templates."
+  :type '(choice (const :tag "Default (package directory)" nil)
+                 (file :tag "Custom templates file"))
+  :group 'claude-org)
+
 (defcustom claude-org-templates
-  '(("Analyze Backtrace" . claude-org-template--backtrace)
-    ("Code Review" . "Please review this code for:
-1. Bugs and potential issues
-2. Code style and readability
-3. Performance concerns
-4. Security vulnerabilities
-
-")
-    ("Explain Code" . "Please explain what this code does, including:
-1. Overall purpose
-2. Key functions and their roles
-3. Data flow
-4. Any notable patterns or techniques
-
-")
-    ("Fix Error" . "Please help fix this error:
-
-Error:
-
-Context:
-
-")
-    ("Git Commit and Push" . "Please commit and push the changes.
-
-Note: If there are pre-commit hooks configured, please wait for them to complete
-before considering the commit successful. If hooks fail, fix the issues and retry.
-
-"))
+  (claude-org--load-templates-from-file
+   (or claude-org-templates-file
+       (claude-org--templates-file-path)))
   "Alist of templates for AI block insertion.
 Each entry is (NAME . TEMPLATE) where:
 - NAME is a string displayed in the completion menu
@@ -3240,7 +3252,11 @@ Each entry is (NAME . TEMPLATE) where:
   - A string to insert verbatim
   - A function (no args) returning a string
 
-Templates are inserted at point within the current AI block."
+Default values are loaded from `claude-org-templates-file' (or the built-in
+`claude-org-templates.el').  To customize, either:
+  1. Edit `claude-org-templates.el' in the package directory
+  2. Set `claude-org-templates-file' to your own file
+  3. Set this variable directly in your init file"
   :type '(alist :key-type (string :tag "Template name")
                 :value-type (choice (string :tag "Template text")
                                     (function :tag "Generator function")))
