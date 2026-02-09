@@ -4236,6 +4236,7 @@ For generic 'Instruction N' headings, uses first line of AI query instead."
     (save-excursion
       (save-restriction
         (widen)
+        (goto-char (point-min))
         (condition-case nil
             (progn
               ;; Navigate to the heading with CUSTOM_ID
@@ -4298,27 +4299,105 @@ Builds title dynamically from CUSTOM_ID to show current heading hierarchy."
               t)
           (error nil))))))
 
+(defun claude-org--get-story-name-for-custom-id (custom-id)
+  "Get the story name for a block identified by CUSTOM_ID.
+Navigates to the heading, walks up to find the ancestor with
+CLAUDE_SESSION_ID property, and returns its heading text.
+Returns nil if no session-scope heading is found."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              (let ((pos (claude-org--find-session-scope-heading)))
+                (when pos
+                  (goto-char pos)
+                  (substring-no-properties (org-get-heading t t t t)))))
+          (error nil))))))
+
+(defun claude-org--build-candidate-info (custom-id)
+  "Build display info for CUSTOM_ID in a single navigation pass.
+Returns (TITLE . STORY-NAME) or nil if CUSTOM_ID not found.
+TITLE is the heading hierarchy string, STORY-NAME is the session ancestor
+heading text (or nil if no session-scope heading).
+This avoids multiple `org-link-search' calls per candidate."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              ;; Build title from heading hierarchy
+              (let* ((heading (substring-no-properties (org-get-heading t t t t)))
+                     (is-generic (string-match-p "^Instruction [0-9]+$" heading))
+                     (effective-heading (if is-generic
+                                            (or (claude-org--extract-query-title-from-ai-block)
+                                                heading)
+                                          heading))
+                     (headings (list effective-heading))
+                     (story-name nil))
+                ;; Walk up parents: collect headings AND find story
+                (save-excursion
+                  (while (org-up-heading-safe)
+                    (let ((parent (substring-no-properties (org-get-heading t t t t))))
+                      (unless (string= parent "Workflow")
+                        (push parent headings)))
+                    ;; Check if this heading defines the session scope
+                    (when (and (not story-name)
+                               (or (claude-org--has-session-tag-p)
+                                   (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+                      (setq story-name
+                            (substring-no-properties (org-get-heading t t t t))))))
+                (cons (string-join (reverse headings) " > ")
+                      story-name)))
+          (error nil))))))
+
 (defun claude-org--collect-recent-blocks ()
   "Collect recent blocks for completing-read.
 Returns alist of (DISPLAY-STRING . ENTRY).
 Only includes entries with CUSTOM_ID that still exist in the buffer.
-Limited by `claude-org-history-max-entries'."
+Limited by `claude-org-history-max-entries'.
+Each DISPLAY-STRING is prefixed with [Story Name] for grouping.
+Uses single-pass navigation per candidate to avoid redundant searches."
   (claude-org--ensure-history-loaded)
   (let* ((entries-with-id (cl-remove-if-not
                            (lambda (entry)
                              (and (listp entry)
                                   (plist-get (cdr entry) :custom-id)))
                            claude-org--block-history))
-         ;; Filter to only entries whose CUSTOM_ID still exists in buffer
-         (valid-entries (cl-remove-if-not
-                         (lambda (entry)
-                           (claude-org--custom-id-exists-p
-                            (plist-get (cdr entry) :custom-id)))
-                         entries-with-id))
-         (limited-entries (seq-take valid-entries claude-org-history-max-entries)))
-    (mapcar (lambda (entry)
-              (cons (claude-org--format-block-candidate entry) entry))
-            limited-entries)))
+         ;; Build candidate info in single pass per entry
+         ;; This replaces separate exists-p + format + story-name calls
+         (candidates nil)
+         (count 0))
+    (dolist (entry entries-with-id)
+      (when (< count claude-org-history-max-entries)
+        (let* ((plist (cdr entry))
+               (custom-id (plist-get plist :custom-id))
+               (info (claude-org--build-candidate-info custom-id)))
+          ;; info is (TITLE . STORY) or nil if CUSTOM_ID not found
+          (when info
+            (let* ((title (car info))
+                   (story (or (cdr info) "Ungrouped"))
+                   (status (plist-get plist :status))
+                   (timestamp (plist-get plist :timestamp))
+                   (status-icon (pcase status
+                                  ('completed "✓")
+                                  ('in-progress "⋯")
+                                  ('error "✗")
+                                  (_ "?")))
+                   (time-str (if timestamp
+                                 (claude-org--format-time-ago timestamp)
+                               "unknown"))
+                   (display (format "[%s] [%s] %s (%s)"
+                                    story status-icon title time-str)))
+              (push (cons display entry) candidates)
+              (cl-incf count))))))
+    (nreverse candidates)))
 
 (defun claude-org--goto-block-by-custom-id (custom-id)
   "Navigate to AI block via CUSTOM_ID using org-link-search.
@@ -4330,10 +4409,10 @@ Returns t if navigation succeeded, nil otherwise."
     (error nil)))
 
 (defun claude-org-jump-to-ai-block ()
-  "Jump to a recent AI block.
+  "Jump to a recent AI block, grouped by story.
 Shows a list of recently executed blocks with status and timing.
-Uses CUSTOM_ID for stable navigation (survives file edits).
-After navigation, unfolds the target section to make the block visible."
+Each candidate is prefixed with [Story Name] for visual grouping.
+Uses CUSTOM_ID for stable navigation (survives file edits)."
   (interactive)
   (claude-org--ensure-history-loaded)
   (let ((candidates (claude-org--collect-recent-blocks)))

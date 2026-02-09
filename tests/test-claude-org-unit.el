@@ -1350,5 +1350,184 @@ This test verifies the disconnect path is called when client is alive."
         (should test--disconnect-called)
         (should (= 0 (claude-org--persistent-client-count)))))))
 
+;;; Story Grouping Tests
+
+(ert-deftest test-claude-org-get-story-name-for-custom-id ()
+  "Test that story name is extracted from the session-scope ancestor heading."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* My Story\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: sdd-20250101-120000\n")
+    (insert ":END:\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Instruction 1 :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-instruction-id\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (should (equal "My Story"
+                   (claude-org--get-story-name-for-custom-id "test-instruction-id")))))
+
+(ert-deftest test-claude-org-get-story-name-no-session ()
+  "Test that nil is returned when no CLAUDE_SESSION_ID ancestor exists."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* No Session Here\n")
+    (insert "** Query :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: orphan-id\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (should-not (claude-org--get-story-name-for-custom-id "orphan-id"))))
+
+(ert-deftest test-claude-org-get-story-name-nonexistent-id ()
+  "Test that nil is returned for a CUSTOM_ID that doesn't exist in buffer."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test\n:PROPERTIES:\n:CUSTOM_ID: real-id\n:END:\n")
+    (should-not (claude-org--get-story-name-for-custom-id "nonexistent-id"))))
+
+(ert-deftest test-claude-org-get-story-name-nil-input ()
+  "Test that nil input returns nil without error."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (should-not (claude-org--get-story-name-for-custom-id nil))))
+
+(ert-deftest test-claude-org-build-candidate-info ()
+  "Test single-pass candidate info extraction returns title and story."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* My Story\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: sdd-20250101-120000\n")
+    (insert ":END:\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Instruction 1 :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-id\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (let ((info (claude-org--build-candidate-info "test-id")))
+      ;; Should return (TITLE . STORY)
+      (should info)
+      (should (stringp (car info)))
+      ;; Story should be "My Story"
+      (should (equal "My Story" (cdr info)))
+      ;; Title should contain "My Story" in hierarchy
+      (should (string-match-p "My Story" (car info))))))
+
+(ert-deftest test-claude-org-build-candidate-info-no-session ()
+  "Test that build-candidate-info returns nil story when no session ancestor."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Standalone\n")
+    (insert "** Query :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: orphan-id\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery\n#+end_src\n")
+    (let ((info (claude-org--build-candidate-info "orphan-id")))
+      (should info)
+      (should (stringp (car info)))
+      ;; No session ancestor, story should be nil
+      (should-not (cdr info)))))
+
+(ert-deftest test-claude-org-build-candidate-info-nonexistent ()
+  "Test that build-candidate-info returns nil for nonexistent CUSTOM_ID."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test\n")
+    (should-not (claude-org--build-candidate-info "nonexistent-id"))))
+
+(ert-deftest test-claude-org-collect-recent-blocks-has-story-prefix ()
+  "Test that collected candidates have [Story Name] prefix in display string."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-story.org")
+    (insert "* Auth Feature\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: story-auth\n")
+    (insert ":END:\n")
+    (insert "** Query :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: auth-query-1\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nimplement login\n#+end_src\n")
+    (setq-local claude-org--block-history
+                '(("block-1" :timestamp 1000.0 :status completed :custom-id "auth-query-1")))
+    (setq-local claude-org--history-loaded t)
+    (let ((claude-org-history-max-entries 100))
+      (let ((candidates (claude-org--collect-recent-blocks)))
+        (should (= 1 (length candidates)))
+        (let ((display-str (car (car candidates))))
+          ;; Display string should start with [Auth Feature]
+          (should (string-prefix-p "[Auth Feature]" display-str)))))))
+
+(ert-deftest test-claude-org-collect-recent-blocks-ungrouped-fallback ()
+  "Test that blocks without session ancestor get [Ungrouped] prefix."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-ungrouped.org")
+    (insert "* Standalone\n")
+    (insert "** Query :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: standalone-id\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\ntest\n#+end_src\n")
+    (setq-local claude-org--block-history
+                '(("block-1" :timestamp 1000.0 :status completed :custom-id "standalone-id")))
+    (setq-local claude-org--history-loaded t)
+    (let ((claude-org-history-max-entries 100))
+      (let ((candidates (claude-org--collect-recent-blocks)))
+        (should (= 1 (length candidates)))
+        (let ((display-str (car (car candidates))))
+          (should (string-prefix-p "[Ungrouped]" display-str)))))))
+
+(ert-deftest test-claude-org-collect-recent-blocks-multiple-stories ()
+  "Test that candidates from different stories get different prefixes."
+  :tags '(:unit :fast :stable :isolated :org :history :grouping)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-multi-story.org")
+    (insert "* Story A\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: story-a\n")
+    (insert ":END:\n")
+    (insert "** Query A :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: qa\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery a\n#+end_src\n")
+    (insert "* Story B\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CLAUDE_SESSION_ID: story-b\n")
+    (insert ":END:\n")
+    (insert "** Query B :claude_chat:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: qb\n")
+    (insert ":END:\n")
+    (insert "#+begin_src ai\nquery b\n#+end_src\n")
+    (setq-local claude-org--block-history
+                '(("b1" :timestamp 2000.0 :status completed :custom-id "qa")
+                  ("b2" :timestamp 1000.0 :status completed :custom-id "qb")))
+    (setq-local claude-org--history-loaded t)
+    (let ((claude-org-history-max-entries 100))
+      (let ((candidates (claude-org--collect-recent-blocks)))
+        (should (= 2 (length candidates)))
+        ;; First candidate from Story A
+        (should (string-prefix-p "[Story A]" (car (nth 0 candidates))))
+        ;; Second candidate from Story B
+        (should (string-prefix-p "[Story B]" (car (nth 1 candidates))))))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here
