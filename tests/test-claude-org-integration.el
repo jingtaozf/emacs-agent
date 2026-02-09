@@ -1077,6 +1077,78 @@ Execute A, then queue B and C - both should execute in order."
          (goto-char (point-min))
          (should (re-search-forward "Block B executed" nil t)))))))
 
+(ert-deftest test-org-integration-queue-response-position ()
+  "Test that queued block's response appears in the CORRECT position.
+Bug: When Block A executes and Block B is queued, after A completes and B
+auto-executes, B's response tokens are inserted into A's Response section
+instead of B's own Response section.
+
+Root cause: `claude-org--execute-queued-block' uses `create-response-section-header'
+which creates a heading WITHOUT :QUERY_ID: property.  When `send-request' reads
+the old query-id from session and `find-response-by-query-id' searches for it,
+it finds the OLD response section (Block A's), not the new one (Block B's).
+
+This test verifies that Block B's response text appears AFTER Block B's
+AI block (Instruction 21), not inside Block A's response section."
+  :tags '(:integration :slow :api :org :queue :position)
+  (test-claude-skip-unless-cli-available)
+
+  (test-claude-with-fixture
+   (lambda (org-file)
+     (with-current-buffer (find-file-noselect org-file)
+       (let ((claude-org-auto-start-mcp-server nil))
+         (claude-org-mode 1))
+
+       ;; Execute Block A (Instruction 20)
+       (goto-char (point-min))
+       (re-search-forward "^\\*+ Instruction 20" nil t)
+       (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+       (let ((session-key (claude-org--current-session-key)))
+         (claude-org-execute)
+         ;; Session should be busy
+         (should (claude-org--session-get session-key :busy))
+
+         ;; Queue Block B (Instruction 21) while A is running
+         (goto-char (point-min))
+         (re-search-forward "^\\*+ Instruction 21" nil t)
+         (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
+         (claude-org-execute)
+         (should (= 1 (claude-org--queue-count session-key)))
+
+         ;; Wait for Block A to complete (B auto-starts)
+         (test-claude-wait-for-completion session-key 90)
+         ;; Wait for Block B to complete
+         (test-claude-wait-for-completion session-key 60)
+
+         ;; --- Core assertion: verify response positions ---
+         ;; Debug: dump headings to see actual buffer structure
+         (goto-char (point-min))
+         (let ((headings nil))
+           (while (re-search-forward "^\\(\\*+ .*\\)$" nil t)
+             (push (format "L%d: %s" (line-number-at-pos) (match-string 1))
+                   headings))
+           (message "=== Buffer headings after queue execution ===")
+           (dolist (h (nreverse headings))
+             (message "  %s" h)))
+
+         ;; Find Instruction 21's current position (may have shifted)
+         (goto-char (point-min))
+         (should (re-search-forward "^\\*+ Instruction 21" nil t))
+         (let ((instr-21-pos (match-beginning 0)))
+
+           ;; CRITICAL ASSERTION 1: \"Block B executed\" must exist in buffer
+           (goto-char (point-min))
+           (should (re-search-forward "Block B executed" nil t))
+           (let ((block-b-text-pos (match-beginning 0)))
+
+             ;; CRITICAL ASSERTION 2: Block B's response text must appear
+             ;; AFTER Instruction 21's heading position.
+             ;; If the bug exists, it will appear BEFORE Instruction 21
+             ;; (inside Block A's response section)
+             (message "Instruction 21 at pos %d, 'Block B executed' at pos %d"
+                      instr-21-pos block-b-text-pos)
+             (should (> block-b-text-pos instr-21-pos)))))))))
+
 (ert-deftest test-org-integration-queue-no-duplicate ()
   "Test that the same block cannot be queued multiple times.
 Execute Block A, then try to queue Block B twice - second attempt should be rejected."

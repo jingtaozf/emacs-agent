@@ -4831,15 +4831,19 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
               (message "Cannot find block end for queued block")
               (set-marker orig-marker nil)  ; Free marker before early return
               (cl-return-from claude-org--execute-queued-block nil))
-            ;; Set up marker at insertion point
-            (save-excursion
-              (goto-char insert-point)
-              (insert "\n\n")
-              ;; Create Response section if enabled
-              (when claude-org-auto-create-response-section
-                (let ((loop-info (when (> loop-max 1) (cons 1 loop-max))))
-                  (insert (claude-org--create-response-section-header
-                           instr-num timestamp loop-info section-level))))
+            ;; Generate new query-id for this queued block (critical for token routing)
+            (let ((query-id (claude-org--generate-query-id)))
+              ;; Store query-id BEFORE creating response section
+              (claude-org--session-put session-key :query-id query-id)
+              ;; Set up at insertion point
+              (save-excursion
+                (goto-char insert-point)
+                (insert "\n\n")
+                ;; Create Response section with :QUERY_ID: property (marker-free architecture)
+                (when claude-org-auto-create-response-section
+                  (claude-org--session-put session-key :section-level section-level)
+                  (claude-org--session-put session-key :instruction-num instr-num)
+                  (claude-org--create-response-section session-key query-id 'normal)))
               (let ((marker (point-marker)))
                 (claude-org--session-put session-key :marker marker)
                 (claude-org--session-put session-key :original-prompt content)
