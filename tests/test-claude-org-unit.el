@@ -1419,8 +1419,8 @@ This test verifies the disconnect path is called when client is alive."
       (should (stringp (car info)))
       ;; Story should be "My Story"
       (should (equal "My Story" (cdr info)))
-      ;; Title should contain "My Story" in hierarchy
-      (should (string-match-p "My Story" (car info))))))
+      ;; Title should NOT contain story name (stripped to avoid duplication)
+      (should-not (string-match-p "My Story" (car info))))))
 
 (ert-deftest test-claude-org-build-candidate-info-no-session ()
   "Test that build-candidate-info returns nil story when no session ancestor."
