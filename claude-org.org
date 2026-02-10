@@ -3092,9 +3092,6 @@ Result directly replaces block content. Use \\[undo] to revert."
   (unless (claude-org--in-ai-block-p)
     (user-error "Not inside an AI block"))
   (let* ((content (claude-org--get-block-content))
-         ;; Capture buffer and position for async callback
-         (source-buffer (current-buffer))
-         (source-marker (point-marker))
          intent)
     (unless content
       (user-error "Could not extract block content (missing #+end_src?)"))
@@ -3103,18 +3100,22 @@ Result directly replaces block content. Use \\[undo] to revert."
     (when (string-empty-p intent)
       (user-error "Refinement intent cannot be empty"))
     (message "Refining prompt...")
-    (claude-agent-refine-prompt
-     content intent
-     :on-result (lambda (refined)
-                  (if (buffer-live-p source-buffer)
-                      (with-current-buffer source-buffer
-                        (save-excursion
-                          (goto-char source-marker)
-                          (if (claude-org--replace-block-content refined)
-                              (message "Prompt refined. Use C-/ to undo if needed.")
-                            (message "Failed to replace block content"))))
-                    (message "Source buffer no longer exists")))
-     :on-error (lambda (err) (message "Refinement failed: %s" err)))))
+    ;; Use lexical-let to capture buffer/marker for async callback
+    ;; (literate-elisp uses dynamic binding; plain let variables go void)
+    (lexical-let ((source-buffer (current-buffer))
+                  (source-marker (point-marker)))
+      (claude-agent-refine-prompt
+       content intent
+       :on-result (lambda (refined)
+                    (if (buffer-live-p source-buffer)
+                        (with-current-buffer source-buffer
+                          (save-excursion
+                            (goto-char source-marker)
+                            (if (claude-org--replace-block-content refined)
+                                (message "Prompt refined. Use C-/ to undo if needed.")
+                              (message "Failed to replace block content"))))
+                      (message "Source buffer no longer exists")))
+       :on-error (lambda (err) (message "Refinement failed: %s" err))))))
 #+END_SRC
 
 ** Session Info Display

@@ -233,6 +233,7 @@ test-org-unit:
 		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
 		-l tests/test-claude-org-unit.el \
+		-l tests/test-claude-org-refine.el \
 		-l tests/test-claude-org-scheduled.el \
 		-l tests/test-claude-org-response.el \
 		-l tests/test-claude-org-queue.el \
