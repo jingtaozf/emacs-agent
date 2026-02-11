@@ -3873,6 +3873,7 @@ Markers hold references to buffers; must be explicitly freed."
 Uses query-id based architecture with marker for queue duplicate detection."
   (claude-org--session-put session-key :busy nil)
   (claude-org--session-put session-key :recovering nil)
+  (claude-org--session-put session-key :needs-message-separator nil)
   (claude-org--free-marker session-key)
   (claude-org--stop-spinner session-key)
   ;; Add newline after response using query-id lookup (marker-free)
@@ -5499,6 +5500,12 @@ Dynamic header line showing session status, IDE context, and thinking state.
           (when (and loop-max (> loop-max 1))
             (claude-org--session-put session-key :loop-current loop-max))
           (claude-agent-query-interrupt process-state)
+          ;; Mark process state closed and unregister from active queries
+          ;; so mode-line and *Claude Queries* buffer reflect cancellation
+          ;; immediately (without waiting for sentinel to fire)
+          (setf (claude-agent--process-state-closed process-state) t)
+          (when-let* ((req-id (claude-agent--process-state-request-id process-state)))
+            (claude-agent--unregister-query req-id))
           (claude-org--session-put session-key :busy nil)
           (claude-org--stop-spinner session-key)
           ;; Clear pending queue
@@ -5542,6 +5549,10 @@ Dynamic header line showing session status, IDE context, and thinking state.
                  (let ((process-state (plist-get state :process-state)))
                    (when process-state
                      (claude-agent-query-interrupt process-state)
+                     ;; Mark closed and unregister from active queries
+                     (setf (claude-agent--process-state-closed process-state) t)
+                     (when-let* ((req-id (claude-agent--process-state-request-id process-state)))
+                       (claude-agent--unregister-query req-id))
                      (plist-put state :busy nil)
                      (cl-incf cancelled)))))
              claude-org--sessions)
