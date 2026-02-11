@@ -1111,29 +1111,32 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
 (ert-deftest test-claude-org-template-get-string ()
   "Test getting content from string template."
   :tags '(:unit :fast :stable :isolated :org :template)
-  (let ((claude-org-templates '(("Test" . "Hello World"))))
+  (cl-letf (((symbol-function 'claude-org--get-templates)
+             (lambda () '(("Test" . "Hello World")))))
     (should (equal "Hello World"
                    (claude-org--get-template-content "Test")))))
 
 (ert-deftest test-claude-org-template-get-function ()
   "Test getting content from function template."
   :tags '(:unit :fast :stable :isolated :org :template)
-  (let ((claude-org-templates
-         '(("Dynamic" . (lambda () (format "Time: %s" "now"))))))
+  (cl-letf (((symbol-function 'claude-org--get-templates)
+             (lambda () '(("Dynamic" . (lambda () (format "Time: %s" "now")))))))
     (should (equal "Time: now"
                    (claude-org--get-template-content "Dynamic")))))
 
 (ert-deftest test-claude-org-template-annotation-string ()
   "Test annotation for string template."
   :tags '(:unit :fast :stable :isolated :org :template)
-  (let ((claude-org-templates '(("Review" . "Please review this code"))))
+  (cl-letf (((symbol-function 'claude-org--get-templates)
+             (lambda () '(("Review" . "Please review this code")))))
     (should (string-match-p "Please review"
                             (claude-org--template-annotation "Review")))))
 
 (ert-deftest test-claude-org-template-annotation-function ()
   "Test annotation for function template."
   :tags '(:unit :fast :stable :isolated :org :template)
-  (let ((claude-org-templates '(("Backtrace" . claude-org-template--backtrace))))
+  (cl-letf (((symbol-function 'claude-org--get-templates)
+             (lambda () '(("Backtrace" . claude-org-template--backtrace)))))
     (should (string-match-p "function"
                             (claude-org--template-annotation "Backtrace")))))
 
@@ -1244,13 +1247,51 @@ This prevents 'Untitled' entries from appearing when SDD workflows are reset."
           (should (null (claude-org--load-templates-from-file tmp-file))))
       (delete-file tmp-file))))
 
-(ert-deftest test-claude-org-define-templates-sets-value ()
-  "Test that claude-org-define-templates sets the templates variable."
+(ert-deftest test-claude-org-get-templates-returns-fresh-data ()
+  "Test that claude-org--get-templates always reads fresh from file."
   :tags '(:unit :fast :stable :isolated :org :template)
-  (let ((claude-org-templates nil)
-        (templates '(("X" . "prompt X"))))
-    (claude-org-define-templates templates)
-    (should (equal templates claude-org-templates))))
+  (let ((tmp-file (make-temp-file "claude-org-templates-" nil ".el")))
+    (unwind-protect
+        (let ((claude-org-templates-file tmp-file))
+          ;; Write initial templates
+          (with-temp-file tmp-file
+            (insert "((\"Alpha\" . \"first\"))\n"))
+          (let ((result1 (claude-org--get-templates)))
+            (should (= 1 (length result1)))
+            (should (equal "first" (cdr (assoc "Alpha" result1)))))
+          ;; Now modify the file — should pick up changes without restart
+          (with-temp-file tmp-file
+            (insert "((\"Alpha\" . \"updated\")\n")
+            (insert " (\"Beta\" . \"second\"))\n"))
+          (let ((result2 (claude-org--get-templates)))
+            (should (= 2 (length result2)))
+            (should (equal "updated" (cdr (assoc "Alpha" result2))))
+            (should (equal "second" (cdr (assoc "Beta" result2))))))
+      (delete-file tmp-file))))
+
+(ert-deftest test-claude-org-get-templates-uses-custom-file ()
+  "Test that claude-org--get-templates respects claude-org-templates-file."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((tmp-file (make-temp-file "claude-org-templates-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp-file
+            (insert "((\"Custom\" . \"my template\"))\n"))
+          (let ((claude-org-templates-file tmp-file))
+            (let ((result (claude-org--get-templates)))
+              (should (= 1 (length result)))
+              (should (equal "my template" (cdr (assoc "Custom" result)))))))
+      (delete-file tmp-file))))
+
+(ert-deftest test-claude-org-get-templates-falls-back-to-default ()
+  "Test that claude-org--get-templates uses default file when custom is nil."
+  :tags '(:unit :fast :stable :isolated :org :template)
+  (let ((claude-org-templates-file nil))
+    (let ((result (claude-org--get-templates)))
+      (should (listp result))
+      (should (> (length result) 0))
+      ;; Should have known default templates
+      (should (assoc "Code Review" result)))))
 
 (ert-deftest test-claude-org-default-templates-file-exists ()
   "Test that the default templates file exists in the package."

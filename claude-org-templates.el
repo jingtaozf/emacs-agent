@@ -7,17 +7,19 @@
 
 ;;; Commentary:
 
-;; Default template definitions for `claude-org-templates'.
+;; Default template definitions loaded by `claude-org--get-templates'.
 ;; This is a data file — the top-level form is an alist read by
 ;; `claude-org--load-templates-from-file'.
+;;
+;; Templates are reloaded from this file every time the template menu
+;; is invoked, so edits take effect immediately without restarting Emacs.
 ;;
 ;; Each entry is (NAME . VALUE) where VALUE is either:
 ;;   - A string to insert verbatim into an AI block
 ;;   - A symbol naming a function (no args) that returns a string
 ;;
 ;; To customize, copy this file to your preferred location and set
-;; `claude-org-templates-file' to point to it, or set
-;; `claude-org-templates' directly in your init file.
+;; `claude-org-templates-file' to point to it.
 
 ;;; Data:
 
@@ -37,6 +39,7 @@ Error:
 Context:
 
 ")
+ ("continue" . "Please continue the previous instruction if not finished.")
  ("Git Commit and Push" . "Please commit and push the changes.
 
 Note: If there are pre-commit hooks configured, please wait for them to complete

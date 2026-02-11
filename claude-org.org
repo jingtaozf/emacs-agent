@@ -3219,11 +3219,6 @@ resolved at load time) and looks for `claude-org-templates.el' there."
                   (directory-file-name claude-org-prompts-directory))))
     (expand-file-name "claude-org-templates.el" pkg-dir)))
 
-(defun claude-org-define-templates (templates)
-  "Set `claude-org-templates' to TEMPLATES.
-TEMPLATES is an alist of (NAME . VALUE) where VALUE is a string or function symbol."
-  (setq claude-org-templates templates))
-
 (defun claude-org--load-templates-from-file (file)
   "Load templates from FILE as data and return the alist.
 Returns nil if FILE does not exist or cannot be read.
@@ -3248,26 +3243,14 @@ Set to a custom path to override the default templates."
                  (file :tag "Custom templates file"))
   :group 'claude-org)
 
-(defcustom claude-org-templates
+(defun claude-org--get-templates ()
+  "Return the current templates alist, loading fresh from file each time.
+This ensures edits to the templates file are picked up immediately
+without restarting Emacs.  Uses `claude-org-templates-file' if set,
+otherwise the default `claude-org-templates.el' in the package directory."
   (claude-org--load-templates-from-file
    (or claude-org-templates-file
-       (claude-org--templates-file-path)))
-  "Alist of templates for AI block insertion.
-Each entry is (NAME . TEMPLATE) where:
-- NAME is a string displayed in the completion menu
-- TEMPLATE is either:
-  - A string to insert verbatim
-  - A function (no args) returning a string
-
-Default values are loaded from `claude-org-templates-file' (or the built-in
-`claude-org-templates.el').  To customize, either:
-  1. Edit `claude-org-templates.el' in the package directory
-  2. Set `claude-org-templates-file' to your own file
-  3. Set this variable directly in your init file"
-  :type '(alist :key-type (string :tag "Template name")
-                :value-type (choice (string :tag "Template text")
-                                    (function :tag "Generator function")))
-  :group 'claude-org)
+       (claude-org--templates-file-path))))
 #+END_SRC
 
 ** Built-in Template Functions
@@ -3306,7 +3289,7 @@ Provide:
 #+BEGIN_SRC elisp
 (defun claude-org--template-annotation (name)
   "Return annotation for template NAME in completion."
-  (let ((template (cdr (assoc name claude-org-templates))))
+  (let ((template (cdr (assoc name (claude-org--get-templates)))))
     (cond
      ((functionp template)
       "  [function]")
@@ -3318,7 +3301,7 @@ Provide:
 (defun claude-org--get-template-content (name)
   "Get the content for template NAME.
 Calls function templates, returns string templates verbatim."
-  (let ((template (cdr (assoc name claude-org-templates))))
+  (let ((template (cdr (assoc name (claude-org--get-templates)))))
     (cond
      ((functionp template) (funcall template))
      ((stringp template) template)
@@ -3327,7 +3310,8 @@ Calls function templates, returns string templates verbatim."
 ;;;###autoload
 (defun claude-org-insert-template ()
   "Insert a template into the current AI block.
-Shows completion menu with available templates from `claude-org-templates'.
+Templates are loaded fresh from file each time, so edits to the
+templates file take effect immediately.
 If not inside an AI block, creates one first."
   (interactive)
   ;; Ensure we're in an AI block (or create one)
@@ -3337,7 +3321,8 @@ If not inside an AI block, creates one first."
     (forward-line -1)
     (end-of-line))
   ;; Select and insert template
-  (let* ((names (mapcar #'car claude-org-templates))
+  (let* ((templates (claude-org--get-templates))
+         (names (mapcar #'car templates))
          (completion-extra-properties
           (list :annotation-function #'claude-org--template-annotation))
          (selected (completing-read "Template: " names nil t)))
