@@ -1700,6 +1700,7 @@ the second message text should be visually separated from the first."
       (claude-org--session-put session-key :query-id query-id)
       (claude-org--session-put session-key :section-level 1)
       (claude-org--session-put session-key :current-line-length 0)
+      (claude-org--session-put session-key :response-has-content nil)
       ;; Simulate first assistant message tokens (realistic: text ends with newline)
       (claude-org--handle-token-v2 session-key "First message text.\n")
       ;; Simulate assistant message boundary (on-message callback)
@@ -1736,6 +1737,7 @@ the second message text should be visually separated from the first."
       (claude-org--session-put session-key :query-id query-id)
       (claude-org--session-put session-key :section-level 1)
       (claude-org--session-put session-key :current-line-length 0)
+      (claude-org--session-put session-key :response-has-content nil)
       ;; Simulate FIRST assistant message tokens (should NOT have leading newline)
       (claude-org--handle-token-v2 session-key "First message")
       ;; Content after :END: should be: blank-line + "First message" (no extra newlines)
@@ -1745,6 +1747,121 @@ the second message text should be visually separated from the first."
         ;; Should be just a blank line then the text, no double blank lines
         (should (string-match-p "^\n?First message" content))
         (should-not (string-match-p "^\n\n+First message" content))))))
+
+(ert-deftest test-claude-org-no-stale-separator-across-queries ()
+  "Test that a stale separator flag from a previous query does not affect the next.
+The :last-assistant-query-id stores the query-id that set it, so a leftover
+value from query N (different query-id) cannot trigger a separator in query N+1."
+  :tags '(:unit :fast :stable :isolated :org :response)
+  (with-temp-buffer
+    (org-mode)
+    (let* ((session-key "test::no-stale")
+           (old-qid "qid-old-query")
+           (new-qid "qid-new-query"))
+      ;; Simulate leftover state from a previous query's last assistant message
+      (claude-org--session-put session-key :last-assistant-query-id old-qid)
+      ;; Now start a NEW query with a different query-id
+      (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
+      (insert ":PROPERTIES:\n")
+      (insert (format ":QUERY_ID: %s\n" new-qid))
+      (insert ":QUERY_TYPE: normal\n")
+      (insert ":END:\n\n")
+      (claude-org--session-put session-key :query-id new-qid)
+      (claude-org--session-put session-key :section-level 1)
+      (claude-org--session-put session-key :current-line-length 0)
+      (claude-org--session-put session-key :response-has-content nil)
+      ;; First token of new query should NOT get a separator
+      (claude-org--handle-token-v2 session-key "New query text")
+      (goto-char (point-min))
+      (re-search-forward ":END:\n" nil t)
+      (let ((content (buffer-substring-no-properties (point) (point-max))))
+        (should (string-match-p "^\n?New query text" content))
+        (should-not (string-match-p "^\n\n+New query text" content))))))
+
+(ert-deftest test-claude-org-strip-leading-newlines-from-first-token ()
+  "Test that leading newlines are stripped from the first token of a new response.
+Claude's model often starts assistant text with \\n\\n which would create
+unwanted blank lines after the :END: property drawer."
+  :tags '(:unit :fast :stable :isolated :org :response)
+  (with-temp-buffer
+    (org-mode)
+    (let* ((session-key "test::strip-leading")
+           (query-id "qid-strip-leading"))
+      (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
+      (insert ":PROPERTIES:\n")
+      (insert (format ":QUERY_ID: %s\n" query-id))
+      (insert ":QUERY_TYPE: normal\n")
+      (insert ":END:\n\n")
+      (claude-org--session-put session-key :query-id query-id)
+      (claude-org--session-put session-key :section-level 1)
+      (claude-org--session-put session-key :current-line-length 0)
+      (claude-org--session-put session-key :response-has-content nil)
+      ;; Simulate Claude's typical first token starting with \n\n
+      (claude-org--handle-token-v2 session-key "\n\nHello world")
+      (goto-char (point-min))
+      (re-search-forward ":END:\n" nil t)
+      (let ((content (buffer-substring-no-properties (point) (point-max))))
+        ;; Leading newlines should be stripped; content should start cleanly
+        (should (string-match-p "^\n?Hello world" content))
+        (should-not (string-match-p "^\n\n+Hello world" content))))))
+
+(ert-deftest test-claude-org-strip-preserves-later-newlines ()
+  "Test that newline stripping only affects the first token, not subsequent ones."
+  :tags '(:unit :fast :stable :isolated :org :response)
+  (with-temp-buffer
+    (org-mode)
+    (let* ((session-key "test::strip-later")
+           (query-id "qid-strip-later"))
+      (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
+      (insert ":PROPERTIES:\n")
+      (insert (format ":QUERY_ID: %s\n" query-id))
+      (insert ":QUERY_TYPE: normal\n")
+      (insert ":END:\n\n")
+      (claude-org--session-put session-key :query-id query-id)
+      (claude-org--session-put session-key :section-level 1)
+      (claude-org--session-put session-key :current-line-length 0)
+      (claude-org--session-put session-key :response-has-content nil)
+      ;; First token - leading newlines stripped
+      (claude-org--handle-token-v2 session-key "\n\nFirst part")
+      ;; Second token - newlines should be preserved
+      (claude-org--handle-token-v2 session-key "\n\nSecond part")
+      (goto-char (point-min))
+      (re-search-forward ":END:\n" nil t)
+      (let ((content (buffer-substring-no-properties (point) (point-max))))
+        ;; First part's leading newlines stripped
+        (should (string-match-p "^\n?First part" content))
+        ;; Second part's newlines preserved in the content
+        (should (string-match-p "Second part" content))))))
+
+(ert-deftest test-claude-org-strip-newline-only-first-token ()
+  "Test that a first token containing only newlines is stripped without
+affecting the second token which carries real content."
+  :tags '(:unit :fast :stable :isolated :org :response)
+  (with-temp-buffer
+    (org-mode)
+    (let* ((session-key "test::strip-empty")
+           (query-id "qid-strip-empty"))
+      (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
+      (insert ":PROPERTIES:\n")
+      (insert (format ":QUERY_ID: %s\n" query-id))
+      (insert ":QUERY_TYPE: normal\n")
+      (insert ":END:\n\n")
+      (claude-org--session-put session-key :query-id query-id)
+      (claude-org--session-put session-key :section-level 1)
+      (claude-org--session-put session-key :current-line-length 0)
+      (claude-org--session-put session-key :response-has-content nil)
+      ;; First token is ONLY newlines - becomes empty after stripping
+      (claude-org--handle-token-v2 session-key "\n\n")
+      ;; :response-has-content should still be nil (nothing inserted)
+      (should-not (claude-org--session-get session-key :response-has-content))
+      ;; Second token has real content - should NOT be stripped
+      (claude-org--handle-token-v2 session-key "Real content")
+      (should (claude-org--session-get session-key :response-has-content))
+      (goto-char (point-min))
+      (re-search-forward ":END:\n" nil t)
+      (let ((content (buffer-substring-no-properties (point) (point-max))))
+        (should (string-match-p "^\n?Real content" content))
+        (should-not (string-match-p "^\n\n+Real content" content))))))
 
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

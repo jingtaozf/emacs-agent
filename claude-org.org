@@ -936,7 +936,6 @@ Uses query-id based recovery:
           (let ((new-query-id (claude-org--generate-query-id)))
             ;; Update session with new query-id BEFORE creating section
             (claude-org--session-put session-key :query-id new-query-id)
-            (claude-org--session-put session-key :needs-message-separator nil)
             ;; Create recovery response section with parent reference
             (claude-org--create-response-section
              session-key new-query-id 'recovery old-query-id reason-str)
@@ -1730,6 +1729,8 @@ Returns the position where content should be inserted (after properties)."
       (when (and (eq query-type 'recovery) recovery-reason)
         (insert (format ":RECOVERY_REASON: %s\n" recovery-reason)))
       (insert ":END:\n\n")
+      ;; Reset content flag so first-token newline stripping works
+      (claude-org--session-put session-key :response-has-content nil)
       ;; Return current position (where content will be inserted)
       (point))))
 #+END_SRC
@@ -1807,11 +1808,27 @@ This is the marker-free version using query-id."
              (new-line-len (cdr break-result)))
         ;; Update line length state
         (claude-org--session-put session-key :current-line-length new-line-len)
-        ;; Prepend newline separator before new assistant message if needed
-        (when (and (> (length final-text) 0)
-                   (claude-org--session-get session-key :needs-message-separator))
-          (claude-org--session-put session-key :needs-message-separator nil)
-          (setq final-text (concat "\n\n" final-text)))
+        ;; Strip leading newlines from the very first token of a new response.
+        ;; Claude's model often starts assistant text with "\n\n" which creates
+        ;; unwanted blank lines after the :END: property drawer.
+        (unless (claude-org--session-get session-key :response-has-content)
+          (when (> (length final-text) 0)
+            (setq final-text (string-trim-left final-text "\n+"))
+            (when (> (length final-text) 0)
+              (claude-org--session-put session-key :response-has-content t))))
+        ;; Prepend newline separator between consecutive assistant messages.
+        ;; :last-assistant-query-id stores the query-id of the most recent
+        ;; assistant message's on-message callback.  When we see the SAME
+        ;; query-id here it means a previous assistant message already
+        ;; produced output in this query, so we insert a blank-line separator.
+        ;; Cross-query stale values are harmless: different query-ids won't match.
+        (let ((last-asst-qid (claude-org--session-get session-key :last-assistant-query-id)))
+          (when (and (> (length final-text) 0)
+                     last-asst-qid
+                     (equal last-asst-qid query-id))
+            ;; Clear so we only insert one separator per assistant message boundary
+            (claude-org--session-put session-key :last-assistant-query-id nil)
+            (setq final-text (concat "\n\n" final-text))))
         ;; Insert processed text using query-id lookup
         (when (> (length final-text) 0)
           (claude-org--insert-at-response session-key final-text))
@@ -3777,10 +3794,15 @@ Extracts session ID from result messages and stores it."
             (claude-org--set-sdk-uuid sdk-uuid))))))
   ;; Handle special tool uses in assistant messages
   (when (claude-agent-assistant-message-p msg)
-    ;; Mark that next token should be preceded by a newline separator.
-    ;; Token callback fires before on-message for the SAME message,
-    ;; so this flag set by message N will affect message N+1's tokens.
-    (claude-org--session-put session-key :needs-message-separator t)
+    ;; Store query-id that produced this assistant message.
+    ;; In handle-token-v2, we insert a newline separator only when the
+    ;; current query-id matches this stored id — meaning a previous
+    ;; assistant message already produced output in this same query.
+    ;; Using query-id instead of a boolean avoids stale-flag issues across
+    ;; queries: a leftover value from query N cannot affect query N+1
+    ;; because their query-ids differ.
+    (claude-org--session-put session-key :last-assistant-query-id
+                             (claude-org--session-get session-key :query-id))
     (let ((marker (claude-org--session-get session-key :marker)))
       (when (and marker (marker-buffer marker))
         (dolist (block (claude-agent-assistant-message-content msg))
@@ -3868,12 +3890,21 @@ Markers hold references to buffers; must be explicitly freed."
       (set-marker marker nil))
     (claude-org--session-put session-key :marker nil)))
 
+(defun claude-org--unregister-active-query (session-key)
+  "Mark process state as closed and unregister from active queries for SESSION-KEY.
+This ensures the mode-line spinner and *Claude Queries* buffer reflect the
+terminal state immediately, without waiting for the CLI process to exit."
+  (when-let* ((process-state (claude-org--session-get session-key :process-state)))
+    (setf (claude-agent--process-state-closed process-state) t)
+    (when-let* ((req-id (claude-agent--process-state-request-id process-state)))
+      (claude-agent--unregister-query req-id))))
+
 (defun claude-org--handle-complete (session-key result)
   "Handle query completion for SESSION-KEY with RESULT.
 Uses query-id based architecture with marker for queue duplicate detection."
   (claude-org--session-put session-key :busy nil)
   (claude-org--session-put session-key :recovering nil)
-  (claude-org--session-put session-key :needs-message-separator nil)
+  (claude-org--session-put session-key :last-assistant-query-id nil)
   (claude-org--free-marker session-key)
   (claude-org--stop-spinner session-key)
   ;; Add newline after response using query-id lookup (marker-free)
@@ -3896,8 +3927,13 @@ Uses query-id based architecture with marker for queue duplicate detection."
   ;; Process pending queue if loop is complete and session not busy
   ;; (loop continuation sets :busy t, so this only runs when truly done)
   (unless (claude-org--session-get session-key :busy)
-    (when-let ((next-block (claude-org--dequeue-block session-key)))
-      (claude-org--execute-queued-block session-key next-block))))
+    (let ((next-block (claude-org--dequeue-block session-key)))
+      (if next-block
+          (claude-org--execute-queued-block session-key next-block)
+        ;; Truly done - unregister from active queries so mode-line and
+        ;; *Claude Queries* buffer reflect completion immediately
+        ;; (don't wait for CLI process to exit and sentinel to fire)
+        (claude-org--unregister-active-query session-key)))))
 #+END_SRC
 
 ** Error Handling
@@ -3961,6 +3997,7 @@ If already recovering and another error occurs, give up and show error to user."
 CRITICAL: This function MUST clear :recovering flag to prevent stuck state."
   (claude-org--session-put session-key :busy nil)
   (claude-org--session-put session-key :recovering nil)  ; CRITICAL: Clear recovering flag
+  (claude-org--session-put session-key :last-assistant-query-id nil)
   (claude-org--stop-spinner session-key)
   (let ((marker (claude-org--session-get session-key :marker)))
     (when (claude-org--marker-valid-p marker)
@@ -3988,6 +4025,8 @@ CRITICAL: This function MUST clear :recovering flag to prevent stuck state."
                 (claude-org--set-exec-status nil))))))  ; Clear scheduled status
       (claude-org--clear-queue session-key)
       (message "Cleared %d queued block(s) due to error" (length queue))))
+  ;; Unregister from active queries so mode-line/queries buffer update immediately
+  (claude-org--unregister-active-query session-key)
   (claude-org--refresh-header-line)
   ;; Run completion hook with error status
   (run-hook-with-args 'claude-org-complete-hook session-key error-msg 'error))
@@ -4554,9 +4593,8 @@ If the session is busy, queues the block for execution when current query comple
             ;; Store instruction info for loop continuation
             (claude-org--session-put session-key :instruction-num instr-num)
             (claude-org--session-put session-key :custom-id custom-id)
-            ;; Reset recovery count and message separator flag for new query
+            ;; Reset recovery count for new query
             (claude-org--session-put session-key :recovery-count 0)
-            (claude-org--session-put session-key :needs-message-separator nil)
             ;; Create Response section with query-id (marker-free)
             (save-excursion
               (goto-char insert-point)
@@ -4833,7 +4871,6 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
             (let ((query-id (claude-org--generate-query-id)))
               ;; Store query-id BEFORE creating response section
               (claude-org--session-put session-key :query-id query-id)
-              (claude-org--session-put session-key :needs-message-separator nil)
               ;; Set up at insertion point
               (save-excursion
                 (goto-char insert-point)
@@ -5500,12 +5537,8 @@ Dynamic header line showing session status, IDE context, and thinking state.
           (when (and loop-max (> loop-max 1))
             (claude-org--session-put session-key :loop-current loop-max))
           (claude-agent-query-interrupt process-state)
-          ;; Mark process state closed and unregister from active queries
-          ;; so mode-line and *Claude Queries* buffer reflect cancellation
-          ;; immediately (without waiting for sentinel to fire)
-          (setf (claude-agent--process-state-closed process-state) t)
-          (when-let* ((req-id (claude-agent--process-state-request-id process-state)))
-            (claude-agent--unregister-query req-id))
+          ;; Mark closed and unregister so mode-line/queries buffer update immediately
+          (claude-org--unregister-active-query session-key)
           (claude-org--session-put session-key :busy nil)
           (claude-org--stop-spinner session-key)
           ;; Clear pending queue
@@ -5546,15 +5579,11 @@ Dynamic header line showing session status, IDE context, and thinking state.
                    (plist-put state :pending-queue nil)))
                ;; Cancel active query
                (when (plist-get state :busy)
-                 (let ((process-state (plist-get state :process-state)))
-                   (when process-state
-                     (claude-agent-query-interrupt process-state)
-                     ;; Mark closed and unregister from active queries
-                     (setf (claude-agent--process-state-closed process-state) t)
-                     (when-let* ((req-id (claude-agent--process-state-request-id process-state)))
-                       (claude-agent--unregister-query req-id))
-                     (plist-put state :busy nil)
-                     (cl-incf cancelled)))))
+                 (when-let* ((process-state (plist-get state :process-state)))
+                   (claude-agent-query-interrupt process-state)
+                   (claude-org--unregister-active-query key)
+                   (plist-put state :busy nil)
+                   (cl-incf cancelled))))
              claude-org--sessions)
     (claude-org--refresh-header-line)
     (if (> queued-cleared 0)
