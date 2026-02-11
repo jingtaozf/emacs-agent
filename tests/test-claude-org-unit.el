@@ -1638,5 +1638,72 @@ This test verifies the disconnect path is called when client is alive."
         ;; Second candidate from Story B
         (should (string-prefix-p "[Story B]" (car (nth 1 candidates))))))))
 
+;;; Response Message Separator Tests
+
+(ert-deftest test-claude-org-newline-between-assistant-messages ()
+  "Test that a newline separator is inserted between consecutive assistant messages.
+When Claude sends multiple assistant messages (e.g., text -> tool use -> text),
+the second message text should be visually separated from the first."
+  :tags '(:unit :fast :stable :isolated :org :response)
+  (with-temp-buffer
+    (org-mode)
+    (let* ((session-key "test::newline-sep")
+           (query-id "qid-test-newline"))
+      ;; Create response section structure
+      (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
+      (insert ":PROPERTIES:\n")
+      (insert (format ":QUERY_ID: %s\n" query-id))
+      (insert ":QUERY_TYPE: normal\n")
+      (insert ":END:\n\n")
+      ;; Set up session state
+      (claude-org--session-put session-key :query-id query-id)
+      (claude-org--session-put session-key :section-level 1)
+      (claude-org--session-put session-key :current-line-length 0)
+      ;; Simulate first assistant message tokens (realistic: text ends with newline)
+      (claude-org--handle-token-v2 session-key "First message text.\n")
+      ;; Simulate assistant message boundary (on-message callback)
+      (let ((msg1 (claude-agent-make-assistant-message
+                   :content (list (claude-agent-make-text-block
+                                   :text "First message text.\n")))))
+        (claude-org--handle-message session-key msg1))
+      ;; Simulate second assistant message tokens
+      (claude-org--handle-token-v2 session-key "Second message text.")
+      ;; Verify: the response content should have a blank line between messages
+      (goto-char (point-min))
+      (re-search-forward ":END:" nil t)
+      (forward-line 1)
+      (let ((content (buffer-substring-no-properties (point) (point-max))))
+        ;; There should be a newline separator between the two message texts
+        (should (string-match-p
+                 "First message text\\.\n+Second message text\\."
+                 content))))))
+
+(ert-deftest test-claude-org-no-newline-before-first-assistant-message ()
+  "Test that no extra newline is added before the very first assistant message."
+  :tags '(:unit :fast :stable :isolated :org :response)
+  (with-temp-buffer
+    (org-mode)
+    (let* ((session-key "test::no-leading-nl")
+           (query-id "qid-test-no-leading"))
+      ;; Create response section
+      (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
+      (insert ":PROPERTIES:\n")
+      (insert (format ":QUERY_ID: %s\n" query-id))
+      (insert ":QUERY_TYPE: normal\n")
+      (insert ":END:\n\n")
+      ;; Set up session
+      (claude-org--session-put session-key :query-id query-id)
+      (claude-org--session-put session-key :section-level 1)
+      (claude-org--session-put session-key :current-line-length 0)
+      ;; Simulate FIRST assistant message tokens (should NOT have leading newline)
+      (claude-org--handle-token-v2 session-key "First message")
+      ;; Content after :END: should be: blank-line + "First message" (no extra newlines)
+      (goto-char (point-min))
+      (re-search-forward ":END:\n" nil t)
+      (let ((content (buffer-substring-no-properties (point) (point-max))))
+        ;; Should be just a blank line then the text, no double blank lines
+        (should (string-match-p "^\n?First message" content))
+        (should-not (string-match-p "^\n\n+First message" content))))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

@@ -936,6 +936,7 @@ Uses query-id based recovery:
           (let ((new-query-id (claude-org--generate-query-id)))
             ;; Update session with new query-id BEFORE creating section
             (claude-org--session-put session-key :query-id new-query-id)
+            (claude-org--session-put session-key :needs-message-separator nil)
             ;; Create recovery response section with parent reference
             (claude-org--create-response-section
              session-key new-query-id 'recovery old-query-id reason-str)
@@ -1806,6 +1807,11 @@ This is the marker-free version using query-id."
              (new-line-len (cdr break-result)))
         ;; Update line length state
         (claude-org--session-put session-key :current-line-length new-line-len)
+        ;; Prepend newline separator before new assistant message if needed
+        (when (and (> (length final-text) 0)
+                   (claude-org--session-get session-key :needs-message-separator))
+          (claude-org--session-put session-key :needs-message-separator nil)
+          (setq final-text (concat "\n\n" final-text)))
         ;; Insert processed text using query-id lookup
         (when (> (length final-text) 0)
           (claude-org--insert-at-response session-key final-text))
@@ -3786,6 +3792,10 @@ Extracts session ID from result messages and stores it."
             (claude-org--set-sdk-uuid sdk-uuid))))))
   ;; Handle special tool uses in assistant messages
   (when (claude-agent-assistant-message-p msg)
+    ;; Mark that next token should be preceded by a newline separator.
+    ;; Token callback fires before on-message for the SAME message,
+    ;; so this flag set by message N will affect message N+1's tokens.
+    (claude-org--session-put session-key :needs-message-separator t)
     (let ((marker (claude-org--session-get session-key :marker)))
       (when (and marker (marker-buffer marker))
         (dolist (block (claude-agent-assistant-message-content msg))
@@ -4558,8 +4568,9 @@ If the session is busy, queues the block for execution when current query comple
             ;; Store instruction info for loop continuation
             (claude-org--session-put session-key :instruction-num instr-num)
             (claude-org--session-put session-key :custom-id custom-id)
-            ;; Reset recovery count for new query
+            ;; Reset recovery count and message separator flag for new query
             (claude-org--session-put session-key :recovery-count 0)
+            (claude-org--session-put session-key :needs-message-separator nil)
             ;; Create Response section with query-id (marker-free)
             (save-excursion
               (goto-char insert-point)
@@ -4836,6 +4847,7 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
             (let ((query-id (claude-org--generate-query-id)))
               ;; Store query-id BEFORE creating response section
               (claude-org--session-put session-key :query-id query-id)
+              (claude-org--session-put session-key :needs-message-separator nil)
               ;; Set up at insertion point
               (save-excursion
                 (goto-char insert-point)
