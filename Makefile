@@ -8,7 +8,7 @@ BATCH = $(EMACS) -Q --batch
 SOURCES = claude-agent.org claude-org.org
 
 # Test files
-UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-error.el tests/test-claude-agent-json-protocol.el
+UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-error.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el
 INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
@@ -104,7 +104,7 @@ reload:
 test: test-unit test-integration
 
 .PHONY: test-unit
-test-unit: test-agent-unit test-org-unit
+test-unit: test-agent-unit test-org-unit test-backend-unit
 
 # Parallel integration testing configuration
 PARALLEL_JOBS ?= 8
@@ -222,6 +222,15 @@ test-agent-unit:
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
 		-l tests/test-claude-agent-unit.el \
+		-f ert-run-tests-batch-and-exit
+
+.PHONY: test-backend-unit
+test-backend-unit:
+	@echo "Running backend protocol unit tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		-l tests/test-claude-agent-backend.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-org-unit

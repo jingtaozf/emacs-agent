@@ -581,9 +581,371 @@ STATE is the process state struct."
                                 state)))))))
 #+END_SRC
 
+* Backend Protocol
+:PROPERTIES:
+:DEPENDS_ON: Data Structures
+:DEPENDED_BY: Process Management, Core API, Client API
+:END:
+
+Extensible backend abstraction via =cl-defgeneric= / =cl-defmethod=.
+Each backend type (JSON stream, terminal, future HTTP) implements this protocol.
+The presentation layer (claude-org.org) depends only on these generics.
+
+** Backend Base Struct
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-backend
+               (:constructor nil)
+               (:copier nil))
+  "Base struct for all agent backends.
+Dispatch on this type via cl-defmethod for protocol implementations.
+Do not instantiate directly — use a concrete backend constructor."
+  (type nil :read-only t
+   :documentation "Keyword identifying backend type, e.g. :json-stream, :terminal."))
+#+END_SRC
+
+** Backend Protocol Generics
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-backend-query (backend prompt callbacks &rest args)
+  "Send PROMPT to BACKEND, invoking CALLBACKS during execution.
+CALLBACKS is a plist with :on-token, :on-message, :on-error, :on-complete.
+ARGS are keyword options: :options, :session-key, :source-buffer, etc.
+Returns an opaque handle for cancellation.")
+
+(cl-defgeneric claude-agent-backend-cancel (backend handle)
+  "Cancel the active query identified by HANDLE.
+HANDLE is the opaque value returned by `claude-agent-backend-query'.
+No-op if HANDLE is nil or query already completed."
+  ;; Default: no-op
+  nil)
+
+(cl-defgeneric claude-agent-backend-cleanup (backend)
+  "Release all resources held by BACKEND."
+  ;; Default: no-op
+  nil)
+
+(cl-defgeneric claude-agent-backend-active-p (backend)
+  "Return non-nil if BACKEND has an active query."
+  ;; Default: not active
+  nil)
+
+(cl-defgeneric claude-agent-backend-session-id (backend)
+  "Return the current session identifier, or nil if no session."
+  ;; Default: no session
+  nil)
+
+(cl-defgeneric claude-agent-backend-send-input (backend input)
+  "Send user INPUT during active query (e.g., tool-use permission responses).
+No-op if backend does not support interactive input."
+  ;; Default: no-op
+  nil)
+
+(cl-defgeneric claude-agent-backend-supports-p (backend capability)
+  "Return non-nil if BACKEND supports CAPABILITY.
+Standard capabilities:
+  :streaming-tokens    — delivers :on-token callbacks
+  :structured-messages — delivers typed :on-message callbacks
+  :tool-use            — supports tool permission flow
+  :session-resume      — can resume from session-id
+  :interactive-input   — accepts send-input during query
+  :persistent-client   — supports long-running connection"
+  ;; Default: no capabilities
+  nil)
+
+(cl-defgeneric claude-agent-backend-classify-error (backend error)
+  "Classify ERROR into a standard category.
+Returns one of: context-limit, session-expired, network, auth, unknown.
+Frontend uses this for recovery decisions."
+  ;; Default: unknown
+  'unknown)
+
+(defconst claude-agent-backend--callback-capabilities
+  '((:on-token    . :streaming-tokens)
+    (:on-message  . :structured-messages)
+    (:on-error    . :always)
+    (:on-complete . :always))
+  "Alist mapping callback keys to required capabilities.
+:always means the callback is never filtered out.")
+
+(defun claude-agent-backend-filter-callbacks (backend callbacks)
+  "Filter CALLBACKS based on BACKEND capabilities.
+Removes callback keys whose required capability is not supported.
+See `claude-agent-backend--callback-capabilities' for the mapping."
+  (let (result)
+    (dolist (mapping claude-agent-backend--callback-capabilities)
+      (let ((cb-key (car mapping))
+            (cap-key (cdr mapping)))
+        (when-let ((cb (plist-get callbacks cb-key)))
+          (when (or (eq cap-key :always)
+                    (claude-agent-backend-supports-p backend cap-key))
+            (setq result (plist-put result cb-key cb))))))
+    result))
+#+END_SRC
+
+** JSON Stream Backend
+
+The JSON stream backend wraps the existing process layer. It handles
+both per-query (one-shot) and persistent-client (bidirectional) modes.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-json-backend
+               (:include claude-agent-backend (type :json-stream))
+               (:constructor claude-agent-json-backend--create)
+               (:copier nil))
+  "JSON stream CLI backend (--output-format stream-json).
+Handles both per-query and persistent-client modes."
+  (process-state nil :documentation "Active claude-agent--process-state or nil")
+  (client nil :documentation "Persistent claude-agent--client or nil")
+  (session-key nil :documentation "File-based session key for resume")
+  (persistent-p nil :documentation "Non-nil for persistent client mode"))
+
+(cl-defmethod claude-agent-backend-supports-p
+    ((backend claude-agent-json-backend) capability)
+  "JSON stream backend supports all standard capabilities."
+  (pcase capability
+    (:streaming-tokens t)
+    (:structured-messages t)
+    (:tool-use t)
+    (:session-resume t)
+    (:interactive-input t)
+    (:persistent-client (claude-agent-json-backend-persistent-p backend))
+    (_ nil)))
+
+(cl-defmethod claude-agent-backend-classify-error
+    ((backend claude-agent-json-backend) error)
+  "Classify ERROR using JSON-stream-specific error patterns."
+  (let ((msg (cond
+              ((stringp error) error)
+              ((and (listp error) (plist-get error :message))
+               (plist-get error :message))
+              (t nil))))
+    (cond
+     ((null msg) 'unknown)
+     ((claude-agent--context-too-long-p msg) 'context-limit)
+     ((claude-agent--session-expired-p msg) 'session-expired)
+     (t 'unknown))))
+
+(cl-defmethod claude-agent-backend-active-p
+    ((backend claude-agent-json-backend))
+  "Check if JSON backend has an active query."
+  (when-let ((state (claude-agent-json-backend-process-state backend)))
+    (claude-agent--query-active-p state)))
+
+(cl-defmethod claude-agent-backend-session-id
+    ((backend claude-agent-json-backend))
+  "Return SDK UUID for the JSON backend's session."
+  (when-let ((key (claude-agent-json-backend-session-key backend)))
+    (claude-agent--get-sdk-uuid key)))
+
+(cl-defmethod claude-agent-backend-cancel
+    ((backend claude-agent-json-backend) handle)
+  "Cancel query via HANDLE (a process-state)."
+  (when handle
+    (claude-agent-query-interrupt handle)))
+
+(cl-defmethod claude-agent-backend-cleanup
+    ((backend claude-agent-json-backend))
+  "Clean up JSON backend resources."
+  (when-let ((state (claude-agent-json-backend-process-state backend)))
+    (claude-agent-close-process-state state)
+    (setf (claude-agent-json-backend-process-state backend) nil))
+  (when-let ((client (claude-agent-json-backend-client backend)))
+    (when (claude-agent-client-alive-p client)
+      (claude-agent-client-disconnect client))
+    (setf (claude-agent-json-backend-client backend) nil)))
+
+(cl-defmethod claude-agent-backend-send-input
+    ((backend claude-agent-json-backend) input)
+  "Send INPUT to the active JSON stream process via stdin."
+  (when-let ((state (claude-agent-json-backend-process-state backend)))
+    (when-let ((proc (claude-agent--process-state-process state)))
+      (when (process-live-p proc)
+        (process-send-string proc (concat input "\n"))))))
+
+(cl-defmethod claude-agent-backend-query
+    ((backend claude-agent-json-backend) prompt callbacks &rest args)
+  "Send PROMPT via JSON stream backend, invoking CALLBACKS.
+Delegates to `claude-agent-query' (one-shot) or
+`claude-agent-client-send-message' (persistent)."
+  (let* ((on-token (plist-get callbacks :on-token))
+         (on-message (plist-get callbacks :on-message))
+         (on-error (plist-get callbacks :on-error))
+         (on-complete (plist-get callbacks :on-complete))
+         (state
+          (if (claude-agent-json-backend-persistent-p backend)
+              ;; Persistent mode: reuse client
+              (let* ((session-key (claude-agent-json-backend-session-key backend))
+                     (options (plist-get args :options))
+                     (client (or (claude-agent-json-backend-client backend)
+                                 (let ((c (claude-agent-client-create
+                                           :options options
+                                           :session-key session-key)))
+                                   (claude-agent-client-connect c "")
+                                   (setf (claude-agent-json-backend-client backend) c)
+                                   c))))
+                (claude-agent-client-send-message
+                 client prompt
+                 :token-callback on-token
+                 :on-message on-message
+                 :on-error on-error
+                 :on-complete on-complete)
+                (claude-agent-client-state client))
+            ;; One-shot mode: delegate to claude-agent-query
+            (apply #'claude-agent-query prompt
+                   :on-token on-token
+                   :on-message on-message
+                   :on-error on-error
+                   :on-complete on-complete
+                   (cl-loop for (k v) on args by #'cddr
+                            append (list k v))))))
+    ;; Store process-state for active-p / cancel
+    (setf (claude-agent-json-backend-process-state backend) state)
+    state))
+#+END_SRC
+
+** Public Utility Wrappers
+
+Public wrappers for previously-private functions. These allow the presentation
+layer to call these without depending on internal naming conventions.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-make-session-key (file-path &optional session-id)
+  "Create internal session key from FILE-PATH and optional SESSION-ID.
+Public wrapper for session key generation."
+  (claude-agent--make-session-key file-path session-id))
+
+(defun claude-agent-get-verbose-buffer (session-key)
+  "Return the verbose output buffer for SESSION-KEY, or nil."
+  (gethash session-key claude-agent--session-verbose-buffers))
+
+(defun claude-agent-session-expired-p (error-message)
+  "Check if ERROR-MESSAGE indicates session expiration.
+Public wrapper for error classification."
+  (claude-agent--session-expired-p error-message))
+
+(defun claude-agent-context-too-long-p (error-message)
+  "Check if ERROR-MESSAGE indicates context/prompt is too long.
+Public wrapper for error classification."
+  (claude-agent--context-too-long-p error-message))
+#+END_SRC
+
+** Backend Protocol Contract
+
+This section documents the contract that all backend implementations must follow.
+It serves as a reference for implementing new backends.
+
+*** Protocol Overview
+
+A backend is a =cl-defstruct= inheriting from =claude-agent-backend=.  It must
+implement the 8 generic functions below.  The presentation layer (claude-org.org)
+calls only these generics plus =claude-agent-backend-filter-callbacks=.
+
+| Generic | Required | Returns | Purpose |
+|---------+----------+---------+---------|
+| =backend-query= | yes | handle (opaque) | Start a query, invoke callbacks |
+| =backend-cancel= | yes | nil | Cancel an in-flight query by handle |
+| =backend-cleanup= | yes | nil | Release resources (process, connection) |
+| =backend-active-p= | yes | boolean | Is a query currently running? |
+| =backend-session-id= | no | string or nil | Resume ID for conversation continuity |
+| =backend-send-input= | no | nil | Send user input (permission prompts) |
+| =backend-supports-p= | yes | boolean | Capability feature flag check |
+| =backend-classify-error= | yes | symbol | Classify error for recovery decisions |
+
+*** Callback Contract
+
+Backends receive a =callbacks= plist with these keys:
+
+| Key | Capability Gate | Purpose |
+|-----+-----------------+---------|
+| =:on-token= | =:streaming-tokens= | Incremental text chunks |
+| =:on-message= | =:structured-messages= | Full structured messages |
+| =:on-error= | (always) | Error notification |
+| =:on-complete= | (always) | Completion notification |
+
+Use =claude-agent-backend-filter-callbacks= before passing callbacks to strip
+unsupported features.  =:on-error= and =:on-complete= are never filtered.
+
+*** Standard Capabilities
+
+| Capability | Meaning |
+|------------+---------|
+| =:streaming-tokens= | Backend emits incremental text tokens |
+| =:structured-messages= | Backend emits typed message structs |
+| =:tool-use= | Backend supports tool-use blocks |
+| =:session-resume= | Backend can resume prior conversations |
+| =:interactive-input= | Backend accepts mid-query user input |
+| =:persistent-client= | Backend maintains a long-lived connection |
+
+*** Error Classification
+
+=backend-classify-error= must return one of:
+
+| Symbol | Meaning | Recovery |
+|--------+---------+----------|
+| =context-limit= | Prompt/context too large | Truncate and retry |
+| =session-expired= | Session ID no longer valid | Start fresh session |
+| =network= | Connection or I/O failure | Retry with backoff |
+| =auth= | Authentication/authorization failure | Re-authenticate |
+| =unknown= | Unrecognized error | Show to user |
+
+*** Implementing a New Backend
+
+To add a new backend (e.g., HTTP API, terminal multiplexer):
+
+#+begin_example
+;; 1. Define struct inheriting from base
+(cl-defstruct (claude-agent-my-backend
+               (:include claude-agent-backend (type :my-type))
+               (:constructor claude-agent-my-backend--create)
+               (:copier nil))
+  "My custom backend."
+  (connection nil)
+  (session-key nil))
+
+;; 2. Implement required generics
+
+(cl-defmethod claude-agent-backend-query
+    ((backend claude-agent-my-backend) prompt callbacks &rest args)
+  ;; Start query, invoke (plist-get callbacks :on-token) etc.
+  ;; Return an opaque handle for cancel/tracking.
+  ...)
+
+(cl-defmethod claude-agent-backend-cancel
+    ((backend claude-agent-my-backend) handle)
+  ;; Cancel query identified by handle
+  ...)
+
+(cl-defmethod claude-agent-backend-cleanup
+    ((backend claude-agent-my-backend))
+  ;; Release all resources
+  ...)
+
+(cl-defmethod claude-agent-backend-active-p
+    ((backend claude-agent-my-backend))
+  ;; Return t if a query is in flight
+  ...)
+
+(cl-defmethod claude-agent-backend-supports-p
+    ((backend claude-agent-my-backend) capability)
+  ;; Return t for supported capabilities
+  (memq capability '(:streaming-tokens :structured-messages)))
+
+(cl-defmethod claude-agent-backend-classify-error
+    ((backend claude-agent-my-backend) error)
+  ;; Classify error string into standard symbol
+  (cond
+   ((string-match-p "timeout" error) 'network)
+   (t 'unknown)))
+
+;; 3. Create a factory function for claude-org integration
+(defun claude-org--make-my-backend (session-key options)
+  (claude-agent-my-backend--create :session-key session-key))
+#+end_example
+
 * Process Management
 :PROPERTIES:
-:DEPENDS_ON: Data Structures, Error Handling, Customization Variables
+:DEPENDS_ON: Data Structures, Backend Protocol, Error Handling, Customization Variables
 :DEPENDED_BY: Core API, Client API, Session Management
 :END:
 

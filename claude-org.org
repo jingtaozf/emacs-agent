@@ -666,7 +666,7 @@ Returns nil safely if not in org-mode context."
 Combines file path with optional CLAUDE_SESSION_ID property.
 Uses claude-agent session key format for consistency."
   (let ((custom-id (claude-org--get-session-id)))
-    (claude-agent--make-session-key buffer-file-name custom-id)))
+    (claude-agent-make-session-key buffer-file-name custom-id)))
 #+END_SRC
 
 ** Session Scope Detection
@@ -1436,7 +1436,8 @@ Multi-session process management allowing concurrent queries.
   busy                    ; Boolean: query in progress
   recovering              ; Non-nil during session recovery
   query-id                ; UUID identifying the current query
-  process-state           ; claude-agent--process-state object
+  backend                 ; claude-agent-backend struct (dispatches protocol)
+  query-handle            ; Opaque handle from backend-query (for cancellation)
   start-time              ; float-time of request start
   original-prompt         ; Original prompt for recovery context
   section-level           ; Heading level (integer) for response adjustment
@@ -1568,6 +1569,13 @@ REASON is an optional string explaining why (for logging)."
   "Return count of active persistent clients."
   (hash-table-count claude-org--persistent-clients))
 
+(defun claude-org--make-default-backend (session-key options)
+  "Create the default backend for SESSION-KEY with OPTIONS.
+Returns a JSON stream backend configured based on `claude-org-persistent-sessions'."
+  (claude-agent-json-backend--create
+   :session-key session-key
+   :persistent-p claude-org-persistent-sessions))
+
 (defun claude-org--get-or-create-persistent-client (session-key options)
   "Get or create a persistent client for SESSION-KEY.
 OPTIONS is a plist of claude-agent options.
@@ -1630,18 +1638,21 @@ Added to `org-after-todo-state-change-hook' (buffer-local) in `claude-org-mode'.
 #+BEGIN_SRC elisp
 (defun claude-org--get-session (session-key)
   "Get or create session state for SESSION-KEY.
-Returns a `claude-org--session-state' struct."
+Returns a `claude-org--session-state' struct.
+Replaces stale non-struct entries (e.g. plists from pre-refactor code)."
   ;; Ensure hash table exists (lazy initialization per buffer)
   ;; Must use setq-local to create buffer-local binding
   (unless (local-variable-p 'claude-org--sessions)
     (setq-local claude-org--sessions (make-hash-table :test 'equal)))
-  (or (gethash session-key claude-org--sessions)
+  (let ((existing (gethash session-key claude-org--sessions)))
+    (if (claude-org--session-state-p existing)
+        existing
       (let ((state (claude-org--make-session-state
                     :spinner 0
                     :section-level 0
                     :current-line-length 0)))
         (puthash session-key state claude-org--sessions)
-        state)))
+        state))))
 
 (defun claude-org--session-state-set (state prop value)
   "Set PROP to VALUE on session STATE struct.
@@ -1650,7 +1661,8 @@ Uses cl-defstruct generated setf forms for each known property."
     (:busy (setf (claude-org--session-state-busy state) value))
     (:recovering (setf (claude-org--session-state-recovering state) value))
     (:query-id (setf (claude-org--session-state-query-id state) value))
-    (:process-state (setf (claude-org--session-state-process-state state) value))
+    (:backend (setf (claude-org--session-state-backend state) value))
+    (:query-handle (setf (claude-org--session-state-query-handle state) value))
     (:start-time (setf (claude-org--session-state-start-time state) value))
     (:original-prompt (setf (claude-org--session-state-original-prompt state) value))
     (:section-level (setf (claude-org--session-state-section-level state) value))
@@ -1686,7 +1698,8 @@ Uses pcase dispatch symmetric with `claude-org--session-state-set'."
     (:busy (claude-org--session-state-busy state))
     (:recovering (claude-org--session-state-recovering state))
     (:query-id (claude-org--session-state-query-id state))
-    (:process-state (claude-org--session-state-process-state state))
+    (:backend (claude-org--session-state-backend state))
+    (:query-handle (claude-org--session-state-query-handle state))
     (:start-time (claude-org--session-state-start-time state))
     (:original-prompt (claude-org--session-state-original-prompt state))
     (:section-level (claude-org--session-state-section-level state))
@@ -3991,11 +4004,12 @@ Markers hold references to buffers; must be explicitly freed."
     (claude-org--session-put session-key :marker nil)))
 
 (defun claude-org--unregister-active-query (session-key)
-  "Mark process state as closed and unregister from active queries for SESSION-KEY.
+  "Cancel and clean up the active query for SESSION-KEY.
 This ensures the mode-line spinner and *Claude Queries* buffer reflect the
 terminal state immediately, without waiting for the CLI process to exit."
-  (when-let* ((process-state (claude-org--session-get session-key :process-state)))
-    (claude-agent-close-process-state process-state)))
+  (when-let* ((backend (claude-org--session-get session-key :backend))
+              (handle (claude-org--session-get session-key :query-handle)))
+    (claude-agent-backend-cancel backend handle)))
 
 (defun claude-org--handle-complete (session-key result)
   "Handle query completion for SESSION-KEY with RESULT.
@@ -4069,24 +4083,27 @@ ERROR can be (symbol :message ...) plist, a string, or other."
 Attempts session recovery if error indicates expired session or context too long.
 If already recovering and another error occurs, give up and show error to user."
   (let ((error-msg (claude-org--extract-error-message error))
-        (is-recovering (claude-org--session-get session-key :recovering)))
+        (is-recovering (claude-org--session-get session-key :recovering))
+        (backend (claude-org--session-get session-key :backend)))
     (cond
      ;; Already recovering and hit another error - give up to prevent infinite loop
      (is-recovering
       (message "Claude: Recovery failed with error: %s" error-msg)
       (claude-org--insert-error session-key
                                 (format "Recovery failed: %s" error-msg)))
-     ;; Context too long - clear UUID and recover with conversation history
-     ((claude-agent--context-too-long-p error-msg)
-      (message "Claude context limit reached, starting fresh session with history...")
-      (claude-org--recover-session session-key 'context-limit))
-     ;; Session expired - clear UUID and recover
-     ((claude-agent--session-expired-p error-msg)
-      (message "Claude session expired, starting new session...")
-      (claude-org--recover-session session-key 'expired))
-     ;; Other error - display it
+     ;; Use backend protocol for error classification (backend-agnostic)
      (t
-      (claude-org--insert-error session-key error-msg)))))
+      (pcase (if backend
+                 (claude-agent-backend-classify-error backend error-msg)
+               'unknown)
+        ('context-limit
+         (message "Claude context limit reached, starting fresh session with history...")
+         (claude-org--recover-session session-key 'context-limit))
+        ('session-expired
+         (message "Claude session expired, starting new session...")
+         (claude-org--recover-session session-key 'expired))
+        (_
+         (claude-org--insert-error session-key error-msg)))))))
 
 (defun claude-org--insert-error (session-key error-msg)
   "Insert ERROR-MSG at SESSION-KEY's marker and clean up.
@@ -4795,6 +4812,19 @@ so this works correctly even when the user is editing other parts of the file."
 ** Send Request
 
 #+BEGIN_SRC elisp
+(defun claude-org--make-guarded-callback (buf session-key query-id handler)
+  "Return a callback that calls HANDLER only if BUF is live and QUERY-ID current.
+Guards against stale callbacks from cancelled or superseded queries."
+  (lexical-let ((buf buf)
+                (session-key session-key)
+                (qid query-id)
+                (handler handler))
+    (lambda (arg)
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (equal qid (claude-org--session-get session-key :query-id))
+            (funcall handler session-key arg)))))))
+
 (defun claude-org--send-request (prompt &optional query-context session-key-override)
   "Send PROMPT to Claude via claude-agent.
 QUERY-CONTEXT is a claude-agent-query-context struct for Session Manager display.
@@ -4830,55 +4860,24 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
              (when-let ((heading-pos (claude-org--find-session-scope-heading)))
                (goto-char heading-pos)
                (substring-no-properties (org-get-heading t t t t))))))
-      ;; Use lexical-let to properly capture variables for callbacks
-      (lexical-let ((buf source-buf)
-                    (session-key session-key))
-        ;; Branch: persistent client vs legacy one-shot query
-        (if claude-org-persistent-sessions
-            ;; Persistent client mode: reuse long-running process
-            (let ((client (claude-org--get-or-create-persistent-client session-key options)))
-              ;; Generate query-id for persistent client mode too
-              (let ((query-id (claude-org--session-get session-key :query-id)))
-                (claude-agent-client-send-message
-                 client
-                 full-prompt
-                 :token-callback (lexical-let ((qid query-id))
-                                   (lambda (text)
-                                     (when (buffer-live-p buf)
-                                       (with-current-buffer buf
-                                         (when (equal qid (claude-org--session-get session-key :query-id))
-                                           ;; Use marker-free v2 handler
-                                           (claude-org--handle-token-v2 session-key text))))))
-                 :on-message (lexical-let ((qid query-id))
-                               (lambda (msg)
-                                 (when (buffer-live-p buf)
-                                   (with-current-buffer buf
-                                     (when (equal qid (claude-org--session-get session-key :query-id))
-                                       (claude-org--handle-message session-key msg))))))
-                 :on-error (lexical-let ((qid query-id))
-                             (lambda (err)
-                               (when (buffer-live-p buf)
-                                 (with-current-buffer buf
-                                   (when (equal qid (claude-org--session-get session-key :query-id))
-                                     (claude-org--handle-error session-key err))))))
-                 :on-complete (lexical-let ((qid query-id))
-                                (lambda (result)
-                                  (when (buffer-live-p buf)
-                                    (with-current-buffer buf
-                                      (when (equal qid (claude-org--session-get session-key :query-id))
-                                        (claude-org--handle-complete session-key result)))))))
-                ;; Store client state and query-id
-                (claude-org--session-put session-key :process-state
-                                         (claude-agent-client-state client))
-                (claude-org--session-put session-key :query-id query-id))
-              ;; Update activity timestamp
-              (claude-org--update-persistent-client-activity session-key))
-          ;; Legacy mode: spawn new process for each query
-          ;; Use query-id from session (already generated by claude-org-execute or recovery)
-          ;; This ensures callback validation works correctly
-          (let* ((query-id (claude-org--session-get session-key :query-id))
-                 (state (claude-agent-query
-                         full-prompt
+      ;; Build callbacks with query-id validation via guarded helper
+      (let* ((query-id (claude-org--session-get session-key :query-id))
+             (mk (lambda (handler)
+                   (claude-org--make-guarded-callback
+                    source-buf session-key query-id handler)))
+             (callbacks
+              (list
+               :on-token    (funcall mk #'claude-org--handle-token-v2)
+               :on-message  (funcall mk #'claude-org--handle-message)
+               :on-error    (funcall mk #'claude-org--handle-error)
+               :on-complete (funcall mk #'claude-org--handle-complete)))
+               ;; Get or create backend
+               (backend (or (claude-org--session-get session-key :backend)
+                            (claude-org--make-default-backend session-key options)))
+               ;; Filter callbacks based on backend capabilities
+               (filtered-callbacks (claude-agent-backend-filter-callbacks backend callbacks))
+               ;; Send query through backend protocol
+               (handle (claude-agent-backend-query backend full-prompt filtered-callbacks
                          :options options
                          :session-key session-key
                          :source-buffer source-buf
@@ -4888,36 +4887,14 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
                          :cli-path cli-path
                          :path-mappings path-mappings
                          :project-root project-root
-                         :org-section org-section-name
-                         :on-token (lexical-let ((qid query-id))
-                                     (lambda (text)
-                                       (when (buffer-live-p buf)
-                                         (with-current-buffer buf
-                                           ;; Only process if this is the current query
-                                           (when (equal qid (claude-org--session-get session-key :query-id))
-                                             ;; Use marker-free v2 handler
-                                             (claude-org--handle-token-v2 session-key text))))))
-                         :on-message (lexical-let ((qid query-id))
-                                       (lambda (msg)
-                                         (when (buffer-live-p buf)
-                                           (with-current-buffer buf
-                                             (when (equal qid (claude-org--session-get session-key :query-id))
-                                               (claude-org--handle-message session-key msg))))))
-                         :on-error (lexical-let ((qid query-id))
-                                     (lambda (err)
-                                       (when (buffer-live-p buf)
-                                         (with-current-buffer buf
-                                           (when (equal qid (claude-org--session-get session-key :query-id))
-                                             (claude-org--handle-error session-key err))))))
-                         :on-complete (lexical-let ((qid query-id))
-                                        (lambda (result)
-                                          (when (buffer-live-p buf)
-                                            (with-current-buffer buf
-                                              (when (equal qid (claude-org--session-get session-key :query-id))
-                                                (claude-org--handle-complete session-key result)))))))))
-            ;; Store process state and query-id
-            (claude-org--session-put session-key :process-state state)
-            (claude-org--session-put session-key :query-id query-id)))))))
+                         :org-section org-section-name)))
+          ;; Store backend and handle in session
+          (claude-org--session-put session-key :backend backend)
+          (claude-org--session-put session-key :query-handle handle)
+          (claude-org--session-put session-key :query-id query-id)
+          ;; Update persistent client activity if applicable
+          (when (claude-agent-backend-supports-p backend :persistent-client)
+            (claude-org--update-persistent-client-activity session-key))))))
 
 (defun claude-org--execute-queued-block (session-key block-info)
   "Execute a queued BLOCK-INFO for SESSION-KEY.
@@ -5619,16 +5596,17 @@ Dynamic header line showing session status, IDE context, and thinking state.
   "Cancel the current session's active query, stop any loop, and clear queue."
   (interactive)
   (let* ((session-key (claude-org--current-session-key))
-         (process-state (claude-org--session-get session-key :process-state))
+         (backend (claude-org--session-get session-key :backend))
+         (query-handle (claude-org--session-get session-key :query-handle))
          (loop-current (claude-org--session-get session-key :loop-current))
          (loop-max (claude-org--session-get session-key :loop-max))
          (queue-count (claude-org--queue-count session-key)))
-    (if (and process-state (claude-org--session-get session-key :busy))
+    (if (and backend (claude-org--session-get session-key :busy))
         (progn
           ;; Stop loop by setting current = max
           (when (and loop-max (> loop-max 1))
             (claude-org--session-put session-key :loop-current loop-max))
-          (claude-agent-query-interrupt process-state)
+          (claude-agent-backend-cancel backend query-handle)
           ;; Mark closed and unregister so mode-line/queries buffer update immediately
           (claude-org--unregister-active-query session-key)
           (claude-org--session-put session-key :busy nil)
@@ -5670,13 +5648,14 @@ Dynamic header line showing session status, IDE context, and thinking state.
                    (when (> q-count 0)
                      (cl-incf queued-cleared q-count)
                      (setf (claude-org--session-state-pending-queue state) nil)))
-                 ;; Cancel active query
+                 ;; Cancel active query via backend protocol
                  (when (claude-org--session-state-busy state)
-                   (when-let* ((ps (claude-org--session-state-process-state state)))
-                     (claude-agent-query-interrupt ps)
-                     (claude-org--unregister-active-query key)
-                     (setf (claude-org--session-state-busy state) nil)
-                     (cl-incf cancelled)))))
+                   (when-let* ((backend (claude-org--session-state-backend state))
+                               (handle (claude-org--session-state-query-handle state)))
+                     (claude-agent-backend-cancel backend handle))
+                   (claude-org--unregister-active-query key)
+                   (setf (claude-org--session-state-busy state) nil)
+                   (cl-incf cancelled))))
              claude-org--sessions)
     (claude-org--refresh-header-line)
     (if (> queued-cleared 0)
@@ -5703,7 +5682,7 @@ Dynamic header line showing session status, IDE context, and thinking state.
   "Show verbose output buffer for current session."
   (interactive)
   (let ((session-key (claude-org--current-session-key)))
-    (if-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+    (if-let ((buf (claude-agent-get-verbose-buffer session-key)))
         (if (buffer-live-p buf)
             (display-buffer buf)
           (message "Verbose buffer no longer exists"))

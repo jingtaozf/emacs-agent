@@ -1955,7 +1955,8 @@ affecting the second token which carries real content."
     (should-not (claude-org--session-state-busy ss))
     (should-not (claude-org--session-state-recovering ss))
     (should-not (claude-org--session-state-query-id ss))
-    (should-not (claude-org--session-state-process-state ss))
+    (should-not (claude-org--session-state-backend ss))
+    (should-not (claude-org--session-state-query-handle ss))
     (should-not (claude-org--session-state-marker ss))
     (should-not (claude-org--session-state-custom-id ss))
     (should-not (claude-org--session-state-block-id ss))
@@ -1968,7 +1969,8 @@ affecting the second token which carries real content."
              :busy t
              :recovering nil
              :query-id "qid-123"
-             :process-state 'mock-ps
+             :backend 'mock-backend
+             :query-handle 'mock-handle
              :start-time 1234.5
              :original-prompt "hello"
              :section-level 3
@@ -1988,7 +1990,8 @@ affecting the second token which carries real content."
              :sdk-uuid "uuid-xyz")))
     (should (eq t (claude-org--session-state-busy ss)))
     (should (equal "qid-123" (claude-org--session-state-query-id ss)))
-    (should (equal 'mock-ps (claude-org--session-state-process-state ss)))
+    (should (equal 'mock-backend (claude-org--session-state-backend ss)))
+    (should (equal 'mock-handle (claude-org--session-state-query-handle ss)))
     (should (= 1234.5 (claude-org--session-state-start-time ss)))
     (should (equal "hello" (claude-org--session-state-original-prompt ss)))
     (should (= 3 (claude-org--session-state-section-level ss)))
@@ -2045,6 +2048,56 @@ affecting the second token which carries real content."
       (claude-org--session-put key :busy t)
       (let ((stored (gethash key claude-org--sessions)))
         (should (claude-org--session-state-p stored))))))
+
+(ert-deftest test-claude-org-get-session-replaces-stale-plist ()
+  "Test that get-session replaces old plist entries with proper structs.
+When old code stored a plist in the sessions hash table, get-session
+should detect the non-struct and replace it with a fresh struct."
+  :tags '(:unit :fast :stable :isolated :session :phase-7)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-plist-migration.org")
+    (claude-org-mode 1)
+    ;; Initialize the hash table via a normal get-session call
+    (claude-org--get-session "init-key")
+    (let ((key "test-stale-plist"))
+      ;; Simulate old code: manually store a plist in the hash table
+      (puthash key '(:process-state nil :marker nil :busy t :query-id "old-qid")
+               claude-org--sessions)
+      ;; Verify plist is stored (not a struct)
+      (should-not (claude-org--session-state-p (gethash key claude-org--sessions)))
+      ;; get-session should detect and replace with a struct
+      (let ((state (claude-org--get-session key)))
+        (should (claude-org--session-state-p state))
+        ;; The struct should be fresh (old plist data is stale)
+        (should-not (claude-org--session-state-busy state))
+        ;; Hash table should now contain the struct
+        (should (claude-org--session-state-p (gethash key claude-org--sessions)))))))
+
+(ert-deftest test-claude-org-unregister-active-query-uses-backend ()
+  "Test that unregister-active-query uses backend protocol, not process-state."
+  :tags '(:unit :fast :stable :isolated :session :phase-7)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-unregister-backend.org")
+    (claude-org-mode 1)
+    (let* ((key "test-unregister")
+           (cancelled nil)
+           ;; Create a mock backend that records cancel calls
+           (mock-backend (claude-agent-json-backend--create))
+           (mock-handle 'mock-handle))
+      ;; Store backend and handle in session
+      (claude-org--session-put key :backend mock-backend)
+      (claude-org--session-put key :query-handle mock-handle)
+      ;; Mock cancel to record the call
+      (cl-letf (((symbol-function 'claude-agent-backend-cancel)
+                 (lambda (backend handle)
+                   (setq cancelled (list backend handle)))))
+        (claude-org--unregister-active-query key))
+      ;; Verify cancel was called with correct args
+      (should cancelled)
+      (should (eq mock-backend (car cancelled)))
+      (should (eq mock-handle (cadr cancelled))))))
 
 ;;; Phase 7b: marker-to-query-id migration tests
 
