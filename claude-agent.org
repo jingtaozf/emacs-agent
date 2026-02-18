@@ -21,7 +21,8 @@
   - [[#content-block-types][Content Block Types]]
   - [[#query-context][Query Context]]
   - [[#message-types][Message Types]]
-  - [[#hook-types][Hook Types]]
+  - [[#message-event-hooks][Message Event Hooks]]
+  - [[#event-dispatch-functions][Event Dispatch Functions]]
 - [[#process-management][Process Management]]
   - [[#cli-discovery][CLI Discovery]]
   - [[#docker-container-management][Docker Container Management]]
@@ -38,11 +39,21 @@
     - [[#token-extraction][Token Extraction]]
     - [[#json-boolean-handling][JSON Boolean Handling]]
     - [[#error-detection][Error Detection]]
+    - [[#normal-message-processing][Normal Message Processing]]
+    - [[#json-validation][JSON Validation]]
     - [[#json-buffer-processing][JSON Buffer Processing]]
     - [[#process-filter-entry-point][Process Filter Entry Point]]
   - [[#process-sentinel][Process Sentinel]]
+  - [[#session-recovery][Session Recovery]]
+    - [[#abnormal-exit-detection][Abnormal Exit Detection]]
+    - [[#recovery-message-insertion][Recovery Message Insertion]]
+    - [[#session-resumption][Session Resumption]]
+  - [[#pipe-deadlock-prevention][Pipe Deadlock Prevention]]
   - [[#streaming-mode-initialization][Streaming Mode Initialization]]
+  - [[#background-task-tracking][Background Task Tracking]]
+  - [[#pending-control-request-tracking][Pending Control Request Tracking]]
   - [[#closing-stdin-after-result][Closing Stdin After Result]]
+    - [[#why-delayed-stdin-close-is-necessary][Why Delayed Stdin Close is Necessary]]
   - [[#process-creation][Process Creation]]
 - [[#json-protocol][JSON Protocol]]
   - [[#content-block-parsing][Content Block Parsing]]
@@ -60,12 +71,17 @@
   - [[#test-file-organization][Test File Organization]]
   - [[#running-tests][Running Tests]]
   - [[#test-categories][Test Categories]]
+- [[#input-validation][Input Validation]]
+  - [[#answer-validation][Answer Validation]]
+  - [[#file-path-validation][File Path Validation]]
+  - [[#command-validation][Command Validation]]
 - [[#permission-system][Permission System]]
   - [[#permission-hook][Permission Hook]]
     - [[#permission-cache-per-session][Permission Cache (Per-Session)]]
     - [[#tool-description][Tool Description]]
     - [[#default-implementation-interactive-prompt][Default Implementation: Interactive Prompt]]
     - [[#auto-approve-implementation][Auto-Approve Implementation]]
+    - [[#askuserquestion-tool-handling][AskUserQuestion Tool Handling]]
   - [[#permission-presets][Permission Presets]]
   - [[#pattern-matching][Pattern Matching]]
   - [[#permission-checking][Permission Checking]]
@@ -115,6 +131,9 @@
 - [[#conversation-titling][Conversation Titling]]
   - [[#customization-2][Customization]]
   - [[#title-generation][Title Generation]]
+- [[#prompt-refinement][Prompt Refinement]]
+  - [[#customization-3][Customization]]
+  - [[#core-api-1][Core API]]
 - [[#package-footer][Package Footer]]
 - [[#release][Release]]
 
@@ -309,6 +328,10 @@ Define error conditions for the SDK.
 #+END_SRC
 
 * Data Structures
+:PROPERTIES:
+:DEPENDS_ON: Dependencies and Requirements
+:DEPENDED_BY: Process Management, Core API, Client API, Session Management
+:END:
 
 ** Options
 
@@ -559,6 +582,10 @@ STATE is the process state struct."
 #+END_SRC
 
 * Process Management
+:PROPERTIES:
+:DEPENDS_ON: Data Structures, Error Handling, Customization Variables
+:DEPENDED_BY: Core API, Client API, Session Management
+:END:
 
 ** CLI Discovery
 
@@ -819,6 +846,50 @@ If STREAMING-P is non-nil, use streaming input mode."
 
 Internal state structure for managing async process communication.
 
+*** Sub-Structs
+
+Focused sub-structs for logical grouping of process state fields.
+These exist as standalone types for Phase 3 decomposition; future
+phases will compose them into the main process-state.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent--callback-state
+               (:constructor claude-agent--make-callback-state)
+               (:copier nil))
+  "Bundle of callbacks for async query processing."
+  callback          ; Message callback function
+  token-callback    ; Token callback for streaming text
+  error-callback    ; Error callback function
+  complete-callback) ; Completion callback function
+
+(cl-defstruct (claude-agent--recovery-state
+               (:constructor claude-agent--make-recovery-state)
+               (:copier nil))
+  "Recovery-related state for session resumption."
+  session-id        ; Claude session ID (from result message) for resumption
+  original-prompt   ; Original prompt for recovery context
+  (got-result nil)) ; Boolean: true if result message was received
+
+(cl-defstruct (claude-agent--source-state
+               (:constructor claude-agent--make-source-state)
+               (:copier nil))
+  "Source location state for query origin tracking."
+  buffer            ; Buffer that initiated query (for display)
+  query-context     ; claude-agent-query-context struct for display
+  location-fn       ; Function symbol to call for navigation (or nil)
+  location-args)    ; List of args for location-fn (or nil)
+
+(cl-defstruct (claude-agent--docker-state
+               (:constructor claude-agent--make-docker-state)
+               (:copier nil))
+  "Docker sandbox state for containerized execution."
+  mode              ; Non-nil when running in Docker sandbox
+  path-mappings     ; Path mappings for Docker mode ((host . container) ...)
+  edited-files)     ; List of files edited during query (container paths)
+#+END_SRC
+
+*** Composite State
+
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent--process-state
                (:constructor claude-agent--make-process-state)
@@ -851,6 +922,58 @@ Internal state structure for managing async process communication.
 
 (defvar claude-agent--active-states nil
   "List of active process states for cleanup.")
+#+END_SRC
+
+*** Unified Lifecycle Registry
+
+Single registry struct consolidating all global tracking tables.
+Per-process cleanup via =claude-agent-registry-cleanup-process= — never =clrhash=.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent--registry
+               (:constructor claude-agent--make-registry)
+               (:copier nil))
+  "Unified lifecycle registry for all process tracking state."
+  (active-states nil)     ; List of active process-state objects
+  (queries (make-hash-table :test 'equal))          ; request-id -> process-state
+  (sessions (make-hash-table :test 'equal))         ; session-key -> session-id
+  (background-tasks (make-hash-table :test 'equal)) ; task-id -> owner-request-id
+  (control-requests (make-hash-table :test 'equal)) ; ctrl-req-id -> owner-request-id
+  (verbose-buffers (make-hash-table :test 'equal))) ; session-key -> buffer
+
+(defvar claude-agent--registry (claude-agent--make-registry)
+  "Singleton lifecycle registry instance.")
+
+(defun claude-agent-registry-cleanup-process (state)
+  "Per-process cleanup for STATE. Removes only entries owned by this process.
+Never calls clrhash — preserves parallel sessions."
+  (let* ((req-id (claude-agent--process-state-request-id state))
+         (reg claude-agent--registry))
+    ;; Remove from active-states list
+    (setf (claude-agent--registry-active-states reg)
+          (delq state (claude-agent--registry-active-states reg)))
+    ;; Remove owned entries (collect keys first to avoid modify-during-iterate)
+    (when req-id
+      (let ((keys-to-remove nil))
+        ;; Background tasks
+        (let ((bg (claude-agent--registry-background-tasks reg)))
+          (maphash (lambda (k v)
+                     (when (equal v req-id)
+                       (push k keys-to-remove)))
+                   bg)
+          (dolist (k keys-to-remove)
+            (remhash k bg)))
+        ;; Control requests
+        (setq keys-to-remove nil)
+        (let ((cr (claude-agent--registry-control-requests reg)))
+          (maphash (lambda (k v)
+                     (when (equal v req-id)
+                       (push k keys-to-remove)))
+                   cr)
+          (dolist (k keys-to-remove)
+            (remhash k cr)))
+        ;; Queries
+        (remhash req-id (claude-agent--registry-queries reg))))))
 #+END_SRC
 
 ** Process Filter
@@ -1003,13 +1126,15 @@ Helper function to process non-control messages (user, assistant, result, etc.).
 Extracted to avoid duplication in the event dispatch logic.
 
 #+BEGIN_SRC elisp
-(defun claude-agent--process-normal-message (parsed state callback token-callback
-                                                    error-callback process)
+(defun claude-agent--process-normal-message (parsed state)
   "Process a normal (non-control) message.
 PARSED is the JSON plist, STATE is process state.
-CALLBACK, TOKEN-CALLBACK, ERROR-CALLBACK are user callbacks.
-PROCESS is the CLI process."
-  (let ((json-error (claude-agent--extract-json-error parsed))
+Callbacks and process are extracted from STATE."
+  (let ((callback (claude-agent--process-state-callback state))
+        (token-callback (claude-agent--process-state-token-callback state))
+        (error-callback (claude-agent--process-state-error-callback state))
+        (process (claude-agent--process-state-process state))
+        (json-error (claude-agent--extract-json-error parsed))
         (is-result (string= (plist-get parsed :type) "result")))
     ;; Set got-result flag for ANY result message (error or success)
     ;; This prevents infinite recovery loops when CLI returns error results
@@ -1086,11 +1211,59 @@ Attempted JSON has opening braces or brackets."
       (not (string-match-p "^[[:space:]]*[{[]" line))))
 #+END_SRC
 
+*** Protocol-Based Message Dispatch
+
+Extensible message dispatch via =cl-defgeneric= / =cl-defmethod=.
+Each message type gets its own method, dispatched by symbol via eql specializer.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-handle-message (type parsed state)
+  "Handle a parsed message of TYPE from the CLI.
+TYPE is a symbol (assistant, user, result, system, etc.).
+PARSED is the raw JSON plist.
+STATE is the `claude-agent--process-state'.")
+
+(cl-defmethod claude-agent-handle-message ((type (eql 'assistant)) parsed state)
+  "Handle assistant message — dispatch PreToolUse hooks, then normal processing."
+  (claude-agent--dispatch-pre-tool-use parsed state)
+  (claude-agent--process-normal-message parsed state))
+
+(cl-defmethod claude-agent-handle-message ((type (eql 'user)) parsed state)
+  "Handle user message — dispatch PostToolUse hooks, then normal processing."
+  (claude-agent--dispatch-post-tool-use parsed state)
+  (claude-agent--process-normal-message parsed state))
+
+(cl-defmethod claude-agent-handle-message ((type (eql 'result)) parsed state)
+  "Handle result message — dispatch Stop hooks, then normal processing."
+  (let ((message (claude-agent--parse-message parsed)))
+    (run-hook-with-args 'claude-agent-stop-functions message state))
+  (claude-agent--process-normal-message parsed state))
+
+;; Catch-all for system, init, and any future message types
+(cl-defmethod claude-agent-handle-message (type parsed state)
+  "Default handler for unspecialized message types."
+  (claude-agent--process-normal-message parsed state))
+#+END_SRC
+
 *** JSON Buffer Processing
 
 Process accumulated JSON data line by line. Each complete line (terminated by
 newline) is parsed and dispatched to the appropriate handler - either control
 requests for the bidirectional protocol, or normal message callbacks.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--try-parse-json (string)
+  "Try to parse STRING as JSON, returning plist or nil on failure.
+Uses standard json settings: plist objects, list arrays, keyword keys."
+  (condition-case nil
+      (let ((json-object-type 'plist)
+            (json-array-type 'list)
+            (json-key-type 'keyword))
+        (json-read-from-string string))
+    ((json-parse-error json-readtable-error json-end-of-file
+                       json-unknown-keyword error)
+     nil)))
+#+END_SRC
 
 #+NAME: filter-process-json-buffer
 #+BEGIN_SRC elisp
@@ -1100,8 +1273,6 @@ PROCESS has state stored via `process-get'.
 Parses complete newline-delimited JSON and invokes callbacks."
   (let* ((state (process-get process 'claude-agent-state))
          (buf (claude-agent--process-state-json-buffer state))
-         (callback (claude-agent--process-state-callback state))
-         (token-callback (claude-agent--process-state-token-callback state))
          (error-callback (claude-agent--process-state-error-callback state)))
     (while (string-match "^\\([^\n]+\\)\n" buf)
       (let* ((line (match-string 1 buf))
@@ -1109,51 +1280,24 @@ Parses complete newline-delimited JSON and invokes callbacks."
         (setf (claude-agent--process-state-json-buffer state) rest)
         (setq buf rest)
         (when (and line (not (string-empty-p (string-trim line))))
-          (condition-case err
-              (let* ((json-object-type 'plist)
-                     (json-array-type 'list)
-                     (json-key-type 'keyword)
-                     (parsed (json-read-from-string line))
-                     (msg-type (plist-get parsed :type)))
-                (claude-agent--debug-log "Parsed JSON: %S" msg-type)
+          (let ((parsed (claude-agent--try-parse-json line)))
+            (if parsed
+                (let ((msg-type (plist-get parsed :type)))
+                  (claude-agent--debug-log "Parsed JSON: %S" msg-type)
 
-                ;; Handle control requests (bidirectional protocol)
-                (cond
-                 ((equal msg-type "control_request")
-                  (claude-agent--handle-control-request process parsed))
-
-                 ;; Assistant message - dispatch PreToolUse hooks
-                 ((equal msg-type "assistant")
-                  (claude-agent--dispatch-pre-tool-use parsed state)
-                  (claude-agent--process-normal-message
-                   parsed state callback token-callback error-callback process))
-
-                 ;; User message - dispatch PostToolUse hooks
-                 ((equal msg-type "user")
-                  (claude-agent--dispatch-post-tool-use parsed state)
-                  (claude-agent--process-normal-message
-                   parsed state callback token-callback error-callback process))
-
-                 ;; Result message - dispatch Stop hooks
-                 ((equal msg-type "result")
-                  (let ((message (claude-agent--parse-message parsed)))
-                    (run-hook-with-args 'claude-agent-stop-functions message state))
-                  (claude-agent--process-normal-message
-                   parsed state callback token-callback error-callback process))
-
-                 ;; Other message types
-                 (t
-                  (claude-agent--process-normal-message
-                   parsed state callback token-callback error-callback process))))
-            ((json-parse-error json-readtable-error json-end-of-file json-unknown-keyword)
-             ;; Line is not valid JSON - could be plain text error from CLI
-             (claude-agent--debug-log "Non-JSON output: %s" line)
-             (when error-callback
-               ;; Pass the plain text as error message for session recovery handling
-               (funcall error-callback
-                        (list 'claude-agent-cli-error
-                              :message line
-                              :original-error err))))))))))
+                  ;; Control requests use direct dispatch (bidirectional protocol)
+                  (if (equal msg-type "control_request")
+                      (claude-agent--handle-control-request process parsed)
+                    ;; All other types: generic dispatch via cl-defmethod
+                    (claude-agent-handle-message
+                     (intern msg-type) parsed state)))
+              ;; Line is not valid JSON - could be plain text error from CLI
+              (claude-agent--debug-log "Non-JSON output: %s" line)
+              (when error-callback
+                (funcall error-callback
+                         (list 'claude-agent-cli-error
+                               :message line
+                               :original-error nil))))))))))
 #+END_SRC
 
 *** Process Filter Entry Point
@@ -1212,33 +1356,29 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
                 (session-key (claude-agent--process-state-session-key state)))
             (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
             ;; Try to parse as JSON - might be a control_request that arrived just before exit
-            (condition-case nil
-                (let* ((json-object-type 'plist)
-                       (json-array-type 'list)
-                       (json-key-type 'keyword)
-                       (parsed (json-read-from-string trimmed))
-                       (msg-type (plist-get parsed :type)))
-                  (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
-                  ;; Handle control_request specially - CLI died waiting for our response
-                  (if (equal msg-type "control_request")
-                      (progn
-                        (when session-key
-                          (claude-agent--verbose-insert
-                           session-key
-                           (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
-                        (message "Claude: control_request received but CLI died before we could respond"))
-                    ;; Other message types - just log
-                    (when session-key
-                      (claude-agent--verbose-insert
-                       session-key
-                       (format ">>> INFO: Final message without newline: %s" msg-type)))))
-              ;; Not valid JSON - treat as error message (original behavior)
-              (error
-               (when error-callback
-                 (funcall error-callback
-                          (list 'claude-agent-cli-error
-                                :message trimmed
-                                :original-error nil))))))))
+            (let ((parsed (claude-agent--try-parse-json trimmed)))
+              (if parsed
+                  (let ((msg-type (plist-get parsed :type)))
+                    (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
+                    ;; Handle control_request specially - CLI died waiting for our response
+                    (if (equal msg-type "control_request")
+                        (progn
+                          (when session-key
+                            (claude-agent--verbose-insert
+                             session-key
+                             (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
+                          (message "Claude: control_request received but CLI died before we could respond"))
+                      ;; Other message types - just log
+                      (when session-key
+                        (claude-agent--verbose-insert
+                         session-key
+                         (format ">>> INFO: Final message without newline: %s" msg-type)))))
+                ;; Not valid JSON - treat as error message (original behavior)
+                (when error-callback
+                  (funcall error-callback
+                           (list 'claude-agent-cli-error
+                                 :message trimmed
+                                 :original-error nil))))))))
       ;; Check for automatic recovery before normal completion handling
       (if (claude-agent--is-abnormal-exit-p event state)
           ;; Abnormal exit - attempt recovery
@@ -1248,6 +1388,8 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
                                             (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
             ;; Insert recovery message at current response position
             (claude-agent--insert-recovery-message state event)
+            ;; Kill any orphaned child processes before recovery
+            (claude-agent--kill-child-processes (process-id process))
             ;; Minimal cleanup for recovery (don't clear everything - resumed session needs some state)
             (setq claude-agent--active-states
                   (delq state claude-agent--active-states))
@@ -1277,15 +1419,27 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
               (funcall complete-cb
                        (list 'claude-agent-process-error
                              :message (format "Process event: %s" event)))))))
+        ;; Kill any orphaned child processes (shells that escaped the process group)
+        (when-let ((pid (process-id process)))
+          (let ((child-pids (split-string
+                             (string-trim
+                              (shell-command-to-string
+                               (format "pgrep -P %d 2>/dev/null" pid)))
+                             "\n" t)))
+            (dolist (child-pid child-pids)
+              (let ((cpid (string-to-number child-pid)))
+                (when (> cpid 0)
+                  (signal-process cpid 9))))))
         ;; Cleanup
         (setq claude-agent--active-states
               (delq state claude-agent--active-states))
-        ;; Clear Docker path mappings (set during claude-agent-query)
-        (setq emacs-mcp-server-path-mappings nil)
-        ;; Clear pending background tasks (prevent stale entries across sessions)
-        (clrhash claude-agent--pending-background-tasks)
-        ;; Clear pending control requests (prevent stale entries across sessions)
-        (claude-agent--clear-pending-control-requests)
+        ;; Per-process cleanup: only remove entries owned by THIS process
+        ;; (preserves entries from other parallel sessions)
+        (when-let* ((req-id (claude-agent--process-state-request-id state)))
+          (claude-agent--cleanup-process-entries req-id))
+        ;; Clear Docker path mappings only if this process owned them
+        (when (claude-agent--process-state-docker-mode state)
+          (setq emacs-mcp-server-path-mappings nil))
         ;; Unregister from active queries
         (when-let* ((req-id (claude-agent--process-state-request-id state)))
           (claude-agent--unregister-query req-id))
@@ -1486,34 +1640,39 @@ Both must be tracked to prevent premature stdin close.
 
 #+BEGIN_SRC elisp
 (defvar claude-agent--pending-background-tasks (make-hash-table :test 'equal)
-  "Hash table of task-id -> t for pending background tasks.
-Tracks both Task subagents (agentId) and Bash background tasks (backgroundTaskId).")
+  "Hash table of task-id -> owner-request-id for pending background tasks.
+Tracks both Task subagents (agentId) and Bash background tasks (backgroundTaskId).
+Values are the owning process's request-id for per-process cleanup.")
 
 (defun claude-agent--background-task-tracker (_tool-use-id _result _is-error
-                                              tool-use-result _state)
+                                              tool-use-result state)
   "Track background tasks from PostToolUse hook.
+STATE is the process-state struct (used to identify the owning process).
 TOOL-USE-RESULT contains:
 - For Task tool: isAsync=t, agentId (e.g., \"a4b3ecf\")
 - For Bash tool: backgroundTaskId (e.g., \"b8406fe\")
 - For TaskOutput: task.task_id, task.status"
   (when tool-use-result
-    ;; Case 1: Task tool async launch - isAsync=t with agentId
-    (when (and (eq (plist-get tool-use-result :isAsync) t)
-               (plist-get tool-use-result :agentId))
-      (let ((agent-id (plist-get tool-use-result :agentId)))
-        (puthash agent-id t claude-agent--pending-background-tasks)
-        (claude-agent--debug-log "Background Task started: %s" agent-id)))
-    ;; Case 2: Bash tool background - backgroundTaskId field
-    (when-let ((bg-task-id (plist-get tool-use-result :backgroundTaskId)))
-      (puthash bg-task-id t claude-agent--pending-background-tasks)
-      (claude-agent--debug-log "Background Bash started: %s" bg-task-id))
-    ;; Task completion: task.status="completed"
-    (when-let* ((task (plist-get tool-use-result :task))
-                (task-id (plist-get task :task_id))
-                (status (plist-get task :status)))
-      (when (equal status "completed")
-        (remhash task-id claude-agent--pending-background-tasks)
-        (claude-agent--debug-log "Background task completed: %s" task-id)))))
+    (let ((owner (and state (claude-agent--process-state-request-id state))))
+      ;; Case 1: Task tool async launch - isAsync=t with agentId
+      (when (and (eq (plist-get tool-use-result :isAsync) t)
+                 (plist-get tool-use-result :agentId))
+        (let ((agent-id (plist-get tool-use-result :agentId)))
+          (puthash agent-id (or owner t) claude-agent--pending-background-tasks)
+          (claude-agent--debug-log "Background Task started: %s (owner: %s)"
+                                   agent-id owner)))
+      ;; Case 2: Bash tool background - backgroundTaskId field
+      (when-let ((bg-task-id (plist-get tool-use-result :backgroundTaskId)))
+        (puthash bg-task-id (or owner t) claude-agent--pending-background-tasks)
+        (claude-agent--debug-log "Background Bash started: %s (owner: %s)"
+                                 bg-task-id owner))
+      ;; Task completion: task.status="completed"
+      (when-let* ((task (plist-get tool-use-result :task))
+                  (task-id (plist-get task :task_id))
+                  (status (plist-get task :status)))
+        (when (equal status "completed")
+          (remhash task-id claude-agent--pending-background-tasks)
+          (claude-agent--debug-log "Background task completed: %s" task-id))))))
 
 (defun claude-agent--has-pending-background-tasks-p ()
   "Return non-nil if there are pending background tasks."
@@ -1532,14 +1691,16 @@ before all control_responses are sent, the CLI will exit unexpectedly.
 
 #+BEGIN_SRC elisp
 (defvar claude-agent--pending-control-requests (make-hash-table :test 'equal)
-  "Hash table of request-id -> timestamp for pending control requests.
-Tracks control_requests that need control_responses before stdin can be closed.")
+  "Hash table of control-request-id -> owner-request-id for pending control requests.
+Tracks control_requests that need control_responses before stdin can be closed.
+Values are the owning process's request-id for per-process cleanup.")
 
-(defun claude-agent--track-control-request (request-id)
-  "Track REQUEST-ID as pending a response."
-  (puthash request-id (current-time) claude-agent--pending-control-requests)
-  (claude-agent--debug-log "Control request pending: %s (total: %d)"
-                          request-id
+(defun claude-agent--track-control-request (request-id &optional owner-request-id)
+  "Track REQUEST-ID as pending a response.
+OWNER-REQUEST-ID identifies the owning process for per-process cleanup."
+  (puthash request-id (or owner-request-id t) claude-agent--pending-control-requests)
+  (claude-agent--debug-log "Control request pending: %s (owner: %s, total: %d)"
+                          request-id owner-request-id
                           (hash-table-count claude-agent--pending-control-requests)))
 
 (defun claude-agent--untrack-control-request (request-id)
@@ -1557,6 +1718,29 @@ Tracks control_requests that need control_responses before stdin can be closed."
   "Clear all pending control request tracking.
 Called during session cleanup."
   (clrhash claude-agent--pending-control-requests))
+
+(defun claude-agent--cleanup-process-entries (owner-request-id)
+  "Remove registry entries owned by OWNER-REQUEST-ID.
+Only removes entries from `claude-agent--pending-background-tasks' and
+`claude-agent--pending-control-requests' whose value matches OWNER-REQUEST-ID.
+This is safe for parallel sessions — other sessions' entries are preserved."
+  (when owner-request-id
+    ;; Clean background tasks owned by this process
+    (let ((to-remove nil))
+      (maphash (lambda (key val)
+                 (when (equal val owner-request-id)
+                   (push key to-remove)))
+               claude-agent--pending-background-tasks)
+      (dolist (key to-remove)
+        (remhash key claude-agent--pending-background-tasks)))
+    ;; Clean control requests owned by this process
+    (let ((to-remove nil))
+      (maphash (lambda (key val)
+                 (when (equal val owner-request-id)
+                   (push key to-remove)))
+               claude-agent--pending-control-requests)
+      (dolist (key to-remove)
+        (remhash key claude-agent--pending-control-requests)))))
 #+END_SRC
 
 ** Closing Stdin After Result
@@ -1657,22 +1841,63 @@ The delay is controlled by `claude-agent-stdin-close-delay'."
 ** Process Creation
 
 #+BEGIN_SRC elisp
-(defun claude-agent--start-process (prompt options callback error-callback complete-callback
-                                          &optional token-callback request-id session-key
-                                          source-buffer query-context
-                                          source-location-fn source-location-args)
+(defvar claude-agent--stripped-env-vars '("CLAUDECODE")
+  "Environment variables to strip when spawning Claude CLI subprocesses.
+Claude CLI refuses to launch when CLAUDECODE is set (nested session detection).
+Our SDK must unset it so Emacs users can run queries from within a Claude Code session.")
+
+(defun claude-agent--build-process-environment (env-vars cli-dir)
+  "Build process environment for a Claude CLI subprocess.
+ENV-VARS is an alist of (NAME . VALUE) pairs to add.
+CLI-DIR is the directory of the CLI binary (prepended to PATH), or nil.
+Strips variables listed in `claude-agent--stripped-env-vars'."
+  (let ((base-env (cl-remove-if
+                   (lambda (entry)
+                     (cl-some (lambda (var)
+                                (string-prefix-p (concat var "=") entry))
+                              claude-agent--stripped-env-vars))
+                   process-environment)))
+    (append
+     (when cli-dir
+       (list (concat "PATH=" cli-dir ":" (getenv "PATH"))))
+     (mapcar (lambda (pair)
+               (format "%s=%s" (car pair) (cdr pair)))
+             env-vars)
+     base-env)))
+
+(defun claude-agent--kill-child-processes (pid)
+  "Kill all child processes of process with PID.
+This prevents orphaned shells from surviving after the main process exits.
+PID is guaranteed to be a number from `process-id', so shell injection is not possible."
+  (when (and pid (> pid 0))
+    (let ((child-pids (split-string
+                      (string-trim
+                       (shell-command-to-string
+                        (format "pgrep -P %d 2>/dev/null" pid)))
+                      "\n" t)))
+      (dolist (child-pid child-pids)
+        (let ((cpid (string-to-number child-pid)))
+          (when (> cpid 0)
+            (signal-process cpid 9)))))))
+
+(cl-defun claude-agent--start-process (prompt options &key callback error-callback
+                                            complete-callback token-callback
+                                            request-id session-key source-buffer
+                                            query-context source-location-fn
+                                            source-location-args)
   "Start Claude CLI process with PROMPT and OPTIONS.
 
-CALLBACK is called with each parsed message.
-ERROR-CALLBACK is called on errors.
-COMPLETE-CALLBACK is called when process completes.
-TOKEN-CALLBACK is called with each text token for streaming (optional).
-REQUEST-ID is a unique identifier for this request (optional).
-SESSION-KEY identifies the session for verbose output grouping (optional).
-SOURCE-BUFFER is the buffer that initiated this query (optional).
-QUERY-CONTEXT is a claude-agent-query-context struct for display (optional).
-SOURCE-LOCATION-FN is a function symbol to call for navigation (optional).
-SOURCE-LOCATION-ARGS is a list of args for SOURCE-LOCATION-FN (optional).
+All other arguments are keyword arguments:
+  :CALLBACK is called with each parsed message.
+  :ERROR-CALLBACK is called on errors.
+  :COMPLETE-CALLBACK is called when process completes.
+  :TOKEN-CALLBACK is called with each text token for streaming.
+  :REQUEST-ID is a unique identifier for this request (auto-generated if nil).
+  :SESSION-KEY identifies the session for verbose output grouping.
+  :SOURCE-BUFFER is the buffer that initiated this query.
+  :QUERY-CONTEXT is a claude-agent-query-context struct for display.
+  :SOURCE-LOCATION-FN is a function symbol to call for navigation.
+  :SOURCE-LOCATION-ARGS is a list of args for SOURCE-LOCATION-FN.
 
 Uses streaming mode by default to enable bidirectional control protocol
 for features like canUseTool permission callback.
@@ -1707,7 +1932,6 @@ Returns a process state object."
                  :docker-mode docker-mode-p
                  :ready nil
                  :closed nil))
-         ;; Note: We use :connection-type 'pipe in make-process below
          (default-directory (or cwd default-directory))
          ;; When cli-path is explicit, prepend its directory to exec-path
          ;; This ensures #!/usr/bin/env node finds the correct node version
@@ -1718,16 +1942,10 @@ Returns a process state object."
          (exec-path (if cli-dir
                         (cons cli-dir exec-path)
                       exec-path))
-         ;; Build process-environment with custom vars and adjusted PATH
-         (process-environment (append
-                              (when cli-dir
-                                (list (concat "PATH=" cli-dir ":" (getenv "PATH"))))
-                              (mapcar (lambda (pair)
-                                        (format "%s=%s" (car pair) (cdr pair)))
-                                      env-vars)
-                              process-environment)))
-    ;; Build command (prompt sent via stdin in streaming mode)
-    ;; For Docker commands, cli-parts is already a list; append args
+         ;; Build process-environment: custom vars, CLI PATH, stripped nesting vars
+         (process-environment (claude-agent--build-process-environment
+                               env-vars cli-dir)))
+    ;; Build command; for Docker commands, cli-parts is already a list
     (let* ((command (append cli-parts args))
            (process (make-process
                     :name "claude-agent"
@@ -1833,6 +2051,10 @@ Returns a process state object."
 #+END_SRC
 
 * Core API
+:PROPERTIES:
+:DEPENDS_ON: Data Structures, Process Management, Permission System, Session Management
+:DEPENDED_BY: Client API, Conversation Titling, Prompt Refinement, claude-org.org
+:END:
 
 ** Query Function
 
@@ -1937,24 +2159,57 @@ Docker example:
     ;; Execute query
     (let ((claude-agent-cli-path effective-cli-path))
       (let ((state (claude-agent--start-process
-                    prompt
-                    opts
-                    on-message
-                    on-error
-                    on-complete
-                    on-token
-                    nil  ; request-id (auto-generated)
-                    session-key
-                    source-buffer
-                    query-context
-                    source-location-fn
-                    source-location-args)))
+                    prompt opts
+                    :callback on-message
+                    :error-callback on-error
+                    :complete-callback on-complete
+                    :token-callback on-token
+                    :session-key session-key
+                    :source-buffer source-buffer
+                    :query-context query-context
+                    :source-location-fn source-location-fn
+                    :source-location-args source-location-args)))
         ;; Store org-section on the process for permission callbacks
         (when (and state org-section)
           (let ((process (claude-agent--process-state-process state)))
             (when process
               (process-put process :org-section org-section))))
         state))))
+
+(defun claude-agent--kill-process-tree (process &optional signal)
+  "Kill PROCESS and all its descendant processes.
+SIGNAL defaults to SIGKILL (9).  On Unix, child shells (zsh, bash) create
+their own process groups via setsid/setpgid, so killing just the parent or
+its process group leaves grandchildren orphaned.  This function uses pgrep
+to find all descendants and kills them bottom-up."
+  (when (process-live-p process)
+    (let ((pid (process-id process))
+          (sig (or signal 9)))
+      (when pid
+        ;; Kill descendants first (children, grandchildren, etc.)
+        ;; pgrep -P finds direct children; we recurse via the shell
+        (let ((desc-pids (split-string
+                          (string-trim
+                           (shell-command-to-string
+                            (format "pgrep -P %d 2>/dev/null" pid)))
+                          "\n" t)))
+          (dolist (child-pid desc-pids)
+            (let ((child-pid-num (string-to-number child-pid)))
+              (when (> child-pid-num 0)
+                ;; Recursively kill grandchildren first
+                (let ((grandchild-pids
+                       (split-string
+                        (string-trim
+                         (shell-command-to-string
+                          (format "pgrep -P %s 2>/dev/null" child-pid)))
+                        "\n" t)))
+                  (dolist (gc-pid grandchild-pids)
+                    (let ((gc-pid-num (string-to-number gc-pid)))
+                      (when (> gc-pid-num 0)
+                        (signal-process gc-pid-num sig)))))
+                (signal-process child-pid-num sig)))))
+        ;; Finally kill the main process
+        (kill-process process)))))
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
@@ -1966,13 +2221,14 @@ STATE is the process state returned by `claude-agent-query'."
 (defun claude-agent-query-kill (state)
   "Kill an ongoing query by STATE.
 Unlike `claude-agent-query-interrupt', this sends SIGKILL which cannot be ignored.
+Kills the entire process tree to prevent orphaned shell processes.
 STATE is the process state returned by `claude-agent-query'."
   (when-let ((process (claude-agent--process-state-process state)))
     (when (process-live-p process)
-      (kill-process process))))
+      (claude-agent--kill-process-tree process))))
 
 (defun claude-agent-kill-all-processes ()
-  "Kill all active Claude agent processes.
+  "Kill all active Claude agent processes and their children.
 This is useful for cleanup after tests or when processes are stuck.
 Returns the number of processes killed."
   (interactive)
@@ -1981,13 +2237,13 @@ Returns the number of processes killed."
     (dolist (state claude-agent--active-states)
       (when-let ((process (claude-agent--process-state-process state)))
         (when (process-live-p process)
-          (kill-process process)
+          (claude-agent--kill-process-tree process)
           (cl-incf killed))))
     ;; Also kill via active-queries hash table
     (maphash (lambda (_req-id state)
                (when-let ((process (claude-agent--process-state-process state)))
                  (when (process-live-p process)
-                   (kill-process process)
+                   (claude-agent--kill-process-tree process)
                    (cl-incf killed))))
              claude-agent--active-queries)
     ;; Clear state tracking
@@ -2091,6 +2347,10 @@ Returns \"unknown\" if START-TIME is nil."
 #+END_SRC
 
 * Client API
+:PROPERTIES:
+:DEPENDS_ON: Data Structures, Process Management, Core API
+:DEPENDED_BY: Interactive Chat Mode
+:END:
 
 The client API provides bidirectional interactive conversations.
 
@@ -2174,21 +2434,20 @@ Starts the CLI process in streaming mode."
          (on-err (claude-agent-client-on-error client)))
     (setf (claude-agent-client-state client)
           (claude-agent--start-process
-           prompt
-           options
-           (lambda (msg)
-             ;; Track session ID from result messages
-             (when (claude-agent-result-message-p msg)
-               (setf (claude-agent-client-session-id client)
-                     (claude-agent-result-message-session-id msg)))
-             ;; Call user callback
-             (when on-msg
-               (funcall on-msg msg)))
-           on-err
-           (lambda (result)
-             (setf (claude-agent-client-connected-p client) nil)
-             (when (and result on-err)
-               (funcall on-err result)))))
+           prompt options
+           :callback (lambda (msg)
+                       ;; Track session ID from result messages
+                       (when (claude-agent-result-message-p msg)
+                         (setf (claude-agent-client-session-id client)
+                               (claude-agent-result-message-session-id msg)))
+                       ;; Call user callback
+                       (when on-msg
+                         (funcall on-msg msg)))
+           :error-callback on-err
+           :complete-callback (lambda (result)
+                                (setf (claude-agent-client-connected-p client) nil)
+                                (when (and result on-err)
+                                  (funcall on-err result)))))
     (setf (claude-agent-client-connected-p client) t)
     client))
 
@@ -2212,10 +2471,10 @@ For persistent bidirectional streaming, use `claude-agent-client-send-message'."
                         options)))
     (setf (claude-agent-client-state client)
           (claude-agent--start-process
-           message
-           new-options
-           (or on-response (claude-agent-client-on-message client))
-           (or on-error (claude-agent-client-on-error client))
+           message new-options
+           :callback (or on-response (claude-agent-client-on-message client))
+           :error-callback (or on-error (claude-agent-client-on-error client))
+           :complete-callback
            (lambda (result)
              (when (and result (claude-agent-client-on-error client))
                (funcall (claude-agent-client-on-error client) result)))))))
@@ -2241,22 +2500,20 @@ Returns non-nil if the message was sent successfully."
          (session-key (claude-agent-client-session-key client)))
     (unless (and process (process-live-p process))
       (error "Client process is not alive"))
-    ;; Update client callbacks if provided
-    (when on-message
-      (setf (claude-agent--process-state-callback state)
-            (lambda (msg)
-              ;; Track session ID from result messages
-              (when (claude-agent-result-message-p msg)
-                (setf (claude-agent-client-session-id client)
-                      (claude-agent-result-message-session-id msg))
-                ;; Call on-complete when we get result
-                (when (or on-complete (claude-agent-client-on-complete client))
-                  (funcall (or on-complete (claude-agent-client-on-complete client)) msg)))
-              (funcall on-message msg))))
-    (when on-error
-      (setf (claude-agent--process-state-error-callback state) on-error))
-    (when token-callback
-      (setf (claude-agent--process-state-token-callback state) token-callback))
+    ;; Update client callbacks via public API
+    (claude-agent-update-state-callbacks state
+     :callback (when on-message
+                 (lambda (msg)
+                   ;; Track session ID from result messages
+                   (when (claude-agent-result-message-p msg)
+                     (setf (claude-agent-client-session-id client)
+                           (claude-agent-result-message-session-id msg))
+                     ;; Call on-complete when we get result
+                     (when (or on-complete (claude-agent-client-on-complete client))
+                       (funcall (or on-complete (claude-agent-client-on-complete client)) msg)))
+                   (funcall on-message msg)))
+     :error-callback on-error
+     :token-callback token-callback)
     ;; Update client metadata
     (cl-incf (claude-agent-client-query-count client))
     (setf (claude-agent-client-last-activity client) (float-time))
@@ -2277,7 +2534,7 @@ Cleans up process and resources, calls on-disconnect callback if set."
       (when-let ((state (claude-agent-client-state client)))
         (when-let ((process (claude-agent--process-state-process state)))
           (when (process-live-p process)
-            (delete-process process)))
+            (claude-agent--kill-process-tree process)))
         (when-let ((buf (claude-agent--process-state-buffer state)))
           (when (buffer-live-p buf)
             (kill-buffer buf))))
@@ -2394,7 +2651,9 @@ Tracks pending requests to prevent premature stdin close."
     (claude-agent--debug-log "Control request: %s (id=%s)" subtype request-id)
 
     ;; Track this request as pending (will be untracked when response is sent)
-    (claude-agent--track-control-request request-id)
+    (let ((owner (when-let* ((state (process-get process 'claude-agent-state)))
+                   (claude-agent--process-state-request-id state))))
+      (claude-agent--track-control-request request-id owner))
 
     (condition-case err
         (cond
@@ -2540,10 +2799,51 @@ Returns t if valid."
 #+END_SRC
 
 * Permission System
+:PROPERTIES:
+:DEPENDS_ON: Data Structures
+:DEPENDED_BY: Core API, claude-org.org
+:END:
 
 This section provides permission pattern matching for controlling which
 Claude tools are allowed or denied. It ports the permission system from
 the Python backend.
+
+** Permission Protocol
+
+Formal protocol for composable permission checkers via =cl-defgeneric=.
+The base =permission-checker= struct defines the protocol; specialized
+sub-structs (like =pattern-checker=) implement the =check-tool-permission= method.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-permission-checker
+               (:constructor claude-agent-make-permission-checker)
+               (:copier nil))
+  "Base struct for permission checkers.
+Subtype to implement `claude-agent-check-tool-permission'.")
+
+(cl-defgeneric claude-agent-check-tool-permission (checker tool input ctx)
+  "Check permission for TOOL with INPUT using CHECKER.
+TOOL is the tool name string (e.g. \"Read\", \"Bash\").
+INPUT is the tool input plist.
+CTX is an optional context plist.
+Returns: 'allow, 'deny, or 'ask.")
+
+(cl-defstruct (claude-agent-pattern-checker
+               (:constructor claude-agent-make-pattern-checker)
+               (:include claude-agent-permission-checker)
+               (:copier nil))
+  "Pattern-based permission checker with allow/deny glob patterns."
+  allow-patterns   ; List of patterns to allow
+  deny-patterns)   ; List of patterns to deny
+
+(cl-defmethod claude-agent-check-tool-permission
+    ((checker claude-agent-pattern-checker) tool input _ctx)
+  "Check permission for TOOL with INPUT against CHECKER's patterns."
+  (claude-agent-check-permission
+   tool input
+   (claude-agent-pattern-checker-allow-patterns checker)
+   (claude-agent-pattern-checker-deny-patterns checker)))
+#+END_SRC
 
 ** Permission Hook
 
@@ -3372,6 +3672,10 @@ automatically from current Emacs state."
 #+END_SRC
 
 * Session Management
+:PROPERTIES:
+:DEPENDS_ON: Data Structures, Verbose Output
+:DEPENDED_BY: Core API, Query Cancellation, claude-org.org
+:END:
 
 This section provides file-based session management, mapping internal
 session keys (file_path::session_id) to SDK UUIDs for conversation resume.
@@ -3458,6 +3762,10 @@ This includes both expired sessions and context limit errors."
 #+END_SRC
 
 * Query Cancellation
+:PROPERTIES:
+:DEPENDS_ON: Data Structures, Process Management
+:DEPENDED_BY: Core API, Activity Mode-Line, claude-org.org
+:END:
 
 This section provides query cancellation support by tracking active
 queries and allowing them to be interrupted.
@@ -3600,6 +3908,31 @@ Cancels active queries and removes stale entries."
   (interactive)
   (claude-agent-cancel-all-queries)
   (claude-agent--cleanup-stale-queries))
+
+(cl-defun claude-agent-update-state-callbacks (state &key callback error-callback
+                                                     token-callback complete-callback)
+  "Update callbacks on STATE.
+This is the public API for external modules to modify process state callbacks
+without reaching into private struct internals.
+Only provided non-nil keyword arguments are updated."
+  (when (and state (claude-agent--process-state-p state))
+    (when callback
+      (setf (claude-agent--process-state-callback state) callback))
+    (when error-callback
+      (setf (claude-agent--process-state-error-callback state) error-callback))
+    (when token-callback
+      (setf (claude-agent--process-state-token-callback state) token-callback))
+    (when complete-callback
+      (setf (claude-agent--process-state-complete-callback state) complete-callback))))
+
+(defun claude-agent-close-process-state (state)
+  "Mark STATE as closed and unregister its query from active tracking.
+This is the public API for external modules (e.g., claude-org) to signal
+that a process state is terminated without reaching into private internals."
+  (when (and state (claude-agent--process-state-p state))
+    (setf (claude-agent--process-state-closed state) t)
+    (when-let* ((req-id (claude-agent--process-state-request-id state)))
+      (claude-agent--unregister-query req-id))))
 #+END_SRC
 
 ** Periodic Cleanup Timer
@@ -4164,6 +4497,15 @@ CLI-like output for all queries within a session.
   "If non-nil, kill verbose buffer when session is cleared."
   :type 'boolean
   :group 'claude-agent)
+
+(defcustom claude-agent-verbose-buffer-max-size nil
+  "Maximum size in characters for verbose buffers.
+When a verbose buffer exceeds this size, the oldest content is trimmed.
+Set to nil to disable trimming (unlimited growth).
+Recommended: 500000 (500KB) for typical usage."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Max characters"))
+  :group 'claude-agent)
 #+END_SRC
 
 ** Verbose Mode
@@ -4180,11 +4522,23 @@ CLI-like output for all queries within a session.
 
 #+BEGIN_SRC elisp
 (defun claude-agent--verbose-insert (session-key text)
-  "Insert TEXT into verbose buffer for SESSION-KEY."
+  "Insert TEXT into verbose buffer for SESSION-KEY.
+When `claude-agent-verbose-buffer-max-size' is set, trims oldest content
+if buffer exceeds the limit after insertion."
   (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (let ((inhibit-read-only t))
+          ;; Trim if over max size before inserting
+          (when (and claude-agent-verbose-buffer-max-size
+                     (> (buffer-size) claude-agent-verbose-buffer-max-size))
+            (let ((trim-to (/ claude-agent-verbose-buffer-max-size 2)))
+              (goto-char (+ (point-min) (- (buffer-size) trim-to)))
+              ;; Advance to next line boundary for clean trim
+              (forward-line 1)
+              (delete-region (point-min) (point))
+              (goto-char (point-min))
+              (insert "[...verbose output trimmed...]\n")))
           (goto-char (point-max))
           (insert text)
           (unless (string-suffix-p "\n" text)
@@ -5053,6 +5407,33 @@ MESSAGES is a list of (role . content) pairs."
           (cl-incf count))))
     (mapconcat #'identity formatted "\n\n")))
 
+(cl-defun claude-agent-query-accumulate (prompt &key options on-result on-error
+                                              session-key)
+  "Run a query that accumulates all response text, then calls ON-RESULT.
+This is a convenience wrapper around `claude-agent-query' for fire-and-forget
+queries that just need the full text response (e.g., title generation,
+prompt refinement).
+
+PROMPT is the query prompt.
+OPTIONS is an options plist (from `claude-agent-options').
+ON-RESULT is called with the accumulated text string (trimmed).
+ON-ERROR is called on error.
+SESSION-KEY is an optional session key."
+  (lexical-let ((collected-text "")
+                (on-result-cb on-result))
+    (claude-agent-query
+     prompt
+     :options options
+     :session-key session-key
+     :on-message (lambda (msg)
+                   (when (claude-agent-assistant-message-p msg)
+                     (when-let ((text (claude-agent-extract-text msg)))
+                       (setq collected-text (concat collected-text text)))))
+     :on-error on-error
+     :on-complete (lambda (_result)
+                    (when on-result-cb
+                      (funcall on-result-cb (string-trim collected-text)))))))
+
 (cl-defun claude-agent-generate-title (messages &key on-title on-error)
   "Generate a short title for conversation MESSAGES.
 
@@ -5095,36 +5476,29 @@ Output ONLY the title text, nothing else. Maximum %d characters."
                    :system-prompt system-prompt
                    :disallowed-tools '("*")  ; No tools needed for titling
                    :max-turns 1)))
-    ;; Use lexical-let to create proper closure for mutable state
-    (lexical-let ((collected-text "")
-                  (on-title-cb on-title)
+    (lexical-let ((on-title-cb on-title)
                   (max-chars claude-agent-title-max-chars))
-      (claude-agent-query
+      (claude-agent-query-accumulate
        prompt
        :options options
-       ;; Use fresh session - don't pass session-key
-       :on-message (lambda (msg)
-                     (when (claude-agent-assistant-message-p msg)
-                       (when-let ((text (claude-agent-extract-text msg)))
-                         (setq collected-text (concat collected-text text)))))
        :on-error on-error
-       :on-complete (lambda (_result)
-                      (when on-title-cb
-                        ;; Clean up the title: trim whitespace, remove quotes
-                        (let ((title (string-trim collected-text)))
-                          ;; Remove surrounding quotes if present
-                          (when (and (>= (length title) 2)
-                                     (string-match-p "^[\"'].*[\"']$" title))
-                            (setq title (substring title 1 -1)))
-                          ;; Remove common bad prefixes (model didn't follow instructions)
-                          (when (string-match "^\\(?:Title:\\s-*\\|Here's\\s-*\\(?:a\\|the\\)\\s-*title:\\s-*\\)" title)
-                            (setq title (substring title (match-end 0))))
-                          ;; If title looks like a response (starts with I'll, I can, etc.), skip it
-                          (unless (string-match-p "^I'\\(?:ll\\|m\\|ve\\)\\s-\\|^I\\s-+\\(?:can\\|will\\|would\\)" title)
-                            ;; Truncate if too long
-                            (when (> (length title) max-chars)
-                              (setq title (concat (substring title 0 (- max-chars 3)) "...")))
-                            (funcall on-title-cb title)))))))))
+       :on-result
+       (lambda (text)
+         (when on-title-cb
+           (let ((title text))
+             ;; Remove surrounding quotes if present
+             (when (and (>= (length title) 2)
+                        (string-match-p "^[\"'].*[\"']$" title))
+               (setq title (substring title 1 -1)))
+             ;; Remove common bad prefixes
+             (when (string-match "^\\(?:Title:\\s-*\\|Here's\\s-*\\(?:a\\|the\\)\\s-*title:\\s-*\\)" title)
+               (setq title (substring title (match-end 0))))
+             ;; If title looks like a response, skip it
+             (unless (string-match-p "^I'\\(?:ll\\|m\\|ve\\)\\s-\\|^I\\s-+\\(?:can\\|will\\|would\\)" title)
+               ;; Truncate if too long
+               (when (> (length title) max-chars)
+                 (setq title (concat (substring title 0 (- max-chars 3)) "...")))
+               (funcall on-title-cb title)))))))))
 
 (defun claude-agent-generate-title-from-text (text &optional callback)
   "Generate a title for TEXT content.
@@ -5229,21 +5603,11 @@ Output the refined prompt:" user-intent original-prompt))
                    :system-prompt system-prompt
                    :disallowed-tools '("*")  ; No tools needed
                    :max-turns 1)))
-    (lexical-let ((collected-text "")
-                  (on-result-cb on-result))
-      (claude-agent-query
-       prompt
-       :options options
-       :on-message (lambda (msg)
-                     (when (claude-agent-assistant-message-p msg)
-                       (when-let ((text (claude-agent-extract-text msg)))
-                         (setq collected-text (concat collected-text text)))))
-       :on-error on-error
-       :on-complete (lambda (_result)
-                      (when on-result-cb
-                        ;; Clean up: trim whitespace
-                        (let ((refined (string-trim collected-text)))
-                          (funcall on-result-cb refined))))))))
+    (claude-agent-query-accumulate
+     prompt
+     :options options
+     :on-error on-error
+     :on-result on-result)))
 #+END_SRC
 
 * Package Footer

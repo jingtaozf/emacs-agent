@@ -1863,5 +1863,242 @@ affecting the second token which carries real content."
         (should (string-match-p "^\n?Real content" content))
         (should-not (string-match-p "^\n\n+Real content" content))))))
 
+;;; Phase 1b: reset-session-state helper tests
+
+(ert-deftest test-claude-org-reset-session-state-clears-flags ()
+  "Test that reset-session-state clears busy, recovering, query-id flags."
+  :tags '(:unit :fast :stable :isolated :session :phase-1b)
+  (let ((claude-org--sessions (make-hash-table :test 'equal)))
+    (claude-org--session-put "test-key" :busy t)
+    (claude-org--session-put "test-key" :recovering t)
+    (claude-org--session-put "test-key" :last-assistant-query-id "qid-123")
+    ;; Reset
+    (claude-org--reset-session-state "test-key")
+    ;; All should be nil
+    (should-not (claude-org--session-get "test-key" :busy))
+    (should-not (claude-org--session-get "test-key" :recovering))
+    (should-not (claude-org--session-get "test-key" :last-assistant-query-id))))
+
+(ert-deftest test-claude-org-reset-session-state-preserves-other-props ()
+  "Test that reset-session-state preserves unrelated session properties."
+  :tags '(:unit :fast :stable :isolated :session :phase-1b)
+  (let ((claude-org--sessions (make-hash-table :test 'equal)))
+    (claude-org--session-put "test-key" :busy t)
+    (claude-org--session-put "test-key" :custom-id "my-block-id")
+    (claude-org--session-put "test-key" :query-id "qid-456")
+    ;; Reset
+    (claude-org--reset-session-state "test-key")
+    ;; Unrelated props should survive
+    (should (equal "my-block-id" (claude-org--session-get "test-key" :custom-id)))
+    (should (equal "qid-456" (claude-org--session-get "test-key" :query-id)))))
+
+;;; Phase 1c: find-heading-by-property tests
+
+(ert-deftest test-claude-org-find-heading-by-property-found ()
+  "Test that find-heading-by-property returns point at matching heading."
+  :tags '(:unit :fast :stable :isolated :navigation :phase-1c)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Heading One\n:PROPERTIES:\n:CUSTOM_ID: h1\n:END:\n\n"
+            "* Heading Two\n:PROPERTIES:\n:CUSTOM_ID: h2\n:END:\n\n"
+            "* Heading Three\n:PROPERTIES:\n:MY_PROP: special-val\n:END:\n")
+    ;; Find by CUSTOM_ID
+    (let ((pos (claude-org--find-heading-by-property "CUSTOM_ID" "h2")))
+      (should pos)
+      (should (integer-or-marker-p pos))
+      (goto-char pos)
+      (should (looking-at "\\* Heading Two")))))
+
+(ert-deftest test-claude-org-find-heading-by-property-not-found ()
+  "Test that find-heading-by-property returns nil when no match."
+  :tags '(:unit :fast :stable :isolated :navigation :phase-1c)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Heading One\n:PROPERTIES:\n:CUSTOM_ID: h1\n:END:\n")
+    (should-not (claude-org--find-heading-by-property "CUSTOM_ID" "nonexistent"))))
+
+(ert-deftest test-claude-org-find-heading-by-property-custom-prop ()
+  "Test find-heading-by-property works with arbitrary property names."
+  :tags '(:unit :fast :stable :isolated :navigation :phase-1c)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* First\n:PROPERTIES:\n:SESSION_KEY: sk-001\n:END:\n\n"
+            "* Second\n:PROPERTIES:\n:SESSION_KEY: sk-002\n:END:\n")
+    (let ((pos (claude-org--find-heading-by-property "SESSION_KEY" "sk-002")))
+      (should pos)
+      (goto-char pos)
+      (should (looking-at "\\* Second")))))
+
+(ert-deftest test-claude-org-find-heading-by-property-explicit-buffer ()
+  "Test find-heading-by-property with explicit buffer argument."
+  :tags '(:unit :fast :stable :isolated :navigation :phase-1c)
+  (let ((buf (generate-new-buffer " *test-prop-buf*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (org-mode)
+            (insert "* Target\n:PROPERTIES:\n:CUSTOM_ID: target-id\n:END:\n"))
+          ;; Call from a different buffer
+          (let ((pos (claude-org--find-heading-by-property
+                      "CUSTOM_ID" "target-id" buf)))
+            (should pos)))
+      (kill-buffer buf))))
+
+;;; Phase 7: session-state cl-defstruct tests
+
+(ert-deftest test-claude-org-session-state-struct-exists ()
+  "Test that claude-org--session-state struct type exists with correct fields."
+  :tags '(:unit :fast :stable :isolated :session :phase-7)
+  (let ((ss (claude-org--make-session-state)))
+    (should (claude-org--session-state-p ss))
+    ;; All core fields should be nil by default
+    (should-not (claude-org--session-state-busy ss))
+    (should-not (claude-org--session-state-recovering ss))
+    (should-not (claude-org--session-state-query-id ss))
+    (should-not (claude-org--session-state-process-state ss))
+    (should-not (claude-org--session-state-marker ss))
+    (should-not (claude-org--session-state-custom-id ss))
+    (should-not (claude-org--session-state-block-id ss))
+    (should-not (claude-org--session-state-pending-queue ss))))
+
+(ert-deftest test-claude-org-session-state-struct-fields ()
+  "Test that session-state struct has all documented fields."
+  :tags '(:unit :fast :stable :isolated :session :phase-7)
+  (let ((ss (claude-org--make-session-state
+             :busy t
+             :recovering nil
+             :query-id "qid-123"
+             :process-state 'mock-ps
+             :start-time 1234.5
+             :original-prompt "hello"
+             :section-level 3
+             :response-has-content t
+             :last-assistant-query-id "qid-prev"
+             :current-line-length 42
+             :loop-max 5
+             :loop-current 2
+             :loop-interval 10
+             :pending-queue '("block-1")
+             :instruction-num 3
+             :custom-id "cid-abc"
+             :recovery-count 1
+             :block-id "bid-001"
+             :marker nil
+             :spinner 2
+             :sdk-uuid "uuid-xyz")))
+    (should (eq t (claude-org--session-state-busy ss)))
+    (should (equal "qid-123" (claude-org--session-state-query-id ss)))
+    (should (equal 'mock-ps (claude-org--session-state-process-state ss)))
+    (should (= 1234.5 (claude-org--session-state-start-time ss)))
+    (should (equal "hello" (claude-org--session-state-original-prompt ss)))
+    (should (= 3 (claude-org--session-state-section-level ss)))
+    (should (eq t (claude-org--session-state-response-has-content ss)))
+    (should (equal "qid-prev" (claude-org--session-state-last-assistant-query-id ss)))
+    (should (= 42 (claude-org--session-state-current-line-length ss)))
+    (should (= 5 (claude-org--session-state-loop-max ss)))
+    (should (= 2 (claude-org--session-state-loop-current ss)))
+    (should (= 10 (claude-org--session-state-loop-interval ss)))
+    (should (equal '("block-1") (claude-org--session-state-pending-queue ss)))
+    (should (= 3 (claude-org--session-state-instruction-num ss)))
+    (should (equal "cid-abc" (claude-org--session-state-custom-id ss)))
+    (should (= 1 (claude-org--session-state-recovery-count ss)))
+    (should (equal "bid-001" (claude-org--session-state-block-id ss)))
+    (should (= 2 (claude-org--session-state-spinner ss)))
+    (should (equal "uuid-xyz" (claude-org--session-state-sdk-uuid ss)))))
+
+(ert-deftest test-claude-org-session-state-setf ()
+  "Test that session-state fields are mutable via setf."
+  :tags '(:unit :fast :stable :isolated :session :phase-7)
+  (let ((ss (claude-org--make-session-state)))
+    (setf (claude-org--session-state-busy ss) t)
+    (setf (claude-org--session-state-query-id ss) "qid-new")
+    (should (eq t (claude-org--session-state-busy ss)))
+    (should (equal "qid-new" (claude-org--session-state-query-id ss)))))
+
+(ert-deftest test-claude-org-session-put-get ()
+  "Test session-put/get with struct-backed state."
+  :tags '(:unit :fast :stable :isolated :session :phase-7)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-phase7.org")
+    (claude-org-mode 1)
+    (let ((key "test-phase7"))
+      ;; Put known properties
+      (claude-org--session-put key :busy t)
+      (claude-org--session-put key :query-id "qid-456")
+      (claude-org--session-put key :section-level 2)
+      (claude-org--session-put key :loop-max 10)
+      ;; Get them back
+      (should (eq t (claude-org--session-get key :busy)))
+      (should (equal "qid-456" (claude-org--session-get key :query-id)))
+      (should (= 2 (claude-org--session-get key :section-level)))
+      (should (= 10 (claude-org--session-get key :loop-max))))))
+
+(ert-deftest test-claude-org-session-state-stored-as-struct ()
+  "Test that sessions hash stores struct instances, not plists."
+  :tags '(:unit :fast :stable :isolated :session :phase-7)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-phase7b.org")
+    (claude-org-mode 1)
+    (let ((key "test-struct-check"))
+      (claude-org--session-put key :busy t)
+      (let ((stored (gethash key claude-org--sessions)))
+        (should (claude-org--session-state-p stored))))))
+
+;;; Phase 7b: marker-to-query-id migration tests
+
+(ert-deftest test-claude-org-exec-status-no-exec-marker ()
+  "Test that set/get-exec-status-for-session works via custom-id."
+  :tags '(:unit :fast :stable :isolated :session :phase-7b)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-7b-exec.org")
+    (claude-org-mode 1)
+    (insert "* Test Block\n:PROPERTIES:\n:CUSTOM_ID: block-7b-exec\n:END:\n\n")
+    (let ((key "test-7b-exec"))
+      ;; Store custom-id for exec-status lookup
+      (claude-org--session-put key :custom-id "block-7b-exec")
+      ;; Set status should work via custom-id
+      (should (claude-org--set-exec-status-for-session key "executing"))
+      ;; Get status should return what we set
+      (should (equal "executing" (claude-org--get-exec-status-for-session key))))))
+
+(ert-deftest test-claude-org-queue-dedup-by-custom-id ()
+  "Test that queue duplicate detection uses custom-id, not marker position."
+  :tags '(:unit :fast :stable :isolated :queue :phase-7b)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-7b-queue.org")
+    (claude-org-mode 1)
+    (let ((key "test-7b-queue"))
+      ;; Queue a block with custom-id
+      (should (eq 'queued
+                  (claude-org--queue-block key '(:custom-id "blk-1" :content "hello"))))
+      ;; Same custom-id should be detected as duplicate
+      (should (eq 'in-queue
+                  (claude-org--queue-block key '(:custom-id "blk-1" :content "hello"))))
+      ;; Different custom-id should be accepted
+      (should (eq 'queued
+                  (claude-org--queue-block key '(:custom-id "blk-2" :content "world")))))))
+
+(ert-deftest test-claude-org-queue-running-dedup-by-custom-id ()
+  "Test that queue detects running block via custom-id match."
+  :tags '(:unit :fast :stable :isolated :queue :phase-7b)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-7b-running.org")
+    (claude-org-mode 1)
+    (let ((key "test-7b-running"))
+      ;; Set custom-id for the running session
+      (claude-org--session-put key :custom-id "running-blk")
+      (claude-org--session-put key :busy t)
+      ;; Try to queue the same block that's running
+      (should (eq 'running
+                  (claude-org--queue-block key '(:custom-id "running-blk" :content "test"))))
+      ;; Different block should queue fine
+      (should (eq 'queued
+                  (claude-org--queue-block key '(:custom-id "other-blk" :content "test")))))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

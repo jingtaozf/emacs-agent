@@ -314,7 +314,7 @@
 
 (ert-deftest test-claude-org-queue-running-block-rejected ()
   "Test that the currently running block cannot be queued.
-If Block A is running (its marker stored in :marker), trying to
+If Block A is running (its custom-id stored in session), trying to
 queue the same block should be rejected."
   :tags '(:unit :fast :stable :isolated :org :queue)
   (with-temp-buffer
@@ -322,26 +322,19 @@ queue the same block should be rejected."
     (setq buffer-file-name "/tmp/test-running.org")
     (insert "* Test\n#+begin_src ai\ntest\n#+end_src\n")
     (setq-local claude-org--sessions (make-hash-table :test 'equal))
-    (let* ((session-key "/tmp/test-running.org::test-session")
-           ;; Create marker at the ai block position
-           (marker (save-excursion
-                     (goto-char (point-min))
-                     (re-search-forward "#\\+begin_src ai" nil t)
-                     (copy-marker (line-beginning-position)))))
-      ;; Simulate that this block is already running
-      ;; The running block's marker is stored in :marker session state
+    (let ((session-key "/tmp/test-running.org::test-session"))
+      ;; Simulate that this block is already running with custom-id
       (claude-org--session-put session-key :busy t)
-      (claude-org--session-put session-key :marker marker)
+      (claude-org--session-put session-key :custom-id "b1")
       ;; Queue should be empty
       (should (= 0 (claude-org--queue-count session-key)))
-      ;; Now try to queue the SAME block (same position)
+      ;; Now try to queue the SAME block (same custom-id)
       ;; This simulates user pressing C-c C-c on the running block
-      (let ((same-marker (copy-marker (marker-position marker))))
-        (let ((result (claude-org--queue-block session-key
-                                                (list :custom-id "b1"
-                                                      :marker same-marker))))
-          ;; Should be rejected - returns 'running (not 'queued)
-          (should (eq result 'running))))
+      (let ((result (claude-org--queue-block session-key
+                                              (list :custom-id "b1"
+                                                    :content "test"))))
+        ;; Should be rejected - returns 'running (not 'queued)
+        (should (eq result 'running)))
       ;; Queue should still be empty
       (should (= 0 (claude-org--queue-count session-key))))))
 

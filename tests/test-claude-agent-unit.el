@@ -791,17 +791,13 @@ successful results."
                          :duration_ms 0
                          :num_turns 0
                          :session_id "test-session"))
-         (state (claude-agent--make-process-state :session-id "test-session"))
-         (error-called nil))
+         (error-called nil)
+         (state (claude-agent--make-process-state
+                 :session-id "test-session"
+                 :error-callback (lambda (_err) (setq error-called t)))))
 
-    ;; Process the error result message
-    (claude-agent--process-normal-message
-     error-result
-     state
-     nil  ; callback
-     nil  ; token-callback
-     (lambda (_err) (setq error-called t))  ; error-callback
-     nil) ; process
+    ;; Process the error result message (2-arg: callbacks from state)
+    (claude-agent--process-normal-message error-result state)
 
     ;; Verify got-result is set even for error results
     (should (claude-agent--process-state-got-result state))
@@ -824,17 +820,13 @@ successful results."
                            :duration_ms 1000
                            :num_turns 1
                            :session_id "test-session"))
-         (state (claude-agent--make-process-state :session-id "test-session"))
-         (message-received nil))
+         (message-received nil)
+         (state (claude-agent--make-process-state
+                 :session-id "test-session"
+                 :callback (lambda (msg) (setq message-received msg)))))
 
-    ;; Process the success result message
-    (claude-agent--process-normal-message
-     success-result
-     state
-     (lambda (msg) (setq message-received msg))  ; callback
-     nil  ; token-callback
-     nil  ; error-callback
-     nil) ; process
+    ;; Process the success result message (2-arg: callbacks from state)
+    (claude-agent--process-normal-message success-result state)
 
     ;; Verify got-result is set
     (should (claude-agent--process-state-got-result state))
@@ -875,6 +867,597 @@ of the actual error like 'No conversation found with session ID: ...'."
       ;; Should fall back to generic message
       (should error-msg)
       (should (string-match-p "Execution error" error-msg)))))
+
+;;; Environment Building Tests
+
+(ert-deftest test-claude-agent-build-env-strips-claudecode ()
+  "Test that CLAUDECODE is stripped from the process environment.
+Claude CLI refuses to launch inside another Claude Code session when
+CLAUDECODE is set.  Our SDK must unset it so Emacs users can run
+queries from within a Claude Code session."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("HOME=/home/user"
+                                "CLAUDECODE=1"
+                                "PATH=/usr/bin"
+                                "EDITOR=emacs"))
+         (result (claude-agent--build-process-environment nil nil)))
+    ;; CLAUDECODE should be stripped
+    (should-not (cl-find-if (lambda (s) (string-prefix-p "CLAUDECODE=" s)) result))
+    ;; Other vars should remain
+    (should (member "HOME=/home/user" result))
+    (should (member "PATH=/usr/bin" result))
+    (should (member "EDITOR=emacs" result))))
+
+(ert-deftest test-claude-agent-build-env-preserves-custom-vars ()
+  "Test that custom env vars from options are prepended."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("HOME=/home/user" "PATH=/usr/bin"))
+         (env-vars '(("MY_VAR" . "my_value") ("OTHER" . "test")))
+         (result (claude-agent--build-process-environment env-vars nil)))
+    (should (member "MY_VAR=my_value" result))
+    (should (member "OTHER=test" result))
+    (should (member "HOME=/home/user" result))))
+
+(ert-deftest test-claude-agent-build-env-prepends-cli-dir-to-path ()
+  "Test that cli-dir is prepended to PATH when provided."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("HOME=/home/user" "PATH=/usr/bin"))
+         (result (claude-agent--build-process-environment nil "/opt/node/bin/")))
+    (should (cl-find-if (lambda (s)
+                          (and (string-prefix-p "PATH=" s)
+                               (string-match-p "/opt/node/bin/" s)))
+                        result))))
+
+(ert-deftest test-claude-agent-build-env-no-claudecode-even-with-custom-vars ()
+  "Test CLAUDECODE is stripped even when custom env vars are provided."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("CLAUDECODE=1" "HOME=/home/user"))
+         (env-vars '(("FOO" . "bar")))
+         (result (claude-agent--build-process-environment env-vars "/some/dir/")))
+    (should-not (cl-find-if (lambda (s) (string-prefix-p "CLAUDECODE=" s)) result))
+    (should (member "FOO=bar" result))))
+
+;;; Phase 0a: Sentinel per-process cleanup tests
+
+(ert-deftest test-claude-agent-sentinel-cleanup-preserves-other-sessions ()
+  "Test that sentinel cleanup only removes entries for the exiting process.
+The old code used clrhash which wiped ALL entries including other sessions."
+  :tags '(:unit :fast :stable :isolated :sentinel :phase-0a)
+  (let ((claude-agent--pending-background-tasks (make-hash-table :test 'equal))
+        (claude-agent--pending-control-requests (make-hash-table :test 'equal)))
+    ;; Session A owns task-1 and ctrl-1
+    (puthash "task-1" "req-A" claude-agent--pending-background-tasks)
+    (puthash "ctrl-1" "req-A" claude-agent--pending-control-requests)
+    ;; Session B owns task-2 and ctrl-2
+    (puthash "task-2" "req-B" claude-agent--pending-background-tasks)
+    (puthash "ctrl-2" "req-B" claude-agent--pending-control-requests)
+    ;; Cleanup session A
+    (claude-agent--cleanup-process-entries "req-A")
+    ;; Session B entries must survive
+    (should (gethash "task-2" claude-agent--pending-background-tasks))
+    (should (gethash "ctrl-2" claude-agent--pending-control-requests))
+    ;; Session A entries must be gone
+    (should-not (gethash "task-1" claude-agent--pending-background-tasks))
+    (should-not (gethash "ctrl-1" claude-agent--pending-control-requests))))
+
+(ert-deftest test-claude-agent-sentinel-cleanup-removes-all-owned-entries ()
+  "Test that sentinel cleanup removes ALL entries for the exiting process."
+  :tags '(:unit :fast :stable :isolated :sentinel :phase-0a)
+  (let ((claude-agent--pending-background-tasks (make-hash-table :test 'equal))
+        (claude-agent--pending-control-requests (make-hash-table :test 'equal)))
+    ;; Session A owns multiple tasks and control requests
+    (puthash "task-1" "req-A" claude-agent--pending-background-tasks)
+    (puthash "task-3" "req-A" claude-agent--pending-background-tasks)
+    (puthash "ctrl-1" "req-A" claude-agent--pending-control-requests)
+    (puthash "ctrl-3" "req-A" claude-agent--pending-control-requests)
+    ;; Cleanup session A
+    (claude-agent--cleanup-process-entries "req-A")
+    ;; All A entries gone
+    (should (= 0 (hash-table-count claude-agent--pending-background-tasks)))
+    (should (= 0 (hash-table-count claude-agent--pending-control-requests)))))
+
+(ert-deftest test-claude-agent-sentinel-cleanup-noop-when-no-entries ()
+  "Test that cleanup is safe when no entries exist for the process."
+  :tags '(:unit :fast :stable :isolated :sentinel :phase-0a)
+  (let ((claude-agent--pending-background-tasks (make-hash-table :test 'equal))
+        (claude-agent--pending-control-requests (make-hash-table :test 'equal)))
+    ;; Only session B entries
+    (puthash "task-2" "req-B" claude-agent--pending-background-tasks)
+    ;; Cleanup non-existent session A - should not error
+    (claude-agent--cleanup-process-entries "req-A")
+    ;; Session B untouched
+    (should (= 1 (hash-table-count claude-agent--pending-background-tasks)))))
+
+(ert-deftest test-claude-agent-background-task-tracker-stores-owner ()
+  "Test that background-task-tracker stores request-id as owner, not just t."
+  :tags '(:unit :fast :stable :isolated :sentinel :phase-0a)
+  (let ((claude-agent--pending-background-tasks (make-hash-table :test 'equal))
+        (state (claude-agent--make-process-state :request-id "req-X")))
+    ;; Simulate Task tool async launch
+    (claude-agent--background-task-tracker
+     nil nil nil
+     '(:isAsync t :agentId "agent-1")
+     state)
+    ;; Value should be the owning request-id, not t
+    (should (equal "req-X" (gethash "agent-1" claude-agent--pending-background-tasks)))))
+
+(ert-deftest test-claude-agent-control-request-tracker-stores-owner ()
+  "Test that control request tracking stores request-id as owner."
+  :tags '(:unit :fast :stable :isolated :sentinel :phase-0a)
+  (let ((claude-agent--pending-control-requests (make-hash-table :test 'equal)))
+    ;; Track with owner
+    (claude-agent--track-control-request "ctrl-1" "req-X")
+    ;; Value should be the owning request-id
+    (should (equal "req-X" (gethash "ctrl-1" claude-agent--pending-control-requests)))))
+
+;;; Phase 0c: Verbose buffer memory leak tests
+
+(ert-deftest test-claude-agent-verbose-buffer-max-size ()
+  "Test that verbose buffer is trimmed when it exceeds max size."
+  :tags '(:unit :fast :stable :isolated :verbose :phase-0c)
+  (let ((claude-agent--session-verbose-buffers (make-hash-table :test 'equal))
+        (claude-agent-verbose-buffer-max-size 100)
+        (buf (generate-new-buffer " *test-verbose*")))
+    (unwind-protect
+        (progn
+          (puthash "test-key" buf claude-agent--session-verbose-buffers)
+          ;; Insert more than max-size
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (insert (make-string 200 ?x))))
+          ;; Trigger insert which should trim
+          (claude-agent--verbose-insert "test-key" "new-content")
+          (with-current-buffer buf
+            ;; Buffer should have been trimmed: not dramatically larger than max
+            (should (<= (buffer-size) (+ claude-agent-verbose-buffer-max-size 50)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest test-claude-agent-verbose-buffer-no-trim-under-limit ()
+  "Test that verbose buffer is NOT trimmed when under max size."
+  :tags '(:unit :fast :stable :isolated :verbose :phase-0c)
+  (let ((claude-agent--session-verbose-buffers (make-hash-table :test 'equal))
+        (claude-agent-verbose-buffer-max-size 10000)
+        (buf (generate-new-buffer " *test-verbose*")))
+    (unwind-protect
+        (progn
+          (puthash "test-key" buf claude-agent--session-verbose-buffers)
+          (claude-agent--verbose-insert "test-key" "small text")
+          (with-current-buffer buf
+            (should (string-match-p "small text" (buffer-string)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest test-claude-agent-verbose-buffer-max-size-nil-no-trim ()
+  "Test that nil max-size means no trimming (unlimited)."
+  :tags '(:unit :fast :stable :isolated :verbose :phase-0c)
+  (let ((claude-agent--session-verbose-buffers (make-hash-table :test 'equal))
+        (claude-agent-verbose-buffer-max-size nil)
+        (buf (generate-new-buffer " *test-verbose*")))
+    (unwind-protect
+        (progn
+          (puthash "test-key" buf claude-agent--session-verbose-buffers)
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (insert (make-string 200 ?x))))
+          (claude-agent--verbose-insert "test-key" "more")
+          (with-current-buffer buf
+            ;; No trimming, so buffer should be large
+            (should (> (buffer-size) 200))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+;;; Phase 0b: Docker path mappings per-process tests
+
+(ert-deftest test-claude-agent-path-mappings-stored-in-process-state ()
+  "Test that path-mappings are stored per-process, not in a global."
+  :tags '(:unit :fast :stable :isolated :docker :phase-0b)
+  (let ((state (claude-agent--make-process-state
+                :path-mappings '(("/host" . "/container")))))
+    ;; path-mappings should be in the process state
+    (should (equal '(("/host" . "/container"))
+                   (claude-agent--process-state-path-mappings state)))))
+
+;;; Phase 0d: Shared JSON parser tests
+
+(ert-deftest test-claude-agent-try-parse-json-valid ()
+  "Test that try-parse-json parses valid JSON into plist."
+  :tags '(:unit :fast :stable :isolated :json :phase-0d)
+  (let ((result (claude-agent--try-parse-json "{\"type\":\"assistant\",\"id\":\"123\"}")))
+    (should result)
+    (should (equal "assistant" (plist-get result :type)))
+    (should (equal "123" (plist-get result :id)))))
+
+(ert-deftest test-claude-agent-try-parse-json-invalid ()
+  "Test that try-parse-json returns nil for invalid JSON."
+  :tags '(:unit :fast :stable :isolated :json :phase-0d)
+  (should-not (claude-agent--try-parse-json "not json at all"))
+  (should-not (claude-agent--try-parse-json ""))
+  (should-not (claude-agent--try-parse-json "{broken")))
+
+(ert-deftest test-claude-agent-try-parse-json-array ()
+  "Test that try-parse-json handles arrays correctly."
+  :tags '(:unit :fast :stable :isolated :json :phase-0d)
+  (let ((result (claude-agent--try-parse-json "{\"items\":[1,2,3]}")))
+    (should result)
+    (should (equal '(1 2 3) (plist-get result :items)))))
+
+;;; Phase 1a: query-accumulate helper tests
+
+(ert-deftest test-claude-agent-query-accumulate-exists ()
+  "Test that claude-agent-query-accumulate function exists."
+  :tags '(:unit :fast :stable :isolated :phase-1a)
+  (should (fboundp 'claude-agent-query-accumulate)))
+
+(ert-deftest test-claude-agent-query-accumulate-calls-query ()
+  "Test that query-accumulate calls claude-agent-query with correct args."
+  :tags '(:unit :fast :stable :isolated :phase-1a)
+  (let ((query-called nil)
+        (query-args nil))
+    (cl-letf (((symbol-function 'claude-agent-query)
+               (lambda (prompt &rest args)
+                 (setq query-called t
+                       query-args (cons prompt args)))))
+      (claude-agent-query-accumulate
+       "test prompt"
+       :options '(:model "haiku")
+       :on-result (lambda (_text) nil))
+      (should query-called)
+      (should (equal "test prompt" (car query-args))))))
+
+(ert-deftest test-claude-agent-query-accumulate-accumulates-text ()
+  "Test that query-accumulate accumulates text from on-message and passes to on-result."
+  :tags '(:unit :fast :stable :isolated :phase-1a)
+  (let ((result-text nil)
+        (captured-on-message nil)
+        (captured-on-complete nil))
+    (cl-letf (((symbol-function 'claude-agent-query)
+               (lambda (_prompt &rest args)
+                 (setq captured-on-message (plist-get args :on-message)
+                       captured-on-complete (plist-get args :on-complete)))))
+      (claude-agent-query-accumulate
+       "test"
+       :on-result (lambda (text) (setq result-text text)))
+      ;; Simulate messages
+      (let ((msg1 '(:type "assistant" :message (:content ((:type "text" :text "hello "))))))
+        (funcall captured-on-message (claude-agent--parse-message msg1)))
+      (let ((msg2 '(:type "assistant" :message (:content ((:type "text" :text "world"))))))
+        (funcall captured-on-message (claude-agent--parse-message msg2)))
+      ;; Simulate completion
+      (funcall captured-on-complete nil)
+      ;; Result should be trimmed accumulated text
+      (should (equal "hello world" result-text)))))
+
+;;; Phase 1d: process-normal-message 2-arg signature tests
+
+(ert-deftest test-claude-agent-process-normal-message-2-arg ()
+  "Test that process-normal-message works with just (parsed state)."
+  :tags '(:unit :fast :stable :isolated :process :phase-1d)
+  (let* ((msg-received nil)
+         (token-received nil)
+         (state (claude-agent--make-process-state
+                 :callback (lambda (msg) (setq msg-received msg))
+                 :token-callback (lambda (text) (setq token-received text))
+                 :error-callback nil
+                 :session-key "test-session"))
+         ;; Create a minimal assistant message with text content
+         (parsed '(:type "assistant"
+                   :message (:role "assistant"
+                             :content ((:type "text" :text "hello"))))))
+    ;; Should work with just 2 args - callback/token-callback extracted from state
+    (claude-agent--process-normal-message parsed state)
+    ;; Message callback should have been called
+    (should msg-received)))
+
+(ert-deftest test-claude-agent-process-normal-message-error-from-state ()
+  "Test that process-normal-message extracts error-callback from state."
+  :tags '(:unit :fast :stable :isolated :process :phase-1d)
+  (let* ((error-received nil)
+         (state (claude-agent--make-process-state
+                 :callback nil
+                 :error-callback (lambda (err) (setq error-received err))))
+         ;; Simulate error in result
+         (parsed '(:type "result"
+                   :is_error t
+                   :error "Something went wrong")))
+    (claude-agent--process-normal-message parsed state)
+    ;; Error callback should have been called
+    (should error-received)))
+
+;;; Phase 2: Public accessors for cross-module encapsulation
+
+(ert-deftest test-claude-agent-close-and-unregister-state ()
+  "Test public API to close state and unregister query."
+  :tags '(:unit :fast :stable :isolated :api :phase-2)
+  (let* ((claude-agent--active-queries (make-hash-table :test 'equal))
+         (state (claude-agent--make-process-state :request-id "req-test")))
+    ;; Register query first
+    (puthash "req-test" state claude-agent--active-queries)
+    (should (gethash "req-test" claude-agent--active-queries))
+    ;; Use public API to close and unregister
+    (claude-agent-close-process-state state)
+    ;; State should be closed
+    (should (claude-agent--process-state-closed state))
+    ;; Query should be unregistered
+    (should-not (gethash "req-test" claude-agent--active-queries))))
+
+(ert-deftest test-claude-agent-close-process-state-idempotent ()
+  "Test that closing an already-closed state is safe."
+  :tags '(:unit :fast :stable :isolated :api :phase-2)
+  (let ((state (claude-agent--make-process-state :request-id "req-test")))
+    (claude-agent-close-process-state state)
+    (should (claude-agent--process-state-closed state))
+    ;; Second call should not error
+    (claude-agent-close-process-state state)
+    (should (claude-agent--process-state-closed state))))
+
+;;; Phase 9: Client callback mutation helper tests
+
+(ert-deftest test-claude-agent-update-state-callbacks ()
+  "Test public API to update process state callbacks."
+  :tags '(:unit :fast :stable :isolated :api :phase-9)
+  (let* ((state (claude-agent--make-process-state
+                 :callback (lambda (_) nil)
+                 :error-callback (lambda (_) nil)))
+         (new-cb (lambda (msg) msg))
+         (new-err (lambda (err) err))
+         (new-tok (lambda (text) text)))
+    (claude-agent-update-state-callbacks state
+                                         :callback new-cb
+                                         :error-callback new-err
+                                         :token-callback new-tok)
+    (should (eq new-cb (claude-agent--process-state-callback state)))
+    (should (eq new-err (claude-agent--process-state-error-callback state)))
+    (should (eq new-tok (claude-agent--process-state-token-callback state)))))
+
+(ert-deftest test-claude-agent-update-state-callbacks-partial ()
+  "Test that update-state-callbacks only changes provided keys."
+  :tags '(:unit :fast :stable :isolated :api :phase-9)
+  (let* ((original-cb (lambda (_) nil))
+         (state (claude-agent--make-process-state
+                 :callback original-cb
+                 :error-callback nil))
+         (new-err (lambda (err) err)))
+    ;; Only update error-callback
+    (claude-agent-update-state-callbacks state :error-callback new-err)
+    ;; Original callback should be unchanged
+    (should (eq original-cb (claude-agent--process-state-callback state)))
+    (should (eq new-err (claude-agent--process-state-error-callback state)))))
+
+;;; Phase 3: process-state sub-structs tests
+
+(ert-deftest test-claude-agent-callback-state-struct ()
+  "Test that callback-state sub-struct exists and holds callbacks."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-3)
+  (let ((cs (claude-agent--make-callback-state
+             :callback (lambda (_) nil)
+             :token-callback (lambda (_) nil)
+             :error-callback (lambda (_) nil)
+             :complete-callback (lambda (_) nil))))
+    (should (claude-agent--callback-state-p cs))
+    (should (functionp (claude-agent--callback-state-callback cs)))
+    (should (functionp (claude-agent--callback-state-token-callback cs)))))
+
+(ert-deftest test-claude-agent-recovery-state-struct ()
+  "Test that recovery-state sub-struct exists."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-3)
+  (let ((rs (claude-agent--make-recovery-state
+             :session-id "sid-123"
+             :original-prompt "hello")))
+    (should (claude-agent--recovery-state-p rs))
+    (should (equal "sid-123" (claude-agent--recovery-state-session-id rs)))
+    (should-not (claude-agent--recovery-state-got-result rs))))
+
+(ert-deftest test-claude-agent-source-state-struct ()
+  "Test that source-state sub-struct exists."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-3)
+  (let ((ss (claude-agent--make-source-state
+             :buffer (current-buffer))))
+    (should (claude-agent--source-state-p ss))
+    (should (bufferp (claude-agent--source-state-buffer ss)))))
+
+(ert-deftest test-claude-agent-docker-state-struct ()
+  "Test that docker-state sub-struct exists."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-3)
+  (let ((ds (claude-agent--make-docker-state
+             :mode t
+             :path-mappings '(("/host" . "/container")))))
+    (should (claude-agent--docker-state-p ds))
+    (should (claude-agent--docker-state-mode ds))
+    (should (equal '(("/host" . "/container"))
+                   (claude-agent--docker-state-path-mappings ds)))))
+
+(ert-deftest test-claude-agent-process-state-flat-accessors ()
+  "Test that process-state provides flat accessors for sub-struct fields."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-3)
+  (let ((state (claude-agent--make-process-state
+                :callback (lambda (_) 'test)
+                :session-id "sid-abc"
+                :docker-mode t
+                :source-buffer (current-buffer))))
+    ;; Flat accessors reach into sub-structs
+    (should (functionp (claude-agent--process-state-callback state)))
+    (should (equal "sid-abc" (claude-agent--process-state-session-id state)))
+    (should (claude-agent--process-state-docker-mode state))
+    (should (bufferp (claude-agent--process-state-source-buffer state)))))
+
+;;; Phase 0e: Remove duplicate provide
+
+(ert-deftest test-claude-agent-single-provide ()
+  "Test that claude-agent has exactly one provide in active code blocks.
+Provides inside :load no blocks (tangle templates) are excluded."
+  :tags '(:unit :fast :stable :isolated :phase-0e)
+  ;; Find claude-agent.org: try relative to test file, then default-directory
+  (let* ((test-dir (file-name-directory (or load-file-name buffer-file-name default-directory)))
+         (org-file (or (let ((f (expand-file-name "../claude-agent.org" test-dir)))
+                         (and (file-exists-p f) f))
+                       (let ((f (expand-file-name "claude-agent.org" default-directory)))
+                         (and (file-exists-p f) f))))
+         (count 0))
+    (when (file-exists-p org-file)
+      (with-temp-buffer
+        (insert-file-contents org-file)
+        (goto-char (point-min))
+        ;; Count provides that are in active src blocks (not :load no)
+        (while (re-search-forward "(provide 'claude-agent)" nil t)
+          (save-excursion
+            ;; Check we're inside a #+BEGIN_SRC elisp block (not :load no)
+            (let ((in-no-load nil))
+              (when (re-search-backward "#\\+BEGIN_SRC elisp" nil t)
+                (when (string-match-p ":load no" (buffer-substring (point) (line-end-position)))
+                  (setq in-no-load t)))
+              (unless in-no-load
+                (setq count (1+ count))))))))
+    (should (= 1 count))))
+
+;;; Phase 4: Protocol-based message dispatch tests
+
+(ert-deftest test-claude-agent-handle-message-generic-exists ()
+  "Test that cl-defgeneric claude-agent-handle-message exists."
+  :tags '(:unit :fast :stable :isolated :dispatch :phase-4)
+  (should (fboundp 'claude-agent-handle-message)))
+
+(ert-deftest test-claude-agent-handle-message-assistant ()
+  "Test that assistant messages are dispatched via handle-message."
+  :tags '(:unit :fast :stable :isolated :dispatch :phase-4)
+  (let* ((received nil)
+         (state (claude-agent--make-process-state
+                 :callback (lambda (msg)
+                             (push (list 'callback msg) received))
+                 :token-callback (lambda (tok)
+                                   (push (list 'token tok) received)))))
+    (claude-agent-handle-message
+     'assistant
+     '(:type "assistant"
+       :message (:role "assistant"
+                 :content ((:type "text" :text "hello"))))
+     state)
+    ;; Should have invoked callback with parsed message
+    (should (cl-some (lambda (r) (eq (car r) 'callback)) received))))
+
+(ert-deftest test-claude-agent-handle-message-result ()
+  "Test that result messages dispatch stop hooks."
+  :tags '(:unit :fast :stable :isolated :dispatch :phase-4)
+  (let* ((stop-called nil)
+         (state (claude-agent--make-process-state
+                 :callback (lambda (_msg) nil)))
+         (claude-agent-stop-functions
+          (list (lambda (_msg _state) (setq stop-called t)))))
+    (claude-agent-handle-message
+     'result
+     '(:type "result"
+       :result (:role "assistant"
+                :content ((:type "text" :text "done"))))
+     state)
+    (should stop-called)))
+
+(ert-deftest test-claude-agent-handle-message-fallback ()
+  "Test that unknown message types fall through to normal processing."
+  :tags '(:unit :fast :stable :isolated :dispatch :phase-4)
+  (let* ((callback-called nil)
+         (state (claude-agent--make-process-state
+                 :callback (lambda (_msg) (setq callback-called t)))))
+    (claude-agent-handle-message
+     'system
+     '(:type "system"
+       :subtype "init"
+       :data (:session_id "sid-test"))
+     state)
+    (should callback-called)))
+
+;;; Phase 6: Unified registry struct tests
+
+(ert-deftest test-claude-agent-registry-struct-exists ()
+  "Test that unified registry struct exists with all sub-tables."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-6)
+  (let ((reg (claude-agent--make-registry)))
+    (should (claude-agent--registry-p reg))
+    ;; active-states defaults to nil (list)
+    (should-not (claude-agent--registry-active-states reg))
+    ;; Hash tables should be initialized
+    (should (hash-table-p (claude-agent--registry-queries reg)))
+    (should (hash-table-p (claude-agent--registry-sessions reg)))
+    (should (hash-table-p (claude-agent--registry-background-tasks reg)))
+    (should (hash-table-p (claude-agent--registry-control-requests reg)))
+    (should (hash-table-p (claude-agent--registry-verbose-buffers reg)))))
+
+(ert-deftest test-claude-agent-registry-singleton ()
+  "Test that claude-agent--registry is a single registry instance."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-6)
+  (should (claude-agent--registry-p claude-agent--registry)))
+
+(ert-deftest test-claude-agent-registry-cleanup-process ()
+  "Test per-process cleanup removes only owned entries."
+  :tags '(:unit :fast :stable :isolated :data-structures :phase-6)
+  (let ((claude-agent--registry (claude-agent--make-registry)))
+    ;; Add background tasks: task-id -> owner-request-id
+    ;; "bg-task-1" owned by "req-A", "bg-task-2" owned by "req-B"
+    (puthash "bg-task-1" "req-A" (claude-agent--registry-background-tasks claude-agent--registry))
+    (puthash "bg-task-2" "req-B" (claude-agent--registry-background-tasks claude-agent--registry))
+    ;; Add control request owned by "req-A"
+    (puthash "ctrl-1" "req-A" (claude-agent--registry-control-requests claude-agent--registry))
+    ;; Register active state for req-A
+    (let ((state-a (claude-agent--make-process-state :request-id "req-A")))
+      (push state-a (claude-agent--registry-active-states claude-agent--registry))
+      ;; Cleanup for req-A should remove only req-A's entries
+      (claude-agent-registry-cleanup-process state-a))
+    ;; req-A's task removed, req-B's task preserved
+    (should-not (gethash "bg-task-1" (claude-agent--registry-background-tasks claude-agent--registry)))
+    (should (gethash "bg-task-2" (claude-agent--registry-background-tasks claude-agent--registry)))
+    (should-not (gethash "ctrl-1" (claude-agent--registry-control-requests claude-agent--registry)))))
+
+;;; Phase 8: Permission system protocol tests
+
+(ert-deftest test-claude-agent-permission-checker-struct-exists ()
+  "Test that base permission-checker struct exists."
+  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
+  (let ((checker (claude-agent-make-permission-checker)))
+    (should (claude-agent-permission-checker-p checker))))
+
+(ert-deftest test-claude-agent-pattern-checker-struct-exists ()
+  "Test that pattern-checker sub-struct exists with allow/deny patterns."
+  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
+  (let ((checker (claude-agent-make-pattern-checker
+                  :allow-patterns '("Read" "Grep")
+                  :deny-patterns '("Bash(rm *)"))))
+    (should (claude-agent-permission-checker-p checker))
+    (should (claude-agent-pattern-checker-p checker))
+    (should (equal '("Read" "Grep")
+                   (claude-agent-pattern-checker-allow-patterns checker)))
+    (should (equal '("Bash(rm *)")
+                   (claude-agent-pattern-checker-deny-patterns checker)))))
+
+(ert-deftest test-claude-agent-check-tool-permission-generic-exists ()
+  "Test that cl-defgeneric check-tool-permission exists."
+  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
+  (should (fboundp 'claude-agent-check-tool-permission)))
+
+(ert-deftest test-claude-agent-pattern-checker-allows ()
+  "Test that pattern-checker allows matching tools."
+  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
+  (let ((checker (claude-agent-make-pattern-checker
+                  :allow-patterns '("Read" "Grep"))))
+    (should (eq 'allow
+                (claude-agent-check-tool-permission
+                 checker "Read" '(:file_path "/tmp/test.txt") nil)))))
+
+(ert-deftest test-claude-agent-pattern-checker-denies ()
+  "Test that pattern-checker denies matching tools."
+  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
+  (let ((checker (claude-agent-make-pattern-checker
+                  :deny-patterns '("Bash(rm *)"))))
+    (should (eq 'deny
+                (claude-agent-check-tool-permission
+                 checker "Bash" '(:command "rm -rf /") nil)))))
+
+(ert-deftest test-claude-agent-pattern-checker-ask-fallback ()
+  "Test that pattern-checker returns ask for unmatched tools."
+  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
+  (let ((checker (claude-agent-make-pattern-checker
+                  :allow-patterns '("Read"))))
+    (should (eq 'ask
+                (claude-agent-check-tool-permission
+                 checker "Write" '(:file_path "/tmp/out.txt") nil)))))
 
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

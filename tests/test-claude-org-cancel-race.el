@@ -71,10 +71,8 @@ This verifies the race condition is fixed:
            (message "DEBUG: final status after waiting = %s" final-status)
            (should (equal final-status "cancelled"))))))))
 
-(ert-deftest test-org-integration-cancel-with-invalid-exec-marker ()
-  "Test cancel when exec-status-marker becomes invalid.
-This simulates a scenario where the marker buffer is killed or narrowing
-changes, and verifies status is still set correctly using custom-id fallback."
+(ert-deftest test-org-integration-cancel-sets-status-via-custom-id ()
+  "Test that cancel sets exec-status to cancelled via custom-id lookup."
   :tags '(:integration :slow :api :org :status :race)
   (test-claude-skip-unless-cli-available)
 
@@ -101,27 +99,16 @@ changes, and verifies status is still set correctly using custom-id fallback."
          (goto-char block-pos)
          (should (equal (claude-org--get-exec-status) "executing"))
 
-         ;; Manually invalidate the exec-status-marker to simulate edge case
-         (let ((esm (claude-org--session-get session-key :exec-status-marker)))
-           (message "DEBUG: exec-status-marker before invalidate = %s buffer = %s"
-                    esm (and esm (marker-buffer esm)))
-           (when esm
-             (set-marker esm nil))
-           (message "DEBUG: exec-status-marker after invalidate = %s buffer = %s"
-                    esm (and esm (marker-buffer esm))))
-
-         ;; Check custom-id is available for fallback
+         ;; Verify custom-id is available
          (let ((custom-id (claude-org--session-get session-key :custom-id)))
-           (message "DEBUG: custom-id = %s" custom-id))
+           (should custom-id))
 
-         ;; Cancel it - this should still work via custom-id fallback
+         ;; Cancel it
          (claude-org-cancel)
 
-         ;; Check status - should be "cancelled" even without valid marker
+         ;; Check status - should be "cancelled" via custom-id
          (goto-char block-pos)
          (let ((status-after-cancel (claude-org--get-exec-status)))
-           (message "DEBUG: status after cancel with invalid marker = %s" status-after-cancel)
-           ;; If this fails, we found the bug!
            (should (equal status-after-cancel "cancelled"))))))))
 
 (provide 'test-claude-org-cancel-race)
