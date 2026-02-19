@@ -289,6 +289,14 @@ This prevents denial-of-service via extremely large commands."
   :type 'integer
   :group 'claude-agent)
 
+(defcustom claude-agent-max-json-buffer-size (* 10 1024 1024)
+  "Maximum size in bytes for the JSON accumulation buffer.
+If the CLI sends data without newlines and the buffer exceeds this
+limit, the process is killed and an error is signalled via the error
+callback.  Default is 10 MB."
+  :type 'integer
+  :group 'claude-agent)
+
 (defcustom claude-agent-stdin-chunk-size 4096
   "Maximum bytes to send in one write to prevent pipe buffer blocking.
 When sending large JSON messages to the CLI, messages are chunked into
@@ -1306,6 +1314,15 @@ Per-process cleanup via =claude-agent-registry-cleanup-process= — never =clrha
 (defvar claude-agent--registry (claude-agent--make-registry)
   "Singleton lifecycle registry instance.")
 
+(defun claude-agent--remove-hash-entries-by-value (table value)
+  "Remove all entries from TABLE whose value equals VALUE.
+Collects keys first to avoid modify-during-iterate."
+  (let (keys)
+    (maphash (lambda (k v)
+               (when (equal v value) (push k keys)))
+             table)
+    (dolist (k keys) (remhash k table))))
+
 (defun claude-agent-registry-cleanup-process (state)
   "Per-process cleanup for STATE. Removes only entries owned by this process.
 Never calls clrhash — preserves parallel sessions."
@@ -1314,28 +1331,13 @@ Never calls clrhash — preserves parallel sessions."
     ;; Remove from active-states list
     (setf (claude-agent--registry-active-states reg)
           (delq state (claude-agent--registry-active-states reg)))
-    ;; Remove owned entries (collect keys first to avoid modify-during-iterate)
+    ;; Remove owned entries from all registry tables
     (when req-id
-      (let ((keys-to-remove nil))
-        ;; Background tasks
-        (let ((bg (claude-agent--registry-background-tasks reg)))
-          (maphash (lambda (k v)
-                     (when (equal v req-id)
-                       (push k keys-to-remove)))
-                   bg)
-          (dolist (k keys-to-remove)
-            (remhash k bg)))
-        ;; Control requests
-        (setq keys-to-remove nil)
-        (let ((cr (claude-agent--registry-control-requests reg)))
-          (maphash (lambda (k v)
-                     (when (equal v req-id)
-                       (push k keys-to-remove)))
-                   cr)
-          (dolist (k keys-to-remove)
-            (remhash k cr)))
-        ;; Queries
-        (remhash req-id (claude-agent--registry-queries reg))))))
+      (claude-agent--remove-hash-entries-by-value
+       (claude-agent--registry-background-tasks reg) req-id)
+      (claude-agent--remove-hash-entries-by-value
+       (claude-agent--registry-control-requests reg) req-id)
+      (remhash req-id (claude-agent--registry-queries reg)))))
 #+END_SRC
 
 ** Process Filter
@@ -1399,86 +1401,81 @@ The Claude CLI can signal errors in multiple ways - result messages with
 
 #+NAME: filter-extract-error
 #+BEGIN_SRC elisp
-(defun claude-agent--extract-json-error (parsed)
-  "Extract error message from PARSED JSON if it indicates an error.
-Returns the error message string if an error is detected, nil otherwise.
-Checks for:
-- result messages with is_error=true
-- assistant messages with error field (e.g., 'invalid_request')
-- result text containing 'Prompt is too long'"
-  (let ((type (plist-get parsed :type)))
+(defconst claude-agent--known-error-subtypes
+  '(("error_during_execution" . "Execution error (Claude encountered an issue during tool use)")
+    ("invalid_request" . "Invalid request error")
+    ("rate_limit" . "Rate limit exceeded"))
+  "Alist mapping known error subtype strings to human-readable messages.")
+
+(defun claude-agent--extract-result-error (parsed)
+  "Extract error from a result message in PARSED JSON.
+Checks :errors array, known subtypes, error_details, field values,
+and deep-search as fallback.  Returns error string or nil."
+  (let ((subtype (plist-get parsed :subtype))
+        (errors (plist-get parsed :errors)))
     (cond
-     ;; Result message with is_error flag set to true (not :json-false)
-     ((and (string= type "result")
-           (claude-agent--json-true-p (plist-get parsed :is_error)))
-      ;; Check subtype FIRST for known error types
-      ;; This takes priority over raw field values which may contain technical subtype names
-      (let ((subtype (plist-get parsed :subtype))
-            (errors (plist-get parsed :errors)))
-        (cond
-         ;; First check :errors array - it contains specific error messages
-         ;; e.g., ["No conversation found with session ID: ..."]
-         ((and errors (listp errors) (car errors) (stringp (car errors)))
-          (car errors))
-         ;; error_during_execution typically means tool/API failure
-         ((string= subtype "error_during_execution")
-          "Execution error (Claude encountered an issue during tool use)")
-         ;; Include other known subtypes with context
-         ((string= subtype "invalid_request")
-          "Invalid request error")
-         ((string= subtype "rate_limit")
-          "Rate limit exceeded")
-         ;; Now try specific error fields that contain descriptive messages
-         ((plist-get parsed :error_details)
-          (let ((details (plist-get parsed :error_details)))
-            (if (stringp details) details (format "%S" details))))
-         ;; Try :result, :error, :message but skip if they're just subtype values
-         ((and (plist-get parsed :result)
-               (not (member (plist-get parsed :result)
-                            '("error_during_execution" "invalid_request" "rate_limit"))))
-          (plist-get parsed :result))
-         ((and (plist-get parsed :error)
-               (not (member (plist-get parsed :error)
-                            '("error_during_execution" "invalid_request" "rate_limit"))))
-          (plist-get parsed :error))
-         ((and (plist-get parsed :message)
-               (not (member (plist-get parsed :message)
-                            '("error_during_execution" "invalid_request" "rate_limit"))))
-          (plist-get parsed :message))
-         ;; Other subtype values - format them nicely
-         ((and subtype (not (string= subtype "")))
-          (format "Error: %s" subtype))
-         ;; Search for meaningful error strings in the parsed data
-         (t
-          (or
-           (cl-labels ((find-error-string (obj)
-                         (cond
-                          ((stringp obj)
-                           ;; Look for descriptive error messages, not field values
-                           (when (and (> (length obj) 20)  ; Skip short field values
-                                      (string-match-p "\\(?:error\\|Error\\|failed\\|not found\\)" obj))
-                             obj))
-                          ((listp obj)
-                           (cl-some #'find-error-string obj))
-                          (t nil))))
-             (find-error-string parsed))
-           ;; Last resort: show what fields we do have
-           (format "Error (fields: %s)"
-                   (mapcar #'car (seq-partition (cdr parsed) 2))))))))
-     ;; Assistant message with error field containing a non-empty string
-     ((and (string= type "assistant")
-           (let ((msg (plist-get parsed :message)))
-             (let ((err (plist-get msg :error)))
-               (and err (stringp err) (not (string-empty-p err))))))
-      (let* ((msg (plist-get parsed :message))
-             (content (plist-get msg :content))
+     ;; :errors array with specific error messages
+     ((and errors (listp errors) (car errors) (stringp (car errors)))
+      (car errors))
+     ;; Known subtype with human-readable message
+     ((cdr (assoc subtype claude-agent--known-error-subtypes)))
+     ;; error_details field
+     ((plist-get parsed :error_details)
+      (let ((details (plist-get parsed :error_details)))
+        (if (stringp details) details (format "%S" details))))
+     ;; Try :result, :error, :message — skip values that duplicate subtype names
+     ((let ((subtype-values (mapcar #'car claude-agent--known-error-subtypes)))
+        (or (let ((v (plist-get parsed :result)))
+              (and v (not (member v subtype-values)) v))
+            (let ((v (plist-get parsed :error)))
+              (and v (not (member v subtype-values)) v))
+            (let ((v (plist-get parsed :message)))
+              (and v (not (member v subtype-values)) v)))))
+     ;; Other subtype values — format nicely
+     ((and subtype (not (string= subtype "")))
+      (format "Error: %s" subtype))
+     ;; Deep search for meaningful error strings
+     (t
+      (or
+       (cl-labels ((find-error-string (obj)
+                     (cond
+                      ((stringp obj)
+                       (when (and (> (length obj) 20)
+                                  (string-match-p "\\(?:error\\|Error\\|failed\\|not found\\)" obj))
+                         obj))
+                      ((listp obj)
+                       (cl-some #'find-error-string obj))
+                      (t nil))))
+         (find-error-string parsed))
+       (format "Error (fields: %s)"
+               (mapcar #'car (seq-partition (cdr parsed) 2))))))))
+
+(defun claude-agent--extract-assistant-error (parsed)
+  "Extract error from an assistant message in PARSED JSON.
+Checks for :message with non-empty :error field, extracts text
+content or falls back to error string.  Returns error string or nil."
+  (let* ((msg (plist-get parsed :message))
+         (err (plist-get msg :error)))
+    (when (and err (stringp err) (not (string-empty-p err)))
+      (let* ((content (plist-get msg :content))
              (text-block (car-safe (seq-filter
                                     (lambda (b) (string= (plist-get b :type) "text"))
                                     content))))
         (or (plist-get text-block :text)
-            (plist-get msg :error)
-            "API error")))
-     ;; No error detected
+            err
+            "API error")))))
+
+(defun claude-agent--extract-json-error (parsed)
+  "Extract error message from PARSED JSON if it indicates an error.
+Returns the error message string if an error is detected, nil otherwise.
+Delegates to sub-extractors for result and assistant message types."
+  (let ((type (plist-get parsed :type)))
+    (cond
+     ((and (string= type "result")
+           (claude-agent--json-true-p (plist-get parsed :is_error)))
+      (claude-agent--extract-result-error parsed))
+     ((string= type "assistant")
+      (claude-agent--extract-assistant-error parsed))
      (t nil))))
 #+END_SRC
 
@@ -1511,31 +1508,30 @@ Callbacks and process are extracted from STATE."
                      (list 'claude-agent-api-error
                            :message json-error
                            :parsed parsed))))
-      ;; Normal message processing
-      (progn
-        ;; Extract text for token callback (streaming)
-        (when token-callback
-          (claude-agent--extract-tokens parsed token-callback))
-        ;; Call message callback with parsed message
-        (let ((message (claude-agent--parse-message parsed)))
-          (when message
-            ;; Capture session-id from system/init message (available at start)
-            ;; This is critical for recovery - result message comes too late
-            (when (and (claude-agent-system-message-p message)
-                       (equal (claude-agent-system-message-subtype message) "init"))
-              (when-let ((sid (plist-get (claude-agent-system-message-data message) :session_id)))
-                (setf (claude-agent--process-state-session-id state) sid)))
-            ;; Set got-result flag when result message received
-            (when (claude-agent-result-message-p message)
-              (setf (claude-agent--process-state-got-result state) t))
-            ;; Write to verbose buffer if session-key is set
-            (claude-agent--verbose-write-message
-             (claude-agent--process-state-session-key state) message)
-            ;; Call user callback
-            (when callback
-              (funcall callback message))))
-        ;; Close stdin when result is received (streaming mode)
-        (claude-agent--maybe-close-stdin process parsed)))))
+      ;; Normal message processing (else-branch is implicit progn)
+      ;; Extract text for token callback (streaming)
+      (when token-callback
+        (claude-agent--extract-tokens parsed token-callback))
+      ;; Call message callback with parsed message
+      (let ((message (claude-agent--parse-message parsed)))
+        (when message
+          ;; Capture session-id from system/init message (available at start)
+          ;; This is critical for recovery - result message comes too late
+          (when (and (claude-agent-system-message-p message)
+                     (equal (claude-agent-system-message-subtype message) "init"))
+            (when-let ((sid (plist-get (claude-agent-system-message-data message) :session_id)))
+              (setf (claude-agent--process-state-session-id state) sid)))
+          ;; Set got-result flag when result message received
+          (when (claude-agent-result-message-p message)
+            (setf (claude-agent--process-state-got-result state) t))
+          ;; Write to verbose buffer if session-key is set
+          (claude-agent--verbose-write-message
+           (claude-agent--process-state-session-key state) message)
+          ;; Call user callback
+          (when callback
+            (funcall callback message))))
+      ;; Close stdin when result is received (streaming mode)
+      (claude-agent--maybe-close-stdin process parsed))))
 #+END_SRC
 
 *** JSON Validation
@@ -1679,10 +1675,24 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
       (when-let ((session-key (claude-agent--process-state-session-key state)))
         (claude-agent--verbose-insert session-key
                                       (format "<<< STDOUT: %s" output)))
-      (let ((json-buf (or (claude-agent--process-state-json-buffer state) "")))
-        (setf (claude-agent--process-state-json-buffer state)
-              (concat json-buf output))
-        (claude-agent--process-json-buffer process)))))
+      (let* ((json-buf (or (claude-agent--process-state-json-buffer state) ""))
+             (new-buf (concat json-buf output)))
+        (if (> (length new-buf) claude-agent-max-json-buffer-size)
+            ;; Buffer overflow — clear buffer, signal error, kill process
+            (progn
+              ;; Clear buffer FIRST to prevent sentinel from re-parsing garbage
+              (setf (claude-agent--process-state-json-buffer state) "")
+              (let ((err-cb (claude-agent--process-state-error-callback state)))
+                (when err-cb
+                  (funcall err-cb
+                           (list :error
+                                 (format "JSON buffer overflow: %d bytes exceeds %d byte limit"
+                                         (length new-buf)
+                                         claude-agent-max-json-buffer-size)))))
+              (when (process-live-p process)
+                (delete-process process)))
+          (setf (claude-agent--process-state-json-buffer state) new-buf)
+          (claude-agent--process-json-buffer process))))))
 #+END_SRC
 
 ** Process Sentinel
@@ -1690,10 +1700,71 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
 The sentinel handles process completion and cleanup.
 
 #+BEGIN_SRC elisp
+(defun claude-agent--sentinel-handle-normal-exit (state event)
+  "Handle normal (non-recovery) exit for STATE with EVENT.
+Calls the complete callback with nil for successful exit, or with
+an error plist for abnormal exit codes."
+  (let ((complete-cb (claude-agent--process-state-complete-callback state)))
+    (cond
+     ((string-match-p "finished" event)
+      (when complete-cb
+        (funcall complete-cb nil)))
+     ((string-match-p "exited abnormally" event)
+      (let ((exit-code (when (string-match "code \\([0-9]+\\)" event)
+                         (string-to-number (match-string 1 event)))))
+        (when complete-cb
+          (funcall complete-cb
+                   (list 'claude-agent-process-error
+                         :message "Process exited abnormally"
+                         :exit-code exit-code)))))
+     (t
+      (when complete-cb
+        (funcall complete-cb
+                 (list 'claude-agent-process-error
+                       :message (format "Process event: %s" event))))))))
+
+(defun claude-agent--sentinel-handle-abnormal-exit (process state event)
+  "Handle abnormal exit (recovery path) for PROCESS with STATE and EVENT.
+Inserts recovery message, kills orphaned children, does minimal cleanup,
+then resumes the session."
+  (when-let ((session-key (claude-agent--process-state-session-key state)))
+    (claude-agent--verbose-insert session-key
+                                  (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
+  (claude-agent--insert-recovery-message state event)
+  (claude-agent--kill-child-processes (process-id process))
+  ;; Registry-aware cleanup (removes from active-states, queries, etc.)
+  (claude-agent-registry-cleanup-process state)
+  ;; Kill output buffer after registry cleanup
+  (when-let* ((buf (claude-agent--process-state-buffer state)))
+    (when (buffer-live-p buf)
+      (kill-buffer buf)))
+  (claude-agent--resume-session state))
+
+(defun claude-agent--sentinel-cleanup (process state)
+  "Clean up after PROCESS exits with STATE.
+Kills orphaned children, removes from active-states, unregisters
+query, clears Docker mappings, and kills output buffer."
+  ;; Kill any orphaned child processes (delegate to existing helper)
+  (claude-agent--kill-child-processes (process-id process))
+  ;; Remove from active states
+  (setq claude-agent--active-states
+        (delq state claude-agent--active-states))
+  ;; Per-process cleanup and unregister (single req-id extraction)
+  (when-let* ((req-id (claude-agent--process-state-request-id state)))
+    (claude-agent--cleanup-process-entries req-id)
+    (claude-agent--unregister-query req-id))
+  ;; Clear Docker path mappings if this process owned them
+  (when (claude-agent--process-state-docker-mode state)
+    (setq emacs-mcp-server-path-mappings nil))
+  (when-let* ((buf (claude-agent--process-state-buffer state)))
+    (when (buffer-live-p buf)
+      (kill-buffer buf))))
+
 (defun claude-agent--process-sentinel (process event)
   "Process sentinel function for PROCESS.
 EVENT is the process event string.
-Uses `process-get' to retrieve state instead of closures (for dynamic binding compat)."
+Delegates to sub-handlers for normal exit, abnormal exit (recovery),
+and cleanup."
   (let ((state (process-get process 'claude-agent-state)))
     (claude-agent--debug-log "Process event: %s" (string-trim event))
     (when state
@@ -1709,20 +1780,16 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
       ;; Process any remaining JSON in buffer
       (claude-agent--process-json-buffer process)
       ;; Handle any remaining content without trailing newline
-      ;; This can happen when CLI sends data but dies before the newline
-      ;; IMPORTANT: Check if it's a valid JSON message (especially control_request)
       (let ((remaining (claude-agent--process-state-json-buffer state)))
         (when (and remaining (not (string-empty-p (string-trim remaining))))
           (let ((trimmed (string-trim remaining))
                 (error-callback (claude-agent--process-state-error-callback state))
                 (session-key (claude-agent--process-state-session-key state)))
             (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
-            ;; Try to parse as JSON - might be a control_request that arrived just before exit
             (let ((parsed (claude-agent--try-parse-json trimmed)))
               (if parsed
                   (let ((msg-type (plist-get parsed :type)))
                     (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
-                    ;; Handle control_request specially - CLI died waiting for our response
                     (if (equal msg-type "control_request")
                         (progn
                           (when session-key
@@ -1730,84 +1797,20 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
                              session-key
                              (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
                           (message "Claude: control_request received but CLI died before we could respond"))
-                      ;; Other message types - just log
                       (when session-key
                         (claude-agent--verbose-insert
                          session-key
                          (format ">>> INFO: Final message without newline: %s" msg-type)))))
-                ;; Not valid JSON - treat as error message (original behavior)
                 (when error-callback
                   (funcall error-callback
                            (list 'claude-agent-cli-error
                                  :message trimmed
                                  :original-error nil))))))))
-      ;; Check for automatic recovery before normal completion handling
+      ;; Dispatch to normal or abnormal exit handler
       (if (claude-agent--is-abnormal-exit-p event state)
-          ;; Abnormal exit - attempt recovery
-          (progn
-            (when-let ((session-key (claude-agent--process-state-session-key state)))
-              (claude-agent--verbose-insert session-key
-                                            (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
-            ;; Insert recovery message at current response position
-            (claude-agent--insert-recovery-message state event)
-            ;; Kill any orphaned child processes before recovery
-            (claude-agent--kill-child-processes (process-id process))
-            ;; Minimal cleanup for recovery (don't clear everything - resumed session needs some state)
-            (setq claude-agent--active-states
-                  (delq state claude-agent--active-states))
-            (when-let* ((req-id (claude-agent--process-state-request-id state)))
-              (claude-agent--unregister-query req-id))
-            (when-let* ((buf (claude-agent--process-state-buffer state)))
-              (when (buffer-live-p buf)
-                (kill-buffer buf)))
-            ;; Resume the session (will create new process with same callbacks)
-            (claude-agent--resume-session state))
-        ;; Normal exit - standard completion and cleanup
-        (let ((complete-cb (claude-agent--process-state-complete-callback state)))
-          (cond
-           ((string-match-p "finished" event)
-            (when complete-cb
-              (funcall complete-cb nil)))
-           ((string-match-p "exited abnormally" event)
-            (let ((exit-code (when (string-match "code \\([0-9]+\\)" event)
-                               (string-to-number (match-string 1 event)))))
-              (when complete-cb
-                (funcall complete-cb
-                         (list 'claude-agent-process-error
-                               :message "Process exited abnormally"
-                               :exit-code exit-code)))))
-           (t
-            (when complete-cb
-              (funcall complete-cb
-                       (list 'claude-agent-process-error
-                             :message (format "Process event: %s" event)))))))
-        ;; Kill any orphaned child processes (shells that escaped the process group)
-        (when-let ((pid (process-id process)))
-          (let ((child-pids (split-string
-                             (string-trim
-                              (shell-command-to-string
-                               (format "pgrep -P %d 2>/dev/null" pid)))
-                             "\n" t)))
-            (dolist (child-pid child-pids)
-              (let ((cpid (string-to-number child-pid)))
-                (when (> cpid 0)
-                  (signal-process cpid 9))))))
-        ;; Cleanup
-        (setq claude-agent--active-states
-              (delq state claude-agent--active-states))
-        ;; Per-process cleanup: only remove entries owned by THIS process
-        ;; (preserves entries from other parallel sessions)
-        (when-let* ((req-id (claude-agent--process-state-request-id state)))
-          (claude-agent--cleanup-process-entries req-id))
-        ;; Clear Docker path mappings only if this process owned them
-        (when (claude-agent--process-state-docker-mode state)
-          (setq emacs-mcp-server-path-mappings nil))
-        ;; Unregister from active queries
-        (when-let* ((req-id (claude-agent--process-state-request-id state)))
-          (claude-agent--unregister-query req-id))
-        (when-let* ((buf (claude-agent--process-state-buffer state)))
-          (when (buffer-live-p buf)
-            (kill-buffer buf)))))))
+          (claude-agent--sentinel-handle-abnormal-exit process state event)
+        (claude-agent--sentinel-handle-normal-exit state event)
+        (claude-agent--sentinel-cleanup process state)))))
 #+END_SRC
 
 ** Session Recovery
@@ -2087,22 +2090,10 @@ Only removes entries from `claude-agent--pending-background-tasks' and
 `claude-agent--pending-control-requests' whose value matches OWNER-REQUEST-ID.
 This is safe for parallel sessions — other sessions' entries are preserved."
   (when owner-request-id
-    ;; Clean background tasks owned by this process
-    (let ((to-remove nil))
-      (maphash (lambda (key val)
-                 (when (equal val owner-request-id)
-                   (push key to-remove)))
-               claude-agent--pending-background-tasks)
-      (dolist (key to-remove)
-        (remhash key claude-agent--pending-background-tasks)))
-    ;; Clean control requests owned by this process
-    (let ((to-remove nil))
-      (maphash (lambda (key val)
-                 (when (equal val owner-request-id)
-                   (push key to-remove)))
-               claude-agent--pending-control-requests)
-      (dolist (key to-remove)
-        (remhash key claude-agent--pending-control-requests)))))
+    (claude-agent--remove-hash-entries-by-value
+     claude-agent--pending-background-tasks owner-request-id)
+    (claude-agent--remove-hash-entries-by-value
+     claude-agent--pending-control-requests owner-request-id)))
 #+END_SRC
 
 ** Closing Stdin After Result
@@ -2421,6 +2412,19 @@ Returns a process state object."
 ** Query Function
 
 #+BEGIN_SRC elisp
+(defun claude-agent--prepare-query-options (options cli-path project-root)
+  "Prepare effective OPTIONS and CLI-PATH for a query.
+Returns a plist (:options OPTS :cli-path PATH).
+Resolves CLI path fallback, creates default options if nil,
+and auto-starts Docker container when needed."
+  (let* ((effective-cli-path (or cli-path claude-agent-cli-path))
+         (opts (or options (claude-agent-options))))
+    ;; Auto-start Docker container if needed
+    (when (and claude-agent-docker-auto-start
+               (claude-agent--docker-command-p effective-cli-path))
+      (claude-agent--ensure-docker-container effective-cli-path project-root))
+    (list :options opts :cli-path effective-cli-path)))
+
 (cl-defun claude-agent-query (prompt &key options on-message on-token on-error on-complete
                                      session-key source-buffer query-context
                                      source-location-fn source-location-args
@@ -2507,12 +2511,9 @@ Docker example:
    :path-mappings \\='((\"/home/user/project\" . \"/workspace\")))"
   (unless prompt
     (error "Prompt is required"))
-  (let* ((effective-cli-path (or cli-path claude-agent-cli-path))
-         (opts (or options (claude-agent-options))))
-    ;; Auto-start Docker container if needed
-    (when (and claude-agent-docker-auto-start
-               (claude-agent--docker-command-p effective-cli-path))
-      (claude-agent--ensure-docker-container effective-cli-path project-root))
+  (let* ((prepared (claude-agent--prepare-query-options options cli-path project-root))
+         (effective-cli-path (plist-get prepared :cli-path))
+         (opts (plist-get prepared :options)))
     ;; Set path mappings for MCP server (for Docker mode path translation).
     ;; This must be setq (not let-bound) because MCP requests arrive
     ;; asynchronously via HTTP, outside any let-binding scope.

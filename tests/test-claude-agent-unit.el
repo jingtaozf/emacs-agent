@@ -1459,5 +1459,166 @@ Provides inside :load no blocks (tangle templates) are excluded."
                 (claude-agent-check-tool-permission
                  checker "Write" '(:file_path "/tmp/out.txt") nil)))))
 
+;;; R10: JSON buffer overflow protection tests
+
+(ert-deftest test-json-buffer-max-size-defcustom-exists ()
+  "claude-agent-max-json-buffer-size defcustom should exist with default 10MB."
+  :tags '(:unit :fast :stable :isolated :process :r10)
+  (should (boundp 'claude-agent-max-json-buffer-size))
+  (should (= (* 10 1024 1024) claude-agent-max-json-buffer-size)))
+
+(ert-deftest test-json-buffer-overflow-triggers-error ()
+  "process-filter should signal error callback when buffer exceeds max size."
+  :tags '(:unit :fast :stable :isolated :process :r10)
+  (let* ((error-received nil)
+         (state (claude-agent--make-process-state
+                 :json-buffer ""
+                 :ready t
+                 :error-callback (lambda (err) (setq error-received err))))
+         ;; Create a mock process
+         (proc (start-process "test-r10" nil "true")))
+    (unwind-protect
+        (progn
+          (process-put proc 'claude-agent-state state)
+          ;; Set buffer just under limit
+          (setf (claude-agent--process-state-json-buffer state)
+                (make-string (- claude-agent-max-json-buffer-size 10) ?x))
+          ;; This output should push it over the limit
+          (claude-agent--process-filter proc (make-string 20 ?y))
+          ;; Error callback should have been called
+          (should error-received)
+          (should (stringp (plist-get error-received :error))))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+;;; R5: Decomposed extract-json-error sub-extractor tests
+
+(ert-deftest test-extract-result-error-with-errors-array ()
+  "Sub-extractor for result messages should handle :errors array."
+  :tags '(:unit :fast :stable :isolated :error :r5)
+  (let ((parsed '(:type "result" :is_error t
+                  :subtype "error_during_execution"
+                  :errors ("Session not found"))))
+    (should (equal "Session not found"
+                   (claude-agent--extract-result-error parsed)))))
+
+(ert-deftest test-extract-result-error-with-subtype ()
+  "Sub-extractor should fall back to known subtype message."
+  :tags '(:unit :fast :stable :isolated :error :r5)
+  (let ((parsed '(:type "result" :is_error t
+                  :subtype "rate_limit")))
+    (should (equal "Rate limit exceeded"
+                   (claude-agent--extract-result-error parsed)))))
+
+(ert-deftest test-extract-assistant-error ()
+  "Sub-extractor for assistant messages with error field."
+  :tags '(:unit :fast :stable :isolated :error :r5)
+  (let ((parsed '(:type "assistant"
+                  :message (:error "invalid_request"
+                            :content ((:type "text" :text "Bad request details"))))))
+    (should (equal "Bad request details"
+                   (claude-agent--extract-assistant-error parsed)))))
+
+(ert-deftest test-extract-assistant-error-nil-for-no-error ()
+  "Sub-extractor returns nil when assistant message has no error."
+  :tags '(:unit :fast :stable :isolated :error :r5)
+  (let ((parsed '(:type "assistant"
+                  :message (:content ((:type "text" :text "Normal"))))))
+    (should-not (claude-agent--extract-assistant-error parsed))))
+
+;;; R8: Decomposed process-sentinel tests
+
+(ert-deftest test-sentinel-sub-handlers-exist ()
+  "Sentinel sub-handler functions should exist."
+  :tags '(:unit :fast :stable :isolated :sentinel :r8)
+  (should (fboundp 'claude-agent--sentinel-handle-normal-exit))
+  (should (fboundp 'claude-agent--sentinel-handle-abnormal-exit))
+  (should (fboundp 'claude-agent--sentinel-cleanup)))
+
+(ert-deftest test-sentinel-normal-exit-finished ()
+  "Normal exit with 'finished' should call complete callback with nil."
+  :tags '(:unit :fast :stable :isolated :sentinel :r8)
+  (let* ((completed nil)
+         (state (claude-agent--make-process-state
+                 :complete-callback (lambda (err) (setq completed (list 'called err))))))
+    (claude-agent--sentinel-handle-normal-exit state "finished\n")
+    (should completed)
+    (should (eq 'called (car completed)))
+    (should-not (cadr completed))))
+
+(ert-deftest test-sentinel-normal-exit-abnormal-code ()
+  "Normal exit with exit code should call complete callback with error."
+  :tags '(:unit :fast :stable :isolated :sentinel :r8)
+  (let* ((completed nil)
+         (state (claude-agent--make-process-state
+                 :complete-callback (lambda (err) (setq completed err)))))
+    (claude-agent--sentinel-handle-normal-exit state "exited abnormally with code 1\n")
+    (should completed)
+    (should (eq 'claude-agent-process-error (car completed)))))
+
+;;; R9: Decomposed claude-agent-query tests
+
+(ert-deftest test-prepare-query-options-exists ()
+  "prepare-query-options function should exist."
+  :tags '(:unit :fast :stable :isolated :query :r9)
+  (should (fboundp 'claude-agent--prepare-query-options)))
+
+(ert-deftest test-prepare-query-options-defaults ()
+  "prepare-query-options should return plist with :options and :cli-path keys."
+  :tags '(:unit :fast :stable :isolated :query :r9)
+  (let ((result (claude-agent--prepare-query-options nil nil nil)))
+    ;; Should have :options key with a valid options plist
+    (should (plist-get result :options))
+    ;; Should have :cli-path key (value can be nil when no CLI configured)
+    (should (plist-member result :cli-path))))
+
+;;; Review Fixes: JSON buffer overflow clears buffer
+
+(ert-deftest test-json-buffer-overflow-clears-buffer ()
+  "After overflow, json-buffer should be cleared to prevent sentinel re-parse."
+  :tags '(:unit :fast :stable :isolated :process :review-fix)
+  (let* ((error-received nil)
+         (state (claude-agent--make-process-state
+                 :json-buffer ""
+                 :ready t
+                 :error-callback (lambda (err) (setq error-received err))))
+         (proc (start-process "test-overflow-clear" nil "sleep" "60")))
+    (unwind-protect
+        (progn
+          (process-put proc 'claude-agent-state state)
+          ;; Set buffer just under limit
+          (setf (claude-agent--process-state-json-buffer state)
+                (make-string (- claude-agent-max-json-buffer-size 10) ?x))
+          ;; Push over the limit
+          (claude-agent--process-filter proc (make-string 20 ?y))
+          ;; Error should be signalled
+          (should error-received)
+          ;; CRITICAL: json-buffer should be cleared so sentinel won't re-parse
+          (should (equal "" (claude-agent--process-state-json-buffer state))))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+;;; Review Fixes: Sentinel cleanup uses kill-child-processes helper
+
+(ert-deftest test-sentinel-cleanup-calls-kill-child-processes ()
+  "sentinel-cleanup should delegate to kill-child-processes, not inline the logic."
+  :tags '(:unit :fast :stable :isolated :process :review-fix)
+  (let* ((kill-helper-called nil)
+         (state (claude-agent--make-process-state
+                 :json-buffer ""
+                 :ready t))
+         (proc (start-process "test-cleanup-helper" nil "sleep" "60")))
+    (unwind-protect
+        (progn
+          (process-put proc 'claude-agent-state state)
+          ;; Stub kill-child-processes to track if it's called
+          (cl-letf (((symbol-function 'claude-agent--kill-child-processes)
+                     (lambda (pid) (setq kill-helper-called pid))))
+            (claude-agent--sentinel-cleanup proc state)
+            ;; Should have called the helper, not inlined the logic
+            (should kill-helper-called)))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

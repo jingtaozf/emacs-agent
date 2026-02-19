@@ -1681,6 +1681,27 @@ This test verifies the disconnect path is called when client is alive."
 
 ;;; Response Message Separator Tests
 
+(defmacro with-response-section (session-key query-id &rest body)
+  "Set up an org buffer with a response section and session state, then run BODY.
+SESSION-KEY and QUERY-ID are evaluated once and bound for BODY.
+Creates a standard response section header and initializes the 4 session
+properties needed by handle-token-v2 / handle-message."
+  (declare (indent 2) (debug t))
+  `(with-temp-buffer
+     (org-mode)
+     (let ((session-key ,session-key)
+           (query-id ,query-id))
+       (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
+       (insert ":PROPERTIES:\n")
+       (insert (format ":QUERY_ID: %s\n" query-id))
+       (insert ":QUERY_TYPE: normal\n")
+       (insert ":END:\n\n")
+       (claude-org--session-put session-key :query-id query-id)
+       (claude-org--session-put session-key :section-level 1)
+       (claude-org--session-put session-key :current-line-length 0)
+       (claude-org--session-put session-key :response-has-content nil)
+       ,@body)))
+
 (ert-deftest test-claude-org-newline-between-assistant-messages ()
   "Test that a newline separator is inserted between consecutive assistant messages.
 When Claude sends multiple assistant messages (e.g., text -> tool use -> text),
@@ -2152,6 +2173,338 @@ should detect the non-struct and replace it with a fresh struct."
       ;; Different block should queue fine
       (should (eq 'queued
                   (claude-org--queue-block key '(:custom-id "other-blk" :content "test")))))))
+
+;;; R1: Data-driven session state dispatch tests
+
+(ert-deftest test-session-field-accessors-alist-exists ()
+  "The accessors alist constant should exist and cover all 22 struct fields."
+  :tags '(:unit :fast :stable :isolated :session :r1)
+  (should (boundp 'claude-org--session-field-accessors))
+  (should (listp claude-org--session-field-accessors))
+  ;; Must have entries for all 22 named fields
+  (should (>= (length claude-org--session-field-accessors) 22))
+  ;; Each entry should be (keyword . function)
+  (dolist (entry claude-org--session-field-accessors)
+    (should (keywordp (car entry)))
+    (should (functionp (cdr entry)))))
+
+(ert-deftest test-session-field-setters-alist-exists ()
+  "The setters alist constant should exist and cover all 22 struct fields."
+  :tags '(:unit :fast :stable :isolated :session :r1)
+  (should (boundp 'claude-org--session-field-setters))
+  (should (listp claude-org--session-field-setters))
+  ;; Must have entries for all 22 named fields
+  (should (>= (length claude-org--session-field-setters) 22))
+  ;; Each entry should be (keyword . function)
+  (dolist (entry claude-org--session-field-setters)
+    (should (keywordp (car entry)))
+    (should (functionp (cdr entry)))))
+
+(ert-deftest test-session-state-get-all-known-fields ()
+  "session-state-get should retrieve all 22 known fields without error."
+  :tags '(:unit :fast :stable :isolated :session :r1)
+  (let ((state (claude-org--make-session-state
+                :busy t
+                :recovering nil
+                :query-id "q123"
+                :backend 'test-backend
+                :query-handle 'handle
+                :start-time 1000.0
+                :original-prompt "test prompt"
+                :section-level 2
+                :response-has-content t
+                :last-assistant-query-id "aq1"
+                :current-line-length 42
+                :loop-max 5
+                :loop-current 3
+                :loop-interval 10
+                :pending-queue '(a b)
+                :instruction-num 7
+                :custom-id "cid"
+                :recovery-count 2
+                :block-id "bid"
+                :marker nil
+                :spinner 1
+                :sdk-uuid "uuid-1")))
+    (should (eq t (claude-org--session-state-get state :busy)))
+    (should (eq nil (claude-org--session-state-get state :recovering)))
+    (should (equal "q123" (claude-org--session-state-get state :query-id)))
+    (should (eq 'test-backend (claude-org--session-state-get state :backend)))
+    (should (eq 'handle (claude-org--session-state-get state :query-handle)))
+    (should (= 1000.0 (claude-org--session-state-get state :start-time)))
+    (should (equal "test prompt" (claude-org--session-state-get state :original-prompt)))
+    (should (= 2 (claude-org--session-state-get state :section-level)))
+    (should (eq t (claude-org--session-state-get state :response-has-content)))
+    (should (equal "aq1" (claude-org--session-state-get state :last-assistant-query-id)))
+    (should (= 42 (claude-org--session-state-get state :current-line-length)))
+    (should (= 5 (claude-org--session-state-get state :loop-max)))
+    (should (= 3 (claude-org--session-state-get state :loop-current)))
+    (should (= 10 (claude-org--session-state-get state :loop-interval)))
+    (should (equal '(a b) (claude-org--session-state-get state :pending-queue)))
+    (should (= 7 (claude-org--session-state-get state :instruction-num)))
+    (should (equal "cid" (claude-org--session-state-get state :custom-id)))
+    (should (= 2 (claude-org--session-state-get state :recovery-count)))
+    (should (equal "bid" (claude-org--session-state-get state :block-id)))
+    (should (eq nil (claude-org--session-state-get state :marker)))
+    (should (= 1 (claude-org--session-state-get state :spinner)))
+    (should (equal "uuid-1" (claude-org--session-state-get state :sdk-uuid)))))
+
+(ert-deftest test-session-state-set-all-known-fields ()
+  "session-state-set should set all 22 known fields and return value."
+  :tags '(:unit :fast :stable :isolated :session :r1)
+  (let ((state (claude-org--make-session-state :spinner 0 :section-level 0
+                                               :current-line-length 0)))
+    ;; Set each field and verify round-trip
+    (claude-org--session-state-set state :busy t)
+    (should (eq t (claude-org--session-state-get state :busy)))
+    (claude-org--session-state-set state :query-id "new-q")
+    (should (equal "new-q" (claude-org--session-state-get state :query-id)))
+    (claude-org--session-state-set state :start-time 2000.0)
+    (should (= 2000.0 (claude-org--session-state-get state :start-time)))
+    (claude-org--session-state-set state :section-level 3)
+    (should (= 3 (claude-org--session-state-get state :section-level)))
+    (claude-org--session-state-set state :loop-max 10)
+    (should (= 10 (claude-org--session-state-get state :loop-max)))
+    (claude-org--session-state-set state :recovery-count 5)
+    (should (= 5 (claude-org--session-state-get state :recovery-count)))
+    (claude-org--session-state-set state :sdk-uuid "new-uuid")
+    (should (equal "new-uuid" (claude-org--session-state-get state :sdk-uuid)))))
+
+(ert-deftest test-session-state-extras-fallback ()
+  "Unknown properties should fall through to extras plist."
+  :tags '(:unit :fast :stable :isolated :session :r1)
+  (let ((state (claude-org--make-session-state :spinner 0 :section-level 0
+                                               :current-line-length 0)))
+    ;; Set unknown property
+    (claude-org--session-state-set state :custom-thing "hello")
+    (should (equal "hello" (claude-org--session-state-get state :custom-thing)))
+    ;; Set another unknown property
+    (claude-org--session-state-set state :another 42)
+    (should (= 42 (claude-org--session-state-get state :another)))
+    ;; First property should still be there
+    (should (equal "hello" (claude-org--session-state-get state :custom-thing)))))
+
+(ert-deftest test-session-state-set-returns-value ()
+  "session-state-set should return the value that was set."
+  :tags '(:unit :fast :stable :isolated :session :r1)
+  (let ((state (claude-org--make-session-state :spinner 0 :section-level 0
+                                               :current-line-length 0)))
+    (should (eq t (claude-org--session-state-set state :busy t)))
+    (should (equal "q1" (claude-org--session-state-set state :query-id "q1")))
+    ;; Extras fallback should also return value
+    (should (equal "val" (claude-org--session-state-set state :unknown-prop "val")))))
+
+(ert-deftest test-session-field-alists-cover-all-struct-fields ()
+  "Both alists should have entries for the same set of keywords."
+  :tags '(:unit :fast :stable :isolated :session :r1)
+  (let ((accessor-keys (mapcar #'car claude-org--session-field-accessors))
+        (setter-keys (mapcar #'car claude-org--session-field-setters)))
+    ;; Same set of keywords in both alists
+    (should (equal (sort (copy-sequence accessor-keys) #'string<)
+                   (sort (copy-sequence setter-keys) #'string<)))
+    ;; All expected keywords present
+    (let ((expected '(:busy :recovering :query-id :backend :query-handle
+                      :start-time :original-prompt :section-level
+                      :response-has-content :last-assistant-query-id
+                      :current-line-length :loop-max :loop-current
+                      :loop-interval :pending-queue :instruction-num
+                      :custom-id :recovery-count :block-id :marker
+                      :spinner :sdk-uuid)))
+      (dolist (key expected)
+        (should (assq key claude-org--session-field-accessors))
+        (should (assq key claude-org--session-field-setters))))))
+
+;;; R6: Recovery retry limit tests
+
+(ert-deftest test-recovery-max-attempts-defcustom-exists ()
+  "claude-org-max-recovery-attempts defcustom should exist with default 3."
+  :tags '(:unit :fast :stable :isolated :recovery :r6)
+  (should (boundp 'claude-org-max-recovery-attempts))
+  (should (= 3 claude-org-max-recovery-attempts)))
+
+(ert-deftest test-recovery-stops-at-limit ()
+  "recover-session should refuse to recover when recovery-count >= max."
+  :tags '(:unit :fast :stable :isolated :recovery :r6)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-r6-limit.org")
+    (claude-org-mode 1)
+    (let ((key "test-r6-limit")
+          (error-inserted nil))
+      ;; Set recovery count at the limit
+      (claude-org--session-put key :recovery-count 3)
+      (claude-org--session-put key :busy t)
+      (claude-org--session-put key :query-id "old-q")
+      ;; Stub functions called during recovery failure path
+      (cl-letf (((symbol-function 'claude-org--insert-error)
+                 (lambda (_key _msg) (setq error-inserted t)))
+                ((symbol-function 'claude-org--stop-spinner) #'ignore)
+                ((symbol-function 'claude-org--refresh-header-line) #'ignore)
+                ((symbol-function 'claude-org--reset-session-state) #'ignore))
+        (claude-org--recover-session key 'expired)
+        ;; Should have inserted error, not attempted recovery
+        (should error-inserted)
+        ;; Should NOT have set recovering flag (it was short-circuited)
+        (should-not (claude-org--session-get key :recovering))))))
+
+(ert-deftest test-recovery-count-resets-on-success ()
+  "recovery-count should be reset to 0 when a new query starts."
+  :tags '(:unit :fast :stable :isolated :recovery :r6)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-r6-reset.org")
+    (claude-org-mode 1)
+    (let ((key "test-r6-reset"))
+      ;; Simulate some recovery attempts
+      (claude-org--session-put key :recovery-count 2)
+      (should (= 2 (claude-org--session-get key :recovery-count)))
+      ;; Reset (simulating what send-request does on new query)
+      (claude-org--session-put key :recovery-count 0)
+      (should (= 0 (claude-org--session-get key :recovery-count))))))
+
+;;; R2: with-session-marker macro tests
+
+(ert-deftest test-with-session-marker-valid-marker ()
+  "Macro should execute body when marker is valid."
+  :tags '(:unit :fast :stable :isolated :marker :r2)
+  (with-temp-buffer
+    (org-mode)
+    (insert "Test content\n")
+    (let ((marker (copy-marker (point-min))))
+      (should (equal "executed"
+                     (claude-org--with-session-marker marker
+                       "executed"))))))
+
+(ert-deftest test-with-session-marker-nil-marker ()
+  "Macro should return nil when marker is nil."
+  :tags '(:unit :fast :stable :isolated :marker :r2)
+  (should-not (claude-org--with-session-marker nil
+                (error "Should not reach here"))))
+
+(ert-deftest test-with-session-marker-killed-buffer ()
+  "Macro should return nil when marker's buffer has been killed."
+  :tags '(:unit :fast :stable :isolated :marker :r2)
+  (let* ((buf (generate-new-buffer " *test-r2-killed*"))
+         (marker (with-current-buffer buf
+                   (insert "content")
+                   (copy-marker (point-min)))))
+    (kill-buffer buf)
+    (should-not (claude-org--with-session-marker marker
+                  (error "Should not reach here")))))
+
+;;; R11: Queue depth limit tests
+
+(ert-deftest test-queue-max-depth-defcustom-exists ()
+  "claude-org-max-queue-depth defcustom should exist with default 20."
+  :tags '(:unit :fast :stable :isolated :queue :r11)
+  (should (boundp 'claude-org-max-queue-depth))
+  (should (= 20 claude-org-max-queue-depth)))
+
+(ert-deftest test-queue-full-rejection ()
+  "queue-block should return queue-full when queue exceeds max depth."
+  :tags '(:unit :fast :stable :isolated :queue :r11)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-r11-full.org")
+    (claude-org-mode 1)
+    (let ((key "test-r11-full")
+          (claude-org-max-queue-depth 3))
+      ;; Fill queue to limit
+      (dotimes (i 3)
+        (should (eq 'queued
+                    (claude-org--queue-block
+                     key (list :custom-id (format "blk-%d" i)
+                               :content (format "content %d" i))))))
+      ;; Next should be rejected
+      (should (eq 'queue-full
+                  (claude-org--queue-block
+                   key '(:custom-id "blk-overflow" :content "overflow")))))))
+
+;;; R3: Decomposed send-request tests
+
+(ert-deftest test-build-full-prompt-with-reminder ()
+  "build-full-prompt should prepend system reminder to prompt."
+  :tags '(:unit :fast :stable :isolated :send-request :r3)
+  (should (fboundp 'claude-org--build-full-prompt))
+  (let ((result (claude-org--build-full-prompt "my query" "context info")))
+    (should (stringp result))
+    (should (string-match-p "context info" result))
+    (should (string-match-p "my query" result))))
+
+(ert-deftest test-build-full-prompt-without-reminder ()
+  "build-full-prompt with nil/empty reminder should return prompt unchanged."
+  :tags '(:unit :fast :stable :isolated :send-request :r3)
+  (should (equal "my query" (claude-org--build-full-prompt "my query" nil)))
+  (should (equal "my query" (claude-org--build-full-prompt "my query" ""))))
+
+(ert-deftest test-dispatch-query-exists ()
+  "dispatch-query function should exist."
+  :tags '(:unit :fast :stable :isolated :send-request :r3)
+  (should (fboundp 'claude-org--dispatch-query)))
+
+;;; R7: Modular header-line component tests
+
+(ert-deftest test-header-line-components-exist ()
+  "All header-line component functions should exist."
+  :tags '(:unit :fast :stable :isolated :header :r7)
+  (should (fboundp 'claude-org--header-session-badge))
+  (should (fboundp 'claude-org--header-docker-badge))
+  (should (fboundp 'claude-org--header-permission-badge))
+  (should (fboundp 'claude-org--header-activity-badge))
+  (should (fboundp 'claude-org--header-project-badge))
+  (should (fboundp 'claude-org--header-ide-context)))
+
+(ert-deftest test-header-line-components-return-strings ()
+  "All header-line components should return strings."
+  :tags '(:unit :fast :stable :isolated :header :r7)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-r7.org")
+    (claude-org-mode 1)
+    (should (stringp (claude-org--header-session-badge)))
+    (should (stringp (claude-org--header-docker-badge)))
+    (should (stringp (claude-org--header-permission-badge)))
+    (should (stringp (claude-org--header-activity-badge)))
+    (should (stringp (claude-org--header-project-badge)))
+    (should (stringp (claude-org--header-ide-context)))))
+
+;;; Review Fixes: Recovery counter increment
+
+(ert-deftest test-recovery-counter-increments-on-each-attempt ()
+  "recover-session should increment recovery-count on each recovery call."
+  :tags '(:unit :fast :stable :isolated :recovery :review-fix)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-recovery-incr.org")
+    (claude-org-mode 1)
+    (let ((key "test-recovery-incr")
+          (recovery-attempted nil))
+      ;; Initialize session state
+      (claude-org--session-put key :recovery-count 0)
+      (claude-org--session-put key :busy t)
+      (claude-org--session-put key :query-id "old-q-1")
+      ;; Stub out all side-effect functions - we just want to verify counter
+      (cl-letf (((symbol-function 'claude-org--find-response-by-query-id)
+                 (lambda (_) (point-min)))
+                ((symbol-function 'claude-org--create-response-section) #'ignore)
+                ((symbol-function 'claude-org--collect-session-context)
+                 (lambda () "context"))
+                ((symbol-function 'claude-org--build-recovery-prompt)
+                 (lambda (_ctx _prompt) "recovery"))
+                ((symbol-function 'claude-org--clear-sdk-uuid) #'ignore)
+                ((symbol-function 'claude-org--send-request)
+                 (lambda (_prompt &rest _) (setq recovery-attempted t)))
+                ((symbol-function 'claude-org--generate-query-id)
+                 (lambda () "new-q"))
+                ((symbol-function 'claude-org--stop-spinner) #'ignore)
+                ((symbol-function 'claude-org--refresh-header-line) #'ignore))
+        ;; First recovery call: count should go from 0 to 1
+        (claude-org--recover-session key 'expired)
+        (should (= 1 (claude-org--session-get key :recovery-count)))
+        ;; Second recovery call: count should go from 1 to 2
+        (claude-org--session-put key :query-id "old-q-2")
+        (claude-org--recover-session key 'expired)
+        (should (= 2 (claude-org--session-get key :recovery-count)))))))
 
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

@@ -290,6 +290,24 @@ This ensures Claude's output fits properly within the document hierarchy."
   :type 'boolean
   :group 'claude-org)
 
+(defcustom claude-org-max-recovery-attempts 3
+  "Maximum number of automatic recovery attempts before giving up.
+When a session encounters context-limit or expiration errors,
+the system retries automatically.  After this many consecutive
+recovery failures, an error message is inserted and retrying stops.
+The counter resets on each successful new query."
+  :type 'integer
+  :group 'claude-org)
+
+(defcustom claude-org-max-queue-depth 20
+  "Maximum number of blocks that can be queued for execution.
+When a new block is queued and the queue already has this many
+entries, `claude-org--queue-block' returns `queue-full' instead
+of adding the block.  This prevents runaway automation from
+consuming unbounded memory."
+  :type 'integer
+  :group 'claude-org)
+
 (defcustom claude-org-auto-break-line-length -1
   "Auto-break lines exceeding this length after sentence-ending punctuation.
 When set to a positive integer, lines longer than this will be broken
@@ -909,50 +927,66 @@ Uses query-id based recovery:
 1. Find current response section by query-id
 2. Create NEW recovery response section after it
 3. Generate new query-id for recovery query
-4. Old query's callbacks will be ignored (query-id mismatch)"
-  (claude-org--session-put session-key :recovering t)
-  (let* ((old-query-id (claude-org--session-get session-key :query-id))
-         (reason-str (pcase reason
-                       ('context-limit "context_limit")
-                       (_ "session_expired"))))
-    ;; Try to find response section by query-id (marker-free approach)
-    (let ((response-pos (claude-org--find-response-by-query-id old-query-id)))
-      (if (not response-pos)
-          ;; Can't find response section - fail gracefully
-          (progn
-            (message "Claude: Cannot recover session - response section not found")
-            (claude-org--reset-session-state session-key)
-            (claude-org--stop-spinner session-key)
-            (claude-org--refresh-header-line))
-        ;; Found response section - create recovery section
-        (save-excursion
-          (goto-char response-pos)
-          ;; Move to end of current response section
-          (org-end-of-subtree t)
-          ;; Insert newlines and create NEW recovery response section
-          (insert "\n\n")
-          ;; Generate new query-id for recovery
-          (let ((new-query-id (claude-org--generate-query-id)))
-            ;; Update session with new query-id BEFORE creating section
-            (claude-org--session-put session-key :query-id new-query-id)
-            ;; Create recovery response section with parent reference
-            (claude-org--create-response-section
-             session-key new-query-id 'recovery old-query-id reason-str)
-            ;; Insert recovery message in the new section
-            (let ((recovery-msg (pcase reason
-                                  ('context-limit "/Context limit reached, recovering with history.../")
-                                  (_ "/Session expired, recovering with context.../"))))
-              (insert recovery-msg "\n\n"))))
-        ;; Clear old session UUID from org property
-        (claude-org--clear-sdk-uuid)
-        ;; Collect context and send recovery request
-        (let* ((context (claude-org--collect-session-context))
-               (original-prompt (claude-org--session-get session-key :original-prompt))
-               (recovery-prompt (claude-org--build-recovery-prompt context original-prompt)))
-          ;; Clear recovering flag - the new query-id protects us now
-          (claude-org--session-put session-key :recovering nil)
-          ;; Send recovery request with new query-id already in session
-          (claude-org--send-request recovery-prompt nil session-key))))))
+4. Old query's callbacks will be ignored (query-id mismatch)
+
+Recovery is limited to `claude-org-max-recovery-attempts' consecutive
+attempts.  The counter resets on each new query."
+  ;; Guard: check recovery count against limit
+  (let ((count (or (claude-org--session-get session-key :recovery-count) 0)))
+    (if (>= count claude-org-max-recovery-attempts)
+        (progn
+          (claude-org--insert-error
+           session-key
+           (format "Recovery limit reached (%d attempts). Please retry manually."
+                   count))
+          (claude-org--reset-session-state session-key)
+          (claude-org--stop-spinner session-key)
+          (claude-org--refresh-header-line))
+      ;; Normal recovery path — increment counter before attempting
+      (claude-org--session-put session-key :recovery-count (1+ count))
+      (claude-org--session-put session-key :recovering t)
+      (let* ((old-query-id (claude-org--session-get session-key :query-id))
+             (reason-str (pcase reason
+                           ('context-limit "context_limit")
+                           (_ "session_expired"))))
+        ;; Try to find response section by query-id (marker-free approach)
+        (let ((response-pos (claude-org--find-response-by-query-id old-query-id)))
+          (if (not response-pos)
+              ;; Can't find response section - fail gracefully
+              (progn
+                (message "Claude: Cannot recover session - response section not found")
+                (claude-org--reset-session-state session-key)
+                (claude-org--stop-spinner session-key)
+                (claude-org--refresh-header-line))
+            ;; Found response section - create recovery section
+            (save-excursion
+              (goto-char response-pos)
+              ;; Move to end of current response section
+              (org-end-of-subtree t)
+              ;; Insert newlines and create NEW recovery response section
+              (insert "\n\n")
+              ;; Generate new query-id for recovery
+              (let ((new-query-id (claude-org--generate-query-id)))
+                ;; Update session with new query-id BEFORE creating section
+                (claude-org--session-put session-key :query-id new-query-id)
+                ;; Create recovery response section with parent reference
+                (claude-org--create-response-section
+                 session-key new-query-id 'recovery old-query-id reason-str)
+                ;; Insert recovery message in the new section
+                (let ((recovery-msg (pcase reason
+                                      ('context-limit "/Context limit reached, recovering with history.../")
+                                      (_ "/Session expired, recovering with context.../"))))
+                  (insert recovery-msg "\n\n"))))
+            ;; Clear old session UUID from org property
+            (claude-org--clear-sdk-uuid)
+            ;; Collect context and send recovery request
+            (let* ((context (claude-org--collect-session-context))
+                   (original-prompt (claude-org--session-get session-key :original-prompt))
+                   (recovery-prompt (claude-org--build-recovery-prompt context original-prompt)))
+              ;; Clear recovering flag - the new query-id protects us now
+              (claude-org--session-put session-key :recovering nil)
+              ;; Send recovery request with new query-id already in session
+              (claude-org--send-request recovery-prompt nil session-key))))))))
 #+END_SRC
 
 * Environment Variable Loading
@@ -1654,34 +1688,70 @@ Replaces stale non-struct entries (e.g. plists from pre-refactor code)."
         (puthash session-key state claude-org--sessions)
         state))))
 
+(defconst claude-org--session-field-accessors
+  `((:busy . ,#'claude-org--session-state-busy)
+    (:recovering . ,#'claude-org--session-state-recovering)
+    (:query-id . ,#'claude-org--session-state-query-id)
+    (:backend . ,#'claude-org--session-state-backend)
+    (:query-handle . ,#'claude-org--session-state-query-handle)
+    (:start-time . ,#'claude-org--session-state-start-time)
+    (:original-prompt . ,#'claude-org--session-state-original-prompt)
+    (:section-level . ,#'claude-org--session-state-section-level)
+    (:response-has-content . ,#'claude-org--session-state-response-has-content)
+    (:last-assistant-query-id . ,#'claude-org--session-state-last-assistant-query-id)
+    (:current-line-length . ,#'claude-org--session-state-current-line-length)
+    (:loop-max . ,#'claude-org--session-state-loop-max)
+    (:loop-current . ,#'claude-org--session-state-loop-current)
+    (:loop-interval . ,#'claude-org--session-state-loop-interval)
+    (:pending-queue . ,#'claude-org--session-state-pending-queue)
+    (:instruction-num . ,#'claude-org--session-state-instruction-num)
+    (:custom-id . ,#'claude-org--session-state-custom-id)
+    (:recovery-count . ,#'claude-org--session-state-recovery-count)
+    (:block-id . ,#'claude-org--session-state-block-id)
+    (:marker . ,#'claude-org--session-state-marker)
+    (:spinner . ,#'claude-org--session-state-spinner)
+    (:sdk-uuid . ,#'claude-org--session-state-sdk-uuid))
+  "Alist mapping keyword properties to session-state accessor functions.
+Each entry is (KEYWORD . GETTER-FN).  Adding a new struct field requires
+one line here and one line in `claude-org--session-field-setters'.")
+
+(defconst claude-org--session-field-setters
+  `((:busy . ,(lambda (state value) (setf (claude-org--session-state-busy state) value)))
+    (:recovering . ,(lambda (state value) (setf (claude-org--session-state-recovering state) value)))
+    (:query-id . ,(lambda (state value) (setf (claude-org--session-state-query-id state) value)))
+    (:backend . ,(lambda (state value) (setf (claude-org--session-state-backend state) value)))
+    (:query-handle . ,(lambda (state value) (setf (claude-org--session-state-query-handle state) value)))
+    (:start-time . ,(lambda (state value) (setf (claude-org--session-state-start-time state) value)))
+    (:original-prompt . ,(lambda (state value) (setf (claude-org--session-state-original-prompt state) value)))
+    (:section-level . ,(lambda (state value) (setf (claude-org--session-state-section-level state) value)))
+    (:response-has-content . ,(lambda (state value) (setf (claude-org--session-state-response-has-content state) value)))
+    (:last-assistant-query-id . ,(lambda (state value) (setf (claude-org--session-state-last-assistant-query-id state) value)))
+    (:current-line-length . ,(lambda (state value) (setf (claude-org--session-state-current-line-length state) value)))
+    (:loop-max . ,(lambda (state value) (setf (claude-org--session-state-loop-max state) value)))
+    (:loop-current . ,(lambda (state value) (setf (claude-org--session-state-loop-current state) value)))
+    (:loop-interval . ,(lambda (state value) (setf (claude-org--session-state-loop-interval state) value)))
+    (:pending-queue . ,(lambda (state value) (setf (claude-org--session-state-pending-queue state) value)))
+    (:instruction-num . ,(lambda (state value) (setf (claude-org--session-state-instruction-num state) value)))
+    (:custom-id . ,(lambda (state value) (setf (claude-org--session-state-custom-id state) value)))
+    (:recovery-count . ,(lambda (state value) (setf (claude-org--session-state-recovery-count state) value)))
+    (:block-id . ,(lambda (state value) (setf (claude-org--session-state-block-id state) value)))
+    (:marker . ,(lambda (state value) (setf (claude-org--session-state-marker state) value)))
+    (:spinner . ,(lambda (state value) (setf (claude-org--session-state-spinner state) value)))
+    (:sdk-uuid . ,(lambda (state value) (setf (claude-org--session-state-sdk-uuid state) value))))
+  "Alist mapping keyword properties to session-state setter functions.
+Each entry is (KEYWORD . SETTER-FN) where SETTER-FN takes (STATE VALUE).
+Adding a new struct field requires one line here and one line in
+`claude-org--session-field-accessors'.")
+
 (defun claude-org--session-state-set (state prop value)
   "Set PROP to VALUE on session STATE struct.
-Uses cl-defstruct generated setf forms for each known property."
-  (pcase prop
-    (:busy (setf (claude-org--session-state-busy state) value))
-    (:recovering (setf (claude-org--session-state-recovering state) value))
-    (:query-id (setf (claude-org--session-state-query-id state) value))
-    (:backend (setf (claude-org--session-state-backend state) value))
-    (:query-handle (setf (claude-org--session-state-query-handle state) value))
-    (:start-time (setf (claude-org--session-state-start-time state) value))
-    (:original-prompt (setf (claude-org--session-state-original-prompt state) value))
-    (:section-level (setf (claude-org--session-state-section-level state) value))
-    (:response-has-content (setf (claude-org--session-state-response-has-content state) value))
-    (:last-assistant-query-id (setf (claude-org--session-state-last-assistant-query-id state) value))
-    (:current-line-length (setf (claude-org--session-state-current-line-length state) value))
-    (:loop-max (setf (claude-org--session-state-loop-max state) value))
-    (:loop-current (setf (claude-org--session-state-loop-current state) value))
-    (:loop-interval (setf (claude-org--session-state-loop-interval state) value))
-    (:pending-queue (setf (claude-org--session-state-pending-queue state) value))
-    (:instruction-num (setf (claude-org--session-state-instruction-num state) value))
-    (:custom-id (setf (claude-org--session-state-custom-id state) value))
-    (:recovery-count (setf (claude-org--session-state-recovery-count state) value))
-    (:block-id (setf (claude-org--session-state-block-id state) value))
-    (:marker (setf (claude-org--session-state-marker state) value))
-    (:spinner (setf (claude-org--session-state-spinner state) value))
-    (:sdk-uuid (setf (claude-org--session-state-sdk-uuid state) value))
-    (_ (setf (claude-org--session-state-extras state)
-             (plist-put (claude-org--session-state-extras state) prop value))))
+Looks up PROP in `claude-org--session-field-setters'; unknown props
+fall through to the extras plist."
+  (let ((entry (assq prop claude-org--session-field-setters)))
+    (if entry
+        (funcall (cdr entry) state value)
+      (setf (claude-org--session-state-extras state)
+            (plist-put (claude-org--session-state-extras state) prop value))))
   value)
 
 (defun claude-org--session-put (session-key prop value)
@@ -1693,31 +1763,12 @@ PROP is a keyword like :busy, :query-id, etc."
 
 (defun claude-org--session-state-get (state prop)
   "Get PROP from session STATE struct.
-Uses pcase dispatch symmetric with `claude-org--session-state-set'."
-  (pcase prop
-    (:busy (claude-org--session-state-busy state))
-    (:recovering (claude-org--session-state-recovering state))
-    (:query-id (claude-org--session-state-query-id state))
-    (:backend (claude-org--session-state-backend state))
-    (:query-handle (claude-org--session-state-query-handle state))
-    (:start-time (claude-org--session-state-start-time state))
-    (:original-prompt (claude-org--session-state-original-prompt state))
-    (:section-level (claude-org--session-state-section-level state))
-    (:response-has-content (claude-org--session-state-response-has-content state))
-    (:last-assistant-query-id (claude-org--session-state-last-assistant-query-id state))
-    (:current-line-length (claude-org--session-state-current-line-length state))
-    (:loop-max (claude-org--session-state-loop-max state))
-    (:loop-current (claude-org--session-state-loop-current state))
-    (:loop-interval (claude-org--session-state-loop-interval state))
-    (:pending-queue (claude-org--session-state-pending-queue state))
-    (:instruction-num (claude-org--session-state-instruction-num state))
-    (:custom-id (claude-org--session-state-custom-id state))
-    (:recovery-count (claude-org--session-state-recovery-count state))
-    (:block-id (claude-org--session-state-block-id state))
-    (:marker (claude-org--session-state-marker state))
-    (:spinner (claude-org--session-state-spinner state))
-    (:sdk-uuid (claude-org--session-state-sdk-uuid state))
-    (_ (plist-get (claude-org--session-state-extras state) prop))))
+Looks up PROP in `claude-org--session-field-accessors'; unknown props
+fall through to the extras plist."
+  (let ((entry (assq prop claude-org--session-field-accessors)))
+    (if entry
+        (funcall (cdr entry) state)
+      (plist-get (claude-org--session-state-extras state) prop))))
 
 (defun claude-org--session-get (session-key prop)
   "Get PROP from session SESSION-KEY.
@@ -1971,6 +2022,18 @@ especially in async contexts where the buffer may have been killed."
        (marker-buffer marker)
        (buffer-live-p (marker-buffer marker))
        (marker-position marker)))
+
+(defmacro claude-org--with-session-marker (marker &rest body)
+  "Execute BODY in the buffer of MARKER if it is valid, else return nil.
+Switches to the marker's buffer using `with-current-buffer', so BODY
+runs with the marker's buffer current.  If MARKER is nil, not a marker,
+or its buffer has been killed, BODY is silently skipped and nil is returned."
+  (declare (indent 1) (debug t))
+  (let ((m (make-symbol "marker")))
+    `(let ((,m ,marker))
+       (when (claude-org--marker-valid-p ,m)
+         (with-current-buffer (marker-buffer ,m)
+           ,@body)))))
 #+END_SRC
 
 ** Pending Block Queue
@@ -2018,6 +2081,10 @@ Returns:
     (cond
      (is-running 'running)   ; Cannot queue the running block
      (in-queue 'in-queue)    ; Already queued
+     ((>= (length queue) claude-org-max-queue-depth)
+      (message "Claude: Queue full (%d blocks). Cannot queue more."
+               (length queue))
+      'queue-full)
      (t
       (claude-org--session-put session-key :pending-queue
                                (append queue (list block-info)))
@@ -3733,24 +3800,23 @@ Only active when `claude-org-auto-break-line-length' is positive."
 Normalizes org headers, auto-breaks long lines, and inserts text at the session's marker.
 If marker is invalid (buffer killed), this function does nothing."
   (let ((marker (claude-org--session-get session-key :marker)))
-    (when (claude-org--marker-valid-p marker)
-      (with-current-buffer (marker-buffer marker)
-        (let* ((target-level (1+ (or (claude-org--session-get session-key :section-level) 0)))
-               (normalized-text (claude-org--normalize-headers-in-text text target-level))
-               ;; Auto-break long lines
-               (current-line-len (or (claude-org--session-get session-key :current-line-length) 0))
-               (break-result (claude-org--auto-break-lines normalized-text current-line-len))
-               (final-text (car break-result))
-               (new-line-len (cdr break-result)))
-          ;; Update line length state
-          (claude-org--session-put session-key :current-line-length new-line-len)
-          ;; Insert processed text
-          (when (> (length final-text) 0)
-            (save-excursion
-              (goto-char marker)
-              (insert final-text)
-              (set-marker marker (point)))))
-        (claude-org--schedule-fontlock)))))
+    (claude-org--with-session-marker marker
+      (let* ((target-level (1+ (or (claude-org--session-get session-key :section-level) 0)))
+             (normalized-text (claude-org--normalize-headers-in-text text target-level))
+             ;; Auto-break long lines
+             (current-line-len (or (claude-org--session-get session-key :current-line-length) 0))
+             (break-result (claude-org--auto-break-lines normalized-text current-line-len))
+             (final-text (car break-result))
+             (new-line-len (cdr break-result)))
+        ;; Update line length state
+        (claude-org--session-put session-key :current-line-length new-line-len)
+        ;; Insert processed text
+        (when (> (length final-text) 0)
+          (save-excursion
+            (goto-char marker)
+            (insert final-text)
+            (set-marker marker (point)))))
+      (claude-org--schedule-fontlock))))
 #+END_SRC
 
 ** Message Handling
@@ -4111,11 +4177,10 @@ CRITICAL: This function MUST clear :recovering flag to prevent stuck state."
   (claude-org--reset-session-state session-key)  ; CRITICAL: Clears :recovering to prevent stuck state
   (claude-org--stop-spinner session-key)
   (let ((marker (claude-org--session-get session-key :marker)))
-    (when (claude-org--marker-valid-p marker)
-      (with-current-buffer (marker-buffer marker)
-        (save-excursion
-          (goto-char marker)
-          (insert (format "\n[Error: %s]\n" error-msg))))))
+    (claude-org--with-session-marker marker
+      (save-excursion
+        (goto-char marker)
+        (insert (format "\n[Error: %s]\n" error-msg)))))
   ;; Set error status on the heading
   (when-let ((custom-id (claude-org--session-get session-key :custom-id)))
     (save-excursion
@@ -4825,6 +4890,35 @@ Guards against stale callbacks from cancelled or superseded queries."
           (when (equal qid (claude-org--session-get session-key :query-id))
             (funcall handler session-key arg)))))))
 
+(defun claude-org--build-full-prompt (prompt system-reminder)
+  "Prepend SYSTEM-REMINDER to PROMPT if non-nil and non-empty.
+Returns the combined prompt string, or PROMPT unchanged when
+SYSTEM-REMINDER is nil or empty."
+  (if (and system-reminder (not (string-empty-p system-reminder)))
+      (concat system-reminder "\n" prompt)
+    prompt))
+
+(defun claude-org--dispatch-query (session-key full-prompt callbacks
+                                    &rest props)
+  "Dispatch FULL-PROMPT through the backend for SESSION-KEY.
+CALLBACKS is a plist of :on-token, :on-message, :on-error, :on-complete.
+PROPS are keyword args passed through to `claude-agent-backend-query'.
+SESSION-KEY is automatically injected into PROPS.
+Stores the resulting backend and query handle in the session."
+  (let* ((props (plist-put props :session-key session-key))
+         (options (plist-get props :options))
+         (backend (or (claude-org--session-get session-key :backend)
+                      (claude-org--make-default-backend session-key options)))
+         (filtered-callbacks (claude-agent-backend-filter-callbacks backend callbacks))
+         (handle (apply #'claude-agent-backend-query backend full-prompt
+                        filtered-callbacks props)))
+    ;; Store backend and handle in session
+    (claude-org--session-put session-key :backend backend)
+    (claude-org--session-put session-key :query-handle handle)
+    ;; Update persistent client activity if applicable
+    (when (claude-agent-backend-supports-p backend :persistent-client)
+      (claude-org--update-persistent-client-activity session-key))))
+
 (defun claude-org--send-request (prompt &optional query-context session-key-override)
   "Send PROMPT to Claude via claude-agent.
 QUERY-CONTEXT is a claude-agent-query-context struct for Session Manager display.
@@ -4845,10 +4939,7 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
          (system-reminder (claude-org--build-ide-context-reminder project-root))
          (options (claude-org--build-query-options project-root system-prompt sdk-uuid))
          ;; Build full prompt with system reminder
-         (full-prompt (if (and system-reminder
-                               (not (string-empty-p system-reminder)))
-                          (concat system-reminder "\n" prompt)
-                        prompt))
+         (full-prompt (claude-org--build-full-prompt prompt system-reminder))
          ;; Capture source context for session manager display
          (source-buf (current-buffer))
          (custom-id (when query-context (claude-agent-query-context-custom-id query-context))))
@@ -4870,31 +4961,18 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
                :on-token    (funcall mk #'claude-org--handle-token-v2)
                :on-message  (funcall mk #'claude-org--handle-message)
                :on-error    (funcall mk #'claude-org--handle-error)
-               :on-complete (funcall mk #'claude-org--handle-complete)))
-               ;; Get or create backend
-               (backend (or (claude-org--session-get session-key :backend)
-                            (claude-org--make-default-backend session-key options)))
-               ;; Filter callbacks based on backend capabilities
-               (filtered-callbacks (claude-agent-backend-filter-callbacks backend callbacks))
-               ;; Send query through backend protocol
-               (handle (claude-agent-backend-query backend full-prompt filtered-callbacks
-                         :options options
-                         :session-key session-key
-                         :source-buffer source-buf
-                         :query-context query-context
-                         :source-location-fn (when custom-id 'claude-org-goto-custom-id)
-                         :source-location-args (when custom-id (list custom-id))
-                         :cli-path cli-path
-                         :path-mappings path-mappings
-                         :project-root project-root
-                         :org-section org-section-name)))
-          ;; Store backend and handle in session
-          (claude-org--session-put session-key :backend backend)
-          (claude-org--session-put session-key :query-handle handle)
-          (claude-org--session-put session-key :query-id query-id)
-          ;; Update persistent client activity if applicable
-          (when (claude-agent-backend-supports-p backend :persistent-client)
-            (claude-org--update-persistent-client-activity session-key))))))
+               :on-complete (funcall mk #'claude-org--handle-complete))))
+        ;; Dispatch through backend
+        (claude-org--dispatch-query session-key full-prompt callbacks
+          :options options
+          :source-buffer source-buf
+          :query-context query-context
+          :source-location-fn (when custom-id 'claude-org-goto-custom-id)
+          :source-location-args (when custom-id (list custom-id))
+          :cli-path cli-path
+          :path-mappings path-mappings
+          :project-root project-root
+          :org-section org-section-name)))))
 
 (defun claude-org--execute-queued-block (session-key block-info)
   "Execute a queued BLOCK-INFO for SESSION-KEY.
@@ -5503,71 +5581,71 @@ Dynamic header line showing session status, IDE context, and thinking state.
 ** Header Line Generation
 
 #+BEGIN_SRC elisp
-(defun claude-org--header-line ()
-  "Generate the header line content for Claude Org buffer."
-  (let* ((file-name (if buffer-file-name
-                        (file-name-nondirectory buffer-file-name)
-                      "untitled"))
-         ;; Show user-defined session ID if present
-         (session-id (claude-org--get-session-id))
-         (session-scope (claude-org--get-session-scope))
-         ;; Display: [sec:mysession] or [file:mysession] or [file-only]
-         (session-str (if session-id
-                          (propertize (format " [%s:%s...]"
-                                              (if (eq session-scope 'section) "sec" "file")
-                                              (substring session-id 0 (min 12 (length session-id))))
-                                      'face (if (eq session-scope 'section)
-                                                'font-lock-constant-face
-                                              'font-lock-type-face))
-                        (propertize " [file-only]" 'face 'font-lock-comment-face)))
-         ;; Docker sandbox indicator
-         (docker-p (claude-org--docker-mode-p))
-         (container-path (when docker-p
-                           (ignore-errors
-                             (org-entry-get nil claude-org-container-path-property t))))
-         (docker-str (if docker-p
-                         (propertize " [Docker]"
-                                     'face '(:weight bold)
-                                     'help-echo (format "Docker sandbox mode\nCLI: %s\nContainer path: %s"
-                                                        (or (claude-org--get-cli-path) "default")
-                                                        (or container-path "/workspace")))
-                       ""))
-         ;; Permission mode indicator
-         (perm-str (propertize (format " [%s]" (claude-org--permission-mode-short))
-                               'face 'font-lock-warning-face
-                               'help-echo (format "Permission: %s (C-c C-p to change)"
-                                                  (claude-org--get-permission-mode-display))))
-         ;; Active session count badge with thinking indicator
-         (active-count (claude-org--active-session-count))
-         ;; Total queued blocks across all sessions
-         (total-queued (claude-org--total-queue-count))
-         (active-str (cond
-                      ;; Active with queue
-                      ((and (> active-count 0) (> total-queued 0))
-                       (propertize (format " [%d thinking... Q:%d]" active-count total-queued)
-                                   'face '(:weight bold)
-                                   'help-echo (claude-org--format-session-tooltip)
-                                   'mouse-face 'mode-line-highlight
-                                   'local-map claude-org--session-badge-map))
-                      ;; Active only
-                      ((> active-count 0)
-                       (propertize (format " [%d thinking...]" active-count)
-                                   'face '(:weight bold)
-                                   'help-echo (claude-org--format-session-tooltip)
-                                   'mouse-face 'mode-line-highlight
-                                   'local-map claude-org--session-badge-map))
-                      ;; Neither
-                      (t "")))
-         ;; Project root
-         (project-root (claude-org--get-project-root))
-         (project-str (if project-root
-                          (propertize (format " [%s]"
-                                              (file-name-nondirectory
-                                               (directory-file-name project-root)))
-                                      'face 'font-lock-keyword-face)
-                        ""))
-         ;; Current open file (from IDE context)
-         (ide-context (claude-agent-collect-ide-context))
+(defun claude-org--header-session-badge ()
+  "Return session scope badge string for header line.
+Shows [sec:ID...] for section scope, [file:ID...] for file scope,
+or [file-only] when no session ID is set."
+  (let ((session-id (claude-org--get-session-id))
+        (session-scope (claude-org--get-session-scope)))
+    (if session-id
+        (propertize (format " [%s:%s...]"
+                            (if (eq session-scope 'section) "sec" "file")
+                            (substring session-id 0 (min 12 (length session-id))))
+                    'face (if (eq session-scope 'section)
+                              'font-lock-constant-face
+                            'font-lock-type-face))
+      (propertize " [file-only]" 'face 'font-lock-comment-face))))
+
+(defun claude-org--header-docker-badge ()
+  "Return Docker sandbox badge string for header line.
+Returns \" [Docker]\" when Docker mode is active, empty string otherwise."
+  (let ((docker-p (claude-org--docker-mode-p)))
+    (if docker-p
+        (let ((container-path (ignore-errors
+                                (org-entry-get nil claude-org-container-path-property t))))
+          (propertize " [Docker]"
+                      'face '(:weight bold)
+                      'help-echo (format "Docker sandbox mode\nCLI: %s\nContainer path: %s"
+                                         (or (claude-org--get-cli-path) "default")
+                                         (or container-path "/workspace"))))
+      "")))
+
+(defun claude-org--header-permission-badge ()
+  "Return permission mode badge string for header line."
+  (propertize (format " [%s]" (claude-org--permission-mode-short))
+              'face 'font-lock-warning-face
+              'help-echo (format "Permission: %s (C-c C-p to change)"
+                                 (claude-org--get-permission-mode-display))))
+
+(defun claude-org--header-activity-badge ()
+  "Return activity badge string for header line.
+Shows thinking count and queue depth when sessions are active."
+  (let ((active-count (claude-org--active-session-count))
+        (total-queued (claude-org--total-queue-count)))
+    (if (> active-count 0)
+        (let ((text (if (> total-queued 0)
+                        (format " [%d thinking... Q:%d]" active-count total-queued)
+                      (format " [%d thinking...]" active-count))))
+          (propertize text
+                      'face '(:weight bold)
+                      'help-echo (claude-org--format-session-tooltip)
+                      'mouse-face 'mode-line-highlight
+                      'local-map claude-org--session-badge-map))
+      "")))
+
+(defun claude-org--header-project-badge ()
+  "Return project root badge string for header line."
+  (let ((project-root (claude-org--get-project-root)))
+    (if project-root
+        (propertize (format " [%s]"
+                            (file-name-nondirectory
+                             (directory-file-name project-root)))
+                    'face 'font-lock-keyword-face)
+      "")))
+
+(defun claude-org--header-ide-context ()
+  "Return IDE context string (current file + selection) for header line."
+  (let* ((ide-context (claude-agent-collect-ide-context))
          (current-file (plist-get ide-context :current-file))
          (file-str (if current-file
                        (propertize (format " | %s%s"
@@ -5575,7 +5653,6 @@ Dynamic header line showing session status, IDE context, and thinking state.
                                            (if (plist-get current-file :modified) "*" ""))
                                    'face 'font-lock-string-face)
                      ""))
-         ;; Selection info
          (selection (plist-get ide-context :selection))
          (sel-str (if (and selection (plist-get selection :text))
                       (let* ((start-line (plist-get selection :start-line))
@@ -5584,9 +5661,22 @@ Dynamic header line showing session status, IDE context, and thinking state.
                         (propertize (format " | sel:%d-%d (%d)" start-line end-line text-len)
                                     'face 'font-lock-comment-face))
                     "")))
+    (concat file-str sel-str)))
+
+(defun claude-org--header-line ()
+  "Generate the header line content for Claude Org buffer.
+Assembles components from dedicated badge functions."
+  (let ((file-name (if buffer-file-name
+                       (file-name-nondirectory buffer-file-name)
+                     "untitled")))
     (concat " Claude Org: "
             (propertize file-name 'face 'font-lock-function-name-face)
-            session-str docker-str perm-str active-str project-str file-str sel-str)))
+            (claude-org--header-session-badge)
+            (claude-org--header-docker-badge)
+            (claude-org--header-permission-badge)
+            (claude-org--header-activity-badge)
+            (claude-org--header-project-badge)
+            (claude-org--header-ide-context))))
 #+END_SRC
 
 * Cancel Support
