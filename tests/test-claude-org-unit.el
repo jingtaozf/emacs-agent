@@ -2506,5 +2506,104 @@ should detect the non-struct and replace it with a fresh struct."
         (claude-org--recover-session key 'expired)
         (should (= 2 (claude-org--session-get key :recovery-count)))))))
 
+;;; Completion status: exec-status must be "completed" and :busy nil after handle-complete
+
+(ert-deftest test-handle-complete-sets-exec-status-completed ()
+  "After handle-complete, exec-status should be 'completed' and :busy nil.
+Reproduces issue: scheduled instructions can't run because previous
+instruction was not properly marked as completed."
+  :tags '(:unit :fast :stable :isolated :completion :scheduled)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-completion-status.org")
+    (claude-org-mode 1)
+    ;; Build an org structure with CUSTOM_ID, AI block, and Response section
+    (insert "* Test Heading\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: test-completion-block\n")
+    (insert ":END:\n\n")
+    (insert "#+begin_src ai\ntest query\n#+end_src\n\n")
+    (insert "** Response 1 (2026-02-19 20:00) :ai_output:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":QUERY_ID: test-qid-123\n")
+    (insert ":QUERY_TYPE: normal\n")
+    (insert ":END:\n\n")
+    (insert "Some response text\n")
+    ;; Set up session state as if execution is in progress
+    (let ((key "test-completion-status"))
+      (claude-org--session-put key :busy t)
+      (claude-org--session-put key :query-id "test-qid-123")
+      (claude-org--session-put key :custom-id "test-completion-block")
+      (claude-org--session-put key :loop-max 1)
+      (claude-org--session-put key :loop-current 1)
+      (claude-org--session-put key :marker (copy-marker (point-min)))
+      (claude-org--session-put key :section-level 2)
+      ;; Set exec-status to "executing" on the heading
+      (save-excursion
+        (goto-char (point-min))
+        (org-back-to-heading t)
+        (org-entry-put nil "AI_EXEC_STATUS" "executing"))
+      ;; Stub side-effect functions
+      (cl-letf (((symbol-function 'claude-org--stop-spinner) #'ignore)
+                ((symbol-function 'claude-org--refresh-header-line) #'ignore)
+                ((symbol-function 'claude-org--unregister-active-query) #'ignore))
+        ;; Call handle-complete
+        (claude-org--handle-complete key nil)
+        ;; CRITICAL: :busy should be nil (so scheduled blocks can run)
+        (should-not (claude-org--session-get key :busy))
+        ;; CRITICAL: exec-status should be "completed"
+        (let ((status (save-excursion
+                        (goto-char (point-min))
+                        (org-back-to-heading t)
+                        (org-entry-get nil "AI_EXEC_STATUS"))))
+          (should (equal "completed" status)))))))
+
+(ert-deftest test-handle-complete-unblocks-scheduled-execution ()
+  "After handle-complete, a scheduled block should see session as not busy."
+  :tags '(:unit :fast :stable :isolated :completion :scheduled)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sched-unblock.org")
+    (claude-org-mode 1)
+    ;; Build org structure
+    (insert "* Block A\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: block-a\n")
+    (insert ":END:\n\n")
+    (insert "#+begin_src ai\nquery A\n#+end_src\n\n")
+    (insert "** Response 1 (2026-02-19 20:00) :ai_output:\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":QUERY_ID: qid-a\n")
+    (insert ":QUERY_TYPE: normal\n")
+    (insert ":END:\n\nResponse A text\n\n")
+    (insert "* Block B\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":CUSTOM_ID: block-b\n")
+    (insert ":SCHEDULED: <2026-02-19 Wed 20:00>\n")
+    (insert ":END:\n\n")
+    (insert "#+begin_src ai\nquery B\n#+end_src\n")
+    ;; Set up session state: Block A is executing
+    (let ((key "test-sched-unblock"))
+      (claude-org--session-put key :busy t)
+      (claude-org--session-put key :query-id "qid-a")
+      (claude-org--session-put key :custom-id "block-a")
+      (claude-org--session-put key :loop-max 1)
+      (claude-org--session-put key :loop-current 1)
+      (claude-org--session-put key :marker (copy-marker (point-min)))
+      (claude-org--session-put key :section-level 2)
+      ;; Stub side-effect functions
+      (cl-letf (((symbol-function 'claude-org--stop-spinner) #'ignore)
+                ((symbol-function 'claude-org--refresh-header-line) #'ignore)
+                ((symbol-function 'claude-org--unregister-active-query) #'ignore))
+        ;; Before handle-complete: session should be busy
+        (should (claude-org--session-get key :busy))
+        ;; Complete Block A
+        (claude-org--handle-complete key nil)
+        ;; After handle-complete: session should NOT be busy
+        (should-not (claude-org--session-get key :busy))
+        ;; Scheduled checker would now see session as free
+        ;; (simulating what claude-org-scheduled--maybe-execute checks)
+        (should-not (claude-org--session-get key :busy))))))
+
 (provide 'test-claude-org-unit)
 ;;; test-claude-org-unit.el ends here

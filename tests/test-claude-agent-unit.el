@@ -1620,5 +1620,70 @@ Provides inside :load no blocks (tangle templates) are excluded."
       (when (process-live-p proc)
         (delete-process proc)))))
 
+;;; Stale background tasks should not block stdin closure for other processes
+
+(ert-deftest test-stale-background-tasks-do-not-block-stdin-close ()
+  "maybe-close-stdin should only consider tasks owned by the current process.
+Stale tasks from dead processes must not block stdin closure for new queries.
+Reproduces: session stays busy=t because stale background tasks prevent
+stdin close, so CLI never exits and handle-complete never fires."
+  :tags '(:unit :fast :stable :isolated :process :stdin :scheduled)
+  (let* ((eof-sent nil)
+         (claude-agent-stdin-close-delay 0) ;; Immediate close for testability
+         (state (claude-agent--make-process-state
+                 :json-buffer ""
+                 :ready t
+                 :request-id "req-NEW"))
+         (proc (start-process "test-stdin-stale" nil "sleep" "60")))
+    (unwind-protect
+        (let ((saved-bg-tasks (copy-hash-table claude-agent--pending-background-tasks)))
+          (unwind-protect
+              (progn
+                (process-put proc 'claude-agent-state state)
+                ;; Simulate stale background tasks from OLDER processes
+                (clrhash claude-agent--pending-background-tasks)
+                (puthash "stale-agent-1" "req-OLD-1" claude-agent--pending-background-tasks)
+                (puthash "stale-agent-2" "req-OLD-2" claude-agent--pending-background-tasks)
+                ;; The global check would see 2 pending tasks and block
+                (should (claude-agent--has-pending-background-tasks-p))
+                ;; But maybe-close-stdin should close anyway because none belong to req-NEW
+                (cl-letf (((symbol-function 'process-send-eof)
+                           (lambda (_proc) (setq eof-sent t))))
+                  (claude-agent--maybe-close-stdin
+                   proc '(:type "result"))
+                  ;; CRITICAL: stdin should have been closed despite stale tasks
+                  (should eof-sent)))
+            ;; Restore original background tasks
+            (clrhash claude-agent--pending-background-tasks)
+            (maphash (lambda (k v) (puthash k v claude-agent--pending-background-tasks))
+                     saved-bg-tasks)))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+(ert-deftest test-no-state-process-ignores-stale-tasks ()
+  "maybe-close-stdin should close stdin even when process has no attached state.
+When process-get returns nil for state, owner-req-id is nil.
+The nil guard ensures stale global tasks do not block stdin closure."
+  :tags '(:unit :fast :stable :isolated :process :stdin)
+  (let* ((eof-sent nil)
+         (claude-agent-stdin-close-delay 0)
+         (proc (start-process "test-no-state" nil "sleep" "60")))
+    (unwind-protect
+        (let ((saved-bg-tasks (copy-hash-table claude-agent--pending-background-tasks)))
+          (unwind-protect
+              (progn
+                ;; NO process-put — process has no attached state
+                (clrhash claude-agent--pending-background-tasks)
+                (puthash "stale-1" "req-OLD" claude-agent--pending-background-tasks)
+                (cl-letf (((symbol-function 'process-send-eof)
+                           (lambda (_proc) (setq eof-sent t))))
+                  (claude-agent--maybe-close-stdin proc '(:type "result"))
+                  ;; Should still close despite stale global tasks
+                  (should eof-sent)))
+            (clrhash claude-agent--pending-background-tasks)
+            (maphash (lambda (k v) (puthash k v claude-agent--pending-background-tasks))
+                     saved-bg-tasks)))
+      (when (process-live-p proc) (delete-process proc)))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

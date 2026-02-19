@@ -2039,9 +2039,19 @@ TOOL-USE-RESULT contains:
           (remhash task-id claude-agent--pending-background-tasks)
           (claude-agent--debug-log "Background task completed: %s" task-id))))))
 
-(defun claude-agent--has-pending-background-tasks-p ()
-  "Return non-nil if there are pending background tasks."
-  (> (hash-table-count claude-agent--pending-background-tasks) 0))
+(defun claude-agent--has-pending-background-tasks-p (&optional owner-request-id)
+  "Return non-nil if there are pending background tasks.
+When OWNER-REQUEST-ID is non-nil, only count tasks owned by that process.
+When nil, checks the global count (any owner).  Callers should guard
+with (and owner-req-id (has-pending-...)) to avoid stale-task blocking."
+  (if owner-request-id
+      (catch 'found
+        (maphash (lambda (_k v)
+                   (when (equal v owner-request-id)
+                     (throw 'found t)))
+                 claude-agent--pending-background-tasks)
+        nil)
+    (> (hash-table-count claude-agent--pending-background-tasks) 0)))
 
 ;; Register tracker on PostToolUse hook
 (add-hook 'claude-agent-post-tool-use-functions
@@ -2150,7 +2160,7 @@ Set to nil to disable automatic stdin close (for debugging)."
 PROCESS is the CLI process.
 
 Checks for both:
-1. Pending background tasks (Task/Bash with run_in_background)
+1. Pending background tasks owned by THIS process (not stale tasks from dead processes)
 2. Pending control requests awaiting responses (permissions, hooks)
 
 This function schedules stdin closure with a small delay to ensure:
@@ -2160,35 +2170,47 @@ This function schedules stdin closure with a small delay to ensure:
 
 The delay is controlled by `claude-agent-stdin-close-delay'."
   (when (equal (plist-get parsed :type) "result")
-    (cond
-     ;; Check for pending background tasks
-     ((claude-agent--has-pending-background-tasks-p)
-      (claude-agent--debug-log "Result received, %d background tasks pending"
-                               (hash-table-count claude-agent--pending-background-tasks)))
-     ;; Check for pending control requests awaiting responses
-     ((claude-agent--has-pending-control-requests-p)
-      (claude-agent--debug-log "Result received, %d control requests pending response"
-                               (hash-table-count claude-agent--pending-control-requests)))
-     ;; No pending work - schedule stdin close
-     (t
-      (let ((delay (or claude-agent-stdin-close-delay 0)))
-        (claude-agent--debug-log "Result received, scheduling stdin close in %.1fs" delay)
-        (if (zerop delay)
-            ;; Immediate close (original behavior)
-            (when (process-live-p process)
-              (process-send-eof process))
-          ;; Delayed close - let filter complete and MCP settle
-          ;; Use lexical-let to capture process (literate-elisp ignores lexical-binding: t)
-          (lexical-let ((proc process))
-            (run-at-time
-             delay nil
-             (lambda ()
-               ;; Re-check for pending work before closing
-               (when (and (process-live-p proc)
-                          (not (claude-agent--has-pending-background-tasks-p))
-                          (not (claude-agent--has-pending-control-requests-p)))
-                 (claude-agent--debug-log "Closing stdin after delay")
-                 (process-send-eof proc)))))))))))
+    (let* ((state (and process (processp process)
+                      (process-get process 'claude-agent-state)))
+           (owner-req-id (and state
+                              (claude-agent--process-state-request-id state))))
+      (cond
+       ;; Check for pending background tasks owned by THIS process
+       ;; When owner-req-id is nil (no state), skip — don't let stale global tasks block
+       ((and owner-req-id
+             (claude-agent--has-pending-background-tasks-p owner-req-id))
+        (claude-agent--debug-log "Result received, background tasks pending for %s"
+                                 owner-req-id))
+       ;; Check for pending control requests awaiting responses
+       ((claude-agent--has-pending-control-requests-p)
+        (claude-agent--debug-log "Result received, %d control requests pending response"
+                                 (hash-table-count claude-agent--pending-control-requests)))
+       ;; No pending work - schedule stdin close
+       (t
+        (let ((delay claude-agent-stdin-close-delay))
+          (unless delay
+            (claude-agent--debug-log "Result received, stdin auto-close disabled"))
+          (when delay
+            (claude-agent--debug-log "Result received, scheduling stdin close in %.1fs" delay)
+            (if (zerop delay)
+              ;; Immediate close (original behavior)
+              (when (process-live-p process)
+                (process-send-eof process))
+            ;; Delayed close - let filter complete and MCP settle
+            ;; Use lexical-let to capture process (literate-elisp ignores lexical-binding: t)
+            (lexical-let ((proc process)
+                          (req-id owner-req-id))
+              (run-at-time
+               delay nil
+               (lambda ()
+                 ;; Re-check for pending work before closing
+                 ;; When req-id is nil, skip background task check (no owner to match)
+                 (when (and (process-live-p proc)
+                            (not (and req-id
+                                      (claude-agent--has-pending-background-tasks-p req-id)))
+                            (not (claude-agent--has-pending-control-requests-p)))
+                   (claude-agent--debug-log "Closing stdin after delay")
+                   (process-send-eof proc)))))))))))))
 #+END_SRC
 
 ** Process Creation
