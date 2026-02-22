@@ -1323,40 +1323,35 @@ triggers an 'Interrupted' message.  Set to 0 for testing."
   :group 'claude-agent-claude-backend)
 
 (defun claude-agent-claude-backend--send-prompt (backend prompt)
-  "Send PROMPT text to BACKEND's Claude CLI terminal and submit it.
-The Claude CLI TUI uses vim-like input modes:
-- Text is sent directly to the process (types into the input field)
-- ESC switches to NORMAL mode
-- Enter in NORMAL mode submits the input
-Uses `run-at-time' timers between steps so Emacs stays responsive.
-Response detection is handled by CLI hooks (SessionStart + Stop),
-not by polling.  Previous `sleep-for' approach was interrupted by
-C-g during C-c C-c execution, preventing ESC and Enter from being sent."
-  (let ((proc (claude-agent-claude-backend-process backend)))
-    (unless (and proc (process-live-p proc))
-      (error "Claude CLI backend process is not alive"))
+  "Send PROMPT to BACKEND's Claude CLI terminal using bracketed paste.
+Wraps PROMPT in bracketed-paste escape sequences (ESC[200~ ... ESC[201~)
+so the TUI treats it as a single paste operation, then sends Enter after
+a short delay to submit.  Uses `eat-term-send-string' (the proper eat
+API) instead of raw `process-send-string'.
+With vimMode disabled via --settings, Enter submits directly—no ESC needed."
+  (let ((buf (claude-agent-claude-backend-buffer backend)))
+    (unless (and buf (buffer-live-p buf))
+      (error "Claude CLI backend buffer is not alive"))
     ;; DEBUG: Log prompt being sent
     (message "SEND-PROMPT[%d]: len=%d preview=%.120s"
              (claude-agent-claude-backend-query-count backend)
              (length prompt)
              (substring prompt 0 (min 120 (length prompt))))
-    ;; Type the prompt text into the input field
-    (process-send-string proc prompt)
-    ;; Schedule ESC after delay (non-blocking, immune to C-g)
-    (lexical-let ((proc proc)
-                  (delay claude-agent-claude-backend-input-delay))
-      (run-at-time delay nil
-        (lambda ()
-          (when (process-live-p proc)
-            ;; ESC to switch to NORMAL mode
-            (process-send-string proc "\e")
-            ;; Schedule Enter after another delay
-            (run-at-time delay nil
-              (lambda ()
-                (when (process-live-p proc)
-                  ;; Enter in NORMAL mode submits the input
-                  ;; Response completion detected via Stop hook
-                  (process-send-string proc "\r"))))))))))
+    (with-current-buffer buf
+      (let ((terminal (and (boundp 'eat-terminal) eat-terminal)))
+        (unless terminal
+          (error "No eat-terminal in buffer %s" (buffer-name buf)))
+        ;; Send prompt wrapped in bracketed paste
+        (eat-term-send-string terminal
+          (concat "\e[200~" prompt "\e[201~"))
+        ;; Schedule Enter after delay (non-blocking, immune to C-g)
+        (lexical-let ((buf buf)
+                      (terminal terminal))
+          (run-at-time claude-agent-claude-backend-input-delay nil
+            (lambda ()
+              (when (buffer-live-p buf)
+                (with-current-buffer buf
+                  (eat-term-send-string terminal "\r"))))))))))
 
 (cl-defmethod claude-agent-backend-query
     ((backend claude-agent-claude-backend) prompt callbacks &rest args)
@@ -1572,7 +1567,10 @@ and is passed to the CLI via --settings flag."
              (hook-entry `[((hooks . [((type . "command")
                                        (command . ,script-path))]))])
              (settings `((hooks . ((SessionStart . ,hook-entry)
-                                   (Stop . ,hook-entry)))))
+                                   (Stop . ,hook-entry)))
+                         ;; Disable vim mode so Enter submits directly
+                         ;; (no ESC→NORMAL→Enter sequence needed).
+                         (vimMode . :json-false)))
              (settings-file (expand-file-name
                              "emacs-agent-settings.json" hooks-dir)))
         (with-temp-file settings-file

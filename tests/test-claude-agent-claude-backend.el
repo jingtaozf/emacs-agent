@@ -837,22 +837,24 @@ Includes the ❯ prompt character to satisfy wait-for-ready."
   (should-not (claude-agent-claude-backend--alist-tool-input-to-plist nil)))
 
 ;;; ============================================================
-;;; Send-prompt (process-send-string + ESC + Enter sequence)
+;;; Send-prompt (bracketed paste + eat-term-send-string)
 ;;; ============================================================
 
-(ert-deftest test-send-prompt-sends-text-esc-enter ()
-  "send-prompt should send text immediately and schedule ESC+Enter via timers."
+(ert-deftest test-send-prompt-bracketed-paste-and-enter ()
+  "send-prompt should send bracketed-paste text and schedule Enter via timer."
   :tags '(:unit :fast :stable :isolated :claude-backend :send-prompt)
   (let* ((sent-strings nil)
          (scheduled-fns nil)
          (backend (claude-agent-claude-backend--create))
          (buf (generate-new-buffer " *test-send*"))
-         (proc (start-process "test-send" buf "cat"))
+         (mock-terminal 'mock-eat-terminal)
          (claude-agent-claude-backend-input-delay 0))
     (setf (claude-agent-claude-backend-buffer backend) buf)
-    (setf (claude-agent-claude-backend-process backend) proc)
-    (cl-letf (((symbol-function 'process-send-string)
-               (lambda (_proc str) (push str sent-strings)))
+    ;; Set up mock eat-terminal in the buffer
+    (with-current-buffer buf
+      (set (make-local-variable 'eat-terminal) mock-terminal))
+    (cl-letf (((symbol-function 'eat-term-send-string)
+               (lambda (_term str) (push str sent-strings)))
               ((symbol-function 'run-at-time)
                (lambda (_delay _repeat fn &rest _args)
                  (push fn scheduled-fns)
@@ -860,26 +862,20 @@ Includes the ❯ prompt character to satisfy wait-for-ready."
       (unwind-protect
           (progn
             (claude-agent-claude-backend--send-prompt backend "hello world")
-            ;; Text should be sent immediately
-            (should (equal '("hello world") (nreverse sent-strings)))
-            ;; One timer should be scheduled (for ESC)
+            ;; Text should be sent wrapped in bracketed paste
+            (should (equal '("\e[200~hello world\e[201~")
+                           (nreverse sent-strings)))
+            ;; One timer should be scheduled (for Enter)
             (should (= 1 (length scheduled-fns)))
-            ;; Execute the ESC timer callback
-            (setq sent-strings nil)
-            (funcall (car scheduled-fns))
-            ;; ESC should now be sent, and another timer scheduled (for Enter)
-            (should (equal '("\e") (nreverse sent-strings)))
-            (should (= 2 (length scheduled-fns)))
             ;; Execute the Enter timer callback
             (setq sent-strings nil)
             (funcall (car scheduled-fns))
             ;; Enter should now be sent
             (should (equal '("\r") (nreverse sent-strings))))
-        (delete-process proc)
         (kill-buffer buf)))))
 
-(ert-deftest test-send-prompt-errors-when-no-process ()
-  "send-prompt should error when process is not alive."
+(ert-deftest test-send-prompt-errors-when-no-buffer ()
+  "send-prompt should error when buffer is not alive."
   :tags '(:unit :fast :stable :isolated :claude-backend :send-prompt)
   (let ((backend (claude-agent-claude-backend--create)))
     (should-error
