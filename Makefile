@@ -8,7 +8,7 @@ BATCH = $(EMACS) -Q --batch
 SOURCES = claude-agent.org claude-org.org
 
 # Test files
-UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-error.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el
+UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-error.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el tests/test-claude-agent-backend-protocol.el
 INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
@@ -231,6 +231,19 @@ test-backend-unit:
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
 		-l tests/test-claude-agent-backend.el \
+		-l tests/test-claude-agent-backend-protocol.el \
+		-l tests/test-claude-agent-claude-backend.el \
+		-l tests/test-claude-agent-chat-backend.el \
+		-f ert-run-tests-batch-and-exit
+
+.PHONY: test-backend-integration
+test-backend-integration:
+	@echo "Running backend integration tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/test-claude-agent-claude-backend-integration.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-org-unit

@@ -1,0 +1,74 @@
+#!/bin/bash
+# claude-agent-hook-wrapper — Bridge between Claude Code hooks and Emacs
+#
+# Called by Claude Code for PreToolUse, PostToolUse, and Stop events.
+# Reads JSON from stdin, writes to temp file, calls emacsclient --eval
+# with the temp file path. Returns JSON to stdout.
+#
+# Security: JSON input is passed via temp file (not string embedding)
+# to prevent shell/elisp injection from untrusted hook payloads.
+#
+# Usage in settings.json:
+#   {
+#     "hooks": {
+#       "PreToolUse": [{
+#         "matcher": "*",
+#         "hooks": [{"type": "command", "command": "/path/to/claude-agent-hook-wrapper"}]
+#       }]
+#     }
+#   }
+#
+# Environment:
+#   EMACSCLIENT  - path to emacsclient (default: emacsclient)
+
+set -euo pipefail
+
+EMACSCLIENT="${EMACSCLIENT:-emacsclient}"
+
+# Read all stdin into temp file (safe for arbitrary JSON content)
+TMPFILE=$(mktemp "${TMPDIR:-/tmp}/claude-hook-XXXXXX.json")
+trap 'rm -f "$TMPFILE"' EXIT
+
+cat > "$TMPFILE"
+
+# Extract event type using jq (safe — never embedded into strings)
+EVENT_TYPE=$(jq -r '.hook_event_name // empty' < "$TMPFILE")
+
+if [ -z "$EVENT_TYPE" ]; then
+  # No event type — let Claude Code handle it
+  exit 0
+fi
+
+# Validate EVENT_TYPE contains only safe characters (alphanumeric + underscore)
+if [[ ! "$EVENT_TYPE" =~ ^[A-Za-z_]+$ ]]; then
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Invalid event type"}}' >&2
+  exit 0
+fi
+
+# Build Elisp expression using temp file path (no JSON string embedding)
+# The Elisp handler reads JSON from the file, avoiding all escaping issues.
+ELISP_EXPR="(let ((json-str (with-temp-buffer (insert-file-contents \"${TMPFILE}\") (buffer-string)))) (claude-agent-claude-backend--format-hook-response (claude-agent-claude-backend--handle-hook \"${EVENT_TYPE}\" (claude-agent-claude-backend--parse-hook-input json-str))))"
+
+RESULT=$("$EMACSCLIENT" --eval "$ELISP_EXPR" 2>/dev/null) || {
+  # emacsclient failed — return ask fallback
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Emacs not reachable"}}'
+  exit 0
+}
+
+# emacsclient wraps output in quotes — strip them
+# Result is either "nil" or "\"json-string\""
+if [ "$RESULT" = "nil" ] || [ -z "$RESULT" ]; then
+  # No decision from handler
+  exit 0
+fi
+
+# Strip outer quotes from emacsclient output and unescape inner quotes
+# emacsclient returns: "\"{ ... }\""
+CLEAN_RESULT=$(printf '%s' "$RESULT" | sed 's/^"//; s/"$//; s/\\"/"/g; s/\\\\/\\/g')
+
+if [ -z "$CLEAN_RESULT" ] || [ "$CLEAN_RESULT" = "nil" ]; then
+  exit 0
+fi
+
+printf '%s\n' "$CLEAN_RESULT"
+exit 0

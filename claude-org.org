@@ -48,6 +48,8 @@
   - [[#system-prompts][System Prompts]]
 - [[#process-management][Process Management]]
   - [[#state-variables-1][State Variables]]
+    - [[#session-state-struct][Session State Struct]]
+    - [[#session-registry][Session Registry]]
   - [[#persistent-client-registry][Persistent Client Registry]]
   - [[#lifecycle-hooks][Lifecycle Hooks]]
   - [[#session-state-accessors][Session State Accessors]]
@@ -1533,6 +1535,18 @@ conversation context internally."
   :type 'boolean
   :group 'claude-org)
 
+(defcustom claude-org-backend-type 'json-stream
+  "Backend type for Claude CLI communication.
+Selects which backend implementation to use for new sessions.
+
+  - `json-stream': JSON streaming via subprocess (default, backward compatible).
+    Uses --output-format stream-json with structured messages.
+  - `claude-cli': Interactive terminal via eat terminal emulator.
+    Runs Claude CLI as long-lived TUI process. Requires the `eat' package."
+  :type '(radio (const :tag "JSON stream (default)" json-stream)
+                (const :tag "Claude CLI terminal (requires eat)" claude-cli))
+  :group 'claude-org)
+
 (defcustom claude-org-session-idle-timeout nil
   "Seconds of inactivity before auto-closing idle persistent sessions.
 When nil, sessions remain connected until explicitly closed."
@@ -1605,10 +1619,27 @@ REASON is an optional string explaining why (for logging)."
 
 (defun claude-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
-Returns a JSON stream backend configured based on `claude-org-persistent-sessions'."
-  (claude-agent-json-backend--create
-   :session-key session-key
-   :persistent-p claude-org-persistent-sessions))
+Dispatches on CLAUDE_BACKEND org property (if set) or `claude-org-backend-type'.
+Returns a backend struct (json-backend or claude-backend)."
+  (let* ((prop-value (claude-org--get-org-property "CLAUDE_BACKEND" t))
+         (backend-type (or (cond
+                             ((equal prop-value "claude-cli") 'claude-cli)
+                             ((equal prop-value "json-stream") 'json-stream)
+                             (t nil))
+                           claude-org-backend-type)))
+    (pcase backend-type
+    ('claude-cli
+     (unless (featurep 'eat)
+       (user-error "The `eat' package is required for claude-cli backend. \
+Install with: M-x package-install RET eat RET"))
+     (claude-agent-claude-backend--create
+      :session-key session-key
+      :cwd (or (claude-org--get-project-root) default-directory)
+      :options options))
+    (_ ; json-stream (default)
+     (claude-agent-json-backend--create
+      :session-key session-key
+      :persistent-p claude-org-persistent-sessions)))))
 
 (defun claude-org--get-or-create-persistent-client (session-key options)
   "Get or create a persistent client for SESSION-KEY.
@@ -5769,13 +5800,17 @@ Assembles components from dedicated badge functions."
 
 #+BEGIN_SRC elisp
 (defun claude-org-show-verbose ()
-  "Show verbose output buffer for current session."
+  "Show verbose output buffer for current session.
+Checks backend-verbose-buffer first (for claude-cli backend, this is
+the eat terminal buffer), then falls back to the session's verbose buffer."
   (interactive)
-  (let ((session-key (claude-org--current-session-key)))
-    (if-let ((buf (claude-agent-get-verbose-buffer session-key)))
-        (if (buffer-live-p buf)
-            (display-buffer buf)
-          (message "Verbose buffer no longer exists"))
+  (let* ((session-key (claude-org--current-session-key))
+         (backend (claude-org--session-get session-key :backend))
+         (buf (or (when backend
+                    (claude-agent-backend-verbose-buffer backend))
+                  (claude-agent-get-verbose-buffer session-key))))
+    (if (and buf (buffer-live-p buf))
+        (display-buffer buf)
       (message "No verbose buffer for session: %s" session-key))))
 #+END_SRC
 
