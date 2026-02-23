@@ -259,6 +259,7 @@ test-org-unit:
 		-l tests/test-claude-org-scheduled.el \
 		-l tests/test-claude-org-response.el \
 		-l tests/test-claude-org-queue.el \
+		-l tests/test-claude-org-cancel.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-agent-integration

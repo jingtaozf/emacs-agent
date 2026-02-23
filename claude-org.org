@@ -5747,18 +5747,28 @@ Assembles components from dedicated badge functions."
           ;; Clear pending queue
           (when (> queue-count 0)
             (claude-org--clear-queue session-key))
-          (let ((marker (claude-org--session-get session-key :marker)))
-            (when (and marker (marker-buffer marker))
-              (with-current-buffer (marker-buffer marker)
-                (save-excursion
-                  (goto-char marker)
-                  ;; Show loop cancellation info if in a loop
-                  (if (and loop-max (> loop-max 1))
-                      (insert (format "\n[Cancelled at iteration %d/%d]\n"
-                                      (or loop-current 1) loop-max))
-                    (insert "\n[Cancelled]\n")))))
-            ;; Update exec status to cancelled
-            (claude-org--set-exec-status-for-session session-key "cancelled"))
+          ;; Insert cancellation message at end of response section
+          ;; using query-id lookup (same mechanism as token insertion).
+          ;; The :marker points to the AI block, NOT the response section,
+          ;; so using it would insert [Cancelled] inside the src block.
+          (let ((cancel-text (if (and loop-max (> loop-max 1))
+                                 (format "\n[Cancelled at iteration %d/%d]\n"
+                                         (or loop-current 1) loop-max)
+                               "\n[Cancelled]\n")))
+            (or (claude-org--insert-at-response session-key cancel-text)
+                ;; Fallback: if no response section found (e.g., cancelled
+                ;; before response section was created), use marker
+                (let ((marker (claude-org--session-get session-key :marker)))
+                  (when (and marker (marker-buffer marker))
+                    (with-current-buffer (marker-buffer marker)
+                      (save-excursion
+                        (goto-char marker)
+                        ;; Find end_src to insert after the block, not inside it
+                        (when (re-search-forward "^#\\+end_src" nil t)
+                          (end-of-line)
+                          (insert cancel-text))))))))
+          ;; Update exec status to cancelled
+          (claude-org--set-exec-status-for-session session-key "cancelled")
           ;; Free marker immediately to prevent race with sentinel callback
           ;; (sentinel's handle-complete would otherwise free the NEW marker
           ;; if user quickly re-executes before sentinel runs)
