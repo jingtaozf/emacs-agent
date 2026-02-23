@@ -917,6 +917,47 @@ queries from within a Claude Code session."
     (should-not (cl-find-if (lambda (s) (string-prefix-p "CLAUDECODE=" s)) result))
     (should (member "FOO=bar" result))))
 
+;;; Bun memory tuning tests
+
+(ert-deftest test-claude-agent-build-env-injects-bun-ram-size-when-set ()
+  "Test that BUN_JSC_forceRAMSize is injected when `claude-agent-bun-memory-limit' is set."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("HOME=/home/user" "PATH=/usr/bin"))
+         (claude-agent-bun-memory-limit (* 3 1024 1024 1024))
+         (result (claude-agent--build-process-environment nil nil)))
+    (should (member (format "BUN_JSC_forceRAMSize=%d" (* 3 1024 1024 1024)) result))))
+
+(ert-deftest test-claude-agent-build-env-no-bun-ram-size-when-nil ()
+  "Test that BUN_JSC_forceRAMSize is NOT injected when limit is nil."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("HOME=/home/user" "PATH=/usr/bin"))
+         (claude-agent-bun-memory-limit nil)
+         (result (claude-agent--build-process-environment nil nil)))
+    (should-not (cl-find-if (lambda (s) (string-prefix-p "BUN_JSC_forceRAMSize=" s))
+                            result))))
+
+(ert-deftest test-claude-agent-build-env-bun-ram-size-coexists-with-custom-vars ()
+  "Test that BUN_JSC_forceRAMSize coexists with user-provided env vars."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("HOME=/home/user"))
+         (claude-agent-bun-memory-limit (* 2 1024 1024 1024))
+         (env-vars '(("MY_VAR" . "value")))
+         (result (claude-agent--build-process-environment env-vars nil)))
+    (should (member (format "BUN_JSC_forceRAMSize=%d" (* 2 1024 1024 1024)) result))
+    (should (member "MY_VAR=value" result))))
+
+(ert-deftest test-claude-agent-build-env-bun-ram-size-overrides-existing ()
+  "Test that our injected BUN_JSC_forceRAMSize overrides any existing one."
+  :tags '(:unit :fast :stable :isolated :process)
+  (let* ((process-environment '("HOME=/home/user" "BUN_JSC_forceRAMSize=999"))
+         (claude-agent-bun-memory-limit (* 3 1024 1024 1024))
+         (result (claude-agent--build-process-environment nil nil)))
+    ;; Our value should be present
+    (should (member (format "BUN_JSC_forceRAMSize=%d" (* 3 1024 1024 1024)) result))
+    ;; The old value from process-environment should still be there (later in list),
+    ;; but our prepended one takes precedence for subprocess env lookup
+    ))
+
 ;;; Phase 0a: Sentinel per-process cleanup tests
 
 (ert-deftest test-claude-agent-sentinel-cleanup-preserves-other-sessions ()

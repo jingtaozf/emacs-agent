@@ -2943,6 +2943,19 @@ The delay is controlled by `claude-agent-stdin-close-delay'."
 ** Process Creation
 
 #+BEGIN_SRC elisp
+(defcustom claude-agent-bun-memory-limit nil
+  "Memory limit in bytes for Bun's JSC heap via BUN_JSC_forceRAMSize.
+When non-nil, this value is injected into the subprocess environment,
+telling Bun's JavaScriptCore engine to treat available RAM as this many
+bytes.  This constrains JS heap growth and triggers GC earlier, helping
+prevent OOM kills (signal 9) on macOS.
+
+Recommended value: (* 3 1024 1024 1024) for 3 GB.
+Set to nil to disable (default)."
+  :type '(choice (integer :tag "Bytes")
+                 (const :tag "Disabled" nil))
+  :group 'claude-agent)
+
 (defvar claude-agent--stripped-env-vars '("CLAUDECODE")
   "Environment variables to strip when spawning Claude CLI subprocesses.
 Claude CLI refuses to launch when CLAUDECODE is set (nested session detection).
@@ -2952,7 +2965,8 @@ Our SDK must unset it so Emacs users can run queries from within a Claude Code s
   "Build process environment for a Claude CLI subprocess.
 ENV-VARS is an alist of (NAME . VALUE) pairs to add.
 CLI-DIR is the directory of the CLI binary (prepended to PATH), or nil.
-Strips variables listed in `claude-agent--stripped-env-vars'."
+Strips variables listed in `claude-agent--stripped-env-vars'.
+Injects BUN_JSC_forceRAMSize when `claude-agent-bun-memory-limit' is set."
   (let ((base-env (cl-remove-if
                    (lambda (entry)
                      (cl-some (lambda (var)
@@ -2962,6 +2976,9 @@ Strips variables listed in `claude-agent--stripped-env-vars'."
     (append
      (when cli-dir
        (list (concat "PATH=" cli-dir ":" (getenv "PATH"))))
+     ;; Bun memory tuning: cap JSC heap to prevent OOM kills
+     (when claude-agent-bun-memory-limit
+       (list (format "BUN_JSC_forceRAMSize=%d" claude-agent-bun-memory-limit)))
      (mapcar (lambda (pair)
                (format "%s=%s" (car pair) (cdr pair)))
              env-vars)

@@ -1880,10 +1880,12 @@ Example: 20260204-103025-a7f3"
 
 #+BEGIN_SRC elisp
 (defun claude-org--create-response-section (session-key query-id query-type
-                                            &optional parent-query-id recovery-reason)
+                                            &optional parent-query-id recovery-reason
+                                            loop-info)
   "Create a response section for SESSION-KEY with QUERY-ID.
 QUERY-TYPE is 'normal or 'recovery.
 For recovery queries, PARENT-QUERY-ID and RECOVERY-REASON should be provided.
+LOOP-INFO is (ITERATION . MAX) for loop iterations, or nil.
 
 Returns the position where content should be inserted (after properties)."
   (let* ((section-level (or (claude-org--session-get session-key :section-level) 1))
@@ -1896,6 +1898,10 @@ Returns the position where content should be inserted (after properties)."
          (instr-num (or (claude-org--session-get session-key :instruction-num)
                         (claude-org--find-instruction-number)))
          (timestamp (format-time-string "%Y-%m-%d %H:%M"))
+         ;; Build loop suffix for iteration numbering
+         (loop-suffix (if loop-info
+                          (format "(%d/%d)" (car loop-info) (cdr loop-info))
+                        ""))
          ;; For recovery, use N.M numbering; for normal, just the number
          ;; If no instruction number found, omit the number from heading
          (response-num (cond
@@ -1911,7 +1917,7 @@ Returns the position where content should be inserted (after properties)."
          (tags (if (eq query-type 'recovery)
                    ":ai_output:recovery:"
                  ":ai_output:"))
-         (heading (format "%s Response %s (%s) %s" stars response-num timestamp tags)))
+         (heading (format "%s Response %s%s (%s) %s" stars response-num loop-suffix timestamp tags)))
     (save-excursion
       ;; Insert heading
       (insert heading "\n")
@@ -1942,6 +1948,16 @@ Returns the heading position, or nil if not found."
            (format ":QUERY_ID: +%s *$" (regexp-quote query-id)) nil t)
       (org-back-to-heading t)
       (point))))
+
+(defun claude-org--find-response-end-by-query-id (query-id)
+  "Find end of response section identified by QUERY-ID.
+Returns position at end of the section subtree (before next sibling)."
+  (save-excursion
+    (let ((heading-pos (claude-org--find-response-by-query-id query-id)))
+      (when heading-pos
+        (goto-char heading-pos)
+        (org-end-of-subtree t)
+        (point)))))
 #+END_SRC
 
 *** Marker-Free Token Insertion
@@ -4039,29 +4055,30 @@ Extracts session ID from result messages and stores it."
             (set-marker marker (point))))))))
 
 (defun claude-org--maybe-continue-loop (session-key)
-  "Continue loop execution if more iterations remain.
-Called after each iteration completes."
-  (let* ((loop-current (claude-org--session-get session-key :loop-current))
-         (loop-max (claude-org--session-get session-key :loop-max))
+  "Continue loop execution by starting the next iteration.
+Called from handle-complete only when loop-current < loop-max (caller
+already verified continuation is needed).  Increments the loop counter
+and either schedules delayed execution or runs immediately."
+  (let* ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
+         (loop-max (or (claude-org--session-get session-key :loop-max) 1))
          (loop-interval (or (claude-org--session-get session-key :loop-interval) 0))
          (original-prompt (claude-org--session-get session-key :original-prompt))
          (instr-num (claude-org--session-get session-key :instruction-num))
-         (custom-id (claude-org--session-get session-key :custom-id)))
-    (when (and loop-current loop-max (< loop-current loop-max))
-      ;; Increment loop counter
-      (let ((next-iteration (1+ loop-current)))
-        (claude-org--session-put session-key :loop-current next-iteration)
-        ;; Schedule next iteration
-        (if (and loop-interval (> loop-interval 0))
-            ;; Delayed execution
-            (run-at-time loop-interval nil
-                         #'claude-org--execute-loop-iteration
-                         session-key next-iteration loop-max original-prompt
-                         instr-num custom-id loop-interval)
-          ;; Immediate execution
-          (claude-org--execute-loop-iteration
-           session-key next-iteration loop-max original-prompt
-           instr-num custom-id loop-interval))))))
+         (custom-id (claude-org--session-get session-key :custom-id))
+         (next-iteration (1+ loop-current)))
+    ;; Increment loop counter
+    (claude-org--session-put session-key :loop-current next-iteration)
+    ;; Schedule next iteration
+    (if (> loop-interval 0)
+        ;; Delayed execution
+        (run-at-time loop-interval nil
+                     #'claude-org--execute-loop-iteration
+                     session-key next-iteration loop-max original-prompt
+                     instr-num custom-id loop-interval)
+      ;; Immediate execution
+      (claude-org--execute-loop-iteration
+       session-key next-iteration loop-max original-prompt
+       instr-num custom-id loop-interval))))
 
 (defun claude-org--execute-loop-iteration (session-key iteration max prompt instr-num custom-id interval)
   "Execute a single loop iteration.
@@ -4070,7 +4087,11 @@ ITERATION is current iteration number (1-based).
 MAX is total iterations.
 PROMPT is the original query.
 INSTR-NUM and CUSTOM-ID are for session manager display.
-INTERVAL is delay between iterations (for display)."
+INTERVAL is delay between iterations (for display).
+
+Creates a proper response section with :QUERY_ID: property at the correct
+position (after the previous iteration's response section, found via query-id
+lookup).  This ensures tokens are routed to the new section, not the old one."
   ;; Get buffer from session marker (needed when called via run-at-time)
   (let ((marker (claude-org--session-get session-key :marker)))
     (when (and marker (marker-buffer marker))
@@ -4080,17 +4101,35 @@ INTERVAL is delay between iterations (for display)."
         (claude-org--session-put session-key :start-time (float-time))
         ;; Start spinner
         (claude-org--start-spinner session-key)
-        ;; Insert new Response section for this iteration
-        (claude-org--insert-iteration-section session-key iteration max instr-num)
-        ;; Build query-context with updated iteration
-        (let ((query-ctx (when instr-num
-                           (claude-agent-make-query-context
-                            :instruction-num instr-num
-                            :loop-current iteration
-                            :loop-max max
-                            :custom-id custom-id))))
-          ;; Send request (uses continue-conversation for context)
-          (claude-org--send-request prompt query-ctx session-key))))))
+        ;; Generate new query-id for this iteration (tokens route via query-id)
+        (let* ((old-query-id (claude-org--session-get session-key :query-id))
+               (new-query-id (claude-org--generate-query-id))
+               ;; Find end of previous response section by old query-id
+               (insert-pos (claude-org--find-response-end-by-query-id old-query-id)))
+          ;; Store new query-id BEFORE creating section (callbacks read it)
+          (claude-org--session-put session-key :query-id new-query-id)
+          ;; Create response section at correct position (after previous response)
+          ;; If insert-pos is nil (e.g. response section deleted), abort iteration
+          (if (not insert-pos)
+              (progn
+                (message "Claude loop: cannot find previous response section, aborting iteration %d" iteration)
+                (claude-org--session-put session-key :busy nil)
+                (claude-org--stop-spinner session-key))
+            (save-excursion
+              (goto-char insert-pos)
+              (insert "\n\n")
+              (claude-org--create-response-section
+               session-key new-query-id 'normal
+               nil nil (cons iteration max)))
+            ;; Build query-context with updated iteration
+            (let ((query-ctx (when instr-num
+                               (claude-agent-make-query-context
+                                :instruction-num instr-num
+                                :loop-current iteration
+                                :loop-max max
+                                :custom-id custom-id))))
+              ;; Send request (uses continue-conversation for context)
+              (claude-org--send-request prompt query-ctx session-key))))))))
 
 (defun claude-org--free-marker (session-key)
   "Free marker for SESSION-KEY to prevent memory leak.
@@ -4110,9 +4149,12 @@ terminal state immediately, without waiting for the CLI process to exit."
 
 (defun claude-org--handle-complete (session-key result)
   "Handle query completion for SESSION-KEY with RESULT.
-Uses query-id based architecture with marker for queue duplicate detection."
-  (claude-org--reset-session-state session-key)
-  (claude-org--free-marker session-key)
+Uses query-id based architecture with marker for queue duplicate detection.
+
+IMPORTANT: Loop continuation check must happen BEFORE freeing the marker,
+because execute-loop-iteration needs the marker to find the buffer.
+When the loop continues, :busy and :marker are kept alive for the next
+iteration (including across run-at-time delays for :interval)."
   (claude-org--stop-spinner session-key)
   ;; Add newline after response using query-id lookup (marker-free)
   (let ((query-id (claude-org--session-get session-key :query-id)))
@@ -4122,25 +4164,29 @@ Uses query-id based architecture with marker for queue duplicate detection."
   (claude-org--refresh-header-line)
   ;; Run completion hook (no marker to pass - we're marker-free)
   (run-hook-with-args 'claude-org-complete-hook session-key result 'completed)
-  ;; Set status to completed (unless loop continues)
-  (let ((loop-max (or (claude-org--session-get session-key :loop-max) 1))
-        (loop-current (or (claude-org--session-get session-key :loop-current) 1)))
-    (when (>= loop-current loop-max)
-      ;; Set status to completed, but only if not already cancelled (race condition)
+  ;; Check loop state BEFORE any cleanup - execute-loop-iteration needs :marker
+  (let* ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
+         (loop-max (or (claude-org--session-get session-key :loop-max) 1))
+         (should-continue (< loop-current loop-max)))
+    (if should-continue
+        ;; Loop has more iterations: keep :busy and :marker alive,
+        ;; clear only transient flags, then trigger next iteration
+        (progn
+          (claude-org--session-put session-key :recovering nil)
+          (claude-org--session-put session-key :last-assistant-query-id nil)
+          (claude-org--maybe-continue-loop session-key))
+      ;; Loop complete (or single-shot) - full cleanup
       (unless (equal (claude-org--get-exec-status-for-session session-key) "cancelled")
-        (claude-org--set-exec-status-for-session session-key "completed"))))
-  ;; Check for loop continuation
-  (claude-org--maybe-continue-loop session-key)
-  ;; Process pending queue if loop is complete and session not busy
-  ;; (loop continuation sets :busy t, so this only runs when truly done)
-  (unless (claude-org--session-get session-key :busy)
-    (let ((next-block (claude-org--dequeue-block session-key)))
-      (if next-block
-          (claude-org--execute-queued-block session-key next-block)
-        ;; Truly done - unregister from active queries so mode-line and
-        ;; *Claude Queries* buffer reflect completion immediately
-        ;; (don't wait for CLI process to exit and sentinel to fire)
-        (claude-org--unregister-active-query session-key)))))
+        (claude-org--set-exec-status-for-session session-key "completed"))
+      (claude-org--reset-session-state session-key)
+      (claude-org--free-marker session-key)
+      ;; Process pending queue
+      (let ((next-block (claude-org--dequeue-block session-key)))
+        (if next-block
+            (claude-org--execute-queued-block session-key next-block)
+          ;; Truly done - unregister from active queries so mode-line and
+          ;; *Claude Queries* buffer reflect completion immediately
+          (claude-org--unregister-active-query session-key))))))
 #+END_SRC
 
 ** Error Handling
@@ -4869,40 +4915,6 @@ SDK-UUID: Session UUID for resume"
    :mcp-config (claude-org--get-mcp-config)
    :setting-sources (claude-org--get-setting-sources)
    :env (claude-org--get-env-vars)))
-#+END_SRC
-
-** Iteration Sections
-
-#+BEGIN_SRC elisp
-(defun claude-org--insert-iteration-section (session-key iteration max instr-num)
-  "Insert new Response section for loop iteration.
-SESSION-KEY identifies the session.
-ITERATION is current iteration number (1-based).
-MAX is total iterations.
-INSTR-NUM is the instruction number for section naming (can be nil).
-
-Uses the session marker for position tracking - Emacs markers automatically
-adjust their position when text is inserted/deleted elsewhere in the buffer,
-so this works correctly even when the user is editing other parts of the file."
-  (let ((marker (claude-org--session-get session-key :marker))
-        (level (or (claude-org--session-get session-key :section-level)
-                   (claude-org--get-section-level))))
-    (when (and marker (marker-buffer marker))
-      (with-current-buffer (marker-buffer marker)
-        (save-excursion
-          (goto-char marker)
-          (let ((stars (make-string level ?*)))
-            (if instr-num
-                ;; With instruction number: "Response N(I/M)"
-                (insert "\n" stars " Response " (number-to-string instr-num)
-                        "(" (number-to-string iteration) "/"
-                        (number-to-string max) ")"
-                        " :" claude-org-output-tag ":\n\n")
-              ;; Without instruction number: "Response (I/M)"  
-              (insert "\n" stars " Response (" (number-to-string iteration) "/"
-                      (number-to-string max) ")"
-                      " :" claude-org-output-tag ":\n\n")))
-          (set-marker marker (point)))))))
 #+END_SRC
 
 ** Send Request
