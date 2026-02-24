@@ -380,9 +380,11 @@ source files and checks they are properly defined."
         (dolist (def definitions)
           (let ((type (car def))
                 (name (cdr def)))
-            ;; Skip certain generated symbols that may not exist
+            ;; Skip certain generated symbols or known external dynamic vars
             (unless (or (string-suffix-p "-map" (symbol-name name))  ; keymaps optional
-                        (string-suffix-p "-hook" (symbol-name name))) ; hooks optional
+                        (string-suffix-p "-hook" (symbol-name name)) ; hooks optional
+                        ;; External dynamic vars (bound at runtime by other packages)
+                        (memq name '(org-state))) ; Org todo-state-change hook
               (when-let ((err (test-static--check-symbol-bound type name)))
                 (push (format "%s: %s" (file-name-nondirectory file) err)
                       file-errors)))))
@@ -529,27 +531,35 @@ ignored by literate-elisp."
         (goto-char (point-min))
         (let ((in-src-block nil)
               (file-short (file-name-nondirectory file)))
-          ;; Scan line by line
-          (while (not (eobp))
-            (let ((line (buffer-substring-no-properties
-                         (line-beginning-position) (line-end-position))))
-              (cond
-               ;; Entering src block
-               ((string-match-p "^#\\+BEGIN_SRC\\s-+elisp" line)
-                (setq in-src-block t))
-               ;; Exiting src block
-               ((string-match-p "^#\\+END_SRC" line)
-                (setq in-src-block nil))
-               ;; Check for definitions outside blocks
-               ((and (not in-src-block)
-                     (string-match "^(\\(def\\|cl-def\\)" line))
-                (push (format "%s:%d: %s"
-                              file-short
-                              (line-number-at-pos)
-                              (string-trim
-                               (substring line 0 (min 60 (length line)))))
-                      errors))))
-            (forward-line 1)))))
+          ;; Scan line by line, tracking both src and example blocks
+          (let ((in-example-block nil))
+            (while (not (eobp))
+              (let ((line (buffer-substring-no-properties
+                           (line-beginning-position) (line-end-position))))
+                (cond
+                 ;; Entering src block
+                 ((string-match-p "^#\\+BEGIN_SRC\\s-+elisp" line)
+                  (setq in-src-block t))
+                 ;; Exiting src block
+                 ((and in-src-block (string-match-p "^#\\+END_SRC" line))
+                  (setq in-src-block nil))
+                 ;; Entering example block
+                 ((string-match-p "^#\\+begin_example" line)
+                  (setq in-example-block t))
+                 ;; Exiting example block
+                 ((and in-example-block (string-match-p "^#\\+end_example" line))
+                  (setq in-example-block nil))
+                 ;; Check for definitions outside any block
+                 ((and (not in-src-block)
+                       (not in-example-block)
+                       (string-match "^(\\(def\\|cl-def\\)" line))
+                  (push (format "%s:%d: %s"
+                                file-short
+                                (line-number-at-pos)
+                                (string-trim
+                                 (substring line 0 (min 60 (length line)))))
+                        errors))))
+              (forward-line 1))))))
     (when errors
       (ert-fail
        (format "Found %d elisp definitions outside #+BEGIN_SRC blocks:\n  %s\n\n\

@@ -9,8 +9,9 @@ SOURCES = claude-agent.org claude-org.org
 
 # Test files
 UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-error.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el tests/test-claude-agent-backend-protocol.el
+MOCK_TESTS = tests/test-claude-agent-mock.el tests/test-claude-org-mock.el
 INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
-ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
+ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
 LITERATE_ELISP_DIR = $(HOME)/projects/literate-elisp
@@ -39,11 +40,10 @@ help:
 	@echo "  make test-agent-unit  - Run claude-agent unit tests"
 	@echo "  make test-org-unit    - Run claude-org unit tests"
 	@echo "  make test-permissions - Run permission functions tests"
-	@echo "  make test-extraction  - Run skill/rule extraction unit tests"
-	@echo "  make test-extraction-integration - Run extraction integration tests (API)"
-	@echo "  make test-mcp-ide     - Run MCP IDE diagnostics tests"
-	@echo "  make test-mcp-ide-unit - Run MCP IDE unit tests only"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
+	@echo "  make test-mock        - Run mock CLI tests (no API, fast)"
+	@echo "  make test-agent-mock  - Run agent mock CLI tests"
+	@echo "  make test-org-mock    - Run org mock CLI tests"
 	@echo "  make test-docker      - Run Docker unit tests (path translation)"
 	@echo "  make test-docker-sandbox - Run Docker sandbox tests (requires container)"
 	@echo "  make test-readme-smoke - Run README tutorial smoke tests (no API)"
@@ -262,6 +262,31 @@ test-org-unit:
 		-l tests/test-claude-org-cancel.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
+.PHONY: test-mock
+test-mock: test-agent-mock test-org-mock
+
+.PHONY: test-agent-mock
+test-agent-mock:
+	@echo "Running claude-agent mock CLI tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		-l tests/fixtures/test-config.el \
+		-l tests/test-claude-agent-mock.el \
+		-f ert-run-tests-batch-and-exit
+
+.PHONY: test-org-mock
+test-org-mock:
+	@echo "Running claude-org mock CLI tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/fixtures/test-config.el \
+		-l tests/test-claude-org-mock.el \
+		-f ert-run-tests-batch-and-exit
+
 .PHONY: test-agent-integration
 test-agent-integration:
 	@echo "Running claude-agent integration tests (requires API key)..."
@@ -305,47 +330,9 @@ test-org-permissions:
 		-l tests/test-claude-agent-permissions.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
 
-.PHONY: test-extraction
-test-extraction:
-	@echo "Running skill/rule extraction unit tests..."
-	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
-		-l tests/test-claude-org-extraction-integration.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :extraction))"
+# NOTE: test-extraction and test-mcp-ide targets removed — source files were deleted.
+# See git log for history.
 
-.PHONY: test-extraction-integration
-test-extraction-integration:
-	@echo "Running skill/rule extraction integration tests (requires API key)..."
-	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
-		-l tests/fixtures/test-config.el \
-		-l tests/test-claude-org-extraction-integration.el \
-		--eval "(ert-run-tests-batch-and-exit '(and (tag :extraction) (tag :integration)))"
-
-.PHONY: test-mcp-ide
-test-mcp-ide:
-	@echo "Running MCP IDE diagnostics tests..."
-	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		-l tests/fixtures/test-config.el \
-		-l tests/test-mcp-ide-integration.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :mcp-ide))"
-
-.PHONY: test-mcp-ide-unit
-test-mcp-ide-unit:
-	@echo "Running MCP IDE unit tests only (no flycheck required)..."
-	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		-l tests/test-mcp-ide-integration.el \
-		--eval "(ert-run-tests-batch-and-exit '(and (tag :mcp-ide) (tag :unit)))"
 
 .PHONY: test-mcp-mode-line
 test-mcp-mode-line:

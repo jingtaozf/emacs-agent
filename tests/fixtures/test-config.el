@@ -216,6 +216,30 @@ Automatically sets org-mode and refreshes property cache."
     (should (stringp uuid))
     (should (> (length uuid) 0))))
 
+;;; Mock CLI Support
+
+(defvar test-claude-mock-cli-path
+  (expand-file-name "mock-claude-cli.sh" test-claude-fixture-dir)
+  "Path to mock Claude CLI for fast integration tests.
+This script speaks the same JSON protocol as the real CLI.")
+
+(defun test-claude-mock-options (&rest args)
+  "Create options using mock CLI instead of real Claude.
+Uses `test-claude-mock-cli-path' and skips slow plugin loading.
+Pass :env to set MOCK_SCENARIO for explicit scenario selection."
+  (apply #'claude-agent-options
+         :cli-path test-claude-mock-cli-path
+         :setting-sources test-claude-default-setting-sources
+         args))
+
+(defun test-claude-mock-options-with-scenario (scenario &rest args)
+  "Create mock options with explicit SCENARIO selection.
+SCENARIO is the name of a fixture file in mock-scenarios/ (without .jsonl).
+ARGS are additional options passed to `claude-agent-options'."
+  (apply #'test-claude-mock-options
+         :env (list (cons "MOCK_SCENARIO" scenario))
+         args))
+
 ;;; Cleanup
 
 (defun test-claude-cleanup-all ()
