@@ -2014,6 +2014,7 @@ phases will compose them into the main process-state.
   session-id        ; Claude session ID (from result message) for resumption
   original-prompt   ; Original prompt for recovery context
   (got-result nil)  ; Boolean: true if result message was received
+  (cancelled nil)   ; Boolean: true if user explicitly cancelled (skip recovery)
   (ready nil)       ; Boolean ready state
   (closed nil))     ; Boolean closed state
 
@@ -2556,6 +2557,7 @@ STATE is the process state. Returns t if:
   (and claude-agent-auto-recovery
        (claude-agent--process-state-session-id state)  ; Need session-id to resume
        (not (claude-agent--process-state-got-result state))  ; No result received
+       (not (claude-agent--process-state-cancelled state))   ; Not user-cancelled
        (or (string-match-p "killed" event)
            (string-match-p "exited abnormally" event)
            ;; Also treat "finished" without result as abnormal
@@ -3342,7 +3344,9 @@ to find all descendants and kills them bottom-up."
 
 (defun claude-agent-query-interrupt (state)
   "Interrupt an ongoing query by STATE.
-STATE is the process state returned by `claude-agent-query'."
+STATE is the process state returned by `claude-agent-query'.
+Sets the cancelled flag to prevent automatic recovery."
+  (setf (claude-agent--process-state-cancelled state) t)
   (when-let ((process (claude-agent--process-state-process state)))
     (when (process-live-p process)
       (interrupt-process process))))
@@ -3351,7 +3355,9 @@ STATE is the process state returned by `claude-agent-query'."
   "Kill an ongoing query by STATE.
 Unlike `claude-agent-query-interrupt', this sends SIGKILL which cannot be ignored.
 Kills the entire process tree to prevent orphaned shell processes.
+Sets the cancelled flag to prevent automatic recovery.
 STATE is the process state returned by `claude-agent-query'."
+  (setf (claude-agent--process-state-cancelled state) t)
   (when-let ((process (claude-agent--process-state-process state)))
     (when (process-live-p process)
       (claude-agent--kill-process-tree process))))
@@ -5000,12 +5006,14 @@ outdated structure, or queries that have exceeded timeout."
 #+BEGIN_SRC elisp
 (defun claude-agent-cancel-query (request-id)
   "Cancel query by REQUEST-ID.
-Always marks as closed and unregisters, even if process is dead.
+Always marks as closed and cancelled, then unregisters, even if process is dead.
+Sets the cancelled flag to prevent automatic recovery.
 Returns t if found and cancelled, nil if not found."
   (let ((state (claude-agent--get-active-query request-id)))
     (when state
-      ;; Always mark as closed first
+      ;; Mark as closed and cancelled to prevent auto-recovery
       (setf (claude-agent--process-state-closed state) t)
+      (setf (claude-agent--process-state-cancelled state) t)
       ;; Interrupt process if still alive
       (when-let ((process (claude-agent--process-state-process state)))
         (when (process-live-p process)

@@ -1726,5 +1726,99 @@ The nil guard ensures stale global tasks do not block stdin closure."
                      saved-bg-tasks)))
       (when (process-live-p proc) (delete-process proc)))))
 
+;;; Cancel should NOT trigger recovery tests
+
+(ert-deftest test-cancel-should-not-trigger-recovery-finished ()
+  "Cancelled query exiting with 'finished' should NOT trigger recovery."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (let ((state (claude-agent--make-process-state
+                :session-id "test-session-123")))
+    ;; Simulate user cancellation: set cancelled flag
+    (setf (claude-agent--process-state-cancelled state) t)
+    ;; Process exits with "finished" - should NOT be treated as abnormal
+    (should-not (claude-agent--is-abnormal-exit-p "finished\n" state))))
+
+(ert-deftest test-cancel-should-not-trigger-recovery-killed ()
+  "Cancelled query exiting with 'killed' should NOT trigger recovery."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (let ((state (claude-agent--make-process-state
+                :session-id "test-session-123")))
+    (setf (claude-agent--process-state-cancelled state) t)
+    ;; Process killed by signal after cancel - still should NOT recover
+    (should-not (claude-agent--is-abnormal-exit-p "killed: 9\n" state))))
+
+(ert-deftest test-cancel-should-not-trigger-recovery-abnormal ()
+  "Cancelled query exiting abnormally should NOT trigger recovery."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (let ((state (claude-agent--make-process-state
+                :session-id "test-session-123")))
+    (setf (claude-agent--process-state-cancelled state) t)
+    (should-not (claude-agent--is-abnormal-exit-p
+                 "exited abnormally with code 1\n" state))))
+
+(ert-deftest test-unexpected-crash-should-trigger-recovery ()
+  "Unexpected crash (not cancelled) SHOULD trigger recovery."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (let ((claude-agent-auto-recovery t)
+        (state (claude-agent--make-process-state
+                :session-id "test-session-123")))
+    ;; NOT cancelled, no result received - should trigger recovery
+    (should (claude-agent--is-abnormal-exit-p "killed: 9\n" state))
+    (should (claude-agent--is-abnormal-exit-p "exited abnormally with code 1\n" state))
+    (should (claude-agent--is-abnormal-exit-p "finished\n" state))))
+
+(ert-deftest test-cancel-does-not-recover-but-crash-does ()
+  "Verify cancelled vs non-cancelled states have opposite recovery behavior."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (let ((claude-agent-auto-recovery t))
+    ;; Non-cancelled state with session-id: SHOULD recover
+    (let ((crash-state (claude-agent--make-process-state
+                        :session-id "session-crash")))
+      (should (claude-agent--is-abnormal-exit-p "finished\n" crash-state)))
+    ;; Cancelled state with session-id: should NOT recover
+    (let ((cancel-state (claude-agent--make-process-state
+                         :session-id "session-cancel")))
+      (setf (claude-agent--process-state-cancelled cancel-state) t)
+      (should-not (claude-agent--is-abnormal-exit-p "finished\n" cancel-state)))))
+
+(ert-deftest test-query-interrupt-sets-cancelled-flag ()
+  "query-interrupt should set the cancelled flag on process state."
+  :tags '(:unit :fast :stable :isolated :recovery)
+  (let* ((proc (start-process "test-cancel-flag" nil "sleep" "10"))
+         (state (claude-agent--make-process-state :process proc)))
+    (unwind-protect
+        (progn
+          ;; Initially not cancelled
+          (should-not (claude-agent--process-state-cancelled state))
+          ;; Interrupt should set cancelled
+          (claude-agent-query-interrupt state)
+          (should (claude-agent--process-state-cancelled state)))
+      (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest test-cancel-query-sets-cancelled-flag ()
+  "claude-agent-cancel-query should set the cancelled flag to prevent auto-recovery.
+Bug: cancel-query only set closed=t but not cancelled=t, so the sentinel's
+is-abnormal-exit-p check would pass and trigger recovery on a user-cancelled query."
+  :tags '(:unit :fast :stable :isolated :recovery :cancel)
+  (let* ((proc (start-process "test-cancel-query-flag" nil "sleep" "10"))
+         (state (claude-agent--make-process-state
+                 :process proc
+                 :request-id "test-cancel-recovery-001"
+                 :session-id "test-session-cancel")))
+    (unwind-protect
+        (progn
+          ;; Register the query so cancel-query can find it
+          (puthash "test-cancel-recovery-001" state claude-agent--active-queries)
+          ;; Initially not cancelled
+          (should-not (claude-agent--process-state-cancelled state))
+          ;; Cancel via cancel-query (the Queries buffer path)
+          (claude-agent-cancel-query "test-cancel-recovery-001")
+          ;; CRITICAL: cancelled flag must be set to prevent auto-recovery
+          (should (claude-agent--process-state-cancelled state))
+          ;; Also verify is-abnormal-exit-p returns nil for this state
+          (let ((claude-agent-auto-recovery t))
+            (should-not (claude-agent--is-abnormal-exit-p "killed: 2\n" state))))
+      (when (process-live-p proc) (delete-process proc)))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here
