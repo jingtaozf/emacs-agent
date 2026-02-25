@@ -133,7 +133,7 @@ Verifies the full pipeline: execute → subprocess → JSON parse → response i
                 (should (test-claude-wait-for-completion session-key 10))
                 ;; Verify Response heading exists with ai_output tag
                 (goto-char (point-min))
-                (should (re-search-forward "^\\*+ Response 1" nil t))
+                (should (re-search-forward "^\\*+ Response.*:ai_output:" nil t))
                 ;; Check for QUERY_ID property
                 (should (re-search-forward ":QUERY_ID:" nil t))))))
       (when (and test-buffer (buffer-live-p test-buffer))

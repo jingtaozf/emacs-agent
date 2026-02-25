@@ -1,0 +1,91 @@
+#!/bin/bash
+set -o pipefail
+# Pre-commit hook for claude-agent
+# Runs ALL fast tests before allowing commit.
+# Only tests requiring API keys or running containers are excluded.
+# Captures detailed output so Claude Code can see and fix failures.
+
+echo "Running pre-commit tests..."
+echo ""
+
+# Create a temporary file for test output
+TEST_OUTPUT=$(mktemp)
+trap "rm -f $TEST_OUTPUT" EXIT
+
+FAILED=0
+
+# Run static analysis / lint
+echo "=== Running lint ==="
+if ! make lint 2>&1 | tee -a "$TEST_OUTPUT"; then
+    FAILED=1
+fi
+
+# Run core unit tests (agent, org, backend)
+echo ""
+echo "=== Running unit tests ==="
+if ! make test-unit 2>&1 | tee -a "$TEST_OUTPUT"; then
+    FAILED=1
+fi
+
+# Run permission tests (fast, no API)
+echo ""
+echo "=== Running permission tests ==="
+if ! make test-permissions 2>&1 | tee -a "$TEST_OUTPUT"; then
+    FAILED=1
+fi
+
+# Run org file protection permission tests (fast, no API)
+echo ""
+echo "=== Running org-permissions tests ==="
+if ! make test-org-permissions 2>&1 | tee -a "$TEST_OUTPUT"; then
+    FAILED=1
+fi
+
+# Run MCP mode-line tests (fast, no API)
+echo ""
+echo "=== Running MCP mode-line tests ==="
+if ! make test-mcp-mode-line 2>&1 | tee -a "$TEST_OUTPUT"; then
+    FAILED=1
+fi
+
+# Run Docker unit tests (fast, no API, no container needed)
+echo ""
+echo "=== Running Docker unit tests ==="
+if ! make test-docker 2>&1 | tee -a "$TEST_OUTPUT"; then
+    FAILED=1
+fi
+
+# Run mock CLI tests (fast, no API, exercises full integration paths)
+echo ""
+echo "=== Running mock CLI tests ==="
+if ! make test-mock 2>&1 | tee -a "$TEST_OUTPUT"; then
+    FAILED=1
+fi
+
+if [ "$FAILED" -eq 0 ]; then
+    echo ""
+    echo "=== All tests passed ==="
+    echo "Proceeding with commit..."
+    exit 0
+else
+    echo ""
+    echo "========================================"
+    echo "ERROR: Pre-commit hook failed - Tests did not pass"
+    echo "========================================"
+    echo ""
+    echo "FAILED TESTS SUMMARY:"
+    echo "--------------------"
+    # Extract failed test names from ERT output
+    grep -E "(FAILED|passed.*failed|unexpected)" "$TEST_OUTPUT" | head -20
+    echo ""
+    echo "FAILURE DETAILS:"
+    echo "----------------"
+    # Show the actual error messages (lines after FAILED)
+    grep -A 5 "FAILED" "$TEST_OUTPUT" | head -50
+    echo ""
+    echo "========================================"
+    echo "Commit aborted. Fix the failing tests before committing."
+    echo "Run 'make test-unit' to see full output."
+    echo "========================================"
+    exit 1
+fi

@@ -30,6 +30,7 @@ help:
 	@echo "  make compile          - Byte-compile source files"
 	@echo "  make clean            - Remove compiled files"
 	@echo "  make reload           - Reload org files in running Emacs"
+	@echo "  make install-hooks    - Install/update git pre-commit hook"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test             - Run all tests (unit + parallel integration)"
@@ -97,6 +98,16 @@ reload:
 	@echo "  (progn"
 	@echo "    (literate-elisp-load \"$(PWD)/claude-agent.org\")"
 	@echo "    (literate-elisp-load \"$(PWD)/claude-org.org\"))"
+
+.PHONY: install-hooks
+install-hooks:
+	@echo "Installing git hooks..."
+	@mkdir -p .git/hooks
+	@cp scripts/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "Pre-commit hook installed successfully."
+	@echo "Hook runs 656 tests (~50s): lint, unit, permissions, mock CLI"
+	@echo "To skip temporarily: git commit --no-verify"
 
 # Testing targets
 
