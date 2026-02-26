@@ -1820,5 +1820,68 @@ is-abnormal-exit-p check would pass and trigger recovery on a user-cancelled que
             (should-not (claude-agent--is-abnormal-exit-p "killed: 2\n" state))))
       (when (process-live-p proc) (delete-process proc)))))
 
+;;; Rate limit event warning tests
+
+(ert-deftest test-format-reset-timestamp-hours-minutes ()
+  "Should format unix timestamp as relative hours and minutes."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  ;; Mock current time to 1000 seconds before resets-at
+  (cl-letf (((symbol-function 'float-time) (lambda () 1772383400.0)))
+    (let ((result (claude-agent--format-reset-timestamp 1772384400)))
+      (should (stringp result))
+      ;; 1000 seconds = 0h 16m
+      (should (string-match-p "0h 16m" result)))))
+
+(ert-deftest test-format-reset-timestamp-days ()
+  "Should format as days and hours when diff > 24h."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  (cl-letf (((symbol-function 'float-time) (lambda () 1772284400.0)))
+    (let ((result (claude-agent--format-reset-timestamp 1772384400)))
+      (should (stringp result))
+      ;; 100000 seconds = 1d 3h
+      (should (string-match-p "1d 3h" result)))))
+
+(ert-deftest test-format-reset-timestamp-non-number ()
+  "Should return 'unknown' for non-numeric input."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  (should (equal "unknown" (claude-agent--format-reset-timestamp nil)))
+  (should (equal "unknown" (claude-agent--format-reset-timestamp "not-a-number"))))
+
+(ert-deftest test-handle-rate-limit-event-posts-warning ()
+  "Handler should call `message' with warning for allowed_warning status."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  (let ((messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages)))
+              ((symbol-function 'float-time) (lambda () 1772380000.0)))
+      (let* ((parsed '(:type "rate_limit_event"
+                       :rate_limit_info (:status "allowed_warning"
+                                         :rateLimitType "seven_day"
+                                         :utilization 0.77
+                                         :resetsAt 1772384400
+                                         :isUsingOverage :json-false
+                                         :surpassedThreshold 0.75)))
+             (state (claude-agent--make-process-state)))
+        (claude-agent-handle-message 'rate_limit_event parsed state)
+        (should (= 1 (length messages)))
+        (should (string-match-p "rate limit" (car messages)))
+        (should (string-match-p "seven_day" (car messages)))
+        (should (string-match-p "77%" (car messages)))))))
+
+(ert-deftest test-handle-rate-limit-event-no-warning-for-allowed ()
+  "Handler should NOT post message when status is not allowed_warning."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  (let ((messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (let* ((parsed '(:type "rate_limit_event"
+                       :rate_limit_info (:status "allowed"
+                                         :rateLimitType "seven_day"
+                                         :utilization 0.50
+                                         :resetsAt 1772384400)))
+             (state (claude-agent--make-process-state)))
+        (claude-agent-handle-message 'rate_limit_event parsed state)
+        (should (= 0 (length messages)))))))
+
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

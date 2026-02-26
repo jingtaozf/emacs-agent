@@ -2325,6 +2325,20 @@ STATE is the `claude-agent--process-state'.")
     (run-hook-with-args 'claude-agent-stop-functions message state))
   (claude-agent--process-normal-message parsed state))
 
+(cl-defmethod claude-agent-handle-message
+    ((type (eql 'rate_limit_event)) parsed state)
+  "Handle rate limit event — post warning message when near limit."
+  (let* ((info (plist-get parsed :rate_limit_info))
+         (status (plist-get info :status))
+         (rate-type (plist-get info :rateLimitType))
+         (utilization (plist-get info :utilization))
+         (resets-at (plist-get info :resetsAt)))
+    (when (equal status "allowed_warning")
+      (message "⚠ Claude rate limit warning: %s at %.0f%% (resets %s)"
+               rate-type
+               (* (or utilization 0) 100)
+               (claude-agent--format-reset-timestamp resets-at)))))
+
 ;; Catch-all for system, init, and any future message types
 (cl-defmethod claude-agent-handle-message (type parsed state)
   "Default handler for unspecialized message types."
@@ -5497,6 +5511,19 @@ Shows days and hours for periods >= 24h, otherwise hours and minutes."
                 (format "%dh %dm" hours mins)))
           "soon"))
     "N/A"))
+
+(defun claude-agent--format-reset-timestamp (unix-ts)
+  "Format UNIX-TS (a number) as relative time string.
+Shows days and hours for periods >= 24h, otherwise hours and minutes.
+Returns \"unknown\" for non-numeric input."
+  (if (numberp unix-ts)
+      (let* ((diff (- unix-ts (float-time)))
+             (hours (floor (/ diff 3600)))
+             (mins (floor (/ (mod diff 3600) 60))))
+        (if (> hours 24)
+            (format "%dd %dh" (/ hours 24) (mod hours 24))
+          (format "%dh %dm" hours mins)))
+    "unknown"))
 #+END_SRC
 
 ** Fetch and Callback
