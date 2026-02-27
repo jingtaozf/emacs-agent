@@ -2053,7 +2053,9 @@ Collects keys first to avoid modify-during-iterate."
 
 (defun claude-agent-registry-cleanup-process (state)
   "Per-process cleanup for STATE. Removes only entries owned by this process.
-Never calls clrhash — preserves parallel sessions."
+Never calls clrhash — preserves parallel sessions.
+Also unregisters from `claude-agent--active-queries' to ensure the
+*Claude Queries* buffer and mode-line reflect the terminal state."
   (let* ((req-id (claude-agent--process-state-request-id state))
          (reg claude-agent--registry))
     ;; Remove from active-states list
@@ -2065,7 +2067,12 @@ Never calls clrhash — preserves parallel sessions."
        (claude-agent--registry-background-tasks reg) req-id)
       (claude-agent--remove-hash-entries-by-value
        (claude-agent--registry-control-requests reg) req-id)
-      (remhash req-id (claude-agent--registry-queries reg)))))
+      (remhash req-id (claude-agent--registry-queries reg))
+      ;; Also unregister from active-queries hash table.
+      ;; This is critical for the abnormal exit (recovery) path where
+      ;; sentinel-cleanup is NOT called, so without this the old dead
+      ;; entry would persist in active-queries indefinitely.
+      (claude-agent--unregister-query req-id))))
 #+END_SRC
 
 ** Process Filter
@@ -2445,25 +2452,32 @@ The sentinel handles process completion and cleanup.
 (defun claude-agent--sentinel-handle-normal-exit (state event)
   "Handle normal (non-recovery) exit for STATE with EVENT.
 Calls the complete callback with nil for successful exit, or with
-an error plist for abnormal exit codes."
-  (let ((complete-cb (claude-agent--process-state-complete-callback state)))
-    (cond
-     ((string-match-p "finished" event)
-      (when complete-cb
-        (funcall complete-cb nil)))
-     ((string-match-p "exited abnormally" event)
-      (let ((exit-code (when (string-match "code \\([0-9]+\\)" event)
-                         (string-to-number (match-string 1 event)))))
+an error plist for abnormal exit codes.
+Skips the complete callback entirely if the query was cancelled,
+since the cancel path already handled cleanup."
+  ;; When a query is cancelled, claude-org-cancel (or cancel-query) already
+  ;; cleans up the session state (frees marker, sets status, stops spinner).
+  ;; Calling complete-callback here would cause duplicate cleanup and fire
+  ;; completion hooks with the wrong status.
+  (unless (claude-agent--process-state-cancelled state)
+    (let ((complete-cb (claude-agent--process-state-complete-callback state)))
+      (cond
+       ((string-match-p "finished" event)
+        (when complete-cb
+          (funcall complete-cb nil)))
+       ((string-match-p "exited abnormally" event)
+        (let ((exit-code (when (string-match "code \\([0-9]+\\)" event)
+                           (string-to-number (match-string 1 event)))))
+          (when complete-cb
+            (funcall complete-cb
+                     (list 'claude-agent-process-error
+                           :message "Process exited abnormally"
+                           :exit-code exit-code)))))
+       (t
         (when complete-cb
           (funcall complete-cb
                    (list 'claude-agent-process-error
-                         :message "Process exited abnormally"
-                         :exit-code exit-code)))))
-     (t
-      (when complete-cb
-        (funcall complete-cb
-                 (list 'claude-agent-process-error
-                       :message (format "Process event: %s" event))))))))
+                         :message (format "Process event: %s" event)))))))))
 
 (defun claude-agent--sentinel-handle-abnormal-exit (process state event)
   "Handle abnormal exit (recovery path) for PROCESS with STATE and EVENT.
