@@ -233,6 +233,7 @@ test-agent-unit:
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
 		-l tests/test-claude-agent-unit.el \
+		-l tests/test-claude-agent-refactor-phase3.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-backend-unit
@@ -271,6 +272,11 @@ test-org-unit:
 		-l tests/test-claude-org-response.el \
 		-l tests/test-claude-org-queue.el \
 		-l tests/test-claude-org-cancel.el \
+		-l tests/test-claude-org-refactor-phase1.el \
+		-l tests/test-claude-org-refactor-phase2.el \
+		-l tests/test-claude-org-refactor-phase4.el \
+		-l tests/support/org-fixtures.el \
+		-l tests/test-claude-org-refactor-phase5.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mock

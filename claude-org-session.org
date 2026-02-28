@@ -1,0 +1,323 @@
+#+TITLE: Claude Org Session Module
+#+PROPERTY: literate-load yes
+
+* Claude Org Session
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+Session state management for claude-org.
+Decomposed into 4 focused sub-structs composed within the main session-state.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'claude-agent)
+#+END_SRC
+
+** Sub-Structs
+
+Four focused sub-structs that group related session fields.
+
+*** Lifecycle Sub-Struct
+
+Fields related to query lifecycle: busy state, recovery, timing.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org--session-lifecycle
+               (:constructor claude-org--make-session-lifecycle)
+               (:copier nil))
+  "Query lifecycle state."
+  busy                    ; Boolean: query in progress
+  recovering              ; Non-nil during session recovery
+  start-time              ; float-time of request start
+  original-prompt         ; Original prompt for recovery context
+  recovery-count          ; Count of recovery attempts
+  query-handle            ; Opaque handle from backend-query (for cancellation)
+  backend                 ; claude-agent-backend struct (dispatches protocol)
+  pending-queue)          ; List of queued blocks awaiting execution
+#+END_SRC
+
+*** Render Sub-Struct
+
+Fields related to response rendering and display.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org--session-render
+               (:constructor claude-org--make-session-render)
+               (:copier nil))
+  "Response rendering state."
+  section-level           ; Heading level (integer) for response adjustment
+  response-has-content    ; Boolean: response has received content
+  current-line-length     ; Tracks line length for auto-breaking
+  last-assistant-query-id ; Query ID of last assistant message
+  marker                  ; Insertion point marker
+  spinner)                ; Spinner frame index (0-3)
+#+END_SRC
+
+*** Loop Sub-Struct
+
+Fields related to iteration/loop execution.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org--session-loop
+               (:constructor claude-org--make-session-loop)
+               (:copier nil))
+  "Iteration/loop execution state."
+  loop-max                ; Total loop iterations
+  loop-current            ; Current iteration (1-based)
+  loop-interval           ; Seconds between loop iterations
+  instruction-num)        ; Instruction number in sequence
+#+END_SRC
+
+*** Identity Sub-Struct
+
+Fields for identification and tracking.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org--session-identity
+               (:constructor claude-org--make-session-identity)
+               (:copier nil))
+  "Session identification and tracking."
+  query-id                ; UUID identifying the current query
+  custom-id               ; Custom ID of heading for recovery
+  block-id                ; Block identifier
+  sdk-uuid)               ; SDK UUID for tracking
+#+END_SRC
+
+** Composed Session State
+
+The main session-state struct composes the 4 sub-structs plus an extras plist.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org--session-state
+               (:constructor claude-org--make-session-state--internal)
+               (:copier nil))
+  "Typed session state for an org-mode Claude session.
+Composed of sub-structs: lifecycle, render, loop, identity."
+  (lifecycle (claude-org--make-session-lifecycle) :documentation "Lifecycle sub-struct")
+  (render (claude-org--make-session-render) :documentation "Render sub-struct")
+  (loop (claude-org--make-session-loop) :documentation "Loop sub-struct")
+  (identity (claude-org--make-session-identity) :documentation "Identity sub-struct")
+  extras)                 ; Plist for arbitrary additional properties
+
+(defun claude-org--make-session-state (&rest args)
+  "Create a new session-state, applying keyword ARGS to sub-struct fields.
+Supports all legacy keyword arguments (e.g. :spinner 0, :section-level nil)
+by routing them to the appropriate sub-struct."
+  (let ((state (claude-org--make-session-state--internal)))
+    ;; Apply keyword arguments to sub-struct fields
+    (while args
+      (let ((key (pop args))
+            (val (pop args)))
+        (claude-org--session-state-set state key val)))
+    state))
+#+END_SRC
+
+** Field Specification
+
+Declarative mapping from field name to sub-struct.
+Routing tables are generated from this single specification.
+
+#+BEGIN_SRC elisp
+(defconst claude-org--session-field-specs
+  '(;; Lifecycle fields
+    (busy . lifecycle)
+    (recovering . lifecycle)
+    (start-time . lifecycle)
+    (original-prompt . lifecycle)
+    (recovery-count . lifecycle)
+    (query-handle . lifecycle)
+    (backend . lifecycle)
+    (pending-queue . lifecycle)
+    ;; Render fields
+    (section-level . render)
+    (response-has-content . render)
+    (current-line-length . render)
+    (last-assistant-query-id . render)
+    (marker . render)
+    (spinner . render)
+    ;; Loop fields
+    (loop-max . loop)
+    (loop-current . loop)
+    (loop-interval . loop)
+    (instruction-num . loop)
+    ;; Identity fields
+    (query-id . identity)
+    (custom-id . identity)
+    (block-id . identity)
+    (sdk-uuid . identity))
+  "Alist mapping field names to their sub-struct group.
+Used to generate routing tables and backward-compat accessors.")
+#+END_SRC
+
+** Generated Routing Tables
+
+#+BEGIN_SRC elisp
+(defconst claude-org--session-field-accessors
+  (mapcar
+   (lambda (spec)
+     (let* ((field (car spec))
+            (sub (cdr spec))
+            (kw (intern (format ":%s" field)))
+            (sub-acc (intern (format "claude-org--session-state-%s" sub)))
+            (field-acc (intern (format "claude-org--session-%s-%s" sub field))))
+       (cons kw (eval `(lambda (s) (,field-acc (,sub-acc s)))))))
+   claude-org--session-field-specs)
+  "Alist mapping keyword properties to session-state accessor functions.
+Each entry is (KEYWORD . GETTER-FN) where GETTER-FN routes through sub-structs.
+Generated from `claude-org--session-field-specs'.")
+
+(defconst claude-org--session-field-setters
+  (mapcar
+   (lambda (spec)
+     (let* ((field (car spec))
+            (sub (cdr spec))
+            (kw (intern (format ":%s" field)))
+            (sub-acc (intern (format "claude-org--session-state-%s" sub)))
+            (field-acc (intern (format "claude-org--session-%s-%s" sub field))))
+       (cons kw (eval `(lambda (s v) (setf (,field-acc (,sub-acc s)) v))))))
+   claude-org--session-field-specs)
+  "Alist mapping keyword properties to session-state setter functions.
+Each entry is (KEYWORD . SETTER-FN) where SETTER-FN routes through sub-structs.
+Generated from `claude-org--session-field-specs'.")
+#+END_SRC
+
+** Session Registry
+
+#+BEGIN_SRC elisp
+(defvar-local claude-org--sessions nil
+  "Hash table mapping session-key -> `claude-org--session-state' struct.
+
+Initialized to a new hash table when `claude-org-mode' is enabled.")
+
+(defvar-local claude-org--fontlock-timer nil
+  "Timer for debounced font-lock during streaming.")
+#+END_SRC
+
+** Session State Accessors
+
+#+BEGIN_SRC elisp
+(defun claude-org--get-session (session-key)
+  "Get or create session state for SESSION-KEY.
+Returns a `claude-org--session-state' struct.
+Replaces stale non-struct entries (e.g. plists from pre-refactor code)."
+  ;; Ensure hash table exists (lazy initialization per buffer)
+  ;; Must use setq-local to create buffer-local binding
+  (unless (local-variable-p 'claude-org--sessions)
+    (setq-local claude-org--sessions (make-hash-table :test 'equal)))
+  (let ((existing (gethash session-key claude-org--sessions)))
+    (if (claude-org--session-state-p existing)
+        existing
+      (let ((state (claude-org--make-session-state
+                    :spinner 0
+                    :section-level nil
+                    :current-line-length 0)))
+        (puthash session-key state claude-org--sessions)
+        state))))
+
+(defun claude-org--session-state-set (state prop value)
+  "Set PROP to VALUE on session STATE struct.
+Looks up PROP in `claude-org--session-field-setters'; unknown props
+fall through to the extras plist."
+  (let ((entry (assq prop claude-org--session-field-setters)))
+    (if entry
+        (funcall (cdr entry) state value)
+      (setf (claude-org--session-state-extras state)
+            (plist-put (claude-org--session-state-extras state) prop value))))
+  value)
+
+(defun claude-org--session-put (session-key prop value)
+  "Set PROP to VALUE in session SESSION-KEY.
+PROP is a keyword like :busy, :query-id, etc."
+  (let ((state (claude-org--get-session session-key)))
+    (claude-org--session-state-set state prop value)
+    state))
+
+(defun claude-org--session-state-get (state prop)
+  "Get PROP from session STATE struct.
+Looks up PROP in `claude-org--session-field-accessors'; unknown props
+fall through to the extras plist."
+  (let ((entry (assq prop claude-org--session-field-accessors)))
+    (if entry
+        (funcall (cdr entry) state)
+      (plist-get (claude-org--session-state-extras state) prop))))
+
+(defun claude-org--session-get (session-key prop)
+  "Get PROP from session SESSION-KEY.
+PROP is a keyword like :busy, :query-id, etc.
+Unknown properties fall through to the extras plist."
+  (let ((state (claude-org--get-session session-key)))
+    (claude-org--session-state-get state prop)))
+
+(defun claude-org--reset-session-state (session-key)
+  "Reset transient session state flags for SESSION-KEY.
+Clears :busy, :recovering, and :last-assistant-query-id.
+Used after query completion, error handling, and recovery failure."
+  (claude-org--session-put session-key :busy nil)
+  (claude-org--session-put session-key :recovering nil)
+  (claude-org--session-put session-key :last-assistant-query-id nil))
+
+(defun claude-org--find-heading-by-property (property value &optional buffer)
+  "Find heading with PROPERTY matching VALUE in BUFFER.
+Return point at heading start, or nil if not found.
+BUFFER defaults to current buffer."
+  (with-current-buffer (or buffer (current-buffer))
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward
+             (format ":%s: +%s"
+                     (regexp-quote property)
+                     (regexp-quote value))
+             nil t)
+        (org-back-to-heading t)
+        (point)))))
+
+(defun claude-org--active-session-count ()
+  "Return count of sessions with :busy t."
+  (let ((count 0))
+    (when (hash-table-p claude-org--sessions)
+      (maphash (lambda (_id state)
+                 (when (and (claude-org--session-state-p state)
+                            (claude-org--session-state-get state :busy))
+                   (cl-incf count)))
+               claude-org--sessions))
+    count))
+
+(defun claude-org--session-display-name (session-key)
+  "Extract display name from SESSION-KEY.
+Returns just the custom part after :: or a shortened file path."
+  (if (string-match "::\\(.+\\)$" session-key)
+      (match-string 1 session-key)
+    ;; No custom ID, show abbreviated file name
+    (file-name-nondirectory session-key)))
+
+(defun claude-org--format-elapsed (start-time)
+  "Format elapsed time since START-TIME as human-readable string.
+Uses verbose format for header-line display."
+  (claude-agent-format-elapsed-time start-time 'verbose))
+#+END_SRC
+
+** Section Level Helpers
+
+#+BEGIN_SRC elisp
+(defun claude-org--ensure-positive-level (raw-level)
+  "Ensure RAW-LEVEL is a positive integer, defaulting to 1.
+Returns RAW-LEVEL unchanged if it is a number greater than 0,
+otherwise returns 1.  Handles nil, zero, and negative inputs."
+  (if (and raw-level (> raw-level 0)) raw-level 1))
+
+(defun claude-org--effective-section-level (session-key)
+  "Return the effective section level for SESSION-KEY, defaulting to 1.
+Reads :section-level from the session state and ensures it is positive
+via `claude-org--ensure-positive-level'."
+  (claude-org--ensure-positive-level
+   (claude-org--session-get session-key :section-level)))
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-org-session)
+#+END_SRC

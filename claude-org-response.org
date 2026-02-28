@@ -1,0 +1,118 @@
+#+TITLE: Claude Org Response Module
+#+PROPERTY: literate-load yes
+
+* Claude Org Response
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+Response utilities for claude-org: query-ID generation, header normalization,
+auto-break lines, and font-lock debounce.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+;; Depends on claude-org-session for fontlock-timer buffer-local var
+;; Depends on claude-org for defcustom variables (normalize-headers, etc.)
+;; These are loaded before this module via claude-code.el
+#+END_SRC
+
+** Query-ID Generation
+
+#+BEGIN_SRC elisp
+(defun claude-org--generate-query-id ()
+  "Generate a unique query ID.
+Format: YYYYMMDD-HHMMSS-XXXX where XXXX is a 4-char random suffix.
+Example: 20260204-103025-a7f3"
+  (let* ((timestamp (format-time-string "%Y%m%d-%H%M%S"))
+         (random-suffix (substring (md5 (format "%s%s" (random) (current-time))) 0 4)))
+    (format "%s-%s" timestamp random-suffix)))
+#+END_SRC
+
+** Debounced Font-Lock
+
+#+BEGIN_SRC elisp
+(defun claude-org--schedule-fontlock ()
+  "Schedule a debounced font-lock refresh.
+Batches rapid updates during streaming for better performance."
+  (when claude-org--fontlock-timer
+    (cancel-timer claude-org--fontlock-timer))
+  (lexical-let ((buf (current-buffer)))  ; Capture buffer lexically
+    (setq claude-org--fontlock-timer
+          (run-with-timer claude-org-fontlock-delay nil
+                          (lambda ()
+                            (when (buffer-live-p buf)
+                              (with-current-buffer buf
+                                (when (derived-mode-p 'org-mode)
+                                  (font-lock-flush)
+                                  (redisplay)))))))))
+#+END_SRC
+
+** Header Normalization
+
+#+BEGIN_SRC elisp
+(defun claude-org--normalize-headers-in-text (text target-level)
+  "Normalize org headers in TEXT to start at TARGET-LEVEL.
+Headers at line start are adjusted: Claude's level N becomes target-level + (N-1).
+Only lines starting with asterisks followed by space are treated as headers.
+Also normalizes line endings: \\r\\n (DOS) and \\r (old Mac) become \\n.
+No buffering - processes each token independently using regex."
+  ;; Normalize line endings: \r\n -> \n, then \r -> \n
+  (let ((clean-text (replace-regexp-in-string "\r\n?" "\n" text)))
+    (if (not claude-org-normalize-headers)
+        clean-text
+      (let ((offset (1- target-level)))
+        (replace-regexp-in-string
+         "^\\(\\*+\\) "
+         (lambda (match)
+           (let* ((stars (match-string 1 match))
+                  (new-level (+ (length stars) offset)))
+             (concat (make-string (max 1 new-level) ?*) " ")))
+         clean-text)))))
+
+(defun claude-org--auto-break-lines (text current-line-length)
+  "Auto-break long lines in TEXT after sentence-ending punctuation.
+CURRENT-LINE-LENGTH is the length of the current line before this text.
+Returns (NEW-TEXT . NEW-LINE-LENGTH) cons cell.
+Only active when `claude-org-auto-break-line-length' is positive."
+  (if (< claude-org-auto-break-line-length 1)
+      ;; Disabled - return text unchanged, update line length
+      (let ((last-newline (string-match-p "\n[^\n]*\\'" text)))
+        (cons text
+              (if last-newline
+                  (- (length text) last-newline 1)
+                (+ current-line-length (length text)))))
+    ;; Enabled - process text for line breaks
+    (let ((result "")
+          (line-len current-line-length)
+          (threshold claude-org-auto-break-line-length)
+          (i 0)
+          (len (length text)))
+      (while (< i len)
+        (let ((char (aref text i)))
+          ;; Always add char to result and increment line length first
+          (setq result (concat result (char-to-string char)))
+          (setq line-len (1+ line-len))
+          (cond
+           ;; Newline resets counter
+           ((= char ?\n)
+            (setq line-len 0))
+           ;; Check for sentence-ending punctuation followed by space
+           ;; Break if line length exceeds threshold
+           ((and (>= line-len threshold)
+                 (memq char '(?. ?! ?\?))
+                 (< (1+ i) len)
+                 (= (aref text (1+ i)) ?\s))
+            ;; Insert newline after the punctuation
+            (setq result (concat result "\n"))
+            (setq line-len 0))))
+        (setq i (1+ i)))
+      (cons result line-len))))
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-org-response)
+#+END_SRC

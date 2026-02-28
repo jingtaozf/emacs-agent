@@ -1,0 +1,240 @@
+#+TITLE: Claude Agent IDE Context Module
+#+PROPERTY: literate-load yes
+
+IDE context collection and system reminder building.
+Extracted from claude-agent.org as part of modular decomposition.
+
+* Dependencies
+
+#+BEGIN_SRC elisp
+;;; claude-agent-ide.el --- IDE context collection -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024-2025 Jingtao Xu
+
+;;; Commentary:
+
+;; Provides functions for collecting IDE context from Emacs
+;; and building system reminder tags that match the Python backend format.
+
+;;; Code:
+
+(require 'cl-lib)
+#+END_SRC
+
+* IDE Context
+
+This section provides functions for collecting IDE context from Emacs
+and building system reminder tags that match the Python backend format.
+
+** Buffer Filtering
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-ide-context-exclude-buffer-names
+  '("*Claude Chat*" "*Messages*" "*scratch*" "*Completions*")
+  "List of buffer name patterns to exclude from IDE context.
+Patterns are matched using `string-match-p' (regexp)."
+  :type '(repeat string)
+  :group 'claude-agent)
+
+(defcustom claude-agent-ide-context-exclude-modes
+  '(claude-agent-chat-mode special-mode dired-mode)
+  "List of major modes to exclude from IDE context."
+  :type '(repeat symbol)
+  :group 'claude-agent)
+
+(defvar claude-agent-ide-context-exclude-predicates nil
+  "List of predicate functions for excluding buffers from IDE context.
+Each function takes a buffer as argument and returns non-nil to exclude it.
+This allows dynamic exclusion, e.g., for claude-org-mode buffers.")
+
+(defun claude-agent--buffer-excluded-p (buffer)
+  "Check if BUFFER should be excluded from IDE context.
+Returns non-nil if buffer matches any exclusion criteria."
+  (or
+   ;; Check buffer name patterns
+   (cl-some (lambda (pattern)
+              (string-match-p pattern (buffer-name buffer)))
+            claude-agent-ide-context-exclude-buffer-names)
+   ;; Check major mode
+   (with-current-buffer buffer
+     (cl-some (lambda (mode)
+                (derived-mode-p mode))
+              claude-agent-ide-context-exclude-modes))
+   ;; Check custom predicates
+   (cl-some (lambda (pred)
+              (funcall pred buffer))
+            claude-agent-ide-context-exclude-predicates)))
+#+END_SRC
+
+** Buffer Information
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-buffer-info (buffer)
+  "Format BUFFER info as plist with :name :path :modified."
+  (with-current-buffer buffer
+    (list :name (buffer-name)
+          :path (buffer-file-name)
+          :modified (buffer-modified-p))))
+
+(defun claude-agent--get-file-buffers (&optional limit)
+  "Get list of file-visiting buffers, up to LIMIT (default 10).
+Excludes buffers matching `claude-agent-ide-context-exclude-buffer-names',
+`claude-agent-ide-context-exclude-modes', or any predicate in
+`claude-agent-ide-context-exclude-predicates'."
+  (let ((limit (or limit 10))
+        (buffers nil))
+    (dolist (buf (buffer-list))
+      (when (and (buffer-file-name buf)
+                 (not (claude-agent--buffer-excluded-p buf))
+                 (< (length buffers) limit))
+        (push (claude-agent--format-buffer-info buf) buffers)))
+    (nreverse buffers)))
+#+END_SRC
+
+** Selection Formatting
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-selection ()
+  "Format current selection as plist with :text :start-line :end-line.
+Returns nil if no region active. Truncates text at 500 chars."
+  (when (use-region-p)
+    (let* ((start (region-beginning))
+           (end (region-end))
+           (text (buffer-substring-no-properties start end))
+           (start-line (line-number-at-pos start))
+           (end-line (line-number-at-pos end)))
+      (list :text (if (> (length text) 500)
+                      (concat (substring text 0 500) "...")
+                    text)
+            :start-line start-line
+            :end-line end-line))))
+#+END_SRC
+
+** IDE Context Collection
+
+#+BEGIN_SRC elisp
+(defun claude-agent--get-current-file-buffer ()
+  "Get the most recently used file buffer that is not excluded.
+Returns the buffer object or nil if none found.
+This finds the most recently visited file buffer from `buffer-list',
+which works correctly even when called from a special buffer like Claude Chat."
+  (cl-loop for buf in (buffer-list)
+           when (and (buffer-file-name buf)
+                     (not (claude-agent--buffer-excluded-p buf)))
+           return buf))
+
+(defun claude-agent-collect-ide-context (&optional cwd)
+  "Collect IDE context from current Emacs state.
+Returns plist with:
+  :current-file - Most recent non-excluded file buffer info (name, path, modified)
+  :open-files   - List of file-visiting buffers (max 10), excludes filtered buffers
+  :selection    - Region info if active (text, start-line, end-line)
+  :cwd          - Working directory (uses CWD if provided, otherwise default-directory)
+
+Buffers are filtered according to `claude-agent-ide-context-exclude-buffer-names',
+`claude-agent-ide-context-exclude-modes', and `claude-agent-ide-context-exclude-predicates'.
+
+Note: current-file is determined by finding the most recently used file buffer
+from `buffer-list', not necessarily `current-buffer'. This allows correct context
+collection when called from special buffers like Claude Chat."
+  (let ((current-buf (claude-agent--get-current-file-buffer)))
+    (list :current-file (when current-buf
+                          (claude-agent--format-buffer-info current-buf))
+          :open-files (claude-agent--get-file-buffers 10)
+          :selection (claude-agent--format-selection)
+          :cwd (or cwd default-directory))))
+#+END_SRC
+
+** System Reminder Building
+
+#+BEGIN_SRC elisp
+(cl-defun claude-agent-build-system-reminder (&key current-file open-files
+                                                   selection file-path
+                                                   cwd extra-lines)
+  "Build <system-reminder> tag with IDE context.
+Returns string suitable for prepending to user prompt.
+
+CURRENT-FILE is plist with :name :path :modified.
+OPEN-FILES is list of such plists.
+SELECTION is plist with :text :start-line :end-line.
+FILE-PATH is the conversation notebook path.
+CWD is the working directory (project root) where operations should be performed.
+EXTRA-LINES is a list of additional strings to include in the reminder."
+  (let ((parts nil))
+    ;; Current file
+    (when current-file
+      (let ((name (or (plist-get current-file :name)
+                      (plist-get current-file :path)
+                      "unknown"))
+            (path (plist-get current-file :path))
+            (modified (plist-get current-file :modified)))
+        (push (concat "The user is currently editing: "
+                      name
+                      (if modified " (modified)" "")
+                      (if path (format " (%s)" path) ""))
+              parts)))
+
+    ;; Open files
+    (when open-files
+      (let ((file-list
+             (mapconcat
+              (lambda (f)
+                (concat (or (plist-get f :name)
+                            (plist-get f :path)
+                            "unknown")
+                        (if (plist-get f :modified) "*" "")))
+              (seq-take open-files 10)
+              ", ")))
+        (push (format "Open files in editor: %s" file-list) parts)))
+
+    ;; Selection
+    (when selection
+      (let ((text (plist-get selection :text))
+            (start-line (plist-get selection :start-line))
+            (end-line (plist-get selection :end-line)))
+        (when text
+          (push (format "Selected code (lines %d-%d):\n```\n%s\n```"
+                        start-line end-line text)
+                parts))))
+
+    ;; Working directory
+    (when cwd
+      (push (format "Working directory (project root): %s\nIMPORTANT: All file operations should be relative to this directory unless absolute paths are specified." cwd) parts))
+
+    ;; Conversation notebook
+    (when file-path
+      (push (format "Conversation notebook: %s" file-path) parts))
+
+    ;; Extra lines (for caller-specific context like org output level)
+    (when extra-lines
+      (dolist (line extra-lines)
+        (when (and line (stringp line) (> (length line) 0))
+          (push line parts))))
+
+    ;; Build final string
+    (if parts
+        (concat "<system-reminder>\n"
+                (mapconcat #'identity (nreverse parts) "\n")
+                "\n</system-reminder>")
+      "")))
+
+(defun claude-agent-get-system-reminder (&optional file-path)
+  "Get system reminder with automatically collected IDE context.
+FILE-PATH is the optional conversation notebook path.
+All other context (current-file, open-files, selection) is collected
+automatically from current Emacs state."
+  (let ((context (claude-agent-collect-ide-context)))
+    (claude-agent-build-system-reminder
+     :current-file (plist-get context :current-file)
+     :open-files (plist-get context :open-files)
+     :selection (plist-get context :selection)
+     :file-path file-path)))
+#+END_SRC
+
+
+* Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-ide)
+;;; claude-agent-ide.el ends here
+#+END_SRC

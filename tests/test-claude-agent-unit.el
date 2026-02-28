@@ -1850,7 +1850,8 @@ is-abnormal-exit-p check would pass and trigger recovery on a user-cancelled que
 (ert-deftest test-handle-rate-limit-event-posts-warning ()
   "Handler should call `message' with warning for allowed_warning status."
   :tags '(:unit :fast :stable :isolated :rate-limit)
-  (let ((messages nil))
+  (let ((messages nil)
+        (claude-agent--rate-limit-last-warned (make-hash-table :test 'equal)))
     (cl-letf (((symbol-function 'message)
                (lambda (fmt &rest args) (push (apply #'format fmt args) messages)))
               ((symbol-function 'float-time) (lambda () 1772380000.0)))
@@ -1871,7 +1872,8 @@ is-abnormal-exit-p check would pass and trigger recovery on a user-cancelled que
 (ert-deftest test-handle-rate-limit-event-no-warning-for-allowed ()
   "Handler should NOT post message when status is not allowed_warning."
   :tags '(:unit :fast :stable :isolated :rate-limit)
-  (let ((messages nil))
+  (let ((messages nil)
+        (claude-agent--rate-limit-last-warned (make-hash-table :test 'equal)))
     (cl-letf (((symbol-function 'message)
                (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
       (let* ((parsed '(:type "rate_limit_event"
@@ -1882,6 +1884,79 @@ is-abnormal-exit-p check would pass and trigger recovery on a user-cancelled que
              (state (claude-agent--make-process-state)))
         (claude-agent-handle-message 'rate_limit_event parsed state)
         (should (= 0 (length messages)))))))
+
+(ert-deftest test-handle-rate-limit-event-cooldown-suppresses-repeat ()
+  "Second warning within cooldown period should be suppressed."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  (let ((messages nil)
+        (claude-agent--rate-limit-last-warned (make-hash-table :test 'equal))
+        (claude-agent-rate-limit-warning-interval 3600))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (let* ((parsed '(:type "rate_limit_event"
+                       :rate_limit_info (:status "allowed_warning"
+                                         :rateLimitType "seven_day"
+                                         :utilization 0.77
+                                         :resetsAt 1772384400)))
+             (state (claude-agent--make-process-state)))
+        ;; First call at T=0: should warn
+        (puthash "seven_day" 0 claude-agent--rate-limit-last-warned)
+        (claude-agent-handle-message 'rate_limit_event parsed state)
+        (should (= 1 (length messages)))
+        ;; Second call: fake that last warned was just now (within cooldown)
+        (puthash "seven_day" (float-time) claude-agent--rate-limit-last-warned)
+        (claude-agent-handle-message 'rate_limit_event parsed state)
+        (should (= 1 (length messages)))))))
+
+(ert-deftest test-handle-rate-limit-event-warns-again-after-cooldown ()
+  "Warning should fire again after cooldown period expires."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  (let ((messages nil)
+        (claude-agent--rate-limit-last-warned (make-hash-table :test 'equal))
+        (claude-agent-rate-limit-warning-interval 3600)
+        (now 1772380000.0))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages)))
+              ((symbol-function 'float-time) (lambda () now)))
+      (let* ((parsed '(:type "rate_limit_event"
+                       :rate_limit_info (:status "allowed_warning"
+                                         :rateLimitType "seven_day"
+                                         :utilization 0.77
+                                         :resetsAt 1772384400)))
+             (state (claude-agent--make-process-state)))
+        ;; First call
+        (claude-agent-handle-message 'rate_limit_event parsed state)
+        (should (= 1 (length messages)))
+        ;; After cooldown expires (1 hour + 1 second)
+        (setq now (+ now 3601))
+        (claude-agent-handle-message 'rate_limit_event parsed state)
+        (should (= 2 (length messages)))))))
+
+(ert-deftest test-handle-rate-limit-event-different-types-independent ()
+  "Different rate limit types should have independent cooldowns."
+  :tags '(:unit :fast :stable :isolated :rate-limit)
+  (let ((messages nil)
+        (claude-agent--rate-limit-last-warned (make-hash-table :test 'equal))
+        (claude-agent-rate-limit-warning-interval 3600))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (let ((state (claude-agent--make-process-state)))
+        ;; seven_day warning
+        (claude-agent-handle-message 'rate_limit_event
+          '(:type "rate_limit_event"
+            :rate_limit_info (:status "allowed_warning"
+                              :rateLimitType "seven_day"
+                              :utilization 0.77 :resetsAt 1772384400))
+          state)
+        (should (= 1 (length messages)))
+        ;; five_hour warning (different type) — should also fire
+        (claude-agent-handle-message 'rate_limit_event
+          '(:type "rate_limit_event"
+            :rate_limit_info (:status "allowed_warning"
+                              :rateLimitType "five_hour"
+                              :utilization 0.80 :resetsAt 1772384400))
+          state)
+        (should (= 2 (length messages)))))))
 
 (provide 'test-claude-agent-unit)
 ;;; test-claude-agent-unit.el ends here

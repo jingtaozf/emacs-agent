@@ -112,17 +112,7 @@
   - [[#send-request-helpers][Send Request Helpers]]
   - [[#iteration-sections][Iteration Sections]]
   - [[#send-request][Send Request]]
-- [[#scheduled-execution][Scheduled Execution]]
-  - [[#data-structures][Data Structures]]
-  - [[#alist-management][Alist Management]]
-  - [[#execution-decision-logic][Execution Decision Logic]]
-  - [[#ai-block-detection][AI Block Detection]]
-  - [[#file-scanning][File Scanning]]
-  - [[#timer-system][Timer System]]
-  - [[#mode-line-indicator][Mode-Line Indicator]]
-  - [[#timer-startstop][Timer Start/Stop]]
-  - [[#list-buffer-mode][List Buffer Mode]]
-  - [[#org-schedule-advice][org-schedule Advice]]
+- Scheduled Execution → =claude-org-scheduled.org=
 - [[#header-line][Header Line]]
   - [[#state-variables-2][State Variables]]
   - [[#spinner-control][Spinner Control]]
@@ -214,6 +204,20 @@ Response will appear here after pressing C-c C-c inside the ai block.
 (require 'org)
 (require 'cl-lib)
 (require 'cl)  ; For lexical-let in callback closures
+
+;; Forward-declare hook variables needed by claude-org-history module
+;; (canonical definitions with docstrings are in "Execution Hooks" section below)
+(defvar claude-org-execute-hook nil)
+(defvar claude-org-complete-hook nil)
+
+;; Load extracted modules (literate-elisp .org files, not .el packages)
+(let ((module-dir (file-name-directory (or load-file-name buffer-file-name ""))))
+  (dolist (module '("claude-org-session" "claude-org-queue"
+                    "claude-org-response" "claude-org-history"
+                    "claude-org-scheduled"))
+    (unless (featurep (intern module))
+      (literate-elisp-load
+       (expand-file-name (concat module ".org") module-dir)))))
 #+END_SRC
 
 * Customization
@@ -998,89 +1002,75 @@ Load environment variables from `.env` files with variable substitution support.
 ** ENV File Loading
 
 #+BEGIN_SRC elisp
-(defun claude-org--parse-env-file (file-path)
-  "Parse .env FILE-PATH and return alist of (VAR . VALUE).
+(cl-defun claude-org--parse-env (source &key from-string)
+  "Parse .env content and return alist of (VAR . VALUE).
+SOURCE is either a file path or a string of env content.
+When FROM-STRING is non-nil, SOURCE is treated as a string.
+When FROM-STRING is nil, SOURCE is treated as a file path.
+
 Supports standard .env syntax:
   KEY=value
   KEY=\"value with spaces\"
-  # Comments
+  KEY='single quoted'
+  # Comments (ignored)
   export KEY=value (export prefix ignored)
+  Values containing = (only first = is split point)
 
-Performs tilde expansion on file-path."
-  (let ((expanded-path (expand-file-name file-path))
-        (env-alist '()))
-    (when (file-exists-p expanded-path)
-      (with-temp-buffer
-        (insert-file-contents expanded-path)
-        (goto-char (point-min))
-        (while (not (eobp))
-          (let ((line (string-trim (buffer-substring-no-properties
-                                    (line-beginning-position)
-                                    (line-end-position)))))
-            ;; Skip empty lines and comments
-            (unless (or (string-empty-p line)
-                        (string-prefix-p "#" line))
-              ;; Remove optional "export " prefix
-              (when (string-match "^export[ \t]+" line)
-                (setq line (substring line (match-end 0))))
-              ;; Parse KEY=VALUE
-              (when (string-match "^\\([A-Za-z_][A-Za-z0-9_]*\\)=\\(.*\\)$" line)
-                (let* ((key (match-string 1 line))
-                       (value (match-string 2 line))
-                       ;; Remove surrounding quotes if present
-                       (unquoted-value (if (and (>= (length value) 2)
-                                                (or (and (string-prefix-p "\"" value)
-                                                         (string-suffix-p "\"" value))
-                                                    (and (string-prefix-p "'" value)
-                                                         (string-suffix-p "'" value))))
-                                           (substring value 1 -1)
-                                         value)))
-                  (push (cons key unquoted-value) env-alist)))))
-          (forward-line 1))))
+Returns nil for nonexistent files. Safe parser — no Elisp execution."
+  (let ((env-alist '()))
+    (if from-string
+        ;; Parse from string content
+        (with-temp-buffer
+          (insert source)
+          (goto-char (point-min))
+          (setq env-alist (claude-org--parse-env-lines)))
+      ;; Parse from file path
+      (let ((expanded-path (expand-file-name source)))
+        (when (file-exists-p expanded-path)
+          (with-temp-buffer
+            (insert-file-contents expanded-path)
+            (goto-char (point-min))
+            (setq env-alist (claude-org--parse-env-lines))))))
+    env-alist))
+
+(defun claude-org--parse-env-lines ()
+  "Parse env lines from current buffer position to end.
+Returns alist of (KEY . VALUE). Internal helper for `claude-org--parse-env'."
+  (let ((env-alist '()))
+    (while (not (eobp))
+      (let ((line (string-trim (buffer-substring-no-properties
+                                (line-beginning-position)
+                                (line-end-position)))))
+        ;; Skip empty lines and comments
+        (unless (or (string-empty-p line)
+                    (string-prefix-p "#" line))
+          ;; Remove optional "export " prefix
+          (when (string-match "^\\s-*export[ \t]+" line)
+            (setq line (substring line (match-end 0))))
+          ;; Parse KEY=VALUE (value may contain =)
+          (when (string-match "^\\([A-Za-z_][A-Za-z0-9_]*\\)=\\(.*\\)$" line)
+            (let* ((key (match-string 1 line))
+                   (value (match-string 2 line))
+                   ;; Remove surrounding quotes if present
+                   (unquoted-value (if (and (>= (length value) 2)
+                                            (or (and (string-prefix-p "\"" value)
+                                                     (string-suffix-p "\"" value))
+                                                (and (string-prefix-p "'" value)
+                                                     (string-suffix-p "'" value))))
+                                       (substring value 1 -1)
+                                     value)))
+              (push (cons key unquoted-value) env-alist)))))
+      (forward-line 1))
     (nreverse env-alist)))
+
+;; Backward compatibility aliases
+(defun claude-org--parse-env-file (file-path)
+  "Parse .env FILE-PATH. Deprecated: use `claude-org--parse-env' instead."
+  (claude-org--parse-env file-path))
 
 (defun claude-org--parse-env-file-safe (content)
-  "Parse env file CONTENT string safely without using (read).
-Returns alist of (KEY . VALUE). This is a safe parser that treats
-all values as literal strings - no Elisp execution possible.
-
-Supports:
-- KEY=value
-- KEY=\"value\" (double quotes stripped)
-- KEY='value' (single quotes stripped)
-- # comments
-- export KEY=value (export prefix ignored)
-- Blank lines (skipped)
-- Values containing = (only first = is split point)"
-  (let ((env-alist '()))
-    (with-temp-buffer
-      (insert content)
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let ((line (string-trim (buffer-substring-no-properties
-                                  (line-beginning-position)
-                                  (line-end-position)))))
-          ;; Skip empty lines and comments
-          (unless (or (string-empty-p line)
-                      (string-prefix-p "#" line))
-            ;; Remove optional "export " prefix
-            (when (string-match "^\\s-*export[ \t]+" line)
-              (setq line (substring line (match-end 0))))
-            ;; Parse KEY=VALUE (value may contain =)
-            (when (string-match "^\\([A-Za-z_][A-Za-z0-9_]*\\)=\\(.*\\)$" line)
-              (let* ((key (match-string 1 line))
-                     (value (match-string 2 line))
-                     ;; Remove surrounding quotes if present
-                     (unquoted-value (if (and (>= (length value) 2)
-                                              (or (and (string-prefix-p "\"" value)
-                                                       (string-suffix-p "\"" value))
-                                                  (and (string-prefix-p "'" value)
-                                                       (string-suffix-p "'" value))))
-                                         (substring value 1 -1)
-                                       value)))
-                (push (cons key unquoted-value) env-alist)))))
-        (forward-line 1)))
-    (nreverse env-alist)))
+  "Parse env CONTENT string. Deprecated: use `claude-org--parse-env' with :from-string t."
+  (claude-org--parse-env content :from-string t))
 
 (defun claude-org--get-env-file-path ()
   "Get ENV_FILE path from org properties.
@@ -1093,7 +1083,7 @@ Returns nil if not set. Supports tilde expansion."
 Returns alist of (VAR . VALUE), or nil if no ENV_FILE is set."
   (when-let ((env-file-path (claude-org--get-env-file-path)))
     (if (file-exists-p env-file-path)
-        (claude-org--parse-env-file env-file-path)
+        (claude-org--parse-env env-file-path)
       (message "Warning: ENV_FILE not found: %s" env-file-path)
       nil)))
 #+END_SRC
@@ -1462,50 +1452,10 @@ Multi-session process management allowing concurrent queries.
 
 ** State Variables
 
-*** Session State Struct
+*** Session State (see claude-org-session.org)
 
-#+BEGIN_SRC elisp
-(cl-defstruct (claude-org--session-state
-               (:constructor claude-org--make-session-state)
-               (:copier nil))
-  "Typed session state for an org-mode Claude session."
-  busy                    ; Boolean: query in progress
-  recovering              ; Non-nil during session recovery
-  query-id                ; UUID identifying the current query
-  backend                 ; claude-agent-backend struct (dispatches protocol)
-  query-handle            ; Opaque handle from backend-query (for cancellation)
-  start-time              ; float-time of request start
-  original-prompt         ; Original prompt for recovery context
-  section-level           ; Heading level (integer) for response adjustment
-  response-has-content    ; Boolean: response has received content
-  last-assistant-query-id ; Query ID of last assistant message
-  current-line-length     ; Tracks line length for auto-breaking
-  loop-max                ; Total loop iterations
-  loop-current            ; Current iteration (1-based)
-  loop-interval           ; Seconds between loop iterations
-  pending-queue           ; List of queued blocks awaiting execution
-  instruction-num         ; Instruction number in sequence
-  custom-id               ; Custom ID of heading for recovery
-  recovery-count          ; Count of recovery attempts
-  block-id                ; Block identifier
-  marker                  ; Insertion point marker
-  spinner                 ; Spinner frame index (0-3)
-  sdk-uuid                ; SDK UUID for tracking
-  extras)                 ; Plist for arbitrary additional properties
-
-#+END_SRC
-
-*** Session Registry
-
-#+BEGIN_SRC elisp
-(defvar-local claude-org--sessions nil
-  "Hash table mapping session-key -> `claude-org--session-state' struct.
-
-Initialized to a new hash table when `claude-org-mode' is enabled.")
-
-(defvar-local claude-org--fontlock-timer nil
-  "Timer for debounced font-lock during streaming.")
-#+END_SRC
+Session struct, registry, and accessors are now in =claude-org-session.org=.
+Loaded via =(require 'claude-org-session)= in the Dependencies section.
 
 ** Persistent Client Registry
 
@@ -1700,164 +1650,6 @@ Added to `org-after-todo-state-change-hook' (buffer-local) in `claude-org-mode'.
            (format "section marked %s" org-state)))))))
 #+END_SRC
 
-** Session State Accessors
-
-#+BEGIN_SRC elisp
-(defun claude-org--get-session (session-key)
-  "Get or create session state for SESSION-KEY.
-Returns a `claude-org--session-state' struct.
-Replaces stale non-struct entries (e.g. plists from pre-refactor code)."
-  ;; Ensure hash table exists (lazy initialization per buffer)
-  ;; Must use setq-local to create buffer-local binding
-  (unless (local-variable-p 'claude-org--sessions)
-    (setq-local claude-org--sessions (make-hash-table :test 'equal)))
-  (let ((existing (gethash session-key claude-org--sessions)))
-    (if (claude-org--session-state-p existing)
-        existing
-      (let ((state (claude-org--make-session-state
-                    :spinner 0
-                    :section-level 0
-                    :current-line-length 0)))
-        (puthash session-key state claude-org--sessions)
-        state))))
-
-(defconst claude-org--session-field-accessors
-  `((:busy . ,#'claude-org--session-state-busy)
-    (:recovering . ,#'claude-org--session-state-recovering)
-    (:query-id . ,#'claude-org--session-state-query-id)
-    (:backend . ,#'claude-org--session-state-backend)
-    (:query-handle . ,#'claude-org--session-state-query-handle)
-    (:start-time . ,#'claude-org--session-state-start-time)
-    (:original-prompt . ,#'claude-org--session-state-original-prompt)
-    (:section-level . ,#'claude-org--session-state-section-level)
-    (:response-has-content . ,#'claude-org--session-state-response-has-content)
-    (:last-assistant-query-id . ,#'claude-org--session-state-last-assistant-query-id)
-    (:current-line-length . ,#'claude-org--session-state-current-line-length)
-    (:loop-max . ,#'claude-org--session-state-loop-max)
-    (:loop-current . ,#'claude-org--session-state-loop-current)
-    (:loop-interval . ,#'claude-org--session-state-loop-interval)
-    (:pending-queue . ,#'claude-org--session-state-pending-queue)
-    (:instruction-num . ,#'claude-org--session-state-instruction-num)
-    (:custom-id . ,#'claude-org--session-state-custom-id)
-    (:recovery-count . ,#'claude-org--session-state-recovery-count)
-    (:block-id . ,#'claude-org--session-state-block-id)
-    (:marker . ,#'claude-org--session-state-marker)
-    (:spinner . ,#'claude-org--session-state-spinner)
-    (:sdk-uuid . ,#'claude-org--session-state-sdk-uuid))
-  "Alist mapping keyword properties to session-state accessor functions.
-Each entry is (KEYWORD . GETTER-FN).  Adding a new struct field requires
-one line here and one line in `claude-org--session-field-setters'.")
-
-(defconst claude-org--session-field-setters
-  `((:busy . ,(lambda (state value) (setf (claude-org--session-state-busy state) value)))
-    (:recovering . ,(lambda (state value) (setf (claude-org--session-state-recovering state) value)))
-    (:query-id . ,(lambda (state value) (setf (claude-org--session-state-query-id state) value)))
-    (:backend . ,(lambda (state value) (setf (claude-org--session-state-backend state) value)))
-    (:query-handle . ,(lambda (state value) (setf (claude-org--session-state-query-handle state) value)))
-    (:start-time . ,(lambda (state value) (setf (claude-org--session-state-start-time state) value)))
-    (:original-prompt . ,(lambda (state value) (setf (claude-org--session-state-original-prompt state) value)))
-    (:section-level . ,(lambda (state value) (setf (claude-org--session-state-section-level state) value)))
-    (:response-has-content . ,(lambda (state value) (setf (claude-org--session-state-response-has-content state) value)))
-    (:last-assistant-query-id . ,(lambda (state value) (setf (claude-org--session-state-last-assistant-query-id state) value)))
-    (:current-line-length . ,(lambda (state value) (setf (claude-org--session-state-current-line-length state) value)))
-    (:loop-max . ,(lambda (state value) (setf (claude-org--session-state-loop-max state) value)))
-    (:loop-current . ,(lambda (state value) (setf (claude-org--session-state-loop-current state) value)))
-    (:loop-interval . ,(lambda (state value) (setf (claude-org--session-state-loop-interval state) value)))
-    (:pending-queue . ,(lambda (state value) (setf (claude-org--session-state-pending-queue state) value)))
-    (:instruction-num . ,(lambda (state value) (setf (claude-org--session-state-instruction-num state) value)))
-    (:custom-id . ,(lambda (state value) (setf (claude-org--session-state-custom-id state) value)))
-    (:recovery-count . ,(lambda (state value) (setf (claude-org--session-state-recovery-count state) value)))
-    (:block-id . ,(lambda (state value) (setf (claude-org--session-state-block-id state) value)))
-    (:marker . ,(lambda (state value) (setf (claude-org--session-state-marker state) value)))
-    (:spinner . ,(lambda (state value) (setf (claude-org--session-state-spinner state) value)))
-    (:sdk-uuid . ,(lambda (state value) (setf (claude-org--session-state-sdk-uuid state) value))))
-  "Alist mapping keyword properties to session-state setter functions.
-Each entry is (KEYWORD . SETTER-FN) where SETTER-FN takes (STATE VALUE).
-Adding a new struct field requires one line here and one line in
-`claude-org--session-field-accessors'.")
-
-(defun claude-org--session-state-set (state prop value)
-  "Set PROP to VALUE on session STATE struct.
-Looks up PROP in `claude-org--session-field-setters'; unknown props
-fall through to the extras plist."
-  (let ((entry (assq prop claude-org--session-field-setters)))
-    (if entry
-        (funcall (cdr entry) state value)
-      (setf (claude-org--session-state-extras state)
-            (plist-put (claude-org--session-state-extras state) prop value))))
-  value)
-
-(defun claude-org--session-put (session-key prop value)
-  "Set PROP to VALUE in session SESSION-KEY.
-PROP is a keyword like :busy, :query-id, etc."
-  (let ((state (claude-org--get-session session-key)))
-    (claude-org--session-state-set state prop value)
-    state))
-
-(defun claude-org--session-state-get (state prop)
-  "Get PROP from session STATE struct.
-Looks up PROP in `claude-org--session-field-accessors'; unknown props
-fall through to the extras plist."
-  (let ((entry (assq prop claude-org--session-field-accessors)))
-    (if entry
-        (funcall (cdr entry) state)
-      (plist-get (claude-org--session-state-extras state) prop))))
-
-(defun claude-org--session-get (session-key prop)
-  "Get PROP from session SESSION-KEY.
-PROP is a keyword like :busy, :query-id, etc.
-Unknown properties fall through to the extras plist."
-  (let ((state (claude-org--get-session session-key)))
-    (claude-org--session-state-get state prop)))
-
-(defun claude-org--reset-session-state (session-key)
-  "Reset transient session state flags for SESSION-KEY.
-Clears :busy, :recovering, and :last-assistant-query-id.
-Used after query completion, error handling, and recovery failure."
-  (claude-org--session-put session-key :busy nil)
-  (claude-org--session-put session-key :recovering nil)
-  (claude-org--session-put session-key :last-assistant-query-id nil))
-
-(defun claude-org--find-heading-by-property (property value &optional buffer)
-  "Find heading with PROPERTY matching VALUE in BUFFER.
-Return point at heading start, or nil if not found.
-BUFFER defaults to current buffer."
-  (with-current-buffer (or buffer (current-buffer))
-    (save-excursion
-      (goto-char (point-min))
-      (when (re-search-forward
-             (format ":%s: +%s"
-                     (regexp-quote property)
-                     (regexp-quote value))
-             nil t)
-        (org-back-to-heading t)
-        (point)))))
-
-(defun claude-org--active-session-count ()
-  "Return count of sessions with :busy t."
-  (let ((count 0))
-    (when (hash-table-p claude-org--sessions)
-      (maphash (lambda (_id state)
-                 (when (and (claude-org--session-state-p state)
-                            (claude-org--session-state-busy state))
-                   (cl-incf count)))
-               claude-org--sessions))
-    count))
-
-(defun claude-org--session-display-name (session-key)
-  "Extract display name from SESSION-KEY.
-Returns just the custom part after :: or a shortened file path."
-  (if (string-match "::\\(.+\\)$" session-key)
-      (match-string 1 session-key)
-    ;; No custom ID, show abbreviated file name
-    (file-name-nondirectory session-key)))
-
-(defun claude-org--format-elapsed (start-time)
-  "Format elapsed time since START-TIME as human-readable string.
-Uses verbose format for header-line display."
-  (claude-agent-format-elapsed-time start-time 'verbose))
-#+END_SRC
-
 ** Query-ID System
 
 Query-IDs provide reliable, marker-free response tracking. Each query gets a
@@ -1866,17 +1658,7 @@ unique ID stored as an org property, enabling:
 - Persistent response location (survives buffer kill/Emacs restart)
 - Clear audit trail (every response traceable to its query)
 
-*** Query-ID Generation
-
-#+BEGIN_SRC elisp
-(defun claude-org--generate-query-id ()
-  "Generate a unique query ID.
-Format: YYYYMMDD-HHMMSS-XXXX where XXXX is a 4-char random suffix.
-Example: 20260204-103025-a7f3"
-  (let* ((timestamp (format-time-string "%Y%m%d-%H%M%S"))
-         (random-suffix (substring (md5 (format "%s%s" (random) (current-time))) 0 4)))
-    (format "%s-%s" timestamp random-suffix)))
-#+END_SRC
+*** Query-ID Generation (see claude-org-response.org)
 
 *** Response Section Creation
 
@@ -1890,7 +1672,7 @@ For recovery queries, PARENT-QUERY-ID and RECOVERY-REASON should be provided.
 LOOP-INFO is (ITERATION . MAX) for loop iterations, or nil.
 
 Returns the position where content should be inserted (after properties)."
-  (let* ((section-level (or (claude-org--session-get session-key :section-level) 1))
+  (let* ((section-level (claude-org--effective-section-level session-key))
          ;; Response should be at SAME level as instruction (sibling), not child
          ;; section-level is the instruction heading level, so use it directly
          (response-level section-level)
@@ -1975,36 +1757,40 @@ Returns t if insertion succeeded, nil otherwise."
         (let ((heading-pos (claude-org--find-response-by-query-id query-id)))
           (when heading-pos
             (goto-char heading-pos)
-            ;; Find the :END: of the PROPERTIES drawer
-            (if (re-search-forward "^:END:" nil t)
-                (progn
-                  ;; Skip past :END: to the blank line after it
-                  (forward-line 1)
-                  ;; Skip ONE blank line if present (the standard separator)
-                  (when (looking-at "^$")
-                    (forward-line 1))
-                  ;; If we're now at a heading, insert BEFORE it (go back to blank line)
-                  (if (looking-at "^\\*+ ")
-                      (progn
-                        (forward-line -1)
-                        (end-of-line)
+            ;; Capture response section level for level-aware stop pattern
+            (let* ((response-level (org-current-level))
+                   ;; Only stop at headings at SAME or SHALLOWER level than
+                   ;; the response section; deeper headings are content within it
+                   (stop-pattern (format "^\\*\\{1,%d\\} " response-level)))
+              (if (re-search-forward "^:END:" nil t)
+                  (progn
+                    ;; Skip past :END: to the blank line after it
+                    (forward-line 1)
+                    ;; Skip ONE blank line if present (the standard separator)
+                    (when (looking-at "^$")
+                      (forward-line 1))
+                    ;; If we're now at a same-or-shallower heading, insert BEFORE it
+                    (if (looking-at stop-pattern)
+                        (progn
+                          (forward-line -1)
+                          (end-of-line)
+                          (insert text)
+                          t)
+                      ;; Otherwise, find the end of content in this section
+                      (let ((insert-pos (line-end-position)))
+                        ;; Search forward for same-or-shallower heading or end of buffer
+                        (while (and (not (eobp))
+                                    (not (looking-at stop-pattern)))
+                          (setq insert-pos (line-end-position))
+                          (forward-line 1))
+                        ;; insert-pos now points to end of last content line
+                        (goto-char insert-pos)
                         (insert text)
-                        t)
-                    ;; Otherwise, find the end of content in this section
-                    (let ((insert-pos (line-end-position)))
-                      ;; Search forward for next heading or end of buffer
-                      (while (and (not (eobp))
-                                  (not (looking-at "^\\*+ ")))
-                        (setq insert-pos (line-end-position))
-                        (forward-line 1))
-                      ;; insert-pos now points to end of last content line
-                      (goto-char insert-pos)
-                      (insert text)
-                      t)))
-              ;; No :END: found, fall back to end of heading line
-              (end-of-line)
-              (insert "\n" text)
-              t)))))))
+                        t)))
+                ;; No :END: found, fall back to end of heading line
+                (end-of-line)
+                (insert "\n" text)
+                t))))))))
 
 (defun claude-org--handle-token-v2 (session-key text)
   "Handle incoming TEXT token for SESSION-KEY using query-id lookup.
@@ -2012,7 +1798,7 @@ Normalizes org headers, auto-breaks long lines, and inserts at response section.
 This is the marker-free version using query-id."
   (let ((query-id (claude-org--session-get session-key :query-id)))
     (when query-id
-      (let* ((target-level (1+ (or (claude-org--session-get session-key :section-level) 0)))
+      (let* ((target-level (1+ (claude-org--effective-section-level session-key)))
              (normalized-text (claude-org--normalize-headers-in-text text target-level))
              ;; Auto-break long lines
              (current-line-len (or (claude-org--session-get session-key :current-line-length) 0))
@@ -2085,86 +1871,9 @@ or its buffer has been killed, BODY is silently skipped and nil is returned."
            ,@body)))))
 #+END_SRC
 
-** Pending Block Queue
+** Pending Block Queue (see claude-org-queue.org)
 
-Functions for managing queued blocks that execute when session becomes free.
-
-#+BEGIN_SRC elisp
-(defun claude-org--same-block-p (id-a marker-a id-b marker-b)
-  "Return non-nil if block A and block B refer to the same block.
-Compares by custom-id when both are non-nil, otherwise by marker position."
-  (if (and id-a id-b)
-      (equal id-a id-b)
-    (let ((pos-a (and (claude-org--marker-valid-p marker-a)
-                      (marker-position marker-a)))
-          (pos-b (and (claude-org--marker-valid-p marker-b)
-                      (marker-position marker-b))))
-      (and pos-a pos-b (= pos-a pos-b)))))
-
-(defun claude-org--queue-block (session-key block-info)
-  "Add BLOCK-INFO to pending queue for SESSION-KEY.
-BLOCK-INFO is a plist with :custom-id, :content, :marker, :instr-num.
-Duplicate detection uses custom-id.  When custom-id is unavailable on
-either side, marker position is compared instead.
-Returns:
-  'queued    - block was successfully added to queue
-  'running   - block is already running (cannot queue)
-  'in-queue  - block is already in the queue"
-  (let* ((queue (claude-org--session-get session-key :pending-queue))
-         (new-custom-id (plist-get block-info :custom-id))
-         (running-custom-id (claude-org--session-get session-key :custom-id))
-         (new-marker (plist-get block-info :marker))
-         (running-marker (claude-org--session-get session-key :marker))
-         ;; Determine if the new block matches the running block
-         (is-running
-          (and (claude-org--session-get session-key :busy)
-               (claude-org--same-block-p new-custom-id new-marker
-                                         running-custom-id running-marker)))
-         ;; Determine if the new block is already in queue
-         (in-queue
-          (cl-some (lambda (queued)
-                     (claude-org--same-block-p
-                      new-custom-id new-marker
-                      (plist-get queued :custom-id) (plist-get queued :marker)))
-                   queue)))
-    (cond
-     (is-running 'running)   ; Cannot queue the running block
-     (in-queue 'in-queue)    ; Already queued
-     ((>= (length queue) claude-org-max-queue-depth)
-      (message "Claude: Queue full (%d blocks). Cannot queue more."
-               (length queue))
-      'queue-full)
-     (t
-      (claude-org--session-put session-key :pending-queue
-                               (append queue (list block-info)))
-      'queued))))
-
-(defun claude-org--dequeue-block (session-key)
-  "Remove and return next block from SESSION-KEY queue.
-Returns nil if queue is empty."
-  (let ((queue (claude-org--session-get session-key :pending-queue)))
-    (when queue
-      (claude-org--session-put session-key :pending-queue (cdr queue))
-      (car queue))))
-
-(defun claude-org--clear-queue (session-key)
-  "Clear all pending blocks for SESSION-KEY."
-  (claude-org--session-put session-key :pending-queue nil))
-
-(defun claude-org--queue-count (session-key)
-  "Return number of queued blocks for SESSION-KEY."
-  (length (claude-org--session-get session-key :pending-queue)))
-
-(defun claude-org--total-queue-count ()
-  "Return total number of queued blocks across all sessions in current buffer."
-  (let ((total 0))
-    (when (hash-table-p claude-org--sessions)
-      (maphash (lambda (_key state)
-                 (when (claude-org--session-state-p state)
-                   (cl-incf total (length (claude-org--session-state-pending-queue state)))))
-               claude-org--sessions))
-    total))
-#+END_SRC
+Queue management functions are now in =claude-org-queue.org=.
 
 ** Execution Status Property
 
@@ -3738,7 +3447,8 @@ LOOP-INFO is (CURRENT . MAX) for loop iterations, or nil.
 SECTION-LEVEL is the heading level for the Response section.
 
 Returns a string like: \"** Response 1 (2025-01-13 08:00) :ai_output:\""
-  (let* ((level (or section-level (claude-org--get-section-level)))
+  (let* ((level (claude-org--ensure-positive-level
+                  (or section-level (claude-org--get-section-level))))
          (stars (make-string level ?*))
          ;; Trim seconds for cleaner display: "2025-01-13 08:00:15" -> "2025-01-13 08:00"
          (display-time (if (and timestamp (> (length timestamp) 16))
@@ -3754,118 +3464,16 @@ Returns a string like: \"** Response 1 (2025-01-13 08:00) :ai_output:\""
             stars instr-part loop-suffix display-time claude-org-output-tag)))
 #+END_SRC
 
-** Debounced Font-Lock
+** Debounced Font-Lock (see claude-org-response.org)
 
-#+BEGIN_SRC elisp
-(defun claude-org--schedule-fontlock ()
-  "Schedule a debounced font-lock refresh.
-Batches rapid updates during streaming for better performance."
-  (when claude-org--fontlock-timer
-    (cancel-timer claude-org--fontlock-timer))
-  (lexical-let ((buf (current-buffer)))  ; Capture buffer lexically
-    (setq claude-org--fontlock-timer
-          (run-with-timer claude-org-fontlock-delay nil
-                          (lambda ()
-                            (when (buffer-live-p buf)
-                              (with-current-buffer buf
-                                (when (derived-mode-p 'org-mode)
-                                  (font-lock-flush)
-                                  (redisplay)))))))))
-#+END_SRC
-
-** Header Normalization
-
-Normalize org headers in Claude's output to fit the document hierarchy.
-Headers are adjusted so Claude's top-level (=*=) becomes the target level.
-
-Uses simple regex replacement - no buffering needed since =^= matches
-both start of string and start of line (after newline).
-
-#+BEGIN_SRC elisp
-(defun claude-org--normalize-headers-in-text (text target-level)
-  "Normalize org headers in TEXT to start at TARGET-LEVEL.
-Headers at line start are adjusted: Claude's level N becomes target-level + (N-1).
-Only lines starting with asterisks followed by space are treated as headers.
-Also normalizes line endings: \\r\\n (DOS) and \\r (old Mac) become \\n.
-No buffering - processes each token independently using regex."
-  ;; Normalize line endings: \r\n -> \n, then \r -> \n
-  (let ((clean-text (replace-regexp-in-string "\r\n?" "\n" text)))
-    (if (not claude-org-normalize-headers)
-        clean-text
-      (let ((offset (1- target-level)))
-        (replace-regexp-in-string
-         "^\\(\\*+\\) "
-         (lambda (match)
-           (let* ((stars (match-string 1 match))
-                  (new-level (+ (length stars) offset)))
-             (concat (make-string (max 1 new-level) ?*) " ")))
-         clean-text)))))
-
-(defun claude-org--auto-break-lines (text current-line-length)
-  "Auto-break long lines in TEXT after sentence-ending punctuation.
-CURRENT-LINE-LENGTH is the length of the current line before this text.
-Returns (NEW-TEXT . NEW-LINE-LENGTH) cons cell.
-Only active when `claude-org-auto-break-line-length' is positive."
-  (if (< claude-org-auto-break-line-length 1)
-      ;; Disabled - return text unchanged, update line length
-      (let ((last-newline (string-match-p "\n[^\n]*\\'" text)))
-        (cons text
-              (if last-newline
-                  (- (length text) last-newline 1)
-                (+ current-line-length (length text)))))
-    ;; Enabled - process text for line breaks
-    (let ((result "")
-          (line-len current-line-length)
-          (threshold claude-org-auto-break-line-length)
-          (i 0)
-          (len (length text)))
-      (while (< i len)
-        (let ((char (aref text i)))
-          ;; Always add char to result and increment line length first
-          (setq result (concat result (char-to-string char)))
-          (setq line-len (1+ line-len))
-          (cond
-           ;; Newline resets counter
-           ((= char ?\n)
-            (setq line-len 0))
-           ;; Check for sentence-ending punctuation followed by space
-           ;; Break if line length exceeds threshold
-           ((and (>= line-len threshold)
-                 (memq char '(?. ?! ?\?))
-                 (< (1+ i) len)
-                 (= (aref text (1+ i)) ?\s))
-            ;; Insert newline after the punctuation
-            (setq result (concat result "\n"))
-            (setq line-len 0))))
-        (setq i (1+ i)))
-      (cons result line-len))))
-#+END_SRC
+** Header Normalization (see claude-org-response.org)
 
 ** Token Handling
 
 #+BEGIN_SRC elisp
-(defun claude-org--handle-token (session-key text)
-  "Handle incoming TEXT token for SESSION-KEY.
-Normalizes org headers, auto-breaks long lines, and inserts text at the session's marker.
-If marker is invalid (buffer killed), this function does nothing."
-  (let ((marker (claude-org--session-get session-key :marker)))
-    (claude-org--with-session-marker marker
-      (let* ((target-level (1+ (or (claude-org--session-get session-key :section-level) 0)))
-             (normalized-text (claude-org--normalize-headers-in-text text target-level))
-             ;; Auto-break long lines
-             (current-line-len (or (claude-org--session-get session-key :current-line-length) 0))
-             (break-result (claude-org--auto-break-lines normalized-text current-line-len))
-             (final-text (car break-result))
-             (new-line-len (cdr break-result)))
-        ;; Update line length state
-        (claude-org--session-put session-key :current-line-length new-line-len)
-        ;; Insert processed text
-        (when (> (length final-text) 0)
-          (save-excursion
-            (goto-char marker)
-            (insert final-text)
-            (set-marker marker (point)))))
-      (claude-org--schedule-fontlock))))
+;; NOTE: claude-org--handle-token (marker-based v1) has been removed.
+;; All token handling now uses claude-org--handle-token-v2 (query-id based).
+;; See Phase 1 refactoring (F2: unify token handler pipeline).
 #+END_SRC
 
 ** Message Handling
@@ -4287,459 +3895,10 @@ CRITICAL: This function MUST clear :recovering flag to prevent stuck state."
   (run-hook-with-args 'claude-org-complete-hook session-key error-msg 'error))
 #+END_SRC
 
-* Block History
+* Block History (see claude-org-history.org)
 
-Functions for tracking and navigating executed AI blocks. History persists
-to disk so it survives Emacs restarts.
-
-** Persistence Functions
-
-#+NAME: history-persistence
-#+BEGIN_SRC elisp
-(defun claude-org--history-file-path ()
-  "Return path to history file for current buffer.
-Uses format: <basename>--<short-hash>.el for readability."
-  (let* ((org-path (buffer-file-name))
-         (basename (file-name-sans-extension
-                    (file-name-nondirectory org-path)))
-         (hash (substring (md5 org-path) 0 8))
-         (dir claude-org-history-directory))
-    (expand-file-name (format "%s--%s.el" basename hash) dir)))
-
-(defun claude-org--ensure-history-directory ()
-  "Ensure the history directory exists."
-  (unless (file-directory-p claude-org-history-directory)
-    (make-directory claude-org-history-directory t)))
-
-(defun claude-org--load-history ()
-  "Load history from disk for current buffer."
-  (when (and (buffer-file-name)
-             (not claude-org--history-loaded))
-    (let ((history-file (claude-org--history-file-path))
-          (current-org-file (buffer-file-name))
-          (loaded-blocks nil))
-      (when (file-exists-p history-file)
-        (condition-case err
-            (setq loaded-blocks
-                  (with-temp-buffer
-                    (insert-file-contents history-file)
-                    (let ((data (read (current-buffer))))
-                      (when (and (plist-get data :blocks)
-                                 (string= (plist-get data :org-file)
-                                          current-org-file))
-                        (plist-get data :blocks)))))
-          (error
-           (message "claude-org: Failed to load history: %s" err))))
-      (when loaded-blocks
-        (setq claude-org--block-history loaded-blocks)))
-    (setq claude-org--history-loaded t)))
-
-(defun claude-org--save-history ()
-  "Save history to disk for current buffer (debounced)."
-  (when (buffer-file-name)
-    ;; Cancel existing timer
-    (when claude-org--history-save-timer
-      (cancel-timer claude-org--history-save-timer))
-    ;; Schedule save
-    (setq claude-org--history-save-timer
-          (run-with-timer
-           claude-org--history-save-delay nil
-           (lambda (buf)
-             (when (buffer-live-p buf)
-               (with-current-buffer buf
-                 (claude-org--save-history-now))))
-           (current-buffer)))))
-
-(defun claude-org--save-history-now ()
-  "Immediately save history to disk."
-  (when (and (buffer-file-name) claude-org--block-history)
-    (claude-org--ensure-history-directory)
-    (let ((history-file (claude-org--history-file-path))
-          (data `(:version 2  ; Version 2: Added :custom-id for stable navigation
-                  :org-file ,(buffer-file-name)
-                  :updated ,(float-time)
-                  :blocks ,(claude-org--prepare-history-for-save))))
-      (with-temp-file history-file
-        (insert ";; -*- mode: lisp-data -*-\n")
-        (insert ";; Claude-org block history - do not edit\n")
-        ;; `pp' respects `print-length' and `print-level' global settings.
-        ;; If user has these set (e.g., for debugging), large history data
-        ;; gets truncated with "..." which becomes symbol `\...' when read
-        ;; back, corrupting the history.  Bind to nil to ensure full output.
-        (let ((print-length nil)
-              (print-level nil))
-          (pp data (current-buffer)))))))
-
-(defun claude-org--prepare-history-for-save ()
-  "Prepare history for saving by removing transient data.
-Keeps only the most recent entries, limited by `claude-org-history-max-entries'.
-Only saves entries with CUSTOM_ID - titles are built dynamically."
-  (let ((entries (cl-remove-if-not
-                  (lambda (entry) (plist-get (cdr entry) :custom-id))
-                  (mapcar
-                   (lambda (entry)
-                     (let ((id (car entry))
-                           (plist (cdr entry)))
-                       ;; Only keep timestamp, status, and custom-id
-                       (cons id (list :timestamp (plist-get plist :timestamp)
-                                      :status (plist-get plist :status)
-                                      :custom-id (plist-get plist :custom-id)))))
-                   claude-org--block-history)))
-        (limit claude-org-history-max-entries))
-    ;; Sort by timestamp, keep most recent
-    (setq entries (sort entries
-                        (lambda (a b)
-                          (> (or (plist-get (cdr a) :timestamp) 0)
-                             (or (plist-get (cdr b) :timestamp) 0)))))
-    (seq-take entries limit)))
-
-(defun claude-org--ensure-history-loaded ()
-  "Ensure history is loaded from disk."
-  (unless claude-org--history-loaded
-    (claude-org--load-history)))
-#+END_SRC
-
-** Hook Functions
-
-Default hook functions for block history tracking.
-
-#+NAME: history-hooks
-#+BEGIN_SRC elisp
-(defun claude-org--find-instruction-custom-id ()
-  "Find the CUSTOM_ID of the instruction heading containing point.
-Checks: immediate heading, previous siblings at same level, then parent headings.
-Returns CUSTOM_ID string or nil if not found."
-  (save-excursion
-    (let ((custom-id nil))
-      ;; First check the immediate containing heading
-      (ignore-errors
-        (org-back-to-heading t)
-        (when (member "claude_chat" (org-get-tags nil t))
-          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
-      ;; Check previous siblings at same level (Response is sibling to Instruction)
-      (when (not custom-id)
-        (let ((current-level (org-current-level)))
-          (while (and (not custom-id)
-                      (org-get-previous-sibling))
-            (when (and (= (org-current-level) current-level)
-                       (member "claude_chat" (org-get-tags nil t)))
-              (setq custom-id (org-entry-get nil "CUSTOM_ID"))))))
-      ;; If still not found, walk up parent headings
-      (while (and (not custom-id) (org-up-heading-safe))
-        (when (member "claude_chat" (org-get-tags nil t))
-          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
-      custom-id)))
-
-(defun claude-org-goto-custom-id (custom-id)
-  "Navigate to the heading with CUSTOM_ID.
-This is used as a source-location-fn for session manager navigation.
-Returns t if found and positioned, nil otherwise."
-  (goto-char (point-min))
-  (when (re-search-forward
-         (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
-    (org-back-to-heading t)
-    t))
-
-(defun claude-org--record-block-execution (session-key _query _marker)
-  "Record block execution start.
-SESSION-KEY identifies the session.
-Called from `claude-org-execute-hook' when point is still in the AI block.
-Only stores CUSTOM_ID - titles are built dynamically when listing.
-Blocks without CUSTOM_ID are not recorded.
-If block with same CUSTOM_ID exists, updates it instead of creating duplicate."
-  (claude-org--ensure-history-loaded)
-  (let ((custom-id (claude-org--find-instruction-custom-id)))
-    ;; Only record if we have a CUSTOM_ID
-    (when custom-id
-      ;; Check if entry with this CUSTOM_ID already exists
-      (let ((existing (cl-find-if (lambda (e)
-                                    (and (listp e) (string= (plist-get (cdr e) :custom-id) custom-id)))
-                                  claude-org--block-history)))
-        (if existing
-            ;; Update existing entry - move to front and update timestamp/status
-            (progn
-              (setq claude-org--block-history (delete existing claude-org--block-history))
-              (let ((updated-entry `(,(car existing)
-                                     :timestamp ,(float-time)
-                                     :status in-progress
-                                     :custom-id ,custom-id)))
-                (push updated-entry claude-org--block-history)
-                (claude-org--session-put session-key :block-id (car existing))))
-          ;; Create new entry
-          (let* ((block-id (format "block-%s-%s"
-                                   (substring custom-id (max 0 (- (length custom-id) 20)))
-                                   (format-time-string "%H%M%S")))
-                 (entry `(:timestamp ,(float-time)
-                          :status in-progress
-                          :custom-id ,custom-id)))
-            (push (cons block-id entry) claude-org--block-history)
-            (claude-org--session-put session-key :block-id block-id)))
-        ;; Trigger debounced save
-        (claude-org--save-history)))))
-
-(defun claude-org--update-block-status (session-key _result status)
-  "Update block status on completion.
-SESSION-KEY identifies the session, STATUS is `completed' or `error'."
-  (let ((block-id (claude-org--session-get session-key :block-id)))
-    (when block-id
-      (let ((entry (assoc block-id claude-org--block-history)))
-        (when entry
-          (plist-put (cdr entry) :status status)
-          (claude-org--save-history))))))
-
-;; Register default hooks
-;; Record on execute-hook (before execution starts) - point is still in AI block
-(add-hook 'claude-org-execute-hook #'claude-org--record-block-execution)
-(add-hook 'claude-org-complete-hook #'claude-org--update-block-status)
-#+END_SRC
-
-** Navigation Functions
-
-Functions for collecting and navigating to recent blocks.
-
-#+NAME: history-navigation
-#+BEGIN_SRC elisp
-(defun claude-org--format-time-ago (timestamp)
-  "Format TIMESTAMP as relative time string."
-  (let* ((now (float-time))
-         (diff (- now timestamp))
-         (minutes (floor (/ diff 60)))
-         (hours (floor (/ diff 3600)))
-         (days (floor (/ diff 86400))))
-    (cond
-     ((< diff 60) "just now")
-     ((< minutes 60) (format "%dm ago" minutes))
-     ((< hours 24) (format "%dh ago" hours))
-     (t (format "%dd ago" days)))))
-
-(defun claude-org--extract-query-title-from-ai-block ()
-  "Extract a title from the first AI block in current subtree.
-Returns first line of query content, truncated to 60 chars."
-  (save-excursion
-    (let ((subtree-end (save-excursion (org-end-of-subtree t) (point))))
-      (when (re-search-forward "#\\+begin_src ai" subtree-end t)
-        (forward-line 1)
-        (let* ((start (point))
-               (end (save-excursion
-                      (if (re-search-forward "#\\+end_src" subtree-end t)
-                          (line-beginning-position)
-                        subtree-end)))
-               (content (string-trim (buffer-substring-no-properties start end)))
-               ;; Get first non-empty line
-               (first-line (car (seq-filter (lambda (s) (not (string-empty-p s)))
-                                            (split-string content "\n")))))
-          (when first-line
-            (let ((title (string-trim first-line)))
-              (if (> (length title) 60)
-                  (concat (substring title 0 57) "...")
-                title))))))))
-
-(defun claude-org--build-block-title-from-custom-id (custom-id)
-  "Build a meaningful title by navigating to CUSTOM_ID heading.
-Returns full hierarchy: \"Instruction > Parent > Grandparent\" format.
-Skips 'Workflow' headings as they're SDD containers.
-For generic 'Instruction N' headings, uses first line of AI query instead."
-  (when custom-id
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char (point-min))
-        (condition-case nil
-            (progn
-              ;; Navigate to the heading with CUSTOM_ID
-              (org-link-search (format "#%s" custom-id))
-              ;; Get current heading
-              (let* ((heading (substring-no-properties (org-get-heading t t t t)))
-                     ;; Check if heading is generic "Instruction N" pattern
-                     (is-generic (string-match-p "^Instruction [0-9]+$" heading))
-                     ;; For generic headings, extract title from AI block query
-                     (effective-heading (if is-generic
-                                            (or (claude-org--extract-query-title-from-ai-block)
-                                                heading)
-                                          heading))
-                     (headings (list effective-heading)))
-                ;; Collect parent headings (skip Workflow)
-                (save-excursion
-                  (while (org-up-heading-safe)
-                    (let ((parent (substring-no-properties (org-get-heading t t t t))))
-                      (unless (string= parent "Workflow")
-                        (push parent headings)))))
-                ;; Build title: most specific first, then parents
-                ;; headings is now (root parent ... instruction)
-                ;; We want: instruction > parent > root
-                (string-join (reverse headings) " > ")))
-          (error nil))))))
-
-(defun claude-org--format-block-candidate (entry)
-  "Format ENTRY for display in completing-read.
-ENTRY is (BLOCK-ID . PLIST).
-Builds title dynamically from CUSTOM_ID to show current heading hierarchy."
-  (let* ((plist (cdr entry))
-         (status (plist-get plist :status))
-         (custom-id (plist-get plist :custom-id))
-         ;; Build title dynamically from CUSTOM_ID
-         (title (or (claude-org--build-block-title-from-custom-id custom-id) "Untitled"))
-         (timestamp (plist-get plist :timestamp))
-         (status-icon (pcase status
-                        ('completed "✓")
-                        ('in-progress "⋯")
-                        ('error "✗")
-                        (_ "?")))
-         (time-str (if timestamp
-                       (claude-org--format-time-ago timestamp)
-                     "unknown")))
-    (format "[%s] %s (%s)"
-            status-icon
-            title  ;; No truncation - show full hierarchy
-            time-str)))
-
-(defun claude-org--custom-id-exists-p (custom-id)
-  "Check if CUSTOM_ID exists in the current buffer."
-  (when custom-id
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char (point-min))
-        (condition-case nil
-            (progn
-              (org-link-search (format "#%s" custom-id))
-              t)
-          (error nil))))))
-
-(defun claude-org--get-story-name-for-custom-id (custom-id)
-  "Get the story name for a block identified by CUSTOM_ID.
-Navigates to the heading, walks up to find the ancestor with
-CLAUDE_SESSION_ID property, and returns its heading text.
-Returns nil if no session-scope heading is found."
-  (when custom-id
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char (point-min))
-        (condition-case nil
-            (progn
-              (org-link-search (format "#%s" custom-id))
-              (let ((pos (claude-org--find-session-scope-heading)))
-                (when pos
-                  (goto-char pos)
-                  (substring-no-properties (org-get-heading t t t t)))))
-          (error nil))))))
-
-(defun claude-org--build-candidate-info (custom-id)
-  "Build display info for CUSTOM_ID in a single navigation pass.
-Returns (TITLE . STORY-NAME) or nil if CUSTOM_ID not found.
-TITLE is the heading hierarchy with the story root stripped when present.
-STORY-NAME is the session ancestor heading text (or nil).
-This avoids multiple `org-link-search' calls per candidate."
-  (when custom-id
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char (point-min))
-        (condition-case nil
-            (progn
-              (org-link-search (format "#%s" custom-id))
-              ;; Build title from heading hierarchy
-              (let* ((heading (substring-no-properties (org-get-heading t t t t)))
-                     (is-generic (string-match-p "^Instruction [0-9]+$" heading))
-                     (effective-heading (if is-generic
-                                            (or (claude-org--extract-query-title-from-ai-block)
-                                                heading)
-                                          heading))
-                     (headings (list effective-heading))
-                     (story-name nil))
-                ;; Walk up parents: collect headings AND find story
-                (save-excursion
-                  (while (org-up-heading-safe)
-                    (let ((parent (substring-no-properties (org-get-heading t t t t))))
-                      (unless (string= parent "Workflow")
-                        (push parent headings)))
-                    ;; Check if this heading defines the session scope
-                    (when (and (not story-name)
-                               (or (claude-org--has-session-tag-p)
-                                   (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
-                      (setq story-name
-                            (substring-no-properties (org-get-heading t t t t))))))
-                ;; Strip story heading from title to avoid duplication
-                (let ((display-headings (if story-name
-                                            (cl-remove story-name headings
-                                                       :test #'string= :count 1)
-                                          headings)))
-                  (cons (string-join (reverse display-headings) " > ")
-                        story-name))))
-          (error nil))))))
-
-(defun claude-org--collect-recent-blocks ()
-  "Collect recent blocks for completing-read.
-Returns alist of (DISPLAY-STRING . ENTRY).
-Only includes entries with CUSTOM_ID that still exist in the buffer.
-Limited by `claude-org-history-max-entries'.
-Each DISPLAY-STRING is prefixed with [Story Name] for grouping.
-Uses single-pass navigation per candidate to avoid redundant searches."
-  (claude-org--ensure-history-loaded)
-  (let* ((entries-with-id (cl-remove-if-not
-                           (lambda (entry)
-                             (and (listp entry)
-                                  (plist-get (cdr entry) :custom-id)))
-                           claude-org--block-history))
-         ;; Build candidate info in single pass per entry
-         ;; This replaces separate exists-p + format + story-name calls
-         (candidates nil)
-         (count 0))
-    (dolist (entry entries-with-id)
-      (when (< count claude-org-history-max-entries)
-        (let* ((plist (cdr entry))
-               (custom-id (plist-get plist :custom-id))
-               (info (claude-org--build-candidate-info custom-id)))
-          ;; info is (TITLE . STORY) or nil if CUSTOM_ID not found
-          (when info
-            (let* ((title (car info))
-                   (story (or (cdr info) "Ungrouped"))
-                   (status (plist-get plist :status))
-                   (timestamp (plist-get plist :timestamp))
-                   (status-icon (pcase status
-                                  ('completed "✓")
-                                  ('in-progress "⋯")
-                                  ('error "✗")
-                                  (_ "?")))
-                   (time-str (if timestamp
-                                 (claude-org--format-time-ago timestamp)
-                               "unknown"))
-                   (display (format "[%s] [%s] %s (%s)"
-                                    story status-icon title time-str)))
-              (push (cons display entry) candidates)
-              (cl-incf count))))))
-    (nreverse candidates)))
-
-(defun claude-org--goto-block-by-custom-id (custom-id)
-  "Navigate to AI block via CUSTOM_ID using org-link-search.
-Returns t if navigation succeeded, nil otherwise."
-  (condition-case nil
-      (progn
-        (org-link-search (format "#%s" custom-id))
-        t)
-    (error nil)))
-
-(defun claude-org-jump-to-ai-block ()
-  "Jump to a recent AI block, grouped by story.
-Shows a list of recently executed blocks with status and timing.
-Each candidate is prefixed with [Story Name] for visual grouping.
-Uses CUSTOM_ID for stable navigation (survives file edits)."
-  (interactive)
-  (claude-org--ensure-history-loaded)
-  (let ((candidates (claude-org--collect-recent-blocks)))
-    (if (null candidates)
-        (message "No AI block history found")
-      (let* ((selection (completing-read "Jump to: " candidates nil t))
-             (entry (cdr (assoc selection candidates)))
-             (plist (cdr entry))
-             (custom-id (plist-get plist :custom-id)))
-        (if (and custom-id (claude-org--goto-block-by-custom-id custom-id))
-            (progn
-              (org-reveal t)
-              (recenter))
-          (message "Cannot navigate to block - no CUSTOM_ID"))))))
-#+END_SRC
+Block history persistence, hook functions, and navigation are now in
+=claude-org-history.org=.
 
 * Execution
 
@@ -4748,6 +3907,68 @@ Execution and request handling.
 ** Execute Command
 
 #+BEGIN_SRC elisp
+(cl-defun claude-org--execute-core (session-key content section-level custom-id
+                                     &key loop-max loop-interval
+                                          heading-marker)
+  "Shared execution logic for both direct and queued block execution.
+SESSION-KEY is the session identifier.
+CONTENT is the prompt text.
+SECTION-LEVEL is the heading level for the response section.
+CUSTOM-ID is the instruction's CUSTOM_ID for navigation.
+LOOP-MAX, LOOP-INTERVAL control loop execution.
+HEADING-MARKER is an optional marker for auto-title generation.
+
+Sets session state, creates response section, starts spinner,
+sends request, and runs hooks.  Returns nil."
+  (let ((loop-max (or loop-max 1))
+        (loop-interval (or loop-interval 0)))
+    (claude-org--set-exec-status "executing")
+    (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
+      (save-excursion
+        (org-back-to-heading t)
+        (org-entry-put nil "LAST_AI_EXECUTED" timestamp))
+      (let ((insert-point (claude-org--find-response-insert-point))
+            (instr-num (claude-org--find-instruction-number)))
+        (unless insert-point
+          (user-error "Cannot find block end"))
+        (let ((query-id (claude-org--generate-query-id))
+              (block-marker (copy-marker (point))))
+          ;; Store session state
+          (claude-org--session-put session-key :query-id query-id)
+          (claude-org--session-put session-key :marker block-marker)
+          (claude-org--session-put session-key :original-prompt content)
+          (claude-org--session-put session-key :section-level section-level)
+          (claude-org--session-put session-key :start-time (float-time))
+          (claude-org--session-put session-key :busy t)
+          (claude-org--session-put session-key :loop-max loop-max)
+          (claude-org--session-put session-key :loop-current 1)
+          (claude-org--session-put session-key :loop-interval loop-interval)
+          (claude-org--session-put session-key :instruction-num instr-num)
+          (claude-org--session-put session-key :custom-id custom-id)
+          (claude-org--session-put session-key :recovery-count 0)
+          ;; Create Response section
+          (save-excursion
+            (goto-char insert-point)
+            (insert "\n\n")
+            (when claude-org-auto-create-response-section
+              (claude-org--create-response-section session-key query-id 'normal)))
+          ;; Run pre-execution hook
+          (run-hook-with-args 'claude-org-execute-hook session-key content nil)
+          ;; Start spinner and auto-title
+          (claude-org--start-spinner session-key)
+          (when heading-marker
+            (claude-org--maybe-auto-generate-title content heading-marker))
+          ;; Build query-context and send
+          (let ((query-ctx (when instr-num
+                             (claude-agent-make-query-context
+                              :instruction-num instr-num
+                              :loop-current 1
+                              :loop-max loop-max
+                              :custom-id custom-id))))
+            (claude-org--send-request content query-ctx session-key))
+          ;; Run post-execution hook
+          (run-hook-with-args 'claude-org-execute-after-hook session-key content nil))))))
+
 (defun claude-org-execute ()
   "Execute the AI query at point.
 Must be called when point is inside a #+begin_src ai block.
@@ -4814,61 +4035,11 @@ If the session is busy, queues the block for execution when current query comple
            (message "This block is already scheduled [%d in queue]."
                     (claude-org--queue-count session-key))))
         (cl-return-from claude-org-execute nil)))
-    ;; Set status to executing and record timestamp
-    (claude-org--set-exec-status "executing")
-    (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
-      (save-excursion
-        (org-back-to-heading t)
-        (org-entry-put nil "LAST_AI_EXECUTED" timestamp))
-      ;; Find insertion point (after last :ai_output: sibling, or after #+end_src)
-      (let ((insert-point (claude-org--find-response-insert-point))
-            (instr-num (claude-org--find-instruction-number)))
-        (unless insert-point
-          (user-error "Cannot find block end"))
-        ;; Generate query-id FIRST (marker-free architecture)
-        (let ((query-id (claude-org--generate-query-id))
-              ;; Create marker at current AI block position for queue duplicate detection
-              (block-marker (copy-marker (point))))
-          ;; Store session state BEFORE creating response section
-          (claude-org--session-put session-key :query-id query-id)
-          (claude-org--session-put session-key :marker block-marker)
-          (claude-org--session-put session-key :original-prompt content)
-          (claude-org--session-put session-key :section-level section-level)
-          (claude-org--session-put session-key :start-time (float-time))
-          (claude-org--session-put session-key :busy t)
-          ;; Store loop state
-          (claude-org--session-put session-key :loop-max loop-max)
-          (claude-org--session-put session-key :loop-current 1)
-          (claude-org--session-put session-key :loop-interval loop-interval)
-          ;; Store instruction info for loop continuation
-          (claude-org--session-put session-key :instruction-num instr-num)
-          (claude-org--session-put session-key :custom-id custom-id)
-          ;; Reset recovery count for new query
-          (claude-org--session-put session-key :recovery-count 0)
-          ;; Create Response section with query-id (marker-free)
-          (save-excursion
-            (goto-char insert-point)
-            (insert "\n\n")
-            (when claude-org-auto-create-response-section
-              (claude-org--create-response-section session-key query-id 'normal)))
-          ;; Run pre-execution hook (pass nil for marker - we're marker-free now)
-          (run-hook-with-args 'claude-org-execute-hook session-key content nil)
-          ;; Start spinner and send request
-          (claude-org--start-spinner session-key)
-          ;; Auto-generate title in parallel (using Haiku, separate session)
-          (when heading-marker
-            (claude-org--maybe-auto-generate-title content heading-marker))
-          ;; Build query-context for session manager (with loop info)
-          (let ((query-ctx (when instr-num
-                             (claude-agent-make-query-context
-                              :instruction-num instr-num
-                              :loop-current 1
+    ;; Delegate to shared execution logic
+    (claude-org--execute-core session-key content section-level custom-id
                               :loop-max loop-max
-                              :custom-id custom-id))))
-            ;; Send request - query-id already stored in session
-            (claude-org--send-request content query-ctx session-key))
-          ;; Run post-execution hook (pass nil for marker - we're marker-free now)
-          (run-hook-with-args 'claude-org-execute-after-hook session-key content nil)))))))
+                              :loop-interval loop-interval
+                              :heading-marker heading-marker))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -5029,7 +4200,6 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
         (loop-max (plist-get block-info :loop-max))
         (loop-interval (plist-get block-info :loop-interval))
         (section-level (plist-get block-info :section-level))
-        (should-auto-title (plist-get block-info :should-auto-title))
         (heading-marker (plist-get block-info :heading-marker)))
     ;; Check if marker is still valid (block not deleted)
     (unless (and orig-marker (marker-buffer orig-marker))
@@ -5038,482 +4208,16 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
       (when-let ((next (claude-org--dequeue-block session-key)))
         (claude-org--execute-queued-block session-key next))
       (cl-return-from claude-org--execute-queued-block nil))
-    ;; Navigate to the original position and execute
+    ;; Navigate to the original position and delegate to shared core
     (with-current-buffer (marker-buffer orig-marker)
       (save-excursion
         (goto-char orig-marker)
-        ;; Update status from scheduled to executing
-        (claude-org--set-exec-status "executing")
-        (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
-          ;; Record execution timestamp
-          (save-excursion
-            (org-back-to-heading t)
-            (org-entry-put nil "LAST_AI_EXECUTED" timestamp))
-          ;; Find insertion point
-          (let ((insert-point (claude-org--find-response-insert-point))
-                (instr-num (claude-org--find-instruction-number)))
-            (unless insert-point
-              (message "Cannot find block end for queued block")
-              (set-marker orig-marker nil)  ; Free marker before early return
-              (cl-return-from claude-org--execute-queued-block nil))
-            ;; Generate new query-id for this queued block (critical for token routing)
-            (let ((query-id (claude-org--generate-query-id)))
-              ;; Store query-id BEFORE creating response section
-              (claude-org--session-put session-key :query-id query-id)
-              ;; Set up at insertion point
-              (save-excursion
-                (goto-char insert-point)
-                (insert "\n\n")
-                ;; Create Response section with :QUERY_ID: property (marker-free architecture)
-                (when claude-org-auto-create-response-section
-                  (claude-org--session-put session-key :section-level section-level)
-                  (claude-org--session-put session-key :instruction-num instr-num)
-                  (claude-org--create-response-section session-key query-id 'normal)))
-              (let ((marker (point-marker)))
-                (claude-org--session-put session-key :marker marker)
-                (claude-org--session-put session-key :original-prompt content)
-                (claude-org--session-put session-key :section-level section-level)
-                (claude-org--session-put session-key :start-time (float-time))
-                (claude-org--session-put session-key :busy t)
-                ;; Store loop state
-                (claude-org--session-put session-key :loop-max loop-max)
-                (claude-org--session-put session-key :loop-current 1)
-                (claude-org--session-put session-key :loop-interval loop-interval)
-                ;; Store instruction info
-                (claude-org--session-put session-key :instruction-num instr-num)
-                (claude-org--session-put session-key :custom-id custom-id)
-                ;; Run pre-execution hook
-                (run-hook-with-args 'claude-org-execute-hook session-key content marker)))
-            ;; Start spinner and send request
-            (claude-org--start-spinner session-key)
-            ;; Auto-generate title if needed
-            (when heading-marker
-              (claude-org--maybe-auto-generate-title content heading-marker))
-            ;; Build query-context and send
-            (let ((query-ctx (when instr-num
-                               (claude-agent-make-query-context
-                                :instruction-num instr-num
-                                :loop-current 1
-                                :loop-max loop-max
-                                :custom-id custom-id))))
-              (claude-org--send-request content query-ctx session-key))
-            ;; Run post-execution hook
-            (let ((marker (claude-org--session-get session-key :marker)))
-              (run-hook-with-args 'claude-org-execute-after-hook session-key content marker)))))
+        (claude-org--execute-core session-key content section-level custom-id
+                                  :loop-max loop-max
+                                  :loop-interval loop-interval
+                                  :heading-marker heading-marker)))
     ;; Free original marker
-    (set-marker orig-marker nil)))))
-#+END_SRC
-
-* Scheduled Execution
-
-Execute AI blocks automatically at scheduled times using org-mode's SCHEDULED property.
-
-** Data Structures
-
-#+BEGIN_SRC elisp
-(defvar claude-org--scheduled-blocks nil
-  "Alist of scheduled AI blocks.
-Keys are CUSTOM-ID strings.
-Values are plists: (:file FILE :scheduled-time TIME)
-where TIME is Emacs time from `org-get-scheduled-time'.")
-
-(defvar claude-org--scheduled-timer nil
-  "Timer that checks for due scheduled AI blocks every 60 seconds.")
-
-(defcustom claude-org-scheduled-files nil
-  "List of files to scan for scheduled AI blocks.
-If nil, uses `org-agenda-files'."
-  :type '(repeat file)
-  :group 'claude-org)
-#+END_SRC
-
-** Alist Management
-
-#+BEGIN_SRC elisp
-(defun claude-org-scheduled--update-entry (custom-id file scheduled-time)
-  "Update or add entry for CUSTOM-ID in scheduled blocks alist.
-FILE is the org file path.
-SCHEDULED-TIME is Emacs time from `org-get-scheduled-time'."
-  (setf (alist-get custom-id claude-org--scheduled-blocks nil nil #'string=)
-        (list :file file :scheduled-time scheduled-time)))
-
-(defun claude-org-scheduled--remove-entry (custom-id)
-  "Remove entry for CUSTOM-ID from scheduled blocks alist."
-  (setq claude-org--scheduled-blocks
-        (assoc-delete-all custom-id claude-org--scheduled-blocks #'string=)))
-#+END_SRC
-
-** Execution Decision Logic
-
-#+BEGIN_SRC elisp
-(defun claude-org-scheduled--should-execute-p (scheduled-time last-executed-str)
-  "Return t if AI block should execute based on times.
-SCHEDULED-TIME is Emacs time from `org-get-scheduled-time'.
-LAST-EXECUTED-STR is string from LAST_AI_EXECUTED property (or nil).
-
-Execution happens when:
-1. Scheduled time has arrived (scheduled-time <= now)
-2. AND either never executed OR scheduled after last execution"
-  (let ((now (current-time))
-        (last-executed (when (and last-executed-str
-                                  (not (string-empty-p last-executed-str)))
-                         (encode-time (parse-time-string last-executed-str)))))
-    (and
-     ;; Scheduled time has arrived
-     (not (time-less-p now scheduled-time))
-     ;; Either never executed, or scheduled after last execution
-     (or (null last-executed)
-         (time-less-p last-executed scheduled-time)))))
-#+END_SRC
-
-** AI Block Detection
-
-#+BEGIN_SRC elisp
-(defun claude-org-scheduled--has-ai-block-p ()
-  "Return t if heading at point contains an AI block in its subtree.
-Only searches within the current heading's subtree."
-  (save-excursion
-    (let ((subtree-end (save-excursion (org-end-of-subtree t) (point))))
-      (re-search-forward "#\\+begin_src ai" subtree-end t))))
-#+END_SRC
-
-** File Scanning
-
-#+BEGIN_SRC elisp
-(defun claude-org-scheduled--collect-from-file (file)
-  "Collect scheduled AI blocks from FILE.
-Returns alist of (CUSTOM-ID . (:file FILE :scheduled-time TIME))."
-  (let (results)
-    (when (file-exists-p file)
-      (with-current-buffer (find-file-noselect file)
-        (org-with-wide-buffer
-         (goto-char (point-min))
-         (while (re-search-forward "^\\*+ " nil t)
-           (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
-                  (scheduled-time (org-get-scheduled-time (point))))
-             (when (and custom-id scheduled-time
-                        (claude-org-scheduled--has-ai-block-p))
-               (push (cons custom-id
-                           (list :file file
-                                 :scheduled-time scheduled-time))
-                     results)))))))
-    results))
-
-(defun claude-org-scheduled-scan-all ()
-  "Scan org files and build scheduled blocks alist.
-Uses `claude-org-scheduled-files' or `org-agenda-files' if nil."
-  (interactive)
-  (setq claude-org--scheduled-blocks nil)
-  (let ((files (or claude-org-scheduled-files
-                   (and (fboundp 'org-agenda-files)
-                        (org-agenda-files 'unrestricted)))))
-    (dolist (file files)
-      (dolist (entry (claude-org-scheduled--collect-from-file file))
-        (push entry claude-org--scheduled-blocks)))
-    ;; Update mode-line indicator
-    (when (fboundp 'claude-org-scheduled--update-mode-line)
-      (claude-org-scheduled--update-mode-line))
-    (message "Found %d scheduled AI block(s)"
-             (length claude-org--scheduled-blocks))))
-#+END_SRC
-
-** Timer System
-
-#+BEGIN_SRC elisp
-(defun claude-org-scheduled--check-and-execute ()
-  "Check all scheduled AI blocks and execute those that are due.
-Called by the timer every 60 seconds."
-  (dolist (entry claude-org--scheduled-blocks)
-    (let* ((custom-id (car entry))
-           (plist (cdr entry))
-           (file (plist-get plist :file))
-           (scheduled-time (plist-get plist :scheduled-time)))
-      (claude-org-scheduled--maybe-execute file custom-id scheduled-time))))
-
-(defun claude-org-scheduled--maybe-execute (file custom-id scheduled-time)
-  "Execute AI block if due and not already executed.
-FILE is the org file path.
-CUSTOM-ID identifies the heading.
-SCHEDULED-TIME is when the block should execute.
-Returns t if execution started, nil if skipped (busy, not due, etc)."
-  (when (file-exists-p file)
-    (with-current-buffer (find-file-noselect file)
-      (org-with-wide-buffer
-       (goto-char (point-min))
-       (when (re-search-forward
-              (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
-         (org-back-to-heading t)
-         (let ((last-exec-str (org-entry-get nil "LAST_AI_EXECUTED"))
-               (heading-pos (point)))
-           (when (claude-org-scheduled--should-execute-p
-                  scheduled-time last-exec-str)
-             ;; Find AI block within subtree
-             (let ((subtree-end (save-excursion (org-end-of-subtree t) (point))))
-               (when (re-search-forward "#\\+begin_src ai" subtree-end t)
-                 (forward-line 1)  ; Move INTO the block, not on begin_src line
-                 ;; Check if session is busy before executing
-                 (let ((session-key (claude-org--current-session-key)))
-                   (if (claude-org--session-get session-key :busy)
-                       (message "Skipping scheduled block %s - session busy" custom-id)
-                     ;; Session not busy, proceed with execution
-                     (message "Executing scheduled AI block: %s" custom-id)
-                     (claude-org-execute)
-                     ;; After execution, advance repeater if present
-                     (goto-char heading-pos)
-                     (let ((new-time (claude-org-scheduled--advance-repeater)))
-                       (when new-time
-                         ;; Update the in-memory alist with new scheduled time
-                         (claude-org-scheduled--update-entry custom-id file new-time)
-                         (message "Advanced repeater for %s to next occurrence"
-                                  custom-id)
-                         ;; Save the buffer to persist the change
-                         (save-buffer))))))))))))))
-
-(defun claude-org-scheduled--advance-repeater ()
-  "Advance the SCHEDULED timestamp if it has a repeater.
-Must be called with point on the heading.
-Returns the new scheduled time if advanced, nil otherwise."
-  (let ((repeat (org-get-repeat)))
-    (when repeat
-      (save-excursion
-        ;; Find the SCHEDULED line within the heading
-        (let ((heading-end (save-excursion (outline-next-heading) (point))))
-          (when (re-search-forward "SCHEDULED:" heading-end t)
-            ;; Find the timestamp on this line
-            (when (re-search-forward "<[^>]+>" (line-end-position) t)
-              (goto-char (match-beginning 0))
-              ;; Parse the repeater: +1d, +1w, +1m, .+1d, ++1d, etc.
-              (let* ((clean-repeat (if (string-match "^[.+]+" repeat)
-                                       (replace-match "" nil nil repeat)
-                                     repeat))
-                     (n (string-to-number (substring clean-repeat 0 -1)))
-                     (unit-char (substring clean-repeat -1))
-                     ;; Convert to days - org-timestamp-change works best with 'day
-                     (days (pcase unit-char
-                             ("d" n)
-                             ("w" (* n 7))
-                             ("m" (* n 30))  ; Approximate
-                             ("y" (* n 365)))))  ; Approximate
-                (when (and days (> days 0))
-                  (org-timestamp-change days 'day)
-                  ;; Return the new scheduled time
-                  (org-get-scheduled-time (point)))))))))))
-#+END_SRC
-
-** Mode-Line Indicator
-:PROPERTIES:
-:CUSTOM_ID: mode-line-indicator
-:END:
-
-Display scheduled AI blocks count in mode-line with clickable popup.
-
-#+BEGIN_SRC elisp
-(defvar claude-org-scheduled-string ""
-  "Mode-line string showing scheduled AI blocks count.
-Clickable to show list of scheduled blocks.")
-
-(defun claude-org-scheduled--update-mode-line ()
-  "Update the scheduled blocks mode-line indicator."
-  (let ((count (length claude-org--scheduled-blocks)))
-    (if (and claude-org--scheduled-timer (> count 0))
-        (setq claude-org-scheduled-string
-              (propertize (format " [S:%d]" count)
-                          'face 'font-lock-constant-face
-                          'help-echo (format "%d scheduled AI block(s)\nmouse-1: Show schedule list"
-                                             count)
-                          'mouse-face 'mode-line-highlight
-                          'local-map (let ((map (make-sparse-keymap)))
-                                       (define-key map [mode-line mouse-1]
-                                                   #'claude-org-scheduled-list)
-                                       map)))
-      (setq claude-org-scheduled-string "")))
-  (force-mode-line-update t))
-#+END_SRC
-
-** Timer Start/Stop
-:PROPERTIES:
-:CUSTOM_ID: timer-start-stop
-:END:
-
-#+BEGIN_SRC elisp
-(defun claude-org-scheduled-start ()
-  "Start the scheduled AI block checker.
-Scans files and starts a timer that checks every 60 seconds.
-Call this from your init.el to enable scheduled execution."
-  (interactive)
-  (claude-org-scheduled-stop)
-  (claude-org-scheduled-scan-all)
-  (setq claude-org--scheduled-timer
-        (run-at-time 0 60 #'claude-org-scheduled--check-and-execute))
-  ;; Enable mode-line indicator
-  (claude-org-scheduled--update-mode-line)
-  (unless (member '(:eval claude-org-scheduled-string) mode-line-misc-info)
-    (push '(:eval claude-org-scheduled-string) mode-line-misc-info))
-  (force-mode-line-update t)
-  (message "Scheduled AI execution started (checking every 60s)"))
-
-(defun claude-org-scheduled-stop ()
-  "Stop the scheduled AI block checker."
-  (interactive)
-  (when (timerp claude-org--scheduled-timer)
-    (cancel-timer claude-org--scheduled-timer)
-    (setq claude-org--scheduled-timer nil))
-  ;; Remove mode-line indicator
-  (setq claude-org-scheduled-string "")
-  (setq mode-line-misc-info
-        (delete '(:eval claude-org-scheduled-string) mode-line-misc-info))
-  (force-mode-line-update t)
-  (message "Scheduled AI execution stopped"))
-#+END_SRC
-
-** List Buffer Mode
-:PROPERTIES:
-:CUSTOM_ID: list-buffer-mode
-:END:
-
-A tabulated-list buffer for viewing and navigating to scheduled AI blocks.
-
-#+BEGIN_SRC elisp
-(defvar claude-org-scheduled-list-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "g") #'claude-org-scheduled-list-refresh)
-    (define-key map (kbd "RET") #'claude-org-scheduled-list-goto)
-    map)
-  "Keymap for `claude-org-scheduled-list-mode'.")
-
-(define-derived-mode claude-org-scheduled-list-mode tabulated-list-mode
-  "Scheduled AI"
-  "Major mode for listing scheduled AI blocks.
-\\{claude-org-scheduled-list-mode-map}"
-  (setq tabulated-list-format
-        [("ID" 25 t)
-         ("File" 25 t)
-         ("Last Run" 18 t)
-         ("Next Run" 18 t)])
-  (setq tabulated-list-padding 2)
-  (setq tabulated-list-sort-key (cons "Next Run" nil))
-  (add-hook 'tabulated-list-revert-hook #'claude-org-scheduled--revert nil t)
-  (tabulated-list-init-header))
-
-(defun claude-org-scheduled--revert ()
-  "Revert function for scheduled list buffer.
-Called by `revert-buffer' via `tabulated-list-revert-hook'."
-  (claude-org-scheduled-scan-all)
-  (setq tabulated-list-entries (claude-org-scheduled--build-list-entries)))
-
-(defun claude-org-scheduled--get-last-executed (file custom-id)
-  "Get LAST_AI_EXECUTED property for CUSTOM-ID in FILE."
-  (when (file-exists-p file)
-    (with-current-buffer (find-file-noselect file)
-      (org-with-wide-buffer
-       (goto-char (point-min))
-       (when (re-search-forward
-              (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
-         (org-back-to-heading t)
-         (org-entry-get nil "LAST_AI_EXECUTED"))))))
-
-(defun claude-org-scheduled--format-time (time)
-  "Format TIME as human-readable string, or \"Never\" if nil."
-  (if time
-      (format-time-string "%Y-%m-%d %H:%M" time)
-    "Never"))
-
-(defun claude-org-scheduled--build-list-entries ()
-  "Build tabulated-list entries from scheduled blocks."
-  (mapcar
-   (lambda (entry)
-     (let* ((custom-id (car entry))
-            (plist (cdr entry))
-            (file (plist-get plist :file))
-            (scheduled-time (plist-get plist :scheduled-time))
-            (last-exec-str (claude-org-scheduled--get-last-executed file custom-id))
-            (last-time (when (and last-exec-str (not (string-empty-p last-exec-str)))
-                         (encode-time (parse-time-string last-exec-str))))
-            (file-basename (file-name-nondirectory file))
-            (overdue-p (and scheduled-time
-                            (time-less-p scheduled-time (current-time)))))
-       (list custom-id
-             (vector
-              ;; ID column - clickable
-              (propertize custom-id
-                          'face 'link
-                          'action #'claude-org-scheduled-list-goto
-                          'follow-link t
-                          'help-echo "Click to jump to this AI block")
-              ;; File column
-              file-basename
-              ;; Last Run column
-              (claude-org-scheduled--format-time last-time)
-              ;; Next Run column - highlight if overdue
-              (propertize (claude-org-scheduled--format-time scheduled-time)
-                          'face (if overdue-p 'warning 'default))))))
-   claude-org--scheduled-blocks))
-
-(defun claude-org-scheduled-list ()
-  "Display a list of all scheduled AI blocks."
-  (interactive)
-  (let ((buf (get-buffer-create "*Claude Scheduled Blocks*")))
-    (with-current-buffer buf
-      (claude-org-scheduled-list-mode)
-      (setq tabulated-list-entries (claude-org-scheduled--build-list-entries))
-      (tabulated-list-print t))
-    (pop-to-buffer buf)))
-
-(defun claude-org-scheduled-list-refresh ()
-  "Refresh the scheduled blocks list buffer."
-  (interactive)
-  (claude-org-scheduled-scan-all)
-  (setq tabulated-list-entries (claude-org-scheduled--build-list-entries))
-  (tabulated-list-print t)
-  (message "Scheduled blocks list refreshed"))
-
-(defun claude-org-scheduled-list-goto (&optional _button)
-  "Jump to the AI block at point.
-BUTTON argument is ignored; we always use `tabulated-list-get-id'."
-  (interactive)
-  (let ((custom-id (tabulated-list-get-id)))
-    (when custom-id
-      (claude-org-scheduled--goto-block custom-id))))
-
-(defun claude-org-scheduled--goto-block (custom-id)
-  "Navigate to the AI block with CUSTOM-ID."
-  (let ((entry (assoc custom-id claude-org--scheduled-blocks #'string=)))
-    (when entry
-      (let ((file (plist-get (cdr entry) :file)))
-        (when (file-exists-p file)
-          (find-file file)
-          (widen)
-          (goto-char (point-min))
-          (when (re-search-forward
-                 (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
-            (org-back-to-heading t)
-            (org-reveal)
-            (recenter)))))))
-#+END_SRC
-
-** org-schedule Advice
-
-#+BEGIN_SRC elisp
-(defun claude-org-scheduled--after-schedule (&rest _)
-  "After advice for `org-schedule'.
-Updates the in-memory scheduled blocks list when user schedules a heading.
-Only active when scheduler is running."
-  (when claude-org--scheduled-timer  ; Only if scheduler is running
-    (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
-           (scheduled-time (org-get-scheduled-time (point)))
-           (file (buffer-file-name)))
-      (cond
-       ;; Has all required: update entry
-       ((and custom-id scheduled-time file
-             (claude-org-scheduled--has-ai-block-p))
-        (claude-org-scheduled--update-entry custom-id file scheduled-time)
-        (message "Updated schedule for AI block: %s" custom-id))
-       ;; Had custom-id but schedule removed: remove entry
-       ((and custom-id (not scheduled-time))
-        (claude-org-scheduled--remove-entry custom-id))))))
-
-(advice-add 'org-schedule :after #'claude-org-scheduled--after-schedule)
+    (set-marker orig-marker nil))))
 #+END_SRC
 
 * Header Line
@@ -5587,10 +4291,10 @@ Dynamic header line showing session status, IDE context, and thinking state.
             (when (hash-table-p claude-org--sessions)
               (maphash (lambda (_key state)
                          (when (and (claude-org--session-state-p state)
-                                    (claude-org--session-state-busy state))
-                           (let* ((frame (or (claude-org--session-state-spinner state) 0))
+                                    (claude-org--session-state-get state :busy))
+                           (let* ((frame (or (claude-org--session-state-get state :spinner) 0))
                                   (next-frame (mod (1+ frame) 4)))
-                             (setf (claude-org--session-state-spinner state) next-frame))))
+                             (claude-org--session-state-set state :spinner next-frame))))
                        claude-org--sessions))))))))
 
 (defun claude-org--refresh-header-line ()
@@ -5608,12 +4312,12 @@ Dynamic header line showing session status, IDE context, and thinking state.
     (maphash
      (lambda (id state)
        (when (and (claude-org--session-state-p state)
-                  (claude-org--session-state-busy state))
-         (let* ((spinner-idx (or (claude-org--session-state-spinner state) 0))
+                  (claude-org--session-state-get state :busy))
+         (let* ((spinner-idx (or (claude-org--session-state-get state :spinner) 0))
                 (spinner-char (nth spinner-idx claude-org--spinner-frames))
                 (display-name (claude-org--session-display-name id))
                 (elapsed (claude-org--format-elapsed
-                          (claude-org--session-state-start-time state))))
+                          (claude-org--session-state-get state :start-time))))
            (push (format "● %s  [%s %s]" display-name spinner-char elapsed)
                  lines))))
      claude-org--sessions)
@@ -5789,17 +4493,17 @@ Assembles components from dedicated badge functions."
     (maphash (lambda (key state)
                (when (claude-org--session-state-p state)
                  ;; Clear queue
-                 (let ((q-count (length (claude-org--session-state-pending-queue state))))
+                 (let ((q-count (length (claude-org--session-state-get state :pending-queue))))
                    (when (> q-count 0)
                      (cl-incf queued-cleared q-count)
-                     (setf (claude-org--session-state-pending-queue state) nil)))
+                     (claude-org--session-state-set state :pending-queue nil)))
                  ;; Cancel active query via backend protocol
-                 (when (claude-org--session-state-busy state)
-                   (when-let* ((backend (claude-org--session-state-backend state))
-                               (handle (claude-org--session-state-query-handle state)))
+                 (when (claude-org--session-state-get state :busy)
+                   (when-let* ((backend (claude-org--session-state-get state :backend))
+                               (handle (claude-org--session-state-get state :query-handle)))
                      (claude-agent-backend-cancel backend handle))
                    (claude-org--unregister-active-query key)
-                   (setf (claude-org--session-state-busy state) nil)
+                   (claude-org--session-state-set state :busy nil)
                    (cl-incf cancelled))))
              claude-org--sessions)
     (claude-org--refresh-header-line)
@@ -5849,10 +4553,10 @@ the eat terminal buffer), then falls back to the session's verbose buffer."
       (maphash (lambda (key state)
                  (when (claude-org--session-state-p state)
                    (push (list key
-                               (if (claude-org--session-state-busy state) "busy" "idle")
+                               (if (claude-org--session-state-get state :busy) "busy" "idle")
                                (claude-org--format-elapsed
-                                (claude-org--session-state-start-time state))
-                               (length (claude-org--session-state-pending-queue state)))
+                                (claude-org--session-state-get state :start-time))
+                               (length (claude-org--session-state-get state :pending-queue)))
                          sessions)))
 	       claude-org--sessions))
     (if sessions

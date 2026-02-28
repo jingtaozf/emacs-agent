@@ -1,0 +1,103 @@
+#+TITLE: Claude Org Queue Module
+#+PROPERTY: literate-load yes
+
+* Claude Org Queue
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+Pending block queue management for claude-org.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+;; Depends on claude-org-session for session-get/put
+;; Depends on claude-org for marker-valid-p and max-queue-depth defcustom
+;; These are loaded before this module via claude-code.el
+#+END_SRC
+
+** Queue Operations
+
+#+BEGIN_SRC elisp
+(defun claude-org--same-block-p (id-a marker-a id-b marker-b)
+  "Return non-nil if block A and block B refer to the same block.
+Compares by custom-id when both are non-nil, otherwise by marker position."
+  (if (and id-a id-b)
+      (equal id-a id-b)
+    (let ((pos-a (and (claude-org--marker-valid-p marker-a)
+                      (marker-position marker-a)))
+          (pos-b (and (claude-org--marker-valid-p marker-b)
+                      (marker-position marker-b))))
+      (and pos-a pos-b (= pos-a pos-b)))))
+
+(defun claude-org--queue-block (session-key block-info)
+  "Add BLOCK-INFO to pending queue for SESSION-KEY.
+BLOCK-INFO is a plist with :custom-id, :content, :marker, :instr-num.
+Duplicate detection uses custom-id.  When custom-id is unavailable on
+either side, marker position is compared instead.
+Returns:
+  'queued    - block was successfully added to queue
+  'running   - block is already running (cannot queue)
+  'in-queue  - block is already in the queue"
+  (let* ((queue (claude-org--session-get session-key :pending-queue))
+         (new-custom-id (plist-get block-info :custom-id))
+         (running-custom-id (claude-org--session-get session-key :custom-id))
+         (new-marker (plist-get block-info :marker))
+         (running-marker (claude-org--session-get session-key :marker))
+         ;; Determine if the new block matches the running block
+         (is-running
+          (and (claude-org--session-get session-key :busy)
+               (claude-org--same-block-p new-custom-id new-marker
+                                         running-custom-id running-marker)))
+         ;; Determine if the new block is already in queue
+         (in-queue
+          (cl-some (lambda (queued)
+                     (claude-org--same-block-p
+                      new-custom-id new-marker
+                      (plist-get queued :custom-id) (plist-get queued :marker)))
+                   queue)))
+    (cond
+     (is-running 'running)   ; Cannot queue the running block
+     (in-queue 'in-queue)    ; Already queued
+     ((>= (length queue) claude-org-max-queue-depth)
+      (message "Claude: Queue full (%d blocks). Cannot queue more."
+               (length queue))
+      'queue-full)
+     (t
+      (claude-org--session-put session-key :pending-queue
+                               (append queue (list block-info)))
+      'queued))))
+
+(defun claude-org--dequeue-block (session-key)
+  "Remove and return next block from SESSION-KEY queue.
+Returns nil if queue is empty."
+  (let ((queue (claude-org--session-get session-key :pending-queue)))
+    (when queue
+      (claude-org--session-put session-key :pending-queue (cdr queue))
+      (car queue))))
+
+(defun claude-org--clear-queue (session-key)
+  "Clear all pending blocks for SESSION-KEY."
+  (claude-org--session-put session-key :pending-queue nil))
+
+(defun claude-org--queue-count (session-key)
+  "Return number of queued blocks for SESSION-KEY."
+  (length (claude-org--session-get session-key :pending-queue)))
+
+(defun claude-org--total-queue-count ()
+  "Return total number of queued blocks across all sessions in current buffer."
+  (let ((total 0))
+    (when (hash-table-p claude-org--sessions)
+      (maphash (lambda (_key state)
+                 (when (claude-org--session-state-p state)
+                   (cl-incf total (length (claude-org--session-state-get state :pending-queue)))))
+               claude-org--sessions))
+    total))
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-org-queue)
+#+END_SRC

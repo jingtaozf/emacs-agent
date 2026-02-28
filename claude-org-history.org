@@ -1,0 +1,452 @@
+#+TITLE: Claude Org History Module
+#+PROPERTY: literate-load yes
+
+* Claude Org History
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+Block history persistence and navigation for claude-org.
+Tracks executed AI blocks and provides jump-to-block navigation.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+;; Depends on claude-org-session for session-get/put
+;; Depends on claude-org for:
+;;   - defcustom: claude-org-history-directory, claude-org-history-max-entries
+;;   - defvar: claude-org--block-history, claude-org--history-loaded,
+;;             claude-org--history-save-timer, claude-org--history-save-delay
+;;   - functions: claude-org--find-session-scope-heading, claude-org--has-session-tag-p
+;; These are loaded before this module via claude-code.el
+#+END_SRC
+
+** Persistence Functions
+
+#+BEGIN_SRC elisp
+(defun claude-org--history-file-path ()
+  "Return path to history file for current buffer.
+Uses format: <basename>--<short-hash>.el for readability."
+  (let* ((org-path (buffer-file-name))
+         (basename (file-name-sans-extension
+                    (file-name-nondirectory org-path)))
+         (hash (substring (md5 org-path) 0 8))
+         (dir claude-org-history-directory))
+    (expand-file-name (format "%s--%s.el" basename hash) dir)))
+
+(defun claude-org--ensure-history-directory ()
+  "Ensure the history directory exists."
+  (unless (file-directory-p claude-org-history-directory)
+    (make-directory claude-org-history-directory t)))
+
+(defun claude-org--load-history ()
+  "Load history from disk for current buffer."
+  (when (and (buffer-file-name)
+             (not claude-org--history-loaded))
+    (let ((history-file (claude-org--history-file-path))
+          (current-org-file (buffer-file-name))
+          (loaded-blocks nil))
+      (when (file-exists-p history-file)
+        (condition-case err
+            (setq loaded-blocks
+                  (with-temp-buffer
+                    (insert-file-contents history-file)
+                    (let ((data (read (current-buffer))))
+                      (when (and (plist-get data :blocks)
+                                 (string= (plist-get data :org-file)
+                                          current-org-file))
+                        (plist-get data :blocks)))))
+          (error
+           (message "claude-org: Failed to load history: %s" err))))
+      (when loaded-blocks
+        (setq claude-org--block-history loaded-blocks)))
+    (setq claude-org--history-loaded t)))
+
+(defun claude-org--save-history ()
+  "Save history to disk for current buffer (debounced)."
+  (when (buffer-file-name)
+    ;; Cancel existing timer
+    (when claude-org--history-save-timer
+      (cancel-timer claude-org--history-save-timer))
+    ;; Schedule save
+    (setq claude-org--history-save-timer
+          (run-with-timer
+           claude-org--history-save-delay nil
+           (lambda (buf)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (claude-org--save-history-now))))
+           (current-buffer)))))
+
+(defun claude-org--save-history-now ()
+  "Immediately save history to disk."
+  (when (and (buffer-file-name) claude-org--block-history)
+    (claude-org--ensure-history-directory)
+    (let ((history-file (claude-org--history-file-path))
+          (data `(:version 2  ; Version 2: Added :custom-id for stable navigation
+                  :org-file ,(buffer-file-name)
+                  :updated ,(float-time)
+                  :blocks ,(claude-org--prepare-history-for-save))))
+      (with-temp-file history-file
+        (insert ";; -*- mode: lisp-data -*-\n")
+        (insert ";; Claude-org block history - do not edit\n")
+        ;; `pp' respects `print-length' and `print-level' global settings.
+        ;; Bind to nil to ensure full output.
+        (let ((print-length nil)
+              (print-level nil))
+          (pp data (current-buffer)))))))
+
+(defun claude-org--prepare-history-for-save ()
+  "Prepare history for saving by removing transient data.
+Keeps only the most recent entries, limited by `claude-org-history-max-entries'.
+Only saves entries with CUSTOM_ID - titles are built dynamically."
+  (let ((entries (cl-remove-if-not
+                  (lambda (entry) (plist-get (cdr entry) :custom-id))
+                  (mapcar
+                   (lambda (entry)
+                     (let ((id (car entry))
+                           (plist (cdr entry)))
+                       ;; Only keep timestamp, status, and custom-id
+                       (cons id (list :timestamp (plist-get plist :timestamp)
+                                      :status (plist-get plist :status)
+                                      :custom-id (plist-get plist :custom-id)))))
+                   claude-org--block-history)))
+        (limit claude-org-history-max-entries))
+    ;; Sort by timestamp, keep most recent
+    (setq entries (sort entries
+                        (lambda (a b)
+                          (> (or (plist-get (cdr a) :timestamp) 0)
+                             (or (plist-get (cdr b) :timestamp) 0)))))
+    (seq-take entries limit)))
+
+(defun claude-org--ensure-history-loaded ()
+  "Ensure history is loaded from disk."
+  (unless claude-org--history-loaded
+    (claude-org--load-history)))
+#+END_SRC
+
+** Hook Functions
+
+#+BEGIN_SRC elisp
+(defun claude-org--find-instruction-custom-id ()
+  "Find the CUSTOM_ID of the instruction heading containing point.
+Checks: immediate heading, previous siblings at same level, then parent headings.
+Returns CUSTOM_ID string or nil if not found."
+  (save-excursion
+    (let ((custom-id nil))
+      ;; First check the immediate containing heading
+      (ignore-errors
+        (org-back-to-heading t)
+        (when (member "claude_chat" (org-get-tags nil t))
+          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
+      ;; Check previous siblings at same level (Response is sibling to Instruction)
+      (when (not custom-id)
+        (let ((current-level (org-current-level)))
+          (while (and (not custom-id)
+                      (org-get-previous-sibling))
+            (when (and (= (org-current-level) current-level)
+                       (member "claude_chat" (org-get-tags nil t)))
+              (setq custom-id (org-entry-get nil "CUSTOM_ID"))))))
+      ;; If still not found, walk up parent headings
+      (while (and (not custom-id) (org-up-heading-safe))
+        (when (member "claude_chat" (org-get-tags nil t))
+          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
+      custom-id)))
+
+(defun claude-org-goto-custom-id (custom-id)
+  "Navigate to the heading with CUSTOM_ID.
+This is used as a source-location-fn for session manager navigation.
+Returns t if found and positioned, nil otherwise."
+  (goto-char (point-min))
+  (when (re-search-forward
+         (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
+    (org-back-to-heading t)
+    t))
+
+(defun claude-org--record-block-execution (session-key _query _marker)
+  "Record block execution start.
+SESSION-KEY identifies the session.
+Called from `claude-org-execute-hook' when point is still in the AI block.
+Only stores CUSTOM_ID - titles are built dynamically when listing.
+Blocks without CUSTOM_ID are not recorded.
+If block with same CUSTOM_ID exists, updates it instead of creating duplicate."
+  (claude-org--ensure-history-loaded)
+  (let ((custom-id (claude-org--find-instruction-custom-id)))
+    ;; Only record if we have a CUSTOM_ID
+    (when custom-id
+      ;; Check if entry with this CUSTOM_ID already exists
+      (let ((existing (cl-find-if (lambda (e)
+                                    (and (listp e) (string= (plist-get (cdr e) :custom-id) custom-id)))
+                                  claude-org--block-history)))
+        (if existing
+            ;; Update existing entry - move to front and update timestamp/status
+            (progn
+              (setq claude-org--block-history (delete existing claude-org--block-history))
+              (let ((updated-entry `(,(car existing)
+                                     :timestamp ,(float-time)
+                                     :status in-progress
+                                     :custom-id ,custom-id)))
+                (push updated-entry claude-org--block-history)
+                (claude-org--session-put session-key :block-id (car existing))))
+          ;; Create new entry
+          (let* ((block-id (format "block-%s-%s"
+                                   (substring custom-id (max 0 (- (length custom-id) 20)))
+                                   (format-time-string "%H%M%S")))
+                 (entry `(:timestamp ,(float-time)
+                          :status in-progress
+                          :custom-id ,custom-id)))
+            (push (cons block-id entry) claude-org--block-history)
+            (claude-org--session-put session-key :block-id block-id)))
+        ;; Trigger debounced save
+        (claude-org--save-history)))))
+
+(defun claude-org--update-block-status (session-key _result status)
+  "Update block status on completion.
+SESSION-KEY identifies the session, STATUS is `completed' or `error'."
+  (let ((block-id (claude-org--session-get session-key :block-id)))
+    (when block-id
+      (let ((entry (assoc block-id claude-org--block-history)))
+        (when entry
+          (plist-put (cdr entry) :status status)
+          (claude-org--save-history))))))
+
+;; Register default hooks
+(add-hook 'claude-org-execute-hook #'claude-org--record-block-execution)
+(add-hook 'claude-org-complete-hook #'claude-org--update-block-status)
+#+END_SRC
+
+** Navigation Functions
+
+#+BEGIN_SRC elisp
+(defun claude-org--format-time-ago (timestamp)
+  "Format TIMESTAMP as relative time string."
+  (let* ((now (float-time))
+         (diff (- now timestamp))
+         (minutes (floor (/ diff 60)))
+         (hours (floor (/ diff 3600)))
+         (days (floor (/ diff 86400))))
+    (cond
+     ((< diff 60) "just now")
+     ((< minutes 60) (format "%dm ago" minutes))
+     ((< hours 24) (format "%dh ago" hours))
+     (t (format "%dd ago" days)))))
+
+(defun claude-org--extract-query-title-from-ai-block ()
+  "Extract a title from the first AI block in current subtree.
+Returns first line of query content, truncated to 60 chars."
+  (save-excursion
+    (let ((subtree-end (save-excursion (org-end-of-subtree t) (point))))
+      (when (re-search-forward "#\\+begin_src ai" subtree-end t)
+        (forward-line 1)
+        (let* ((start (point))
+               (end (save-excursion
+                      (if (re-search-forward "#\\+end_src" subtree-end t)
+                          (line-beginning-position)
+                        subtree-end)))
+               (content (string-trim (buffer-substring-no-properties start end)))
+               ;; Get first non-empty line
+               (first-line (car (seq-filter (lambda (s) (not (string-empty-p s)))
+                                            (split-string content "\n")))))
+          (when first-line
+            (let ((title (string-trim first-line)))
+              (if (> (length title) 60)
+                  (concat (substring title 0 57) "...")
+                title))))))))
+
+(defun claude-org--build-block-title-from-custom-id (custom-id)
+  "Build a meaningful title by navigating to CUSTOM_ID heading.
+Returns full hierarchy: \"Instruction > Parent > Grandparent\" format.
+Skips 'Workflow' headings as they're SDD containers.
+For generic 'Instruction N' headings, uses first line of AI query instead."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              (let* ((heading (substring-no-properties (org-get-heading t t t t)))
+                     (is-generic (string-match-p "^Instruction [0-9]+$" heading))
+                     (effective-heading (if is-generic
+                                            (or (claude-org--extract-query-title-from-ai-block)
+                                                heading)
+                                          heading))
+                     (headings (list effective-heading)))
+                (save-excursion
+                  (while (org-up-heading-safe)
+                    (let ((parent (substring-no-properties (org-get-heading t t t t))))
+                      (unless (string= parent "Workflow")
+                        (push parent headings)))))
+                (string-join (reverse headings) " > ")))
+          (error nil))))))
+
+(defun claude-org--format-block-candidate (entry)
+  "Format ENTRY for display in completing-read.
+ENTRY is (BLOCK-ID . PLIST).
+Builds title dynamically from CUSTOM_ID to show current heading hierarchy."
+  (let* ((plist (cdr entry))
+         (status (plist-get plist :status))
+         (custom-id (plist-get plist :custom-id))
+         (title (or (claude-org--build-block-title-from-custom-id custom-id) "Untitled"))
+         (timestamp (plist-get plist :timestamp))
+         (status-icon (pcase status
+                        ('completed "✓")
+                        ('in-progress "⋯")
+                        ('error "✗")
+                        (_ "?")))
+         (time-str (if timestamp
+                       (claude-org--format-time-ago timestamp)
+                     "unknown")))
+    (format "[%s] %s (%s)"
+            status-icon
+            title
+            time-str)))
+
+(defun claude-org--custom-id-exists-p (custom-id)
+  "Check if CUSTOM_ID exists in the current buffer."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              t)
+          (error nil))))))
+
+(defun claude-org--get-story-name-for-custom-id (custom-id)
+  "Get the story name for a block identified by CUSTOM_ID.
+Navigates to the heading, walks up to find the ancestor with
+CLAUDE_SESSION_ID property, and returns its heading text.
+Returns nil if no session-scope heading is found."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              (let ((pos (claude-org--find-session-scope-heading)))
+                (when pos
+                  (goto-char pos)
+                  (substring-no-properties (org-get-heading t t t t)))))
+          (error nil))))))
+
+(defun claude-org--build-candidate-info (custom-id)
+  "Build display info for CUSTOM_ID in a single navigation pass.
+Returns (TITLE . STORY-NAME) or nil if CUSTOM_ID not found.
+TITLE is the heading hierarchy with the story root stripped when present.
+STORY-NAME is the session ancestor heading text (or nil).
+This avoids multiple `org-link-search' calls per candidate."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (condition-case nil
+            (progn
+              (org-link-search (format "#%s" custom-id))
+              (let* ((heading (substring-no-properties (org-get-heading t t t t)))
+                     (is-generic (string-match-p "^Instruction [0-9]+$" heading))
+                     (effective-heading (if is-generic
+                                            (or (claude-org--extract-query-title-from-ai-block)
+                                                heading)
+                                          heading))
+                     (headings (list effective-heading))
+                     (story-name nil))
+                (save-excursion
+                  (while (org-up-heading-safe)
+                    (let ((parent (substring-no-properties (org-get-heading t t t t))))
+                      (unless (string= parent "Workflow")
+                        (push parent headings)))
+                    (when (and (not story-name)
+                               (or (claude-org--has-session-tag-p)
+                                   (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+                      (setq story-name
+                            (substring-no-properties (org-get-heading t t t t))))))
+                (let ((display-headings (if story-name
+                                            (cl-remove story-name headings
+                                                       :test #'string= :count 1)
+                                          headings)))
+                  (cons (string-join (reverse display-headings) " > ")
+                        story-name))))
+          (error nil))))))
+
+(defun claude-org--collect-recent-blocks ()
+  "Collect recent blocks for completing-read.
+Returns alist of (DISPLAY-STRING . ENTRY).
+Only includes entries with CUSTOM_ID that still exist in the buffer.
+Limited by `claude-org-history-max-entries'.
+Each DISPLAY-STRING is prefixed with [Story Name] for grouping.
+Uses single-pass navigation per candidate to avoid redundant searches."
+  (claude-org--ensure-history-loaded)
+  (let* ((entries-with-id (cl-remove-if-not
+                           (lambda (entry)
+                             (and (listp entry)
+                                  (plist-get (cdr entry) :custom-id)))
+                           claude-org--block-history))
+         (candidates nil)
+         (count 0))
+    (dolist (entry entries-with-id)
+      (when (< count claude-org-history-max-entries)
+        (let* ((plist (cdr entry))
+               (custom-id (plist-get plist :custom-id))
+               (info (claude-org--build-candidate-info custom-id)))
+          (when info
+            (let* ((title (car info))
+                   (story (or (cdr info) "Ungrouped"))
+                   (status (plist-get plist :status))
+                   (timestamp (plist-get plist :timestamp))
+                   (status-icon (pcase status
+                                  ('completed "✓")
+                                  ('in-progress "⋯")
+                                  ('error "✗")
+                                  (_ "?")))
+                   (time-str (if timestamp
+                                 (claude-org--format-time-ago timestamp)
+                               "unknown"))
+                   (display (format "[%s] [%s] %s (%s)"
+                                    story status-icon title time-str)))
+              (push (cons display entry) candidates)
+              (cl-incf count))))))
+    (nreverse candidates)))
+
+(defun claude-org--goto-block-by-custom-id (custom-id)
+  "Navigate to AI block via CUSTOM_ID using org-link-search.
+Returns t if navigation succeeded, nil otherwise."
+  (condition-case nil
+      (progn
+        (org-link-search (format "#%s" custom-id))
+        t)
+    (error nil)))
+
+(defun claude-org-jump-to-ai-block ()
+  "Jump to a recent AI block, grouped by story.
+Shows a list of recently executed blocks with status and timing.
+Each candidate is prefixed with [Story Name] for visual grouping.
+Uses CUSTOM_ID for stable navigation (survives file edits)."
+  (interactive)
+  (claude-org--ensure-history-loaded)
+  (let ((candidates (claude-org--collect-recent-blocks)))
+    (if (null candidates)
+        (message "No AI block history found")
+      (let* ((selection (completing-read "Jump to: " candidates nil t))
+             (entry (cdr (assoc selection candidates)))
+             (plist (cdr entry))
+             (custom-id (plist-get plist :custom-id)))
+        (if (and custom-id (claude-org--goto-block-by-custom-id custom-id))
+            (progn
+              (org-reveal t)
+              (recenter))
+          (message "Cannot navigate to block - no CUSTOM_ID"))))))
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-org-history)
+#+END_SRC
