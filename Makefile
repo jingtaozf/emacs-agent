@@ -8,7 +8,8 @@ BATCH = $(EMACS) -Q --batch
 SOURCES = claude-agent.org claude-org.org
 
 # Test files
-UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-error.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el tests/test-claude-agent-backend-protocol.el
+# Note: actual test loading is in target recipes below, not this variable
+UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el tests/test-claude-agent-backend-protocol.el
 MOCK_TESTS = tests/test-claude-agent-mock.el tests/test-claude-org-mock.el
 INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
@@ -34,7 +35,8 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test             - Run all tests (unit + parallel integration)"
-	@echo "  make test-unit        - Run unit tests only (fast, no API)"
+	@echo "  make test-unit        - Run unit tests only (fast, no API, ~13s)"
+	@echo "  make test-unit-parallel - Run unit tests in parallel (~4.5s)"
 	@echo "  make test-integration - Run integration tests in parallel (6 jobs, default)"
 	@echo "  make test-integration-seq     - Run integration tests sequentially"
 	@echo "  make test-integration PARALLEL_JOBS=N  - Custom parallelism"
@@ -114,8 +116,15 @@ install-hooks:
 .PHONY: test
 test: test-unit test-integration
 
+# Unit test targets are independent — use 'make -j3 test-unit' for parallel (4.5s vs 13s)
 .PHONY: test-unit
 test-unit: test-agent-unit test-org-unit test-backend-unit
+
+# Convenience target: run unit tests in parallel automatically
+UNIT_PARALLEL_JOBS ?= 3
+.PHONY: test-unit-parallel
+test-unit-parallel:
+	@$(MAKE) -j$(UNIT_PARALLEL_JOBS) test-unit
 
 # Parallel integration testing configuration
 PARALLEL_JOBS ?= 8
@@ -234,6 +243,9 @@ test-agent-unit:
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
 		-l tests/test-claude-agent-unit.el \
 		-l tests/test-claude-agent-refactor-phase3.el \
+		-l tests/test-claude-agent-json-protocol.el \
+		-l tests/test-claude-agent-state-management.el \
+		-l tests/test-claude-agent-background-tasks.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-backend-unit
@@ -277,6 +289,19 @@ test-org-unit:
 		-l tests/test-claude-org-refactor-phase4.el \
 		-l tests/support/org-fixtures.el \
 		-l tests/test-claude-org-refactor-phase5.el \
+		-l tests/test-claude-org-heading-level.el \
+		-l tests/test-claude-org-content-loss-repro.el \
+		-l tests/test-claude-org-wrong-level-repro.el \
+		-l tests/test-claude-org-wrong-position-repro.el \
+		-l tests/test-claude-org-loop.el \
+		-l tests/test-claude-org-marker-lifecycle.el \
+		-l tests/test-claude-org-query-id.el \
+		-l tests/test-claude-org-query-id-issues.el \
+		-l tests/test-claude-org-sdd.el \
+		-l tests/test-behavior-prompts.el \
+		-l tests/test-mcp-report-invocation.el \
+		-l tests/test-plugin-discovery.el \
+		-l tests/test-claude-org-edge-cases.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mock

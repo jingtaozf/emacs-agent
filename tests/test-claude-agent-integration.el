@@ -157,13 +157,6 @@ NOTE: This test can be flaky due to API variability."
     (when completed
       (should response))))
 
-(ert-deftest test-integration-tool-use-glob ()
-  "Test that Claude can use the Glob tool.
-  :tags '(:integration :slow :api :flaky :process)
-NOTE: Skipped due to high flakiness - tool use tests frequently timeout with live API.
-This is a known limitation of testing complex tool use against the real API."
-  :expected-result :failed  ;; Mark as expected to fail (effectively skip)
-  (ert-skip "Tool use with Glob frequently times out - too flaky for reliable testing"))
 
 ;;; Permission Mode Tests
 

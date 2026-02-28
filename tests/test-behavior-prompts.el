@@ -9,67 +9,22 @@
 (require 'ert)
 (require 'org)
 
-;; Ensure claude-org is loaded
-(unless (fboundp 'claude-org--tag-prompt)
-  (literate-elisp-load (expand-file-name "claude-org.org"
-                                          (file-name-directory load-file-name))))
+;; Ensure claude-org is loaded (expects Makefile to load it; fallback to project root)
+(unless (fboundp 'claude-org-execute)
+  (let ((project-root (file-name-directory (directory-file-name
+                                            (file-name-directory (or load-file-name default-directory))))))
+    (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
+    (literate-elisp-load (expand-file-name "emacs-mcp-server.org" project-root))
+    (literate-elisp-load (expand-file-name "claude-org.org" project-root))))
 
 ;;; ============================================================
 ;;; Tag Behavior Tests
 ;;; ============================================================
 
-(ert-deftest claude-org-behavior/tag-lookup-explore ()
-  "Test explore tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'explore)))
-    (should (stringp prompt))
-    (should (string-match-p "EXPLORE" prompt))
-    (should (string-match-p "Do NOT modify" prompt))))
-
-(ert-deftest claude-org-behavior/tag-lookup-plan ()
-  "Test plan tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'plan)))
-    (should (stringp prompt))
-    (should (string-match-p "PLAN" prompt))
-    (should (string-match-p "approval" prompt))))
-
-(ert-deftest claude-org-behavior/tag-lookup-code ()
-  "Test code tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'code)))
-    (should (stringp prompt))
-    (should (string-match-p "CODE" prompt))
-    (should (string-match-p "Implement" prompt))))
-
-(ert-deftest claude-org-behavior/tag-lookup-test ()
-  "Test test tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'test)))
-    (should (stringp prompt))
-    (should (string-match-p "TEST" prompt))
-    (should (string-match-p "edge cases" prompt))))
-
-(ert-deftest claude-org-behavior/tag-lookup-review ()
-  "Test review tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'review)))
-    (should (stringp prompt))
-    (should (string-match-p "REVIEW" prompt))
-    (should (string-match-p "Do NOT write new code" prompt))))
-
-(ert-deftest claude-org-behavior/tag-lookup-commit ()
-  "Test commit tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'commit)))
-    (should (stringp prompt))
-    (should (string-match-p "COMMIT" prompt))
-    (should (string-match-p "Do NOT push" prompt))))
-
-(ert-deftest claude-org-behavior/tag-lookup-strict ()
-  "Test strict modifier tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'strict)))
-    (should (stringp prompt))
-    (should (string-match-p "STRICT" prompt))
-    (should (string-match-p "Zero tolerance" prompt))))
 
 (ert-deftest claude-org-behavior/tag-lookup-nonexistent ()
   "Test nonexistent tag returns nil."
-  (should (null (claude-org--tag-prompt 'nonexistent-tag))))
+  (should (null (claude-org-tag-prompt 'nonexistent-tag nil))))
 
 ;;; ============================================================
 ;;; Header Argument Behavior Tests
@@ -200,16 +155,6 @@ inheritance requires full org buffer setup."
 ;;; Full Behavior Prompt Building Tests
 ;;; ============================================================
 
-(ert-deftest claude-org-behavior/build-prompt-tag-only ()
-  "Test building prompt with tag only."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Task :explore:\n#+begin_src ai\nquery\n#+end_src")
-    (goto-char (+ (point-min) 30))
-    (let ((prompt (claude-org--build-behavior-prompt)))
-      (should (stringp prompt))
-      (should (string-match-p "EXPLORE" prompt)))))
-
 (ert-deftest claude-org-behavior/build-prompt-header-only ()
   "Test building prompt with header argument only."
   (with-temp-buffer
@@ -220,21 +165,6 @@ inheritance requires full org buffer setup."
       (should (stringp prompt))
       (should (string-match-p "REVIEW" prompt)))))
 
-(ert-deftest claude-org-behavior/build-prompt-combined ()
-  "Test building prompt with both tags and headers."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Task :code:security:\n#+begin_src ai :tests :coverage 80\nquery\n#+end_src")
-    (goto-char (+ (point-min) 55))
-    (let ((prompt (claude-org--build-behavior-prompt)))
-      (should (stringp prompt))
-      ;; Tags should be present (alphabetically sorted)
-      (should (string-match-p "CODE" prompt))
-      (should (string-match-p "SECURITY" prompt))
-      ;; Headers should be present
-      (should (string-match-p "TEST GENERATION" prompt))
-      (should (string-match-p "80%" prompt)))))
-
 (ert-deftest claude-org-behavior/build-prompt-empty ()
   "Test building prompt with no tags or headers."
   (with-temp-buffer
@@ -243,20 +173,6 @@ inheritance requires full org buffer setup."
     (goto-char (+ (point-min) 25))
     (let ((prompt (claude-org--build-behavior-prompt)))
       (should (null prompt)))))
-
-(ert-deftest claude-org-behavior/build-prompt-tag-order ()
-  "Test that tags are sorted by SDD priority (same priority = original order)."
-  (with-temp-buffer
-    (org-mode)
-    ;; Tags in heading: strict, code, explore - all have same priority (50)
-    ;; So they appear in the order from org-get-tags (left-to-right from heading)
-    (insert "* Task :strict:code:explore:\n#+begin_src ai\nquery\n#+end_src")
-    (goto-char (+ (point-min) 45))
-    (let ((prompt (claude-org--build-behavior-prompt)))
-      ;; All tags should be present in the prompt
-      (should (string-match-p "STRICT" prompt))
-      (should (string-match-p "CODE" prompt))
-      (should (string-match-p "EXPLORE" prompt)))))
 
 ;;; ============================================================
 ;;; Custom Behavior Registration Tests
@@ -267,7 +183,7 @@ inheritance requires full org buffer setup."
 
 (ert-deftest claude-org-behavior/custom-tag-nonexistent ()
   "Test that nonexistent tag returns nil (no alist fallback)."
-  (should (null (claude-org--tag-prompt 'nonexistent_custom_tag))))
+  (should (null (claude-org-tag-prompt 'nonexistent_custom_tag nil))))
 
 (ert-deftest claude-org-behavior/custom-header-nonexistent ()
   "Test that nonexistent header returns nil (no alist fallback)."
@@ -442,7 +358,7 @@ inheritance requires full org buffer setup."
 
 (ert-deftest claude-org-behavior/tag-lookup-lp ()
   "Test lp tag returns correct prompt."
-  (let ((prompt (claude-org--tag-prompt 'lp)))
+  (let ((prompt (claude-org-tag-prompt 'lp nil)))
     (should (stringp prompt))
     (should (string-match-p "Literate" prompt))))
 

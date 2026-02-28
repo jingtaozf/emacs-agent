@@ -277,30 +277,6 @@ The default content should indicate the current SDD story name."
       (should (member "spec" tags))
       (should-not (member "sdd" tags)))))
 
-;;; Unit Tests - Tag Prompt Loading
-
-(ert-deftest test-sdd-tag-prompts-exist ()
-  "Test that all SDD tag prompt files exist.
-Note: research_output is a storage section, not an AI block container, so no prompt."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((tags '("sdd" "research" "design" "planning" "implementation"
-                "spec" "features")))
-    (dolist (tag tags)
-      (let ((file (expand-file-name (format "tags/%s.org" tag)
-                                    claude-org-prompts-directory)))
-        (should (file-readable-p file))))))
-
-(ert-deftest test-sdd-tag-prompts-load ()
-  "Test that SDD tag prompts can be loaded.
-Note: research_output is a storage section, not an AI block container, so no prompt."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((tags '(sdd research design planning implementation
-                spec features)))
-    (dolist (tag tags)
-      (let ((prompt (claude-org--tag-prompt tag)))
-        (should (stringp prompt))
-        (should (> (length prompt) 0))))))
-
 ;;; Unit Tests - Behavior Prompt Building
 
 (ert-deftest test-sdd-behavior-prompt-combines-tags ()

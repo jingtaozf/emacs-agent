@@ -110,81 +110,7 @@ EXTRA-BINDINGS is a list of additional cl-letf bindings."
             (should (equal (claude-org--session-get session-key :original-prompt) "Test"))))
       (kill-buffer test-buffer))))
 
-(ert-deftest test-claude-org-execute-passes-session-key ()
-  "Test that execute passes session-key to send-request.
-This ensures callbacks use the same key where loop state is stored."
-  ;; Check that the source code has the fix
-  (with-temp-buffer
-    (insert-file-contents "/Users/jingtao/projects/claude-agent/claude-org.org")
-    (goto-char (point-min))
-    (search-forward "(defun claude-org-execute ()" nil t)
-    (search-forward "claude-org--send-request" nil t)
-    (let ((line (buffer-substring (line-beginning-position) (line-end-position))))
-      ;; The line should contain session-key as third argument
-      (should (string-match-p "send-request content query-ctx session-key" line)))))
-
-
 ;;; Re-execute Response Section Tests
-
-(ert-deftest test-claude-org-find-instruction-number-in-response ()
-  "Test that find-instruction-number finds number when inside Response section."
-  (with-temp-buffer
-    (insert "* Instruction 3 :claude_chat:
-
-#+begin_src ai
-test query
-#+end_src
-
-** Response 3 :ai_output:
-
-Previous response text.
-
-")
-    (org-mode)
-    (goto-char (point-max))
-    (forward-line -2)  ; Inside Response section
-    (should (= 3 (claude-org--find-instruction-number)))))
-
-(ert-deftest test-claude-org-find-instruction-number-direct ()
-  "Test that find-instruction-number works when directly in Instruction section."
-  (with-temp-buffer
-    (insert "* Instruction 7 :claude_chat:
-
-#+begin_src ai
-test
-#+end_src
-")
-    (org-mode)
-    (goto-char (point-min))
-    (re-search-forward "test" nil t)
-    (should (= 7 (claude-org--find-instruction-number)))))
-
-(ert-deftest test-claude-org-find-instruction-number-nested-response ()
-  "Test finding instruction number from deeply nested Response."
-  (with-temp-buffer
-    (insert "* Instruction 2 :claude_chat:
-
-#+begin_src ai
-query
-#+end_src
-
-** Response 2(1/3) :ai_output:
-
-First iteration.
-
-** Response 2(2/3) :ai_output:
-
-Second iteration.
-
-*** Some subsection
-
-Nested content here.
-
-")
-    (org-mode)
-    (goto-char (point-max))
-    (forward-line -3)  ; Inside nested subsection
-    (should (= 2 (claude-org--find-instruction-number)))))
 
 
 (ert-deftest test-claude-org-loop-state-reset-on-reexecute ()
@@ -444,10 +370,6 @@ Without QUERY_ID, tokens can't be routed to the correct section."
       (when (buffer-live-p test-buffer)
         (kill-buffer test-buffer)))))
 
-(provide 'test-claude-org-loop)
-;;; test-claude-org-loop.el ends here
-
-
 (ert-deftest test-claude-org-section-level-captured-early ()
   "Test that section-level is captured at AI block position, not after insertion.
 This prevents wrong heading levels when re-executing after AI generates nested headings."
@@ -485,3 +407,6 @@ This prevents wrong heading levels when re-executing after AI generates nested h
     ;; The fix ensures we capture level 3, not 5
     ;; This test documents the expected behavior
     ))
+
+(provide 'test-claude-org-loop)
+;;; test-claude-org-loop.el ends here

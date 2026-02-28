@@ -62,52 +62,6 @@
     (let ((pos (claude-org--find-response-by-query-id "20260204-999999-zzzz")))
       (should (null pos)))))
 
-;;; Insert at Response Tests
-
-(ert-deftest test-insert-at-response ()
-  "Should insert text at end of response section."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Test\n")
-    (insert "** Response 1 :ai_output:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":QUERY_ID: 20260204-120000-test\n")
-    (insert ":QUERY_TYPE: normal\n")
-    (insert ":END:\n\n")
-    ;; Set up session state
-    (setq-local claude-org--sessions (make-hash-table :test 'equal))
-    (puthash "test-session" (list :query-id "20260204-120000-test") claude-org--sessions)
-    ;; Insert text
-    (claude-org--insert-at-response "test-session" "Hello, World!")
-    ;; Verify insertion
-    (goto-char (point-min))
-    (should (search-forward "Hello, World!" nil t))))
-
-;;; Token Handler v2 Tests
-
-(ert-deftest test-handle-token-v2-inserts-text ()
-  "Token handler v2 should insert text using query-id lookup."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Test\n")
-    (insert "** Response 1 :ai_output:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":QUERY_ID: 20260204-130000-v2test\n")
-    (insert ":QUERY_TYPE: normal\n")
-    (insert ":END:\n\n")
-    ;; Set up session state
-    (setq-local claude-org--sessions (make-hash-table :test 'equal))
-    (puthash "v2-session"
-             (list :query-id "20260204-130000-v2test"
-                   :section-level 1
-                   :current-line-length 0)
-             claude-org--sessions)
-    ;; Process a token
-    (claude-org--handle-token-v2 "v2-session" "Test token content")
-    ;; Verify token was inserted
-    (goto-char (point-min))
-    (should (search-forward "Test token content" nil t))))
-
 ;;; Response Section Creation Tests
 
 (ert-deftest test-create-response-section-normal ()

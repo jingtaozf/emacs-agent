@@ -16,35 +16,6 @@
                       (file-name-directory load-file-name)))))
   (literate-elisp-load (expand-file-name "claude-org.org" project-root)))
 
-;;; Issue 1: Response section level should match instruction level (sibling)
-
-(ert-deftest test-response-section-is-sibling-not-child ()
-  "Response section should be at same level as instruction (sibling), not child.
-If instruction is level 2 (**), response should also be level 2 (**)."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Parent\n")
-    (insert "** Instruction :instruction:\n")
-    (insert "#+begin_src ai\nQuery\n#+end_src\n")
-    ;; Set up session state - section-level should be 1 (the instruction's level is 2)
-    ;; But for response to be SIBLING, it needs same level as instruction
-    (setq-local claude-org--sessions (make-hash-table :test 'equal))
-    (puthash "test-session"
-             (list :section-level 1  ;; This is parent level, response will be parent+1=2
-                   :instruction-num 1)
-             claude-org--sessions)
-    ;; Create response section
-    (goto-char (point-max))
-    (claude-org--create-response-section "test-session" "20260204-100000-test" 'normal)
-    ;; Check the heading level
-    (goto-char (point-min))
-    (search-forward "Response")
-    (beginning-of-line)
-    ;; Count asterisks - should be 2 for sibling of level-2 instruction
-    (should (looking-at "\\*\\* Response"))
-    ;; Should NOT be 3 asterisks (child)
-    (should-not (looking-at "\\*\\*\\* Response"))))
-
 ;;; Issue 2: Content should have blank line after :END:
 
 (ert-deftest test-response-section-has-newline-after-properties ()

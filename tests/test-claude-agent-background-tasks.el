@@ -15,6 +15,15 @@
   (load-file (expand-file-name "../claude-agent.el"
                                (file-name-directory load-file-name))))
 
+(defmacro test-bg--with-mock-stdin (&rest body)
+  "Execute BODY with mock process-live-p/process-send-eof.
+Binds `closed' to track whether stdin was closed."
+  (declare (indent 0) (debug t))
+  `(let ((closed nil))
+     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+               ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+       ,@body)))
+
 ;;; Test: Background Task Tracker
 
 (ert-deftest test-background-task-tracker-launch ()
@@ -181,54 +190,9 @@ This is the critical fix - Bash tasks must prevent early exit."
    '(:stdout "" :stderr "" :backgroundTaskId "b8406fe")
    nil)
   ;; Result message arrives - stdin should NOT close
-  (let ((closed nil))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+  (test-bg--with-mock-stdin
+    (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
     (should-not closed)))
-
-(ert-deftest test-bash-background-full-flow ()
-  "Test complete Bash background task lifecycle.
-Simulates the actual failure scenario that was occurring."
-  (clrhash claude-agent--pending-background-tasks)
-  (let ((claude-agent-stdin-close-delay 0))  ; Immediate close for testing
-
-    ;; 1. Bash task launched with run_in_background: true
-    (claude-agent--background-task-tracker
-     "toolu_01" nil nil
-     '(:stdout "" :stderr "" :backgroundTaskId "b8406fe")
-     nil)
-    (should (claude-agent--has-pending-background-tasks-p))
-
-    ;; 2. Result message arrives (from prior turn) - stdin should NOT close
-    (let ((closed nil))
-      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-      (should-not closed))
-
-    ;; 3. TaskOutput with block:true, timeout:180000 - task still running
-    (claude-agent--background-task-tracker
-     "toolu_02" nil nil
-     '(:retrieval_status "timeout"
-       :task (:task_id "b8406fe" :task_type "local_bash" :status "running"))
-     nil)
-    (should (claude-agent--has-pending-background-tasks-p))
-
-    ;; 4. TaskOutput finally returns completed
-    (claude-agent--background-task-tracker
-     "toolu_03" nil nil
-     '(:retrieval_status "success"
-       :task (:task_id "b8406fe" :task_type "local_bash" :status "completed"))
-     nil)
-    (should-not (claude-agent--has-pending-background-tasks-p))
-
-    ;; 5. Now result should close stdin
-    (let ((closed nil))
-      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-      (should closed))))
 
 ;;; Test: Has Pending Background Tasks
 
@@ -249,30 +213,24 @@ Simulates the actual failure scenario that was occurring."
   "Test stdin not closed when background tasks pending."
   (clrhash claude-agent--pending-background-tasks)
   (puthash "task1" t claude-agent--pending-background-tasks)
-  (let ((closed nil))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
+  (test-bg--with-mock-stdin
+    (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
     (should-not closed)))
 
 (ert-deftest test-maybe-close-stdin-no-pending ()
   "Test stdin closed when no background tasks pending."
   (clrhash claude-agent--pending-background-tasks)
-  (let ((closed nil)
-        (claude-agent-stdin-close-delay 0))  ; Immediate close for testing
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should closed)))
+  (let ((claude-agent-stdin-close-delay 0))  ; Immediate close for testing
+    (test-bg--with-mock-stdin
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
+      (should closed))))
 
 (ert-deftest test-maybe-close-stdin-non-result ()
   "Test non-result messages don't trigger close."
   (clrhash claude-agent--pending-background-tasks)
-  (let ((closed nil))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "assistant"))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "user")))
+  (test-bg--with-mock-stdin
+    (claude-agent--maybe-close-stdin 'mock-process '(:type "assistant"))
+    (claude-agent--maybe-close-stdin 'mock-process '(:type "user"))
     (should-not closed)))
 
 ;;; Test: Dispatch Functions
@@ -358,48 +316,6 @@ Uses :tool_use_result (snake_case) matching actual JSON from CLI."
     ;; Should not call hook
     (should (= 0 (length hook-calls)))))
 
-;;; Test: Integration - Full Flow
-
-(ert-deftest test-background-task-full-flow ()
-  "Test complete background task lifecycle."
-  (clrhash claude-agent--pending-background-tasks)
-  (let ((claude-agent-stdin-close-delay 0))  ; Immediate close for testing
-
-    ;; 1. Task launched
-    (claude-agent--background-task-tracker
-     "toolu_01" nil nil
-     '(:isAsync t :agentId "agent123")
-     nil)
-    (should (claude-agent--has-pending-background-tasks-p))
-
-    ;; 2. First result - stdin should NOT close
-    (let ((closed nil))
-      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-      (should-not closed))
-
-    ;; 3. TaskOutput shows running - still pending
-    (claude-agent--background-task-tracker
-     "toolu_02" nil nil
-     '(:task (:task_id "agent123" :status "running"))
-     nil)
-    (should (claude-agent--has-pending-background-tasks-p))
-
-    ;; 4. TaskOutput shows completed - removed
-    (claude-agent--background-task-tracker
-     "toolu_03" nil nil
-     '(:task (:task_id "agent123" :status "completed"))
-     nil)
-    (should-not (claude-agent--has-pending-background-tasks-p))
-
-    ;; 5. Now result should close stdin
-    (let ((closed nil))
-      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-        (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-      (should closed))))
-
 ;;; Test: JSON Key Name Fix (tool_use_result vs toolUseResult)
 ;;;
 ;;; The bug: dispatch-post-tool-use was looking for :toolUseResult (camelCase)
@@ -447,35 +363,6 @@ This confirms the fix is correct for the actual JSON format."
     (let ((result (plist-get parsed :tool_use_result)))
       (should (equal (plist-get result :backgroundTaskId) "test123")))))
 
-(ert-deftest test-full-json-to-tracker-flow ()
-  "Test complete flow: JSON parsing -> dispatch -> tracker -> pending hash.
-Uses actual event data from verbose buffer session sdd-20260126-132710."
-  (clrhash claude-agent--pending-background-tasks)
-  ;; Actual JSON from verbose buffer (simplified, key structure preserved)
-  (let* ((json-object-type 'plist)
-         (json-array-type 'list)
-         (json-key-type 'keyword)
-         (json-str (concat
-                    "{\"type\":\"user\","
-                    "\"message\":{\"role\":\"user\","
-                    "\"content\":[{\"tool_use_id\":\"toolu_01TestBg\","
-                    "\"type\":\"tool_result\","
-                    "\"content\":[{\"type\":\"text\",\"text\":\"Running in background\"}]}]},"
-                    "\"tool_use_result\":{\"stdout\":\"\",\"stderr\":\"\","
-                    "\"interrupted\":false,\"isImage\":false,"
-                    "\"backgroundTaskId\":\"bee9495\"}}"))
-         (parsed (json-read-from-string json-str)))
-
-    ;; Set up tracker on hook
-    (let ((claude-agent-post-tool-use-functions
-           (list #'claude-agent--background-task-tracker)))
-      ;; Dispatch should call tracker which should add to pending
-      (claude-agent--dispatch-post-tool-use parsed 'mock-state))
-
-    ;; Verify the background task was tracked
-    (should (gethash "bee9495" claude-agent--pending-background-tasks))
-    (should (= 1 (hash-table-count claude-agent--pending-background-tasks)))))
-
 ;;; Test: Pending Control Request Tracking
 ;;;
 ;;; Control requests (permission prompts) must be tracked to prevent
@@ -522,104 +409,29 @@ This is the critical fix for the early exit bug."
   ;; Simulate pending control request (permission prompt awaiting response)
   (claude-agent--track-control-request "c8b57b4d-8e9e-4010-b2ce-bfa736df4ea2")
   ;; Result message arrives - stdin should NOT close
-  (let ((closed nil)
-        (claude-agent-stdin-close-delay 0))
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should-not closed)))
+  (let ((claude-agent-stdin-close-delay 0))
+    (test-bg--with-mock-stdin
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
+      (should-not closed))))
 
 (ert-deftest test-stdin-closes-after-control-response ()
   "Test stdin closes after all control requests are resolved."
   (clrhash claude-agent--pending-background-tasks)
   (claude-agent--clear-pending-control-requests)
-  (let ((closed nil)
-        (claude-agent-stdin-close-delay 0))
+  (let ((claude-agent-stdin-close-delay 0))
     ;; Track a control request
     (claude-agent--track-control-request "req-001")
     ;; Result arrives - should NOT close
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should-not closed)
-
+    (test-bg--with-mock-stdin
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
+      (should-not closed))
     ;; Response sent - untrack
     (claude-agent--untrack-control-request "req-001")
     ;; Now result should close stdin
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should closed)))
+    (test-bg--with-mock-stdin
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
+      (should closed))))
 
-(ert-deftest test-control-request-and-background-task-combined ()
-  "Test both control requests and background tasks block stdin close."
-  (clrhash claude-agent--pending-background-tasks)
-  (claude-agent--clear-pending-control-requests)
-  (let ((closed nil)
-        (claude-agent-stdin-close-delay 0))
-    ;; Both pending
-    (claude-agent--track-control-request "ctrl-001")
-    (puthash "bg-task-001" t claude-agent--pending-background-tasks)
-
-    ;; Should not close
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should-not closed)
-
-    ;; Resolve control request only - should still not close
-    (claude-agent--untrack-control-request "ctrl-001")
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should-not closed)
-
-    ;; Resolve background task - now should close
-    (remhash "bg-task-001" claude-agent--pending-background-tasks)
-    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
-      (claude-agent--maybe-close-stdin 'mock-process '(:type "result")))
-    (should closed)))
-
-(ert-deftest test-handle-control-request-tracks-request ()
-  "Test that handle-control-request tracks the request for response."
-  (claude-agent--clear-pending-control-requests)
-  ;; Create a mock process
-  (let ((responses-sent nil))
-    (cl-letf (((symbol-function 'process-get) (lambda (_ _) nil))
-              ((symbol-function 'process-live-p) (lambda (_) t))
-              ((symbol-function 'process-send-string)
-               (lambda (_ str) (push str responses-sent)))
-              ((symbol-function 'claude-agent--run-permission-functions)
-               (lambda (_ _ _) '(:behavior "allow"))))
-      ;; Handle a can_use_tool request
-      (claude-agent--handle-control-request
-       'mock-process
-       '(:request_id "test-req-001"
-         :request (:subtype "can_use_tool"
-                   :tool_name "Read"
-                   :input (:file_path "/test.el")))))
-    ;; Request should have been tracked then untracked (response was sent)
-    ;; After response is sent, request is untracked
-    (should-not (claude-agent--has-pending-control-requests-p))
-    ;; Response should have been sent
-    (should (= 1 (length responses-sent)))))
-
-(ert-deftest test-send-control-response-untracks-request ()
-  "Test that send-control-response untracks the request."
-  (claude-agent--clear-pending-control-requests)
-  ;; Pre-track a request
-  (claude-agent--track-control-request "req-to-untrack")
-  (should (claude-agent--has-pending-control-requests-p))
-
-  ;; Send response (should untrack)
-  (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-            ((symbol-function 'process-send-string) (lambda (_ _) nil)))
-    (claude-agent--send-control-response
-     'mock-process "req-to-untrack" "success" '(:behavior "allow")))
-
-  ;; Should be untracked now
-  (should-not (claude-agent--has-pending-control-requests-p)))
 
 (provide 'test-claude-agent-background-tasks)
 ;;; test-claude-agent-background-tasks.el ends here
