@@ -1,0 +1,88 @@
+# Claude Agent SDK for Emacs
+
+## Commands
+
+```bash
+make test-unit          # Run all unit tests (~13s)
+make test-unit-parallel # Run unit tests in parallel (~4.5s)
+make test-agent-unit    # Run claude-agent unit tests only
+make test-org-unit      # Run claude-org unit tests only
+make test-backend-unit  # Run backend protocol unit tests
+make test-mock          # Run mock CLI tests (no API, fast)
+make test-integration   # Run integration tests (requires API key)
+make lint               # Static analysis (undefined functions/variables)
+make check              # lint + test-unit
+```
+
+## Architecture
+
+### Literate Programming
+
+All source code lives in `.org` files using `literate-elisp`:
+- `claude-agent.org` — Core SDK: process management, JSON protocol, query API
+- `claude-org.org` — Org integration: AI blocks, sessions, streaming
+- `emacs-mcp-server.org` — MCP server for Emacs tools
+
+Load with: `(literate-elisp-load "claude-agent.org")`
+
+### Key Layers
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Core SDK | `claude-agent.org` | CLI subprocess, JSON stream parsing |
+| Org Integration | `claude-org.org` | `#+begin_src ai` blocks, response sections |
+| MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude |
+| Entry Point | `claude-code.el` | Package requires, autoloads |
+
+### Data Flow
+
+1. User writes query in `#+begin_src ai` block, presses `C-c C-c`
+2. `claude-org-execute` validates block, creates session
+3. `claude-agent-query` spawns CLI subprocess with `--output-format stream-json`
+4. Process filter parses newline-delimited JSON, dispatches to callbacks
+5. Tokens stream into response section below the AI block
+
+### Session Management
+
+- Sessions identified by buffer-local session keys
+- State stored in `claude-org--sessions` hash table
+- SDK UUID maps Emacs sessions to Claude CLI sessions
+- File-based session persistence via org properties
+
+## Rules
+
+### Code Style
+- Use `defvar` for hooks (not `defcustom`) for existing hooks
+- Use `defcustom` with `make-variable-buffer-local` for new user-facing hooks
+- Internal functions use double-dash: `claude-org--internal-fn`
+- Public API uses single-dash: `claude-org-public-fn`
+
+### Literate Elisp Caveats
+- `lexical-binding: t` in org headers is **ignored** by literate-elisp
+- Use `lexical-let` (from `cl-lib`) for closures in callbacks/timers
+- Use `cond` + `equal` instead of `pcase` string patterns (dynamic binding)
+- After editing `.org` files, **always reload**: `(literate-elisp-load "file.org")`
+
+### Testing
+- All tests in `tests/*.el`, never in `.org` files
+- Tests use `:tags` for filtering: `:unit`, `:integration`, `:fast`, `:stable`
+- Do NOT run tests via `evalElisp` MCP tool — may hang Emacs
+- Use `make test` or `make test-unit` in terminal instead
+- Mock CLI tests use `MOCK_SCENARIO` env var for fixture selection
+
+### Error Handling
+- Process filters must never signal errors (kills the process)
+- Use `condition-case` in all callbacks
+- Sentinel runs after process exits — clean up state there
+
+## Further Reading
+
+| Topic | Location |
+|-------|----------|
+| Full API docs | `claude-agent.org` section headers |
+| Org integration | `claude-org.org` section headers |
+| Test fixtures | `tests/fixtures/` |
+| Mock CLI | `tests/mock-claude-cli.sh` |
+| Docker sandbox | `.devcontainer/` |
+| Prompt tags | `prompts/tags/` |
+| Reference SDK | `reference/claude-agent-sdk-python/` |

@@ -413,6 +413,142 @@ STATUS is symbol: `completed' or `error'.
 Default: includes `claude-org--update-block-status'.")
 #+END_SRC
 
+*** User-Facing Hooks (defcustom, buffer-local)
+
+These hooks are empty by default. Users opt in by adding functions
+via init.el or =.dir-locals.el=. See README.org for setup examples.
+
+#+BEGIN_SRC elisp
+(defcustom claude-org-loop-iteration-hook nil
+  "Hook run at the start of each loop iteration.
+Functions receive (SESSION-KEY ITERATION-NUMBER).
+Empty by default — add functions in init.el to monitor loop behavior.
+
+Example:
+  (add-hook \\='claude-org-loop-iteration-hook #\\='my-loop-monitor nil t)"
+  :type 'hook
+  :group 'claude-org)
+(make-variable-buffer-local 'claude-org-loop-iteration-hook)
+
+(defcustom claude-org-query-complete-hook nil
+  "Hook run when a query completes successfully.
+Functions receive (SESSION-KEY QUERY-ID).
+Empty by default — add functions in init.el for post-completion verification.
+
+Example:
+  (add-hook \\='claude-org-query-complete-hook #\\='my-verify-fn nil t)"
+  :type 'hook
+  :group 'claude-org)
+(make-variable-buffer-local 'claude-org-query-complete-hook)
+#+END_SRC
+
+*** Loop Detection Utilities
+
+Helper functions for the loop iteration hook system. These are building
+blocks that hook functions can use — no detection logic runs by default.
+
+#+BEGIN_SRC elisp
+(defun claude-org--record-tool-call (session-key tool-name tool-input)
+  "Record a tool call in the session's :tool-call-history.
+Appends (TOOL-NAME . ARGS-HASH) to the history list."
+  (let* ((args-hash (sxhash tool-input))
+         (entry (cons tool-name args-hash))
+         (history (claude-org--session-get session-key :tool-call-history)))
+    (claude-org--session-put session-key :tool-call-history
+                             (append history (list entry)))))
+
+(defun claude-org-loop-inject-warning (session-key message)
+  "Inject a warning MESSAGE into the next loop iteration for SESSION-KEY.
+The warning will be included in the system prompt and cleared after use."
+  (claude-org--session-put session-key :loop-warning message))
+
+(defun claude-org--consume-loop-warning (session-key)
+  "Read and clear the :loop-warning from SESSION-KEY.
+Returns the warning string, or nil if none."
+  (let ((warning (claude-org--session-get session-key :loop-warning)))
+    (when warning
+      (claude-org--session-put session-key :loop-warning nil))
+    warning))
+#+END_SRC
+
+*** Pre-Completion Utilities
+
+Helper functions for the query completion hook system.
+
+#+BEGIN_SRC elisp
+(defun claude-org-append-to-response (session-key query-id text)
+  "Append TEXT to the response section identified by QUERY-ID.
+Finds the response heading with matching :QUERY_ID: property,
+navigates to the end of its subtree, and inserts TEXT.
+Preserves window-start (scroll position)."
+  (let ((ws (window-start)))
+    (prog1
+        (save-excursion
+          (goto-char (point-min))
+          (condition-case nil
+              (when (re-search-forward
+                     (format ":QUERY_ID: %s" (regexp-quote query-id)) nil t)
+                (org-back-to-heading t)
+                (org-end-of-subtree t)
+                (insert text)
+                t)
+            (error nil)))
+      (set-window-start nil ws t))))
+#+END_SRC
+
+*** Telemetry Persistence
+
+Functions to persist per-query metrics to org properties.
+
+#+BEGIN_SRC elisp
+(defun claude-org--persist-telemetry (session-key usage-plist)
+  "Persist token usage from USAGE-PLIST to org properties for SESSION-KEY.
+USAGE-PLIST has keys :input-tokens, :output-tokens, :cache-read-tokens."
+  (let ((query-id (claude-org--session-get session-key :query-id)))
+    (when query-id
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward
+               (format ":QUERY_ID: %s" (regexp-quote query-id)) nil t)
+          (org-back-to-heading t)
+          (let ((input (plist-get usage-plist :input-tokens))
+                (output (plist-get usage-plist :output-tokens))
+                (cache (plist-get usage-plist :cache-read-tokens)))
+            (when input
+              (org-entry-put nil "INPUT_TOKENS" (number-to-string input)))
+            (when output
+              (org-entry-put nil "OUTPUT_TOKENS" (number-to-string output)))
+            (when cache
+              (org-entry-put nil "CACHE_READ_TOKENS" (number-to-string cache)))))))))
+
+(defun claude-org--persist-duration (session-key)
+  "Persist query duration to org property for SESSION-KEY.
+Computes duration from :start-time to now."
+  (let ((start-time (claude-org--session-get session-key :start-time))
+        (query-id (claude-org--session-get session-key :query-id)))
+    (when (and start-time query-id)
+      (let ((duration (- (float-time) start-time)))
+        (save-excursion
+          (goto-char (point-min))
+          (when (re-search-forward
+                 (format ":QUERY_ID: %s" (regexp-quote query-id)) nil t)
+            (org-back-to-heading t)
+            (org-entry-put nil "DURATION_SECS"
+                           (format "%.1f" duration))))))))
+
+(defun claude-org--persist-tool-count (session-key)
+  "Persist tool call count to org property for SESSION-KEY."
+  (let ((count (or (claude-org--session-get session-key :tool-call-count) 0))
+        (query-id (claude-org--session-get session-key :query-id)))
+    (when query-id
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward
+               (format ":QUERY_ID: %s" (regexp-quote query-id)) nil t)
+          (org-back-to-heading t)
+          (org-entry-put nil "TOOL_CALLS" (number-to-string count)))))))
+#+END_SRC
+
 ** Block History
 
 Persistent tracking of executed AI blocks, enabling quick navigation to
@@ -2132,49 +2268,52 @@ Example usage in AI prompt:
     \"*** Goals\\n\\n- Goal 1\\n- Goal 2\")
 
 Note: The '***' will be auto-adjusted to match parent+1 level."
-  (save-excursion
-    (condition-case err
-        (progn
-          ;; Navigate to parent section by CUSTOM_ID
-          (org-link-open-from-string (format "[[#%s]]" parent-id))
-          (let* ((parent-level (org-outline-level))
-                 (child-level (1+ parent-level))
-                 ;; Auto-adjust heading levels in content
-                 (adjusted-content (claude-org--adjust-heading-levels content child-level))
-                 (subtree-end (save-excursion (org-end-of-subtree t) (point)))
-                 ;; Match heading at exact child level with subsection name
-                 (search-pattern (format "^%s %s\\([ \t]\\|$\\)"
-                                         (regexp-quote (make-string child-level ?*))
-                                         (regexp-quote subsection-name))))
-            (if (re-search-forward search-pattern subtree-end t)
-                ;; Found existing subsection - replace it
-                (progn
-                  (beginning-of-line)
-                  (let ((section-start (point))
-                        section-end)
-                    ;; Find end of this subsection (next sibling or parent end)
-                    ;; Use org-end-of-subtree for reliability
-                    (save-excursion
-                      (org-end-of-subtree t)
-                      (setq section-end (point)))
-                    ;; Delete old content
-                    (delete-region section-start section-end)
-                    ;; Insert new content at current position (after delete, point is at section-start)
+  (let ((ws (window-start)))
+    (prog1
+        (save-excursion
+          (condition-case err
+              (progn
+                ;; Navigate to parent section by CUSTOM_ID
+                (org-link-open-from-string (format "[[#%s]]" parent-id))
+                (let* ((parent-level (org-outline-level))
+                       (child-level (1+ parent-level))
+                       ;; Auto-adjust heading levels in content
+                       (adjusted-content (claude-org--adjust-heading-levels content child-level))
+                       (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+                       ;; Match heading at exact child level with subsection name
+                       (search-pattern (format "^%s %s\\([ \t]\\|$\\)"
+                                               (regexp-quote (make-string child-level ?*))
+                                               (regexp-quote subsection-name))))
+                  (if (re-search-forward search-pattern subtree-end t)
+                      ;; Found existing subsection - replace it
+                      (progn
+                        (beginning-of-line)
+                        (let ((section-start (point))
+                              section-end)
+                          ;; Find end of this subsection (next sibling or parent end)
+                          ;; Use org-end-of-subtree for reliability
+                          (save-excursion
+                            (org-end-of-subtree t)
+                            (setq section-end (point)))
+                          ;; Delete old content
+                          (delete-region section-start section-end)
+                          ;; Insert new content at current position (after delete, point is at section-start)
+                          (insert adjusted-content)
+                          (unless (bolp) (insert "\n"))
+                          t))
+                    ;; Not found - create at end of parent
+                    (goto-char subtree-end)
+                    ;; Ensure we're on a new line with blank line before
+                    (unless (bolp) (insert "\n"))
+                    (unless (save-excursion (forward-line -1) (looking-at-p "^[ \t]*$"))
+                      (insert "\n"))
                     (insert adjusted-content)
                     (unless (bolp) (insert "\n"))
-                    t))
-              ;; Not found - create at end of parent
-              (goto-char subtree-end)
-              ;; Ensure we're on a new line with blank line before
-              (unless (bolp) (insert "\n"))
-              (unless (save-excursion (forward-line -1) (looking-at-p "^[ \t]*$"))
-                (insert "\n"))
-              (insert adjusted-content)
-              (unless (bolp) (insert "\n"))
-              t)))
-      (error
-       (message "claude-org-update-or-create-subsection error: %s" (error-message-string err))
-       nil))))
+                    t)))
+            (error
+             (message "claude-org-update-or-create-subsection error: %s" (error-message-string err))
+             nil)))
+      (set-window-start nil ws t))))
 #+END_SRC
 
 ** Header Prompt Lookup
@@ -3646,6 +3785,10 @@ Extracts session ID from result messages and stores it."
             (let* ((tool-name (claude-agent-tool-use-block-name block))
                    (tool-input (claude-agent-tool-use-block-input block))
                    (formatted (claude-org--handle-tool-use session-key tool-name tool-input)))
+              ;; F3/F5: Record tool call for history and increment count
+              (claude-org--record-tool-call session-key tool-name tool-input)
+              (claude-org--session-put session-key :tool-call-count
+                                       (1+ (or (claude-org--session-get session-key :tool-call-count) 0)))
               (when formatted
                 (with-current-buffer (marker-buffer marker)
                   (save-excursion
@@ -3709,6 +3852,8 @@ lookup).  This ensures tokens are routed to the new section, not the old one."
         ;; Set busy state
         (claude-org--session-put session-key :busy t)
         (claude-org--session-put session-key :start-time (float-time))
+        ;; Run loop iteration hook (F3: empty by default, user opts in)
+        (run-hook-with-args 'claude-org-loop-iteration-hook session-key iteration)
         ;; Start spinner
         (claude-org--start-spinner session-key)
         ;; Generate new query-id for this iteration (tokens route via query-id)
@@ -3774,6 +3919,16 @@ iteration (including across run-at-time delays for :interval)."
   (claude-org--refresh-header-line)
   ;; Run completion hook (no marker to pass - we're marker-free)
   (run-hook-with-args 'claude-org-complete-hook session-key result 'completed)
+  ;; Run user query-complete hook (F4: empty by default, user opts in)
+  (let ((query-id (claude-org--session-get session-key :query-id)))
+    (when query-id
+      (run-hook-with-args 'claude-org-query-complete-hook session-key query-id)))
+  ;; Persist telemetry (F5: duration, tool count)
+  (condition-case nil
+      (progn
+        (claude-org--persist-duration session-key)
+        (claude-org--persist-tool-count session-key))
+    (error nil))
   ;; Check loop state BEFORE any cleanup - execute-loop-iteration needs :marker
   (let* ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
          (loop-max (or (claude-org--session-get session-key :loop-max) 1))

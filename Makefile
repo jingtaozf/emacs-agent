@@ -173,6 +173,9 @@ _run-sharded-tests-parallel:
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-claude-agent-integration.el \
 			-l tests/test-claude-org-integration.el \
+			-l tests/test-claude-org-cancel-active-queries.el \
+			-l tests/test-claude-org-cancel-race.el \
+			-l tests/test-claude-org-exec-status.el \
 			--eval "(test-claude-run-shard $(TOTAL_SHARDS) {})"'
 
 # Internal: run shards using bash background jobs (portable fallback)
@@ -191,6 +194,9 @@ _run-sharded-tests-bash:
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-claude-agent-integration.el \
 			-l tests/test-claude-org-integration.el \
+			-l tests/test-claude-org-cancel-active-queries.el \
+			-l tests/test-claude-org-cancel-race.el \
+			-l tests/test-claude-org-exec-status.el \
 			--eval "(test-claude-run-shard $(TOTAL_SHARDS) $$i)" \
 			> .test-results/shard-$$i.log 2>&1; \
 			echo $$? > .test-results/shard-$$i.exit ) & \
@@ -247,6 +253,8 @@ test-agent-unit:
 		-l tests/test-claude-agent-state-management.el \
 		-l tests/test-claude-agent-background-tasks.el \
 		-f ert-run-tests-batch-and-exit
+# TDD stubs (tests written before implementation):
+#   -l tests/test-claude-agent-input-validation.el
 
 .PHONY: test-backend-unit
 test-backend-unit:
@@ -273,11 +281,12 @@ test-backend-integration:
 .PHONY: test-org-unit
 test-org-unit:
 	@echo "Running claude-org unit tests..."
-	$(BATCH) $(LOAD_PATH) \
+	$(BATCH) $(LOAD_PATH) -L tests/support \
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/support/test-helpers.el \
 		-l tests/test-claude-org-unit.el \
 		-l tests/test-claude-org-refine.el \
 		-l tests/test-claude-org-scheduled.el \
@@ -302,6 +311,12 @@ test-org-unit:
 		-l tests/test-mcp-report-invocation.el \
 		-l tests/test-plugin-discovery.el \
 		-l tests/test-claude-org-edge-cases.el \
+		-l tests/test-claude-org-window-start.el \
+		-l tests/test-slash-completion.el \
+		-l tests/test-claude-org-loop-detection.el \
+		-l tests/test-claude-org-pre-completion.el \
+		-l tests/test-claude-org-telemetry.el \
+		-l tests/test-structural.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mock
@@ -350,6 +365,9 @@ test-org-integration:
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-org-integration.el \
+		-l tests/test-claude-org-cancel-active-queries.el \
+		-l tests/test-claude-org-cancel-race.el \
+		-l tests/test-claude-org-exec-status.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-permissions
