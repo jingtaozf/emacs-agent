@@ -336,25 +336,26 @@ Sets `emacs-mcp-server-activity-string` directly like claude-agent does."
 
 
 (defun emacs-mcp-server--eval-with-state-preservation (form)
-  "Eval FORM while preserving buffer, point, and window state.
-This prevents elisp evaluation from disrupting the user's current editing context."
-  (let ((orig-buffer (current-buffer))
-        (orig-point (point))
-        (orig-window (selected-window))
-        (orig-window-buffer (window-buffer (selected-window))))
-    (unwind-protect
-        (eval form t)
-      ;; Restore window's buffer first (handles switch-to-buffer)
-      (when (and (window-live-p orig-window)
-                 (buffer-live-p orig-window-buffer))
-        (set-window-buffer orig-window orig-window-buffer))
-      ;; Restore selected window
-      (when (window-live-p orig-window)
-        (select-window orig-window t))
-      ;; Restore buffer context and point
-      (when (buffer-live-p orig-buffer)
-        (set-buffer orig-buffer)
-        (goto-char (min orig-point (point-max)))))))
+  "Eval FORM while preserving buffer, point, mark, narrowing, and window state.
+This prevents elisp evaluation from disrupting the user's current editing context.
+Each eval runs in full isolation — point movement, buffer switches, narrowing
+changes, and window scrolling are all reverted after evaluation completes.
+Uses `save-excursion' (marker-based) so point tracks text insertions correctly."
+  (let ((orig-window (selected-window))
+        (orig-window-buffer (window-buffer (selected-window)))
+        (orig-window-start (window-start (selected-window))))
+    (save-current-buffer
+      (save-excursion
+        (save-restriction
+          (unwind-protect
+              (eval form t)
+            ;; Restore window state (not covered by save-* macros)
+            (when (and (window-live-p orig-window)
+                       (buffer-live-p orig-window-buffer))
+              (set-window-buffer orig-window orig-window-buffer)
+              (set-window-start orig-window orig-window-start t))
+            (when (window-live-p orig-window)
+              (select-window orig-window t))))))))
 (defun emacs-mcp-server--pp-to-string (value)
   "Pretty-print VALUE to string, handling special cases."
   (condition-case _
@@ -441,13 +442,13 @@ Runs `claude-agent-invocation-hook' with the invocation details."
 
 (defconst emacs-mcp-server--builtin-tools
   `(((name . "evalElisp")
-     (description . "Evaluate an Emacs Lisp expression and return the result. This is the single tool for all Emacs operations - use Skills to learn how to construct elisp code for specific tasks like buffer manipulation, variable inspection, navigation, etc.")
+     (description . "Evaluate an Emacs Lisp expression and return the result. This is the single tool for all Emacs operations - use Skills to learn how to construct elisp code for specific tasks like buffer manipulation, variable inspection, navigation, etc. IMPORTANT: Each call runs in an isolated context. Point, buffer, narrowing, and window state are restored to the user's editing position after every call. Any navigation you perform (goto-char, re-search-forward, switch-to-buffer) does NOT persist to the next call. You must perform all navigation and action within a single evalElisp call using save-excursion, with-current-buffer, etc.")
      (handler . emacs-mcp-server--handler-eval-elisp)
      (inputSchema . ((type . "object")
                      (properties . ((code . ((type . "string")
                                              (description . "Elisp code to evaluate")))
                                     (save_current_state . ((type . "boolean")
-                                                           (description . "Whether to preserve buffer, point, and window state during evaluation. Default: true. Set to false only when you need the side effects (e.g., switching buffers).")))))
+                                                           (description . "Whether to preserve buffer, point, narrowing, and window state during evaluation. Default: true — each call runs in full isolation (point, mark, narrowing, window-start all restored after eval). Set to false only when you intentionally need side effects visible to the user (e.g., switching buffers, moving point to show something).")))))
                      (required . ["code"]))))
     ((name . "report_invocation")
      (description . "Report when a skill or rule is being invoked. Call this tool when you invoke a skill (like /commit, /review-pr) or apply a rule from CLAUDE.md or .mdrules files. This enables real-time monitoring of agent behavior.")

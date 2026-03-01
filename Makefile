@@ -318,6 +318,7 @@ test-org-unit:
 		-l tests/test-claude-org-pre-completion.el \
 		-l tests/test-claude-org-telemetry.el \
 		-l tests/test-structural.el \
+		-l tests/test-mcp-eval-state.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mock
