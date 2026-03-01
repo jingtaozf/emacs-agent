@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'company)
 (require 'claude-org)
 
 ;;; Test Fixtures
@@ -157,7 +158,6 @@
 
 (ert-deftest test-slash-company-prefix-simple ()
   "Test company prefix detection for simple slash."
-  :expected-result :failed
   (test-slash--with-incomplete-block "/"
     (let ((prefix (claude-org-company-slash-commands 'prefix)))
       (should (consp prefix))
@@ -166,7 +166,6 @@
 
 (ert-deftest test-slash-company-prefix-partial ()
   "Test company prefix detection for partial command."
-  :expected-result :failed
   (test-slash--with-incomplete-block "/te"
     (let ((prefix (claude-org-company-slash-commands 'prefix)))
       (should (consp prefix))
@@ -175,7 +174,6 @@
 
 (ert-deftest test-slash-company-prefix-with-colon ()
   "Test company prefix detection for namespaced command."
-  :expected-result :failed
   (test-slash--with-incomplete-block "/sc:te"
     (let ((prefix (claude-org-company-slash-commands 'prefix)))
       (should (consp prefix))
@@ -240,7 +238,6 @@
 
 (ert-deftest test-slash-company-backend-installed ()
   "Test that company backend is installed when mode is enabled."
-  (skip-unless (boundp 'company-backends))
   (with-temp-buffer
     (org-mode)
     (claude-org-mode 1)
@@ -248,7 +245,6 @@
 
 (ert-deftest test-slash-company-backend-removed ()
   "Test that company backend is buffer-local and doesn't affect other buffers."
-  (skip-unless (boundp 'company-backends))
   (let ((buf1 (generate-new-buffer " *test1*"))
         (buf2 (generate-new-buffer " *test2*")))
     (unwind-protect

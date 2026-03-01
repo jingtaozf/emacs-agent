@@ -17,7 +17,8 @@ ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
 # Load path for tests
 LITERATE_ELISP_DIR = $(HOME)/projects/literate-elisp
 WEB_SERVER_DIR = $(HOME)/.emacs.d/straight/build/web-server
-LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR)
+COMPANY_DIR = $(HOME)/.emacs.d/straight/build/company
+LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR)
 
 .PHONY: all
 all: compile test-unit
