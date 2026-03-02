@@ -1,0 +1,175 @@
+#+TITLE: Emacs Lisp Idioms That Trip Up AI Agents
+#+DESCRIPTION: Reference for constructs where C/Python/JS mental models give wrong answers
+
+AI agents often apply C/Python/JS mental models to Emacs Lisp.
+This reference covers constructs where those models give wrong answers.
+
+Each entry includes a *Verify* expression you can paste into =M-x ielm=,
+a =*scratch*= buffer, or an =evalElisp= MCP tool call.
+
+* 1. =if= with implicit progn in the else branch
+
+*Construct:* =(if COND THEN ELSE-1 ELSE-2 ...)= — all else forms execute, not just the first.
+
+*Misconception:* Only one else clause is allowed. Additional forms after the first else are "unreachable dead code."
+
+*Reality:* Emacs Lisp =if= accepts zero or more else forms. They all execute as an implicit =progn= and the last one's value is returned. Only the THEN branch is a single form.
+
+*Verify:*
+#+begin_src elisp
+(let ((r nil)) (if nil 'then (push 1 r) (push 2 r)) r)
+;; => (2 1)
+#+end_src
+
+* 2. =condition-case= — no fall-through between handlers
+
+*Construct:* =(condition-case VAR BODYFORM (ERROR-SYMBOL HANDLER...)...)= — each handler is independent.
+
+*Misconception:* Handlers fall through like C =switch= cases or are tried sequentially like Python =except= chains where later ones catch what earlier ones don't re-raise.
+
+*Reality:* Only the first matching handler runs. There is no fall-through. Handlers are matched by error symbol hierarchy, and exactly one executes.
+
+*Verify:*
+#+begin_src elisp
+(condition-case err
+    (error "test")
+  (error "caught")
+  (wrong-type-argument "not reached"))
+;; => "caught"
+#+end_src
+
+* 3. =unwind-protect= — cleanup forms ALWAYS run
+
+*Construct:* =(unwind-protect BODYFORM CLEANUP-FORMS...)= — cleanup runs on normal exit, error, or nonlocal exit.
+
+*Misconception:* Cleanup only runs on success (like code after a try block with no finally), or errors skip it.
+
+*Reality:* Cleanup forms execute unconditionally — on normal return, on error, on =throw=/=signal=, on any nonlocal exit. This is the =finally= equivalent.
+
+*Verify:*
+#+begin_src elisp
+(let ((cleaned nil))
+  (ignore-errors
+    (unwind-protect (error "boom") (setq cleaned t)))
+  cleaned)
+;; => t
+#+end_src
+
+* 4. =prog1= / =prog2= — all forms execute; return value of Nth form
+
+*Construct:* =(prog1 FIRST BODY...)= returns FIRST's value after evaluating all BODY forms.
+
+*Misconception:* Only the first (or second) form executes; the rest are dead code.
+
+*Reality:* Every form evaluates for side effects. The return value is simply pinned to the 1st or 2nd form respectively.
+
+*Verify:*
+#+begin_src elisp
+(let ((x 0)) (list (prog1 (cl-incf x) (cl-incf x)) x))
+;; => (1 2)
+#+end_src
+
+* 5. Dynamic binding — variables visible to callees
+
+*Construct:* =let= bindings are dynamically scoped by default (no =lexical-binding: t= file header).
+
+*Misconception:* =let= creates a lexical scope like Python/JS. A called function cannot see the caller's local variables.
+
+*Reality:* Under dynamic binding, =let= temporarily rebinds a symbol's global value. Any function called within that =let= sees the rebound value.
+
+*Verify:*
+#+begin_src elisp
+(let ((dynamic-var 42))
+  (defun test-read-dynamic () dynamic-var)
+  (let ((dynamic-var 99))
+    (test-read-dynamic)))
+;; => 99
+#+end_src
+
+* 6. Buffer-local variables — =setq= only affects current buffer
+
+*Construct:* =(setq-local VAR VAL)= or =(make-local-variable VAR)= followed by =setq=.
+
+*Misconception:* =setq= always sets a global variable. Or buffer-locals are just namespaced globals.
+
+*Reality:* Once a variable is buffer-local, =setq= in that buffer only changes the buffer's copy. Other buffers (and the default value) are unaffected.
+
+*Verify:*
+#+begin_src elisp
+(with-temp-buffer (setq-local my-test-var 1) my-test-var)
+;; => 1  (but my-test-var is void in other buffers)
+#+end_src
+
+* 7. =save-excursion= — uses markers, not absolute positions
+
+*Construct:* =(save-excursion BODY...)= saves and restores point and mark using markers.
+
+*Misconception:* It saves the integer position and restores it literally. Insertions before point won't affect the restored position.
+
+*Reality:* Markers track insertions. If text is inserted before the saved point, the marker (and thus the restored point) shifts forward.
+
+*Verify:*
+#+begin_src elisp
+(with-temp-buffer
+  (insert "abc")
+  (save-excursion
+    (goto-char 2)
+    (save-excursion
+      (goto-char 1)
+      (insert "X"))
+    (point)))
+;; => 3  (not 2, because the marker shifted)
+#+end_src
+
+* 8. =advice-add= — runtime function wrapping, stackable
+
+*Construct:* =(advice-add SYMBOL HOW FUNCTION)= wraps an existing function at runtime.
+
+*Misconception:* It works like a Python decorator — applied once at definition time, static.
+
+*Reality:* Advice is added and removed at runtime. Multiple pieces of advice stack. The advised function's behavior changes immediately for all callers.
+
+*Verify:*
+#+begin_src elisp
+(defun my-test-fn () 1)
+(advice-add 'my-test-fn :override (lambda (&rest _) 2))
+(prog1 (my-test-fn)
+  (advice-remove 'my-test-fn (lambda (&rest _) 2)))
+;; => 2
+#+end_src
+
+* 9. Process filters — must NEVER signal errors
+
+*Construct:* =(set-process-filter PROC FUNCTION)= — the filter is called asynchronously when output arrives.
+
+*Misconception:* Errors in a filter propagate normally and can be caught by the caller.
+
+*Reality:* An unhandled error in a process filter silently kills the process. There is no caller to catch it. Always wrap the body in =condition-case=.
+
+*Pattern:*
+#+begin_src elisp
+(set-process-filter proc
+  (lambda (proc output)
+    (condition-case err
+        (my-handler proc output)
+      (error (message "Filter error: %s" err)))))
+#+end_src
+
+* 10. =lexical-let= — closures under dynamic binding
+
+*Construct:* =(lexical-let ((VAR VAL)...) BODY...)= from =cl-lib= — creates true lexical bindings.
+
+*Misconception:* Plain =let= creates closures like JS/Python. Lambdas inside =let= capture the variable's value at creation time.
+
+*Reality:* Under dynamic binding (the default, and what literate-elisp org files use), plain =let= does NOT create closures. Lambdas capture the dynamic variable, which changes. =lexical-let= is needed for true capture.
+
+*Verify:*
+#+begin_src elisp
+(require 'cl-lib)
+(let ((fns nil))
+  (dotimes (i 3)
+    (lexical-let ((i i))
+      (push (lambda () i) fns)))
+  (mapcar #'funcall (nreverse fns)))
+;; => (0 1 2)  (NOT (3 3 3))
+#+end_src

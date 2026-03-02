@@ -1,0 +1,109 @@
+#+TITLE: Architecture
+#+DESCRIPTION: Meta-map for claude-agent — navigational aid for what falls between literate documents
+
+This file covers ONLY cross-module concerns. Each .org file documents itself.
+
+* Module Boundary Diagram
+
+#+begin_example
+  Entry: claude-code.el (loads all modules in order below)
+  ─────────────────────────────────────────────────────────
+
+  ┌─────────────────────────────────────────────────────┐
+  │ TOP: claude-org.org                                 │
+  │   Org integration — AI blocks, streaming, execution │
+  │   Depends on: claude-agent, org sub-modules         │
+  └──────────────────────┬──────────────────────────────┘
+                         │ requires
+  ┌──────────┬───────────┼───────────┬──────────────────┐
+  │ session  │  queue    │ response  │ history/scheduled │
+  │  .org    │  .org     │  .org     │  .org    .org     │
+  └──────────┴───────────┼───────────┴──────────────────┘
+                         │ all depend on
+  ┌──────────────────────┴──────────────────────────────┐
+  │ CORE: claude-agent.org                              │
+  │   CLI subprocess, JSON protocol, query API          │
+  │   Depends on: backend, permission, ide              │
+  └───┬──────────────────┬──────────────────────┬───────┘
+      │                  │                      │
+  ┌───┴──────┐   ┌──────┴───────┐   ┌──────────┴──┐
+  │ backend  │   │ permission   │   │     ide      │
+  │  .org    │   │  .org        │   │     .org     │
+  └──────────┘   └──────────────┘   └─────────────┘
+  BOTTOM LAYER: no cross-dependencies
+
+  ════════════════════════════════════════════════════════
+  INDEPENDENT: emacs-mcp-server.org (zero claude-* deps)
+#+end_example
+
+Load order in claude-code.el:
+| Order | Module                  | Why this position              |
+|-------+-------------------------+--------------------------------|
+|     1 | claude-agent-backend    | Protocol abstraction, no deps  |
+|     2 | claude-agent-permission | Tool permissions, no deps      |
+|     3 | claude-agent-ide        | Buffer context, no deps        |
+|     4 | claude-agent            | Core SDK, needs 1-3            |
+|     5 | claude-org-session      | Session state, needs 4         |
+|     6 | claude-org-queue        | Block queue, needs 5           |
+|     7 | claude-org-response     | Response rendering, needs 5    |
+|     8 | claude-org              | Top-level org integration      |
+|     9 | claude-org-history      | History tracking, needs 8      |
+|    10 | claude-org-scheduled    | Scheduled execution, needs 8   |
+|    11 | emacs-mcp-server        | Independent, loaded last       |
+
+* Invariants
+
+These must always be true:
+
+- Every public function has a docstring
+- Every test file appears in a Makefile target
+- Session state lives in hash tables, never global variables
+- Process filters never signal errors (kills the process)
+- All code lives in =#+begin_src elisp= blocks (literate-elisp requirement)
+- Timer callbacks check liveness before operating on process/buffer
+- Test failures include =FIX:= remediation messages
+
+* Absence Constraints
+
+These do NOT exist in the codebase:
+
+| Constraint                                      | Why                                    |
+|-------------------------------------------------+----------------------------------------|
+| claude-agent.org has no org-mode dependency      | Core SDK must work without org         |
+| emacs-mcp-server.org has no claude-* dependency  | Reusable as standalone MCP server      |
+| No circular dependencies between modules         | Load order would break                 |
+| No hardcoded paths in test files                 | Portable CI                            |
+| literate-elisp ignores lexical-binding: t        | Use lexical-let for closures           |
+| Tests never live inside .org files               | Always in tests/*.el                   |
+| No global mutable state                          | Session state keyed by buffer-local    |
+
+* Extension Points
+
+| To add...              | Go here                                                    |
+|------------------------+------------------------------------------------------------|
+| New backend            | Create claude-agent-BACKEND.org, add to claude-code.el     |
+| New MCP tool           | Call =emacs-mcp-server-register-tool= from any module      |
+| New structural test    | Add =ert-deftest= to test-structural.el with =FIX:= msg   |
+| New org sub-module     | Create claude-org-NAME.org, add to claude-code.el/Makefile |
+| New test file          | Create tests/test-NAME.el, add to Makefile target          |
+| New behavior prompt    | Add .org file to prompts/tags/                             |
+
+* Development Lifecycle
+
+#+begin_example
+  Edit .org  ──>  Reload  ──>  Smoke  ──>  Unit
+     │               │           │           │
+  any .org     M-x literate-   make        make
+   file        elisp-load    test-smoke  test-unit
+#+end_example
+
+Key constraints for literate-elisp:
+- Use =lexical-let= for closures (lexical-binding header is ignored)
+- Use =cond= + =equal= instead of =pcase= string patterns
+- Prose before code explains intent; section headings are the docs
+
+* Literate Programming
+
+All source lives in .org files loaded by literate-elisp. Section headings
+serve as module documentation. See =docs/literate-programming-principles.org=
+for full guidelines.

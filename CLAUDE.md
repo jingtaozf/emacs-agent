@@ -3,6 +3,7 @@
 ## Commands
 
 ```bash
+make test-smoke         # Fast syntax check (< 2s) — run after every edit
 make test-unit          # Run all unit tests (~13s)
 make test-unit-parallel # Run unit tests in parallel (~4.5s)
 make test-agent-unit    # Run claude-agent unit tests only
@@ -11,10 +12,29 @@ make test-backend-unit  # Run backend protocol unit tests
 make test-mock          # Run mock CLI tests (no API, fast)
 make test-integration   # Run integration tests (requires API key)
 make lint               # Static analysis (undefined functions/variables)
-make check              # lint + test-unit
+make check              # lint + test-unit (pre-commit gate)
 ```
 
+## Verification
+
+After editing .org files:
+```bash
+make test-smoke        # Syntax check — loads all .org files (< 2s)
+```
+
+After any code change:
+```bash
+make test-unit         # Full unit tests (< 5s parallel)
+make check             # lint + test-unit (pre-commit gate)
+```
+
+Before claiming code is buggy:
+- Evaluate the expression via `evalElisp` to confirm behavior
+- See `docs/ELISP_IDIOMS.org` for common Emacs Lisp traps
+
 ## Architecture
+
+See `ARCHITECTURE.org` for module boundaries, invariants, and extension points.
 
 ### Literate Programming
 
@@ -53,7 +73,7 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 
 ### Code Style
 - Use `defvar` for hooks (not `defcustom`) for existing hooks
-- Use `defcustom` with `make-variable-buffer-local` for new user-facing hooks
+- Use `defcustom` with `:type` keyword for new user-facing options
 - Internal functions use double-dash: `claude-org--internal-fn`
 - Public API uses single-dash: `claude-org-public-fn`
 
@@ -75,10 +95,29 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 - Use `condition-case` in all callbacks
 - Sentinel runs after process exits — clean up state there
 
+### ARCHITECTURE.org Maintenance
+After architectural changes, update `ARCHITECTURE.org`:
+- New .org module added → update Module Boundary Diagram
+- Dependency changed → update diagram arrows
+- New invariant discovered → add to Invariants section
+- New extension point created → add to Extension Points
+
+### Harness Feedback Loop
+When an agent mistake is not caught by existing tests:
+1. Fix the immediate issue
+2. Add a structural test to `test-structural.el` that catches this class of mistake
+3. Include a `FIX:` message explaining the correct action
+4. Update `ARCHITECTURE.org` invariants if it reveals a cross-module rule
+
+The harness grows with each mistake — rules become multipliers.
+
 ## Further Reading
 
 | Topic | Location |
 |-------|----------|
+| Architecture map | `ARCHITECTURE.org` |
+| Elisp idioms | `docs/ELISP_IDIOMS.org` |
+| Literate programming | `docs/literate-programming-principles.org` |
 | Full API docs | `claude-agent.org` section headers |
 | Org integration | `claude-org.org` section headers |
 | Test fixtures | `tests/fixtures/` |

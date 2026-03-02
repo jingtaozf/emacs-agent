@@ -35,6 +35,7 @@ help:
 	@echo "  make install-hooks    - Install/update git pre-commit hook"
 	@echo ""
 	@echo "Testing:"
+	@echo "  make test-smoke       - Fast syntax check (< 2s) — run after every edit"
 	@echo "  make test             - Run all tests (unit + parallel integration)"
 	@echo "  make test-unit        - Run unit tests only (fast, no API, ~13s)"
 	@echo "  make test-unit-parallel - Run unit tests in parallel (~4.5s)"
@@ -116,6 +117,20 @@ install-hooks:
 
 .PHONY: test
 test: test-unit test-integration
+
+# Fast syntax check — agents run after every edit (< 2s)
+.PHONY: test-smoke
+test-smoke:
+	@echo "Running smoke tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-L tests/support \
+		-l tests/support/test-helpers.el \
+		-l tests/test-agent-workflow.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :smoke))"
 
 # Unit test targets are independent — use 'make -j3 test-unit' for parallel (4.5s vs 13s)
 .PHONY: test-unit
@@ -319,6 +334,8 @@ test-org-unit:
 		-l tests/test-claude-org-telemetry.el \
 		-l tests/test-structural.el \
 		-l tests/test-mcp-eval-state.el \
+		-l tests/test-agent-workflow.el \
+		-l tests/test-codebase-hardening.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mock

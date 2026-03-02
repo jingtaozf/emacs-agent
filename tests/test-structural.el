@@ -206,5 +206,160 @@ FIX: Add missing sections to CLAUDE.md."
                              (mapconcat #'identity missing ", ")
                              (car missing)))))))))
 
+;;; F7: ARCHITECTURE.org checks
+
+(ert-deftest test-structural-architecture-org-exists ()
+  "ARCHITECTURE.org exists at project root with required sections.
+FIX: Create ARCHITECTURE.org with: Invariants, Absence Constraints, Extension Points.
+See docs/ for templates."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((arch-file (expand-file-name "ARCHITECTURE.org" test-structural--project-root)))
+      (should (or (file-exists-p arch-file)
+                  (error "ARCHITECTURE.org not found at project root.\nFIX: Create %s as a meta-map."
+                         arch-file)))
+      (when (file-exists-p arch-file)
+        (let ((content (with-temp-buffer
+                         (insert-file-contents arch-file)
+                         (buffer-string)))
+              (missing '()))
+          ;; Check required sections
+          (dolist (section '("Invariants" "Absence Constraints" "Extension Points"))
+            (unless (string-match-p (regexp-quote section) content)
+              (push section missing)))
+          (should (or (null missing)
+                      (error "ARCHITECTURE.org missing sections: %s\nFIX: Add * %s section(s)."
+                             (mapconcat #'identity missing ", ")
+                             (car missing)))))))))
+
+(ert-deftest test-structural-architecture-org-size ()
+  "ARCHITECTURE.org is under 150 lines (meta-map must stay small).
+FIX: Move detailed content to docs/ files. ARCHITECTURE.org is a navigational aid."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((arch-file (expand-file-name "ARCHITECTURE.org" test-structural--project-root)))
+      (when (file-exists-p arch-file)
+        (let ((line-count (with-temp-buffer
+                            (insert-file-contents arch-file)
+                            (count-lines (point-min) (point-max)))))
+          (should (or (<= line-count 150)
+                      (error "ARCHITECTURE.org has %d lines (max 150).\nFIX: Move details to docs/."
+                             line-count))))))))
+
+(ert-deftest test-structural-architecture-org-currency ()
+  "ARCHITECTURE.org mentions all .org module files in the project root.
+FIX: Add the missing module to ARCHITECTURE.org Module Boundary Diagram.
+See the Extension Points section for where new modules belong."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((arch-file (expand-file-name "ARCHITECTURE.org" test-structural--project-root)))
+      (when (file-exists-p arch-file)
+        (let ((arch-content (with-temp-buffer
+                              (insert-file-contents arch-file)
+                              (buffer-string)))
+              (missing '()))
+          ;; Find all module .org files (claude-* and emacs-mcp-server*)
+          (dolist (file (directory-files test-structural--project-root nil
+                                        "^\\(claude-\\|emacs-mcp-server\\).*\\.org$"))
+            ;; README.org is not a code module, skip it
+            (unless (string= file "README.org")
+              (let ((base (file-name-sans-extension file)))
+                (unless (string-match-p (regexp-quote base) arch-content)
+                  (push file missing)))))
+          (should (or (null missing)
+                      (error "ARCHITECTURE.org doesn't mention: %s\nFIX: Add to Module Boundary Diagram.\n%s"
+                             (mapconcat #'identity missing ", ")
+                             "See Extension Points section for where new modules belong."))))))))
+
+;;; F8: Dependency direction enforcement
+
+(ert-deftest test-structural-no-reverse-dependency ()
+  "claude-agent.org must not require claude-org (lower layer cannot depend on upper).
+FIX: Remove (require 'claude-org...) from claude-agent.org.
+See ARCHITECTURE.org Module Boundary Diagram for allowed dependency directions."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((agent-file (expand-file-name "claude-agent.org" test-structural--project-root)))
+      (when (file-exists-p agent-file)
+        (let ((content (with-temp-buffer
+                         (insert-file-contents agent-file)
+                         (buffer-string))))
+          (should (or (not (string-match-p "(require 'claude-org" content))
+                      (error "claude-agent.org requires claude-org!\nFIX: Remove (require 'claude-org...) — lower layer cannot depend on upper.\nSee ARCHITECTURE.org."))))))))
+
+(ert-deftest test-structural-mcp-server-independent ()
+  "emacs-mcp-server.org must not depend on claude-agent or claude-org.
+FIX: Remove the (require 'claude-...) from emacs-mcp-server.org.
+The MCP server is an independent module. See ARCHITECTURE.org."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((mcp-file (expand-file-name "emacs-mcp-server.org" test-structural--project-root)))
+      (when (file-exists-p mcp-file)
+        (let ((content (with-temp-buffer
+                         (insert-file-contents mcp-file)
+                         (buffer-string))))
+          (should (or (not (string-match-p "(require 'claude-" content))
+                      (error "emacs-mcp-server.org depends on claude-*!\nFIX: Remove (require 'claude-...) — MCP server must be independent.\nSee ARCHITECTURE.org."))))))))
+
+;;; F8: Agent-mistake structural tests
+
+(ert-deftest test-structural-defcustom-has-type ()
+  "All defcustom variables in claude-agent/claude-org have :type keyword.
+FIX: Add :type to the defcustom form. Example: :type 'boolean or :type 'string"
+  :tags '(:unit :fast :stable :structural)
+  (let ((missing-type '()))
+    (mapatoms
+     (lambda (sym)
+       (when (and (boundp sym)
+                  (custom-variable-p sym)
+                  (let ((name (symbol-name sym)))
+                    (or (string-prefix-p "claude-agent-" name)
+                        (string-prefix-p "claude-org-" name)
+                        (string-prefix-p "emacs-mcp-server-" name)))
+                  ;; Check if :type is specified
+                  (not (get sym 'custom-type)))
+         (push sym missing-type))))
+    (should (or (null missing-type)
+                (error "defcustom without :type: %s\nFIX: Add :type keyword to each:\n%s"
+                       (length missing-type)
+                       (mapconcat
+                        (lambda (s)
+                          (format "  (defcustom %s ... :type 'TYPE)" s))
+                        (sort missing-type
+                              (lambda (a b) (string< (symbol-name a) (symbol-name b))))
+                        "\n"))))))
+
+;;; F9: ELISP_IDIOMS.org and CLAUDE.md Verification section checks
+
+(ert-deftest test-structural-elisp-idioms-exists ()
+  "docs/ELISP_IDIOMS.org exists and is referenced from CLAUDE.md.
+FIX: Create docs/ELISP_IDIOMS.org with Emacs Lisp idiom reference.
+Then add it to CLAUDE.md Further Reading section."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((idioms-file (expand-file-name "docs/ELISP_IDIOMS.org" test-structural--project-root))
+          (claude-md (expand-file-name "CLAUDE.md" test-structural--project-root)))
+      (should (or (file-exists-p idioms-file)
+                  (error "docs/ELISP_IDIOMS.org not found.\nFIX: Create it with Emacs Lisp idiom reference.")))
+      (when (and (file-exists-p idioms-file) (file-exists-p claude-md))
+        (let ((content (with-temp-buffer
+                         (insert-file-contents claude-md)
+                         (buffer-string))))
+          (should (or (string-match-p "ELISP_IDIOMS" content)
+                      (error "CLAUDE.md doesn't reference ELISP_IDIOMS.org.\nFIX: Add to Further Reading section."))))))))
+
+(ert-deftest test-structural-claude-md-verification-section ()
+  "CLAUDE.md contains a Verification section with make commands.
+FIX: Add ## Verification section to CLAUDE.md with make test-smoke, make check."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((claude-md (expand-file-name "CLAUDE.md" test-structural--project-root)))
+      (when (file-exists-p claude-md)
+        (let ((content (with-temp-buffer
+                         (insert-file-contents claude-md)
+                         (buffer-string))))
+          (should (or (string-match-p "Verification" content)
+                      (error "CLAUDE.md missing Verification section.\nFIX: Add ## Verification with make test-smoke, make check."))))))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here
