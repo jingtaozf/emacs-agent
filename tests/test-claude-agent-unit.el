@@ -291,11 +291,15 @@
   "Test Claude CLI discovery."
   :tags '(:unit :fast :stable :isolated :process)
   ;; This test checks if we can find the CLI or handle its absence gracefully
-  (let ((cli (claude-agent--find-cli)))
-    ;; Should either find it or return the default "claude"
-    (should (stringp cli))
-    (should (or (file-executable-p cli)
-                (equal "claude" cli)))))
+  (condition-case err
+      (let ((cli (claude-agent--find-cli)))
+        ;; Should either find it or return the default "claude"
+        (should (stringp cli))
+        (should (or (file-executable-p cli)
+                    (equal "claude" cli))))
+    (claude-agent-cli-not-found-error
+     ;; In CI without Claude CLI installed, verify the error is signaled correctly
+     (should (string-match-p "not found" (cadr err))))))
 
 ;;; Permission System Tests
 
