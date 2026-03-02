@@ -393,7 +393,8 @@ Includes the ❯ prompt character to satisfy wait-for-ready."
   "ensure-process should create an eat buffer and set it on backend."
   :tags '(:unit :fast :stable :isolated :claude-backend :f6)
   (let ((backend (claude-agent-claude-backend--create :cwd "/tmp"))
-        (mock-buf nil))
+        (mock-buf nil)
+        (claude-agent-cli-path "/usr/bin/true"))
     ;; Mock eat-make to return a test buffer
     (cl-letf (((symbol-function 'eat-make)
                (lambda (_name _program &optional _startfile &rest _switches)
