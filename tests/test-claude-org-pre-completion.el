@@ -78,8 +78,7 @@ FIX: Implement (defun claude-org-append-to-response (session-key query-id text) 
 ;;; Test 4: Append preserves window-start
 
 (ert-deftest test-pre-completion-append-preserves-window-start ()
-  "claude-org-append-to-response preserves window scroll position.
-FIX: Wrap with window-start save/restore like update-or-create-subsection."
+  "claude-org-append-to-response preserves window scroll position."
   :tags '(:unit :fast :stable :pre-completion)
   (with-temp-buffer
     (org-mode)

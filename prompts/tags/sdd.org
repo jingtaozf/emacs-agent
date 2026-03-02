@@ -11,25 +11,26 @@
 |----------+-------|
 | Tag | =:sdd:= |
 | Purpose | Structured workflow: Research → Design → Planning → Implementation |
-| Output | Update sibling sections (Research Output, Spec, Features) |
+| Output | Write to =docs/= folder (research, design-docs, product-specs) |
 
-SDD sections: System Prompt (=:system_prompt:=), Workflow (=:sdd:=), Research Output (=:research_output:=), Spec (=:spec:=), Features (=:features:=).
+SDD notebook sections: System Prompt (=:system_prompt:=), Workflow (=:sdd:=).
+Knowledge artifacts live in =docs/= folder as the *single source of truth*.
 
 Full instructions: [[file:prompts/tags/sdd.org::*Details][Read Details]]
 
-** CRITICAL: Use CUSTOM_ID Links
+** CRITICAL: docs/ Is the Single Source of Truth
 
-*NEVER search by heading text* - there may be multiple sections with same name.
+SDD knowledge artifacts are stored in =docs/= subdirectories, NOT in the notebook:
 
-When updating SDD sections, extract the CUSTOM_ID from the link below and search for it:
+| Artifact | Location | Tools |
+|----------+----------+-------|
+| Research findings | =docs/research/YYYY-slug.org= | Read/Edit/Write (sandbox) |
+| Design doc (spec) | =docs/design-docs/YYYY-slug.org= | Read/Edit/Write (sandbox) |
+| Product specs | =docs/product-specs/name.org= | Read/Edit/Write (sandbox) |
+| References | =docs/references/topic.org= | Read/Edit/Write (sandbox) |
 
-#+begin_example
-;; WRONG - finds first match, may be wrong section!
-(re-search-forward "Research Output :research_output:" nil t)
-
-;; CORRECT - use the CUSTOM_ID from the link
-(re-search-forward ":CUSTOM_ID: claude-agent-dev-research-output-sdd-YYYYMMDD-HHMMSS" nil t)
-#+end_example
+The System Prompt in the notebook tells you which docs/ files to read and update.
+After creating or updating any doc, update its row in the subdirectory's =INDEX.md=.
 
 ** CRITICAL: Use evalElisp for Conversation Notebook
 
@@ -41,28 +42,8 @@ The conversation notebook is on the HOST filesystem, not in the sandbox.
 | =Read/Edit/Write= | ✗ NO | Sandbox-only (=/workspace=) |
 | =Grep/Glob= | ✗ NO | Sandbox-only (=/workspace=) |
 
-*ALWAYS use =evalElisp=* to read or update SDD sections in the conversation notebook.
-
-** CRITICAL: Never Hardcode Heading Stars
-
-When inserting content into SDD sections, *NEVER hardcode heading levels* (like =**= or =***=).
-
-*Use the helper function* which auto-adjusts levels:
-
-#+begin_src elisp
-;; CORRECT - levels auto-adjusted to parent+1
-(claude-org-update-or-create-subsection
-  "custom-id-here"
-  "Goals"
-  "*** Goals\n\n- Goal 1")  ; *** will be adjusted automatically
-#+end_src
-
-#+begin_example
-;; WRONG - hardcoded levels break hierarchy!
-(insert "** Goals\n\n- Goal 1")  ; May create sibling instead of child
-#+end_example
-
-The helper reads parent level and adjusts all headings in content accordingly.
+*ALWAYS use =evalElisp=* to read or update notebook sections (System Prompt only).
+Use standard Read/Edit/Write tools for =docs/= files (they live in the project repo).
 
 * Details
 :PROPERTIES:
@@ -74,130 +55,107 @@ approach following the Atomic pattern: Research → Design → Planning → Impl
 
 ** SDD Structure
 
-The current SDD has these sibling sections:
+The SDD has two notebook sections plus docs/ files:
+
+*** Notebook Sections (interaction space)
 
 | Section | Tag | Purpose |
 |---------+-----+---------|
-| *System Prompt* | =:system_prompt:= | AI guidance instructions (output targets, focus areas) |
-| *Workflow* | =:sdd:= | AI interaction phases (you are here) |
-| *Research Output* | =:research_output:= | Synthesized findings from exploration |
-| *Spec* | =:spec:= | Living RFC document (Goals, Non-Goals, Solution) |
-| *Features* | =:features:= | Atomic TODO items to implement |
+| *System Prompt* | =:system_prompt:= | AI guidance: story name, docs/ file paths, focus areas |
+| *Workflow* | =:sdd:= | AI interaction blocks (you are here) |
+
+*** docs/ Files (knowledge artifacts)
+
+| Directory | Purpose | Format |
+|-----------+---------+--------|
+| =docs/research/= | Research findings from exploration | =YYYY-slug.org= |
+| =docs/design-docs/= | Specs: Goals, Non-Goals, Solution, Technical Design, Features | =YYYY-slug.org= |
+| =docs/product-specs/= | Cross-story product-level specifications | =name.org= |
+| =docs/references/= | Curated external references and resources | =topic.org= |
+
+Each subdirectory has an =INDEX.md= file listing all docs with status.
 
 ** Finding Current Progress
 
 Before starting work, understand where things stand:
 
-1. *Check Features section*: Look for TODO/DONE states
-   - Find the first incomplete TODO - that's the current focus
-   - Review completed items for context
-
-2. *Read Spec section*: Understand the technical design
+1. *Read the System Prompt*: It tells you which docs/ files belong to this story
+2. *Read the Design Doc*: =docs/design-docs/YYYY-slug.org=
    - Goals and Non-Goals define scope
    - Proposed Solution describes the approach
    - Technical Design has implementation details
-
-3. *Review Research Output*: Access collected knowledge
+   - Features section has TODO items — find the first incomplete one
+3. *Read the Research*: =docs/research/YYYY-slug.org=
    - Codebase Patterns: Existing patterns to follow
    - Relevant Files: Key files with file:line references
    - External References: Documentation and resources
 
-** Updating Sibling Sections
+** Updating docs/ Files
 
-As you work, update the appropriate sibling sections using =evalElisp= MCP tool
-with Emacs org-mode Skills (=/emacs-org=, =/emacs-navigation=).
+As you work, update the appropriate docs/ files using Read/Edit/Write tools.
 
-*** CRITICAL: Replace, Don't Append
+*** How to Update
 
-When updating SDD sections multiple times, you MUST *replace* existing subsections
-rather than *append* new ones. This prevents duplicate Goals, Non-Goals, etc.
+1. Read the file with =Read= tool
+2. Edit specific sections with =Edit= tool (preferred) or rewrite with =Write=
+3. For new files, use =Write= to create them from templates below
 
-**** Use the Helper Function
-
-#+begin_src elisp
-;; CORRECT - replaces existing subsection or creates if missing
-(claude-org-update-or-create-subsection
-  "myproject-spec-sdd-20260115-123456"  ; CUSTOM_ID of parent (Spec/Research/Features)
-  "Goals"                                ; Subsection name (without asterisks)
-  "*** Goals\n\n- Goal 1\n- Goal 2")    ; Full content with correct heading level
-#+end_src
-
-**** WRONG Pattern
-
-#+begin_src elisp
-;; WRONG - creates duplicates on repeated updates!
-(org-end-of-subtree)
-(insert "\n*** Goals\nNew goals...")
-#+end_src
-
-**** Updating Multiple Subsections
-
-#+begin_src elisp
-;; Update all Spec subsections at once
-(let ((spec-id "myproject-spec-sdd-20260115-123456"))
-  (claude-org-update-or-create-subsection spec-id "Goals" "*** Goals\n\n...")
-  (claude-org-update-or-create-subsection spec-id "Non-Goals" "*** Non-Goals\n\n...")
-  (claude-org-update-or-create-subsection spec-id "Technical Design" "*** Technical Design\n\n..."))
-#+end_src
-
-*** How to Update Sections
-
-1. Use =/emacs-org= Skill to learn org-mode editing patterns
-2. Navigate to section by CUSTOM_ID: =(org-link-open-from-string "[[#custom-id]]")=
-3. Use =claude-org-update-or-create-subsection= to update/create subsections
-
-*** System Prompt Section
-
-The System Prompt section provides AI guidance for this specific SDD workflow:
-- *Target output section*: Where to write final results (e.g., "Project Context")
-- *Focus areas*: Specific aspects to prioritize during research/design
-- *Constraints*: Any limitations or requirements to observe
-- *Output format*: Expected structure of deliverables
-
-Example content:
-#+begin_example
-Target output section: Project Context
-
-Focus on:
-- API design patterns
-- Error handling conventions
-- Test coverage requirements
-
-Constraints:
-- Must be backward compatible
-- No new dependencies
-#+end_example
-
-*** Research Output Section
-
-When you discover important information during exploration, update subsections:
-- *Codebase Patterns*: Design patterns, coding conventions found
-- *Relevant Files*: Key files with line references (=file.py:42=)
-- *External References*: Links to docs, articles, related PRs
-
-*** Spec Section
-
-When design decisions are made, update subsections:
-- *Goals*: What we're trying to achieve
-- *Non-Goals*: Explicit scope boundaries
-- *Proposed Solution*: High-level approach
-- *Technical Design*: Implementation details
-
-*** Features Section
-
-When breaking down work into atomic tasks, create TODO items with checkboxes:
+*** Research File Template
 
 #+begin_example
-*** TODO Create AuthService class
-Service class for authentication logic
-- [ ] Define class interface
-- [ ] Implement constructor with dependencies
+,#+TITLE: Research: [Story Name]
+,#+DATE: [YYYY-MM-DD]
+,#+SDD_SESSION: [session-id]
+,#+STATUS: draft
 
-*** TODO Add JWT validation middleware
-Validate tokens on protected routes
-- [ ] Parse Bearer token
-- [ ] Verify signature
+,* Codebase Patterns
+
+,* Relevant Files
+
+,* External References
+
+,* Findings
 #+end_example
+
+*** Design Doc Template
+
+#+begin_example
+,#+TITLE: Design: [Story Name]
+,#+DATE: [YYYY-MM-DD]
+,#+SDD_SESSION: [session-id]
+,#+STATUS: draft
+
+,* Goals
+
+,* Non-Goals
+
+,* Proposed Solution
+
+,* Technical Design
+
+,* Features
+
+,** TODO Feature 1
+- [ ] Step 1
+- [ ] Step 2
+
+,** TODO Feature 2
+- [ ] Step 1
+#+end_example
+
+*** INDEX.md Format
+
+Each subdirectory has an INDEX.md:
+
+#+begin_example
+# Design Docs Index
+
+| Date | Title | Status | SDD Session |
+|------|-------|--------|-------------|
+| 2026-03-02 | Harness Engineering | Draft | sdd-20260228-200955 |
+#+end_example
+
+Update INDEX.md after creating or completing docs.
 
 ** Workflow Phases
 
@@ -205,9 +163,9 @@ Each AI block can be tagged with a phase for focused behavior:
 
 | Phase | Tag | Purpose | Output |
 |-------+-----+---------+--------|
-| Research | =:research:= | Explore codebase | → Research Output section |
-| Design | =:design:= | Technical RFC | → Spec section |
-| Planning | =:planning:= | Task breakdown | → Features section (TODOs) |
+| Research | =:research:= | Explore codebase | → =docs/research/YYYY-slug.org= |
+| Design | =:design:= | Technical RFC | → =docs/design-docs/YYYY-slug.org= |
+| Planning | =:planning:= | Task breakdown | → Features in =docs/design-docs/YYYY-slug.org= |
 | Implementation | =:implementation:= | *Write tests THEN code* | → Tests (RED) → Code (GREEN) → Refactor |
 
 Select phase tags when inserting new AI blocks via =C-c C-/= → =n=.
@@ -489,16 +447,17 @@ Continuing on wrong paths because of invested effort:
 
 ** Key Principles
 
-1. *Dual Memory*: Spec = lasting memory, Workflow = active memory
-2. *Human Checkpoints*: Get approval at Research→Design and Planning→Implementation
-3. *Atomic Features*: Each TODO should be completable in one session
-4. *40-60 Rule*: Aim for 40-60% completion, humans refine the rest
-5. *Update as you go*: Keep Research Output, Spec, Features current
-6. *TDD Is Mandatory*: Write tests BEFORE implementation - see RED first
-7. *Tests Are IMMUTABLE*: NEVER modify tests during implementation - fix code, not tests
-8. *Test Tags*: Use =:tdd= tag to track test-first development
-9. *Verify Failure*: A test you haven't seen fail hasn't proven it can detect bugs
-10. *Prefer Real Collaborators*: Minimize mocks - they're a design smell
+1. *docs/ Is Single Truth*: All knowledge artifacts live in docs/, not in the notebook
+2. *Notebook Is Interaction*: System Prompt + Workflow only — no persistent knowledge storage
+3. *Human Checkpoints*: Get approval at Research→Design and Planning→Implementation
+4. *Atomic Features*: Each TODO should be completable in one session
+5. *40-60 Rule*: Aim for 40-60% completion, humans refine the rest
+6. *Update as you go*: Keep docs/ files current as you work
+7. *TDD Is Mandatory*: Write tests BEFORE implementation - see RED first
+8. *Tests Are IMMUTABLE*: NEVER modify tests during implementation - fix code, not tests
+9. *Test Tags*: Use =:tdd= tag to track test-first development
+10. *Verify Failure*: A test you haven't seen fail hasn't proven it can detect bugs
+11. *Prefer Real Collaborators*: Minimize mocks - they're a design smell
 
 
 ** TDD Quality Metrics
@@ -533,96 +492,6 @@ echo "TDD %: $(( 100 * $(grep -r ":tdd" tests/*.el | wc -l) / $(grep -r "ert-def
 #+begin_example elisp
 (ert-run-tests-batch-and-exit '(tag :tdd))
 #+end_example
-
-** Navigating SDD Sections (CRITICAL)
-
-SDD sections are linked via =CUSTOM_ID= properties for stable navigation.
-
-*** Using the Section Links
-
-The "SDD Section Links" section below contains org links in format:
-=[[file:path.org::#custom-id][Section Name]]=
-
-*ALWAYS* use these CUSTOM_ID-based links to navigate. Do NOT use heading-based
-links like =[[file:path::*Heading]]= as they are ambiguous when multiple SDDs exist.
-
-*** If a Link Fails to Resolve
-
-If navigation via =evalElisp= fails for a linked section:
-
-1. *STOP* - Do not guess or use a different section
-2. *WARN the user*: "Cannot find section with CUSTOM_ID: <id>"
-3. *Ask for guidance*: The section may need its CUSTOM_ID property restored
-
-*** Finding and Editing Sections by CUSTOM_ID
-
-Use =evalElisp= MCP tool with these patterns. Invoke =/emacs-org= Skill for more.
-
-#+begin_example elisp
-;; Navigate to section by CUSTOM_ID
-(org-link-open-from-string "[[#custom-id-here]]")
-
-;; Read section content
-(save-excursion
-  (org-link-open-from-string "[[#custom-id-here]]")
-  (org-narrow-to-subtree)
-  (buffer-substring-no-properties (point-min) (point-max)))
-
-;; Insert content at end of section
-(save-excursion
-  (org-link-open-from-string "[[#custom-id-here]]")
-  (org-end-of-subtree)
-  (insert "\nNew content here"))
-#+end_example
-
-*Why CUSTOM_ID*: Multiple SDDs may have identically-named sections.
-CUSTOM_ID guarantees you update the correct section for THIS workflow.
-
-*** Org Hierarchy Rules (CRITICAL)
-
-When writing subsections to SDD sections, you MUST respect org-mode heading hierarchy.
-
-**** Rule 1: Determine Parent Level First
-
-Before writing ANY subsections, check the parent's level:
-
-#+begin_src elisp
-(save-excursion
-  (org-link-open-from-string "[[#target-custom-id]]")
-  (org-outline-level))  ; Returns 2, 3, 4, etc.
-#+end_src
-
-**** Rule 2: Subsections = Parent Level + 1
-
-| Parent Level | Subsection Level | Example |
-|--------------+------------------+---------|
-| =**= (2) | =***= (3) | Spec section |
-| =***= (3) | =****= (4) | Goals under Spec |
-| =****= (4) | =*****= (5) | Details under Goals |
-
-**** Rule 3: Template Levels Are Relative
-
-Template examples in prompt files show *structure*, not absolute levels:
-
-#+begin_example
-,*** Goals        ← Template shows level 3
-,*** Non-Goals    ← But actual level depends on parent
-#+end_example
-
-If parent is level 3 (=***=), these become level 4 (=****=).
-
-**** Rule 4: Verify Before Writing
-
-Always verify hierarchy is correct before inserting content:
-
-#+begin_src elisp
-(save-excursion
-  (org-link-open-from-string "[[#custom-id]]")
-  (let ((parent-level (org-outline-level)))
-    (message "Parent level: %d, use %s for subsections"
-             parent-level
-             (make-string (1+ parent-level) ?*))))
-#+end_src
 
 ** Session Handoff
 

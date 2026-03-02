@@ -2173,163 +2173,6 @@ Returns the level (integer) or nil if not found."
           (org-back-to-heading t)
           (org-outline-level))))))
 
-(defun claude-org--generate-sdd-links (file-path sdd-root &optional session-id)
-  "Generate org links to SDD sibling sections with heading level info.
-FILE-PATH is the absolute path to the org file.
-SDD-ROOT is the parent section name (e.g., \"Feature Name\").
-SESSION-ID is required for generating stable CUSTOM_ID based links.
-Returns a formatted string with links to Research Output, Spec, Features,
-including their heading levels so AI knows correct subsection depth.
-Returns nil if session-id is missing (legacy SDD without proper IDs)."
-  (when (and file-path sdd-root session-id)
-    (let ((sections '(("System Prompt" . "system_prompt")
-                      ("Research Output" . "research_output")
-                      ("Spec" . "spec")
-                      ("Features" . "features")))
-          (file-base (file-name-base file-path)))
-      (concat
-       "** SDD Section Links\n\n"
-       "*CRITICAL*: Use the CUSTOM_ID (not heading text) when searching/updating sections.\n\n"
-       (mapconcat
-        (lambda (sec)
-          (let* ((name (car sec))
-                 (custom-id (claude-org--generate-custom-id session-id name file-base))
-                 (link (org-link-make-string
-                        (format "file:%s::#%s" file-path custom-id)
-                        name))
-                 (level (claude-org--get-section-level-by-custom-id file-path custom-id))
-                 (subsection-level (when level (1+ level)))
-                 (subsection-stars (when subsection-level (make-string subsection-level ?*))))
-            (if subsection-stars
-                (format "- *%s*: %s\n  CUSTOM_ID: =%s=\n  Subsection level: =%s= (level %d)"
-                        name link custom-id subsection-stars subsection-level)
-              (format "- *%s*: %s\n  CUSTOM_ID: =%s=" name link custom-id))))
-        sections "\n")
-       "\n\n*Warning*: If a link fails to resolve, the target section may be missing its CUSTOM_ID property."))))
-#+END_SRC
-
-*** SDD-Specific Method
-
-SDD tag uses Summary section for progressive disclosure, then appends dynamic links.
-
-#+BEGIN_SRC elisp
-(cl-defmethod claude-org-tag-prompt ((tag (eql 'sdd)) context)
-  "SDD tag: combine Summary section with dynamic section links.
-Uses progressive disclosure - only Summary loaded, Claude reads full via link."
-  (let* ((file-path (plist-get context :file-path))
-         (sdd-root (plist-get context :sdd-root))
-         (session-id (plist-get context :session-id))
-         (static-prompt (claude-org--extract-summary-section
-                         (expand-file-name "tags/sdd.org"
-                                           claude-org-prompts-directory)))
-         (links (claude-org--generate-sdd-links file-path sdd-root session-id)))
-    (if links
-        (concat static-prompt "\n\n" links)
-      static-prompt)))
-#+END_SRC
-
-*** SDD Subsection Update Helper
-
-Helper function for updating SDD subsections without creating duplicates.
-When updating Spec, Research Output, or Features sections, AI should use this
-to *replace* existing subsections rather than appending new ones.
-
-#+BEGIN_SRC elisp
-(defun claude-org--adjust-heading-levels (content target-level)
-  "Adjust all heading levels in CONTENT to be relative to TARGET-LEVEL.
-The first heading in CONTENT becomes TARGET-LEVEL, and all other headings
-are adjusted proportionally.
-
-For example, if CONTENT starts with '*** Foo' and TARGET-LEVEL is 4,
-'*** Foo' becomes '**** Foo' and '**** Bar' becomes '***** Bar'.
-
-This ensures correct hierarchy regardless of what level Claude uses in examples."
-  (if (string-match "^\\(\\*+\\) " content)
-      (let* ((content-level (length (match-string 1 content)))
-             (level-diff (- target-level content-level)))
-        (if (= level-diff 0)
-            content  ; Already correct
-          ;; Adjust all heading lines
-          (with-temp-buffer
-            (insert content)
-            (goto-char (point-min))
-            (while (re-search-forward "^\\(\\*+\\) " nil t)
-              (let* ((stars (match-string 1))
-                     (old-level (length stars))
-                     (new-level (max 1 (+ old-level level-diff)))  ; Ensure at least level 1
-                     (new-stars (make-string new-level ?*)))
-                (replace-match (concat new-stars " "))))
-            (buffer-string))))
-    ;; No heading found, return as-is
-    content))
-
-(defun claude-org-update-or-create-subsection (parent-id subsection-name content)
-  "Update existing subsection or create new one under PARENT-ID.
-PARENT-ID is the CUSTOM_ID of the parent section (e.g., Spec section).
-SUBSECTION-NAME is the heading text (e.g., \"Goals\", \"Non-Goals\").
-CONTENT is the full content including heading.  The heading level will be
-automatically adjusted to be one level below the parent, so callers don't
-need to know the exact level.
-
-This function prevents duplicate subsections when AI updates SDD sections
-multiple times. It searches for existing subsection and replaces it,
-or creates new one at end if not found.
-
-Returns t on success, nil on failure.
-
-Example usage in AI prompt:
-  (claude-org-update-or-create-subsection
-    \"myproject-spec-sdd-20260115-123456\"
-    \"Goals\"
-    \"*** Goals\\n\\n- Goal 1\\n- Goal 2\")
-
-Note: The '***' will be auto-adjusted to match parent+1 level."
-  (let ((ws (window-start)))
-    (prog1
-        (save-excursion
-          (condition-case err
-              (progn
-                ;; Navigate to parent section by CUSTOM_ID
-                (org-link-open-from-string (format "[[#%s]]" parent-id))
-                (let* ((parent-level (org-outline-level))
-                       (child-level (1+ parent-level))
-                       ;; Auto-adjust heading levels in content
-                       (adjusted-content (claude-org--adjust-heading-levels content child-level))
-                       (subtree-end (save-excursion (org-end-of-subtree t) (point)))
-                       ;; Match heading at exact child level with subsection name
-                       (search-pattern (format "^%s %s\\([ \t]\\|$\\)"
-                                               (regexp-quote (make-string child-level ?*))
-                                               (regexp-quote subsection-name))))
-                  (if (re-search-forward search-pattern subtree-end t)
-                      ;; Found existing subsection - replace it
-                      (progn
-                        (beginning-of-line)
-                        (let ((section-start (point))
-                              section-end)
-                          ;; Find end of this subsection (next sibling or parent end)
-                          ;; Use org-end-of-subtree for reliability
-                          (save-excursion
-                            (org-end-of-subtree t)
-                            (setq section-end (point)))
-                          ;; Delete old content
-                          (delete-region section-start section-end)
-                          ;; Insert new content at current position (after delete, point is at section-start)
-                          (insert adjusted-content)
-                          (unless (bolp) (insert "\n"))
-                          t))
-                    ;; Not found - create at end of parent
-                    (goto-char subtree-end)
-                    ;; Ensure we're on a new line with blank line before
-                    (unless (bolp) (insert "\n"))
-                    (unless (save-excursion (forward-line -1) (looking-at-p "^[ \t]*$"))
-                      (insert "\n"))
-                    (insert adjusted-content)
-                    (unless (bolp) (insert "\n"))
-                    t)))
-            (error
-             (message "claude-org-update-or-create-subsection error: %s" (error-message-string err))
-             nil)))
-      (set-window-start nil ws t))))
 #+END_SRC
 
 ** Header Prompt Lookup
@@ -2432,8 +2275,6 @@ Returns plist with :tags and :header-args."
 Container tags come before phase tags."
   (pcase tag
     ("sdd" 0)        ; Container first
-    ("spec" 1)       ; Documentation sections
-    ("features" 2)
     ("research" 10)  ; Phases in order
     ("design" 11)
     ("planning" 12)
@@ -3116,25 +2957,86 @@ property starting with 'sdd-'. Returns the level (integer) or nil if not found."
               (setq found-level (org-current-level)))))
         found-level))))
 
+(defun claude-org--sdd-name-to-slug (name)
+  "Convert SDD feature NAME to a file-system slug.
+Lowercases, replaces spaces/special chars with hyphens, collapses runs."
+  (let ((slug (downcase name)))
+    (setq slug (replace-regexp-in-string "[^a-z0-9]+" "-" slug))
+    (setq slug (replace-regexp-in-string "^-\\|-$" "" slug))
+    slug))
+
+(defun claude-org--sdd-create-docs-files (name session-id)
+  "Create docs/ research and design-doc files for SDD story NAME.
+SESSION-ID is the SDD session identifier.
+Returns a plist (:research PATH :design PATH) of created file paths,
+or nil if docs/ directories don't exist."
+  (let* ((buf-dir (if buffer-file-name
+                     (file-name-directory buffer-file-name)
+                   default-directory))
+         (project-root (or (locate-dominating-file buf-dir "docs")
+                           buf-dir))
+         (research-dir (expand-file-name "docs/research" project-root))
+         (design-dir (expand-file-name "docs/design-docs" project-root))
+         (year (substring session-id 4 8))
+         (slug (claude-org--sdd-name-to-slug name))
+         (research-file (expand-file-name (format "%s-%s.org" year slug) research-dir))
+         (design-file (expand-file-name (format "%s-%s.org" year slug) design-dir)))
+    (when (and (file-directory-p research-dir)
+               (file-directory-p design-dir))
+      ;; Create research file from template
+      (unless (file-exists-p research-file)
+        (with-temp-file research-file
+          (insert (format "#+TITLE: Research: %s\n" name))
+          (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
+          (insert (format "#+SDD_SESSION: %s\n" session-id))
+          (insert "#+STATUS: draft\n\n")
+          (insert "* Codebase Patterns\n\n")
+          (insert "* Relevant Files\n\n")
+          (insert "* External References\n\n")
+          (insert "* Findings\n")))
+      ;; Create design doc from template
+      (unless (file-exists-p design-file)
+        (with-temp-file design-file
+          (insert (format "#+TITLE: Design: %s\n" name))
+          (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
+          (insert (format "#+SDD_SESSION: %s\n" session-id))
+          (insert "#+STATUS: draft\n\n")
+          (insert "* Goals\n\n")
+          (insert "* Non-Goals\n\n")
+          (insert "* Proposed Solution\n\n")
+          (insert "* Technical Design\n\n")
+          (insert "* Features\n")))
+      ;; Update INDEX.md files
+      (claude-org--sdd-update-index research-dir name session-id)
+      (claude-org--sdd-update-index design-dir name session-id)
+      (list :research research-file :design design-file))))
+
+(defun claude-org--sdd-update-index (dir name session-id)
+  "Append entry to INDEX.md in DIR for SDD story NAME with SESSION-ID."
+  (let ((index-file (expand-file-name "INDEX.md" dir)))
+    (when (file-exists-p index-file)
+      (with-temp-buffer
+        (insert-file-contents index-file)
+        (goto-char (point-max))
+        (insert (format "| %s | %s | Draft | %s |\n"
+                        (format-time-string "%Y-%m-%d")
+                        name
+                        session-id))
+        (write-region (point-min) (point-max) index-file nil 'silent)))))
+
 (defun claude-org-insert-sdd ()
   "Insert an SDD (Spec-Driven Development) structure.
-Creates five sections in order:
+Creates two notebook sections:
 1. System Prompt :system_prompt: for AI guidance instructions
 2. Workflow :sdd: with a single AI block (user adds phase tags manually)
-3. Research Output :research_output: with Patterns/Files/External subsections
-4. Spec :spec: with Goals/Non-Goals/Proposed Solution/Technical Design
-5. Features :features: with ORDERED property for TODO tracking
 
-The structure follows the Atomic workflow pattern:
-- System Prompt: Instructions to guide AI behavior and output structure
-- Workflow: AI interaction happens here (user selects phase tags per block)
-- Research Output: Synthesized findings from exploration
-- Spec: Living RFC document that evolves with the project
-- Features: Atomic TODO items, each small enough to complete in one session
+Knowledge artifacts (research, spec, features) are created as files in docs/:
+- docs/research/YYYY-slug.org — research findings
+- docs/design-docs/YYYY-slug.org — design doc with goals, spec, features
 
-Each section gets a CUSTOM_ID property for stable cross-file linking.
-Format: file-base-section-slug-session-id (e.g., claude-agent-dev-research-output-sdd-20251227-180147)
+The System Prompt auto-populates with paths to these docs/ files.
 
+Each notebook section gets a CUSTOM_ID property for stable cross-file linking.
 Prompts for feature name and sets up unique CLAUDE_SESSION_ID.
 Aligns section level with previous SDD if any exists, otherwise uses top level."
   (interactive)
@@ -3145,7 +3047,9 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
          (level (or (claude-org--find-previous-sdd-level) 1))
          (stars (make-string level ?*))
          (stars2 (make-string (1+ level) ?*))
-         (stars3 (make-string (+ 2 level) ?*)))
+         (stars3 (make-string (+ 2 level) ?*))
+         ;; Create docs/ files (side effect only, return value unused)
+         (_ (claude-org--sdd-create-docs-files name session-id)))
     ;; Insert top-level heading with session
     (insert stars " " name "\n")
     (insert ":PROPERTIES:\n")
@@ -3158,7 +3062,44 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "System Prompt" file-base) "\n")
     (insert ":END:\n\n")
-    (insert (format "The current SDD story is \"%s\"\n\n" name))
+    (insert (format "The current SDD story is \"%s\"\n" name))
+    ;; Always include docs/ guidance — use relative paths from slug/year
+    (let* ((slug (claude-org--sdd-name-to-slug name))
+           (year (substring session-id 4 8))
+           (r (format "docs/research/%s-%s.org" year slug))
+           (d (format "docs/design-docs/%s-%s.org" year slug)))
+      (insert (format "
+Docs files for this story:
+- *Research*: =%s=
+- *Design Doc*: =%s=
+- *Product Specs*: =docs/product-specs/= (cross-story specs)
+- *References*: =docs/references/= (curated external resources)
+
+*Shorthand references* — when I say:
+
+| I say | I mean | Section inside |
+|-------|--------|----------------|
+| \"the research file\" | =%s= | (whole file) |
+| \"the design doc\" / \"the spec\" | =%s= | (whole file) |
+| \"the goals\" / \"the non-goals\" | =%s= | =* Goals= / =* Non-Goals= |
+| \"the features\" / \"the TODOs\" | =%s= | =* Features= |
+| \"the technical design\" | =%s= | =* Technical Design= |
+| \"the references\" | =docs/references/= | (directory) |
+| \"the product specs\" | =docs/product-specs/= | (directory) |
+
+*Managing docs/ folder*:
+
+| Directory | When to Update | INDEX.md Purpose |
+|-----------|----------------|------------------|
+| =docs/research/= | During research phase — findings, codebase patterns, relevant files | Track all research with status (draft/complete) |
+| =docs/design-docs/= | During design phase — goals, spec, technical design, features TODOs | Track design docs with status (draft/review/approved) |
+| =docs/product-specs/= | When a feature defines cross-story product behavior | Catalog reusable product-level specs |
+| =docs/references/= | When curating external docs, articles, or API references | Quick-lookup index of reference material |
+
+After creating or updating any doc, append/update its row in the
+subdirectory's =INDEX.md= (Date, Title, Status, SDD Session columns).
+
+" r d r d d d d)))
 
     ;; 2. Insert Workflow section with single AI block (no phase tags)
     (insert stars2 " Workflow :sdd:\n")
@@ -3171,29 +3112,6 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":CUSTOM_ID: " (claude-org--generate-instruction-custom-id file-base 1 session-id) "\n")
     (insert ":END:\n\n")
     (insert "#+begin_src ai\n\n#+end_src\n\n")
-
-    ;; 3. Insert Research Output section for findings
-    (insert stars2 " Research Output :research_output:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Research Output" file-base) "\n")
-    (insert ":END:\n\n")
-    (dolist (section '("Codebase Patterns" "Relevant Files" "External References"))
-      (insert stars3 " " section "\n\n"))
-
-    ;; 4. Insert Spec section with subsections
-    (insert stars2 " Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Spec" file-base) "\n")
-    (insert ":END:\n\n")
-    (dolist (section '("Goals" "Non-Goals" "Proposed Solution" "Technical Design"))
-      (insert stars3 " " section "\n\n"))
-
-    ;; 5. Insert Features section with ORDERED property and CUSTOM_ID
-    (insert stars2 " Features :features:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Features" file-base) "\n")
-    (insert ":ORDERED: t\n")
-    (insert ":END:\n\n")
 
     ;; Position cursor inside the AI block
     (re-search-backward "^#\\+begin_src ai")

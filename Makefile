@@ -327,7 +327,6 @@ test-org-unit:
 		-l tests/test-mcp-report-invocation.el \
 		-l tests/test-plugin-discovery.el \
 		-l tests/test-claude-org-edge-cases.el \
-		-l tests/test-claude-org-window-start.el \
 		-l tests/test-slash-completion.el \
 		-l tests/test-claude-org-loop-detection.el \
 		-l tests/test-claude-org-pre-completion.el \

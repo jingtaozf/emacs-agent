@@ -116,6 +116,10 @@ The harness grows with each mistake — rules become multipliers.
 | Topic | Location |
 |-------|----------|
 | Architecture map | `ARCHITECTURE.org` |
+| Design docs | `docs/design-docs/` |
+| Research findings | `docs/research/` |
+| Product specs | `docs/product-specs/` |
+| References | `docs/references/` |
 | Elisp idioms | `docs/ELISP_IDIOMS.org` |
 | Literate programming | `docs/literate-programming-principles.org` |
 | Full API docs | `claude-agent.org` section headers |

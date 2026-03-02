@@ -9,6 +9,9 @@
 
 ;; Unit and integration tests for SDD (Spec-Driven Development) workflow.
 ;; Tests the claude-org-insert-sdd command and tag inheritance.
+;;
+;; SDD notebook structure: System Prompt + Workflow only.
+;; Knowledge artifacts (research, spec, features) live in docs/ folder.
 
 ;;; Code:
 
@@ -49,48 +52,39 @@ The default content should indicate the current SDD story name."
     ;; Should find the default content with the story name
     (should (re-search-forward "The current SDD story is \"My SDD Story\"" nil t))))
 
-(ert-deftest test-sdd-insert-creates-four-sections ()
-  "Test that claude-org-insert-sdd creates Workflow, Research Output, Spec, and Features sections."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
+(ert-deftest test-sdd-insert-creates-two-notebook-sections ()
+  "Test that claude-org-insert-sdd creates only System Prompt and Workflow sections.
+Research Output, Spec, and Features now live in docs/ folder, not the notebook."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
-    ;; Simulate user input
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
       (claude-org-insert-sdd))
-    ;; Verify structure - use separate searches from point-min for each major section
+    ;; Verify structure - only 2 sections in notebook
     (goto-char (point-min))
     ;; Top-level heading
     (should (re-search-forward "^\\* Test Feature" nil t))
+    ;; System Prompt section
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
+    (should (org-entry-get nil "CUSTOM_ID"))
     ;; Workflow section with :sdd: tag and CUSTOM_ID
     (goto-char (point-min))
     (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
-    (should (org-entry-get nil "CUSTOM_ID"))  ; Check CUSTOM_ID via org API
+    (should (org-entry-get nil "CUSTOM_ID"))
     ;; AI block under Workflow
     (goto-char (point-min))
     (let ((tag-pattern (format ":%s:" claude-org-heading-tag)))
-      ;; Pattern includes :research: before :claude_chat:
       (should (re-search-forward (format "^\\*\\*\\* Instruction 1 .*%s" tag-pattern) nil t))
       (should (re-search-forward "^#\\+begin_src ai" nil t)))
-    ;; Research Output section with CUSTOM_ID
+    ;; MUST NOT have Research Output, Spec, or Features sections
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\* Research Output :research_output:" nil t))
-    (should (org-entry-get nil "CUSTOM_ID"))
-    (should (re-search-forward "^\\*\\*\\* Codebase Patterns" nil t))
-    (should (re-search-forward "^\\*\\*\\* Relevant Files" nil t))
-    (should (re-search-forward "^\\*\\*\\* External References" nil t))
-    ;; Spec section with CUSTOM_ID
+    (should-not (re-search-forward "^\\*\\* Research Output" nil t))
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\* Spec :spec:" nil t))
-    (should (org-entry-get nil "CUSTOM_ID"))
-    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
-    (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
-    (should (re-search-forward "^\\*\\*\\* Proposed Solution" nil t))
-    (should (re-search-forward "^\\*\\*\\* Technical Design" nil t))
-    ;; Features section with CUSTOM_ID
+    (should-not (re-search-forward "^\\*\\* Spec" nil t))
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\* Features :features:" nil t))
-    (should (org-entry-get nil "CUSTOM_ID"))))
+    (should-not (re-search-forward "^\\*\\* Features" nil t))))
 
 (ert-deftest test-sdd-insert-sets-session-id ()
   "Test that SDD structure has unique CLAUDE_SESSION_ID."
@@ -106,17 +100,77 @@ The default content should indicate the current SDD story name."
       (should session-id)
       (should (string-prefix-p "sdd-" session-id)))))
 
-(ert-deftest test-sdd-insert-features-has-ordered ()
-  "Test that Features section has ORDERED property."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-sdd.org")
-    (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-      (claude-org-insert-sdd))
-    (goto-char (point-min))
-    (re-search-forward "^\\*\\* Features :features:")
-    (should (equal "t" (org-entry-get nil "ORDERED")))))
+(ert-deftest test-sdd-insert-creates-docs-files ()
+  "Test that claude-org-insert-sdd creates research and design-doc files in docs/."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (let ((default-directory (make-temp-file "sdd-test-project-" t)))
+    (unwind-protect
+        (progn
+          ;; Create docs/ structure
+          (make-directory (expand-file-name "docs/research") t)
+          (make-directory (expand-file-name "docs/design-docs") t)
+          (with-temp-file (expand-file-name "docs/research/INDEX.md")
+            (insert "# Research Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
+            (insert "# Design Docs Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+          (with-temp-buffer
+            (org-mode)
+            (setq buffer-file-name (expand-file-name "notebook.org"))
+            (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
+              (claude-org-insert-sdd))
+            ;; Verify docs files were created
+            (let* ((session-id (save-excursion
+                                 (goto-char (point-min))
+                                 (re-search-forward "^\\* Test Feature")
+                                 (org-entry-get nil "CLAUDE_SESSION_ID")))
+                   (year (substring session-id 4 8))
+                   (slug "test-feature")
+                   (research-file (expand-file-name
+                                   (format "docs/research/%s-%s.org" year slug)))
+                   (design-file (expand-file-name
+                                 (format "docs/design-docs/%s-%s.org" year slug))))
+              (should (file-exists-p research-file))
+              (should (file-exists-p design-file))
+              ;; Verify research file has correct structure
+              (with-temp-buffer
+                (insert-file-contents research-file)
+                (should (string-match-p "TITLE.*Research.*Test Feature" (buffer-string)))
+                (should (string-match-p "SDD_SESSION" (buffer-string))))
+              ;; Verify design doc has correct structure
+              (with-temp-buffer
+                (insert-file-contents design-file)
+                (should (string-match-p "TITLE.*Design.*Test Feature" (buffer-string)))
+                (should (string-match-p "Goals" (buffer-string)))
+                (should (string-match-p "Features" (buffer-string)))))))
+      ;; Cleanup
+      (delete-directory default-directory t))))
+
+(ert-deftest test-sdd-insert-system-prompt-includes-docs-paths ()
+  "Test that System Prompt default content includes docs/ file paths."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (let ((default-directory (make-temp-file "sdd-test-project-" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "docs/research") t)
+          (make-directory (expand-file-name "docs/design-docs") t)
+          (with-temp-file (expand-file-name "docs/research/INDEX.md")
+            (insert "# Research Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
+            (insert "# Design Docs Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+          (with-temp-buffer
+            (org-mode)
+            (setq buffer-file-name (expand-file-name "notebook.org"))
+            (cl-letf (((symbol-function 'read-string) (lambda (_) "My Story")))
+              (claude-org-insert-sdd))
+            ;; System Prompt should reference docs/ files
+            (goto-char (point-min))
+            (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+            (let ((section-end (save-excursion (org-end-of-subtree t) (point))))
+              (should (re-search-forward "docs/research/" section-end t))
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+              (should (re-search-forward "docs/design-docs/" section-end t)))))
+      (delete-directory default-directory t))))
 
 (ert-deftest test-sdd-level-alignment ()
   "Test that new SDD aligns with previous SDD level."
@@ -259,24 +313,6 @@ The default content should indicate the current SDD story name."
       (should (member "sdd" tags))
       (should (member "research" tags)))))
 
-(ert-deftest test-sdd-spec-section-no-workflow-tag ()
-  "Test that Spec section does not inherit :sdd: tag."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Workflow :sdd:\n")
-    (insert "*** Research :research:\n")
-    (insert "** Spec :spec:\n")
-    (insert "*** Goals\n")
-    (insert "Content here\n")
-    (goto-char (point-min))
-    (re-search-forward "Content here")
-    (let ((tags (claude-org--get-current-tags)))
-      ;; Should have spec tag but NOT sdd (sibling, not child)
-      (should (member "spec" tags))
-      (should-not (member "sdd" tags)))))
-
 ;;; Unit Tests - Behavior Prompt Building
 
 (ert-deftest test-sdd-behavior-prompt-combines-tags ()
@@ -351,6 +387,57 @@ were not inherited because org-get-tags was called with LOCAL=t."
     ;; Should return nil
     (should-not (claude-org--find-previous-sdd-level))))
 
+;;; Unit Tests - Tag-Based Prompt Dispatch
+
+(ert-deftest test-sdd-tag-prompt-generic-dispatch ()
+  "Test that cl-defgeneric claude-org-tag-prompt dispatches correctly."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  ;; Default method should load from file
+  (let ((prompt (claude-org-tag-prompt 'explore nil)))
+    (should (or (null prompt)  ; File may not exist
+                (stringp prompt)))))
+
+(ert-deftest test-sdd-find-sdd-root ()
+  "Test claude-org--find-sdd-root finds correct parent."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* My Feature\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Research :research:\n")
+    (insert "**** Instruction 1 :claude_chat:\n")
+    (insert "#+begin_src ai\ntest\n#+end_src\n")
+    (goto-char (point-min))
+    (re-search-forward "test")
+    (should (equal "My Feature" (claude-org--find-sdd-root)))))
+
+(ert-deftest test-sdd-find-sdd-root-not-in-sdd ()
+  "Test claude-org--find-sdd-root returns nil when not in SDD."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Regular Section\n")
+    (insert "** Subsection\n")
+    (goto-char (point-max))
+    (should-not (claude-org--find-sdd-root))))
+
+(ert-deftest test-sdd-build-behavior-context ()
+  "Test claude-org--build-behavior-context builds correct plist."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-context.org")
+    (insert "* Feature\n")
+    (insert "** Workflow :sdd:\n")
+    (insert "*** Research :research:\n")
+    (goto-char (point-max))
+    (let ((context (claude-org--build-behavior-context)))
+      (should (plistp context))
+      (should (equal "/tmp/test-context.org" (plist-get context :file-path)))
+      (should (equal "Feature" (plist-get context :sdd-root)))
+      (should (member "sdd" (plist-get context :current-tags)))
+      (should (member "research" (plist-get context :current-tags))))))
+
 ;;; Integration Tests (require API)
 
 (ert-deftest test-sdd-integration-workflow ()
@@ -393,114 +480,10 @@ were not inherited because org-get-tags was called with LOCAL=t."
     ;; Cleanup
     (delete-file buffer-file-name)))
 
-;;; Unit Tests - Tag-Based Prompt Dispatch
-
-(ert-deftest test-sdd-tag-prompt-generic-dispatch ()
-  "Test that cl-defgeneric claude-org-tag-prompt dispatches correctly."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  ;; Default method should load from file
-  (let ((prompt (claude-org-tag-prompt 'explore nil)))
-    (should (or (null prompt)  ; File may not exist
-                (stringp prompt)))))
-
-(ert-deftest test-sdd-tag-prompt-sdd-method ()
-  "Test that SDD tag method returns combined prompt with links."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let* ((context (list :file-path "/tmp/test.org"
-                        :sdd-root "My Feature"
-                        :session-id "sdd-20251229-120000"  ; Required for link generation
-                        :current-tags '("sdd" "research")))
-         (prompt (claude-org-tag-prompt 'sdd context)))
-    (should (stringp prompt))
-    ;; Should contain SDD workflow Summary content
-    (should (string-match-p "SDD" prompt))
-    ;; Should contain dynamic links section (requires session-id)
-    (should (string-match-p "SDD Section Links" prompt))
-    (should (string-match-p "Research Output" prompt))
-    (should (string-match-p "Spec" prompt))
-    (should (string-match-p "Features" prompt))))
-
-(ert-deftest test-sdd-tag-prompt-sdd-without-context ()
-  "Test SDD method gracefully handles nil context."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((prompt (claude-org-tag-prompt 'sdd nil)))
-    (should (stringp prompt))
-    ;; Should still have static SDD content
-    (should (string-match-p "SDD" prompt))
-    ;; But no dynamically generated section links to Research Output/Spec/Features
-    ;; The static prompt has examples like [[file:path.org::#custom-id]...
-    ;; but not real links with actual section names like [Research Output]]
-    (should-not (string-match-p "- \\*Research Output\\*: \\[\\[file:" prompt))
-    (should-not (string-match-p "- \\*Spec\\*: \\[\\[file:" prompt))
-    (should-not (string-match-p "- \\*Features\\*: \\[\\[file:" prompt))))
-
-(ert-deftest test-sdd-find-sdd-root ()
-  "Test claude-org--find-sdd-root finds correct parent."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* My Feature\n")
-    (insert "** Workflow :sdd:\n")
-    (insert "*** Research :research:\n")
-    (insert "**** Instruction 1 :claude_chat:\n")
-    (insert "#+begin_src ai\ntest\n#+end_src\n")
-    (goto-char (point-min))
-    (re-search-forward "test")
-    (should (equal "My Feature" (claude-org--find-sdd-root)))))
-
-(ert-deftest test-sdd-find-sdd-root-not-in-sdd ()
-  "Test claude-org--find-sdd-root returns nil when not in SDD."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Regular Section\n")
-    (insert "** Subsection\n")
-    (goto-char (point-max))
-    (should-not (claude-org--find-sdd-root))))
-
-(ert-deftest test-sdd-generate-links ()
-  "Test claude-org--generate-sdd-links requires session-id for CUSTOM_ID format."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  ;; Without session-id, should return nil (no legacy fallback)
-  (should-not (claude-org--generate-sdd-links "/tmp/test.org" "My Feature" nil))
-  ;; With session-id, should create proper CUSTOM_ID-based links
-  (let ((links (claude-org--generate-sdd-links "/tmp/test.org" "My Feature" "sdd-12345")))
-    (should (stringp links))
-    (should (string-match-p "SDD Section Links" links))
-    ;; Should use #custom-id format, NOT *heading format
-    (should (string-match-p "::#test-research-output-sdd-12345" links))
-    (should (string-match-p "::#test-spec-sdd-12345" links))
-    (should (string-match-p "::#test-features-sdd-12345" links))
-    (should-not (string-match-p "::\\*" links))))
-
-(ert-deftest test-sdd-generate-links-nil-args ()
-  "Test claude-org--generate-sdd-links handles nil arguments."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (should-not (claude-org--generate-sdd-links nil "Root"))
-  (should-not (claude-org--generate-sdd-links "/tmp/test.org" nil))
-  (should-not (claude-org--generate-sdd-links nil nil)))
-
-(ert-deftest test-sdd-build-behavior-context ()
-  "Test claude-org--build-behavior-context builds correct plist."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-context.org")
-    (insert "* Feature\n")
-    (insert "** Workflow :sdd:\n")
-    (insert "*** Research :research:\n")
-    (goto-char (point-max))
-    (let ((context (claude-org--build-behavior-context)))
-      (should (plistp context))
-      (should (equal "/tmp/test-context.org" (plist-get context :file-path)))
-      (should (equal "Feature" (plist-get context :sdd-root)))
-      (should (member "sdd" (plist-get context :current-tags)))
-      (should (member "research" (plist-get context :current-tags))))))
-
 ;;; Integration Tests - SDD Prompt Building
 
 (ert-deftest test-sdd-integration-behavior-prompt-with-links ()
-  "Test that behavior prompt includes dynamic SDD links when session-id is present."
+  "Test that behavior prompt includes docs/ links when session-id is present."
   :tags '(:integration :fast :stable :org :sdd)
   (with-temp-buffer
     (org-mode)
@@ -519,9 +502,9 @@ were not inherited because org-get-tags was called with LOCAL=t."
       (should (stringp prompt))
       ;; Should have SDD content
       (should (string-match-p "SDD" prompt))
-      ;; Should have dynamic links with CUSTOM_ID format
-      (should (string-match-p "SDD Section Links" prompt))
-      (should (string-match-p "file:/tmp/test-sdd-links.org::#" prompt)))))
+      ;; Should have docs/ links
+      (should (string-match-p "docs/research/" prompt))
+      (should (string-match-p "docs/design-docs/" prompt)))))
 
 (ert-deftest test-sdd-integration-multiple-tags-ordered ()
   "Test that multiple tags are processed in correct order with context."
@@ -545,64 +528,50 @@ were not inherited because org-get-tags was called with LOCAL=t."
 
 ;;; End-to-End Tests - Full SDD Workflow
 
-(ert-deftest test-sdd-e2e-create-and-verify-links ()
-  "End-to-end: Create SDD, verify dynamic links in system prompt."
-  :tags '(:e2e :slow :org :sdd)
-  (let ((test-file (make-temp-file "sdd-e2e-" nil ".org")))
-    (unwind-protect
-        (with-temp-buffer
-          (org-mode)
-          (setq buffer-file-name test-file)
-          ;; Create SDD structure
-          (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Test Feature")))
-            (claude-org-insert-sdd))
-          (save-buffer)
-          ;; Navigate to first AI block
-          (goto-char (point-min))
-          (re-search-forward "^#\\+begin_src ai")
-          (forward-line 1)
-          ;; Verify context and links
-          (let* ((context (claude-org--build-behavior-context))
-                 (prompt (claude-org--build-behavior-prompt)))
-            ;; Context should have correct values
-            (should (equal "E2E Test Feature" (plist-get context :sdd-root)))
-            (should (member "sdd" (plist-get context :current-tags)))
-            ;; Prompt should have dynamic links pointing to this file
-            (should (string-match-p "SDD Section Links" prompt))
-            (should (string-match-p (regexp-quote test-file) prompt))
-            ;; Links should reference actual sections we created
-            (should (string-match-p "Research Output" prompt))
-            (should (string-match-p "Spec" prompt))
-            (should (string-match-p "Features" prompt))))
-      ;; Cleanup
-      (when (file-exists-p test-file)
-        (delete-file test-file)))))
-
-(ert-deftest test-sdd-e2e-links-resolve-correctly ()
-  "End-to-end: Verify generated links point to actual sections."
-  :tags '(:e2e :slow :org :sdd)
-  (let ((test-file (make-temp-file "sdd-links-" nil ".org")))
+(ert-deftest test-sdd-e2e-create-and-verify-structure ()
+  "End-to-end: Create SDD, verify docs/ files and notebook structure."
+  :tags '(:e2e :slow :org :sdd :tdd)
+  (let ((test-dir (make-temp-file "sdd-e2e-" t)))
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (org-mode)
-            (setq buffer-file-name test-file)
-            (cl-letf (((symbol-function 'read-string) (lambda (_) "Link Test")))
-              (claude-org-insert-sdd))
-            (save-buffer))
-          ;; Reopen file and verify links work
-          (with-current-buffer (find-file-noselect test-file)
-            (goto-char (point-min))
-            ;; Verify all linked sections exist
-            (should (re-search-forward "^\\*\\* Research Output" nil t))
-            (goto-char (point-min))
-            (should (re-search-forward "^\\*\\* Spec" nil t))
-            (goto-char (point-min))
-            (should (re-search-forward "^\\*\\* Features" nil t))
-            (kill-buffer)))
+          ;; Set up docs/ structure
+          (make-directory (expand-file-name "docs/research" test-dir) t)
+          (make-directory (expand-file-name "docs/design-docs" test-dir) t)
+          (with-temp-file (expand-file-name "docs/research/INDEX.md" test-dir)
+            (insert "# Research Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md" test-dir)
+            (insert "# Design Docs Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+          (let ((default-directory test-dir)
+                (test-file (expand-file-name "test-notebook.org" test-dir)))
+            (with-temp-buffer
+              (org-mode)
+              (setq buffer-file-name test-file)
+              ;; Create SDD structure
+              (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Test Feature")))
+                (claude-org-insert-sdd))
+              (save-buffer)
+              ;; Navigate to first AI block
+              (goto-char (point-min))
+              (re-search-forward "^#\\+begin_src ai")
+              (forward-line 1)
+              ;; Verify context
+              (let* ((context (claude-org--build-behavior-context))
+                     (prompt (claude-org--build-behavior-prompt)))
+                ;; Context should have correct values
+                (should (equal "E2E Test Feature" (plist-get context :sdd-root)))
+                (should (member "sdd" (plist-get context :current-tags)))
+                ;; Prompt should have docs/ links
+                (should (string-match-p "docs/research/" prompt))
+                (should (string-match-p "docs/design-docs/" prompt)))
+              ;; Verify NO Research Output/Spec/Features in notebook
+              (goto-char (point-min))
+              (should-not (re-search-forward "^\\*\\* Research Output" nil t))
+              (goto-char (point-min))
+              (should-not (re-search-forward "^\\*\\* Spec" nil t))
+              (goto-char (point-min))
+              (should-not (re-search-forward "^\\*\\* Features" nil t)))))
       ;; Cleanup
-      (when (file-exists-p test-file)
-        (delete-file test-file)))))
+      (delete-directory test-dir t))))
 
 ;;; CUSTOM_ID Tests - Stable Link Support
 
@@ -632,371 +601,56 @@ were not inherited because org-get-tags was called with LOCAL=t."
   (should-not (claude-org--generate-custom-id "sdd-12345" nil))
   (should-not (claude-org--generate-custom-id nil nil)))
 
-(ert-deftest test-sdd-insert-adds-custom-id ()
-  "Test that claude-org-insert-sdd adds CUSTOM_ID to all sections."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
+(ert-deftest test-sdd-insert-adds-custom-id-to-notebook-sections ()
+  "Test that claude-org-insert-sdd adds CUSTOM_ID to notebook sections only."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-custom-id.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
       (claude-org-insert-sdd))
-    ;; Verify CUSTOM_ID on Workflow section - format: file-base-section-session
+    ;; Verify CUSTOM_ID on top-level heading
+    (goto-char (point-min))
+    (re-search-forward "^\\* Test Feature")
+    (should (org-entry-get nil "CUSTOM_ID"))
+    ;; Verify CUSTOM_ID on System Prompt
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+    (should (org-entry-get nil "CUSTOM_ID"))
+    (should (string-match-p "^test-custom-id-system-prompt-sdd-" (org-entry-get nil "CUSTOM_ID")))
+    ;; Verify CUSTOM_ID on Workflow section
     (goto-char (point-min))
     (re-search-forward "^\\*\\* Workflow :sdd:")
     (should (org-entry-get nil "CUSTOM_ID"))
     (should (string-match-p "^test-custom-id-workflow-sdd-" (org-entry-get nil "CUSTOM_ID")))
-    ;; Verify CUSTOM_ID on Research Output section
+    ;; MUST NOT have Research Output, Spec, or Features sections at all
     (goto-char (point-min))
-    (re-search-forward "^\\*\\* Research Output")
-    (should (org-entry-get nil "CUSTOM_ID"))
-    (should (string-match-p "^test-custom-id-research-output-sdd-" (org-entry-get nil "CUSTOM_ID")))
-    ;; Verify CUSTOM_ID on Spec section
+    (should-not (re-search-forward "^\\*\\* Research Output" nil t))
     (goto-char (point-min))
-    (re-search-forward "^\\*\\* Spec")
-    (should (org-entry-get nil "CUSTOM_ID"))
-    (should (string-match-p "^test-custom-id-spec-sdd-" (org-entry-get nil "CUSTOM_ID")))
-    ;; Verify CUSTOM_ID on Features section
+    (should-not (re-search-forward "^\\*\\* Spec" nil t))
     (goto-char (point-min))
-    (re-search-forward "^\\*\\* Features")
-    (should (org-entry-get nil "CUSTOM_ID"))
-    (should (string-match-p "^test-custom-id-features-sdd-" (org-entry-get nil "CUSTOM_ID")))))
+    (should-not (re-search-forward "^\\*\\* Features" nil t))))
 
-(ert-deftest test-sdd-generate-links-uses-custom-id ()
-  "Test claude-org--generate-sdd-links uses #custom-id format with file-base."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((links (claude-org--generate-sdd-links "/tmp/test.org" "My Feature" "sdd-12345")))
-    (should (stringp links))
-    ;; Should include System Prompt section (first, for AI to update SDD guidance)
-    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-system-prompt-sdd-12345\\]\\[System Prompt\\]\\]" links))
-    ;; Should use #custom-id format with file-base-section-session pattern
-    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-research-output-sdd-12345\\]\\[Research Output\\]\\]" links))
-    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-spec-sdd-12345\\]\\[Spec\\]\\]" links))
-    (should (string-match-p "\\[\\[file:/tmp/test.org::#test-features-sdd-12345\\]\\[Features\\]\\]" links))
-    ;; Should NOT use *heading format
-    (should-not (string-match-p "::\\*Research Output" links))))
+;;; Structural Tests - docs/ Directory
 
-(ert-deftest test-sdd-links-resolve-via-custom-id ()
-  "Test that CUSTOM_ID links can be resolved via org-link-search."
-  :tags '(:integration :fast :stable :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-resolve.org")
-    (insert "* Test Feature\n")
-    (insert "** Research Output :research_output:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: sdd-12345-research-output\n")
-    (insert ":END:\n")
-    (insert "Research content here.\n")
-    (goto-char (point-min))
-    ;; org-link-search with #custom-id should find the heading
-    (let ((result (org-link-search "#sdd-12345-research-output")))
-      (should (eq result 'dedicated))
-      (should (string-match-p "Research Output" (org-get-heading t t t t))))))
+(ert-deftest test-sdd-docs-directories-exist ()
+  "Test that required docs/ subdirectories exist."
+  :tags '(:unit :fast :stable :structural :sdd :tdd)
+  (let ((project-root (locate-dominating-file default-directory "claude-org.org")))
+    (skip-unless project-root)
+    (should (file-directory-p (expand-file-name "docs/research" project-root)))
+    (should (file-directory-p (expand-file-name "docs/design-docs" project-root)))
+    (should (file-directory-p (expand-file-name "docs/product-specs" project-root)))
+    (should (file-directory-p (expand-file-name "docs/references" project-root)))))
 
-(ert-deftest test-sdd-e2e-custom-id-workflow ()
-  "End-to-end: Create SDD, verify CUSTOM_ID links work."
-  :tags '(:e2e :slow :org :sdd)
-  (let ((test-file (make-temp-file "sdd-customid-" nil ".org")))
-    (unwind-protect
-        (with-temp-buffer
-          (org-mode)
-          (setq buffer-file-name test-file)
-          ;; Create SDD structure
-          (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Custom ID")))
-            (claude-org-insert-sdd))
-          (save-buffer)
-          ;; Verify sections have CUSTOM_ID
-          (goto-char (point-min))
-          (re-search-forward "^\\*\\* Research Output")
-          (let ((custom-id (org-entry-get nil "CUSTOM_ID")))
-            (should custom-id)
-            ;; Verify link can be resolved
-            (goto-char (point-max))
-            (let ((result (org-link-search (concat "#" custom-id))))
-              (should (eq result 'dedicated))
-              (should (string-match-p "Research Output" (org-get-heading t t t t))))))
-      ;; Cleanup
-      (when (file-exists-p test-file)
-        (delete-file test-file)))))
-
-;;; Unit Tests - Subsection Update Helper
-
-(ert-deftest test-sdd-update-subsection-creates-new ()
-  "Test claude-org-update-or-create-subsection creates new subsection when missing."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n")
-    (insert "\n")
-    ;; Create new Goals subsection
-    (should (claude-org-update-or-create-subsection
-             "test-spec-sdd-12345"
-             "Goals"
-             "*** Goals\n\n- Goal 1\n- Goal 2"))
-    ;; Verify it was created
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
-    (should (re-search-forward "- Goal 1" nil t))
-    (should (re-search-forward "- Goal 2" nil t))))
-
-(ert-deftest test-sdd-update-subsection-replaces-existing ()
-  "Test claude-org-update-or-create-subsection replaces existing subsection."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n\n")
-    (insert "*** Goals\n\n- Old Goal 1\n- Old Goal 2\n\n")
-    (insert "*** Non-Goals\n\n- Non-goal 1\n")
-    ;; Replace Goals subsection
-    (should (claude-org-update-or-create-subsection
-             "test-spec-sdd-12345"
-             "Goals"
-             "*** Goals\n\n- New Goal A\n- New Goal B\n- New Goal C"))
-    ;; Verify replacement
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
-    (should (re-search-forward "- New Goal A" nil t))
-    (should (re-search-forward "- New Goal B" nil t))
-    ;; Old content should be gone
-    (goto-char (point-min))
-    (should-not (re-search-forward "Old Goal" nil t))
-    ;; Non-Goals should still exist (sibling not affected)
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
-    (should (re-search-forward "- Non-goal 1" nil t))))
-
-(ert-deftest test-sdd-update-subsection-no-duplicates ()
-  "Test that repeated updates don't create duplicate subsections."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n\n")
-    ;; First update - creates Goals
-    (claude-org-update-or-create-subsection
-     "test-spec-sdd-12345" "Goals" "*** Goals\n\n- Version 1")
-    ;; Second update - should replace, not append
-    (claude-org-update-or-create-subsection
-     "test-spec-sdd-12345" "Goals" "*** Goals\n\n- Version 2")
-    ;; Third update - should still replace
-    (claude-org-update-or-create-subsection
-     "test-spec-sdd-12345" "Goals" "*** Goals\n\n- Version 3")
-    ;; Count Goals headings - should be exactly 1
-    (goto-char (point-min))
-    (let ((count 0))
-      (while (re-search-forward "^\\*\\*\\* Goals" nil t)
-        (setq count (1+ count)))
-      (should (= 1 count)))
-    ;; Only latest version should exist
-    (goto-char (point-min))
-    (should (re-search-forward "- Version 3" nil t))
-    (goto-char (point-min))
-    (should-not (re-search-forward "- Version 1" nil t))
-    (should-not (re-search-forward "- Version 2" nil t))))
-
-(ert-deftest test-sdd-update-subsection-preserves-siblings ()
-  "Test that updating one subsection preserves other subsections."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n\n")
-    (insert "*** Goals\n\n- Goal 1\n\n")
-    (insert "*** Non-Goals\n\n- Non-goal 1\n\n")
-    (insert "*** Technical Design\n\n- Design 1\n")
-    ;; Update only Non-Goals
-    (claude-org-update-or-create-subsection
-     "test-spec-sdd-12345" "Non-Goals" "*** Non-Goals\n\n- Updated non-goal")
-    ;; Verify Goals unchanged
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
-    (should (re-search-forward "- Goal 1" nil t))
-    ;; Verify Non-Goals updated
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
-    (should (re-search-forward "- Updated non-goal" nil t))
-    ;; Verify Technical Design unchanged
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Technical Design" nil t))
-    (should (re-search-forward "- Design 1" nil t))))
-
-(ert-deftest test-sdd-update-subsection-respects-level ()
-  "Test that subsection level is determined by parent level."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    ;; Parent at level 3 (not typical but should work)
-    (insert "* Feature\n")
-    (insert "** Category\n")
-    (insert "*** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n\n")
-    ;; Create Goals - should be level 4
-    (claude-org-update-or-create-subsection
-     "test-spec-sdd-12345" "Goals" "**** Goals\n\n- Goal at level 4")
-    ;; Verify level 4 heading
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\*\\* Goals" nil t))
-    ;; Should NOT match level 3
-    (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\*\\* Goals" nil t))))
-
-(ert-deftest test-sdd-update-subsection-handles-invalid-id ()
-  "Test that invalid CUSTOM_ID returns nil without error."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n")
-    ;; Try with non-existent CUSTOM_ID - should return nil
-    (should-not (claude-org-update-or-create-subsection
-                 "nonexistent-custom-id"
-                 "Goals"
-                 "*** Goals\n\n- Goal 1"))))
-
-(ert-deftest test-sdd-update-multiple-subsections ()
-  "Test updating multiple subsections in sequence."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n\n")
-    ;; Create all Spec subsections
-    (let ((spec-id "test-spec-sdd-12345"))
-      (claude-org-update-or-create-subsection
-       spec-id "Goals" "*** Goals\n\n- Goal 1")
-      (claude-org-update-or-create-subsection
-       spec-id "Non-Goals" "*** Non-Goals\n\n- Non-goal 1")
-      (claude-org-update-or-create-subsection
-       spec-id "Technical Design" "*** Technical Design\n\n- Design 1"))
-    ;; Verify all created
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Goals" nil t))
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Non-Goals" nil t))
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Technical Design" nil t))
-    ;; Now update all of them
-    (let ((spec-id "test-spec-sdd-12345"))
-      (claude-org-update-or-create-subsection
-       spec-id "Goals" "*** Goals\n\n- Updated Goal")
-      (claude-org-update-or-create-subsection
-       spec-id "Non-Goals" "*** Non-Goals\n\n- Updated Non-goal")
-      (claude-org-update-or-create-subsection
-       spec-id "Technical Design" "*** Technical Design\n\n- Updated Design"))
-    ;; Verify no duplicates (count each heading)
-    (dolist (heading '("Goals" "Non-Goals" "Technical Design"))
-      (goto-char (point-min))
-      (let ((count 0))
-        (while (re-search-forward (format "^\\*\\*\\* %s" heading) nil t)
-          (setq count (1+ count)))
-        (should (= 1 count))))
-    ;; Verify updated content
-    (goto-char (point-min))
-    (should (re-search-forward "- Updated Goal" nil t))
-    (goto-char (point-min))
-    (should (re-search-forward "- Updated Non-goal" nil t))
-    (goto-char (point-min))
-    (should (re-search-forward "- Updated Design" nil t))))
-
-;;; Tests for claude-org--adjust-heading-levels
-
-(ert-deftest test-sdd-adjust-heading-levels-basic ()
-  "Test basic level adjustment from 3 to 4."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((content "*** Goals\n\n- Goal 1\n- Goal 2"))
-    ;; Adjust from level 3 to level 4
-    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
-      (should (string-match-p "^\\*\\*\\*\\* Goals" adjusted))
-      (should-not (string-match-p "^\\*\\*\\* Goals" adjusted)))))
-
-(ert-deftest test-sdd-adjust-heading-levels-no-change ()
-  "Test that correct level is not changed."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((content "**** Goals\n\n- Goal 1"))
-    ;; Already at level 4
-    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
-      (should (string-equal content adjusted)))))
-
-(ert-deftest test-sdd-adjust-heading-levels-nested ()
-  "Test nested headings are all adjusted proportionally."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((content "*** Goals\n\n- Goal 1\n\n**** Subgoal\n\n- Detail"))
-    ;; Adjust all headings up by 1 level
-    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
-      ;; *** becomes ****
-      (should (string-match-p "^\\*\\*\\*\\* Goals" adjusted))
-      ;; **** becomes *****
-      (should (string-match-p "^\\*\\*\\*\\*\\* Subgoal" adjusted)))))
-
-(ert-deftest test-sdd-adjust-heading-levels-demote ()
-  "Test demotion (higher to lower level)."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((content "**** Goals\n\n- Goal 1"))
-    ;; Adjust from level 4 to level 3
-    (let ((adjusted (claude-org--adjust-heading-levels content 3)))
-      (should (string-match-p "^\\*\\*\\* Goals" adjusted))
-      (should-not (string-match-p "^\\*\\*\\*\\* Goals" adjusted)))))
-
-(ert-deftest test-sdd-adjust-heading-levels-no-heading ()
-  "Test content without heading is returned unchanged."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((content "Just some text\n- Item 1"))
-    (let ((adjusted (claude-org--adjust-heading-levels content 4)))
-      (should (string-equal content adjusted)))))
-
-(ert-deftest test-sdd-adjust-heading-levels-min-level ()
-  "Test that level never goes below 1."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (let ((content "*** Goals\n\n- Goal 1"))
-    ;; Try to demote to level 1 (diff = -2)
-    (let ((adjusted (claude-org--adjust-heading-levels content 1)))
-      ;; Should become level 1, not level -1
-      (should (string-match-p "^\\* Goals" adjusted)))))
-
-(ert-deftest test-sdd-update-subsection-auto-adjusts-level ()
-  "Test that update function auto-adjusts wrong level in content."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    ;; Parent at level 3
-    (insert "* Feature\n")
-    (insert "** Category\n")
-    (insert "*** Spec :spec:\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CUSTOM_ID: test-spec-sdd-12345\n")
-    (insert ":END:\n\n")
-    ;; Pass content with WRONG level (level 2 instead of 4)
-    ;; Function should auto-adjust to level 4
-    (claude-org-update-or-create-subsection
-     "test-spec-sdd-12345" "Goals" "** Goals\n\n- Goal at wrong level")
-    ;; Verify it became level 4 (parent 3 + 1)
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\*\\* Goals" nil t))
-    ;; Should NOT have level 2 heading
-    (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\* Goals" nil t))))
+(ert-deftest test-sdd-docs-index-files-exist ()
+  "Test that INDEX.md files exist in docs/ subdirectories."
+  :tags '(:unit :fast :stable :structural :sdd :tdd)
+  (let ((project-root (locate-dominating-file default-directory "claude-org.org")))
+    (skip-unless project-root)
+    (dolist (subdir '("research" "design-docs" "product-specs" "references"))
+      (should (file-exists-p
+               (expand-file-name (format "docs/%s/INDEX.md" subdir) project-root))))))
 
 (provide 'test-claude-org-sdd)
 ;;; test-claude-org-sdd.el ends here
