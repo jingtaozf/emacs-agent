@@ -336,7 +336,23 @@ test-org-unit:
 		-l tests/test-mcp-eval-state.el \
 		-l tests/test-agent-workflow.el \
 		-l tests/test-codebase-hardening.el \
+		-l tests/test-mcp-protocol.el \
+		-l tests/test-mcp-lifecycle.el \
+		-l tests/test-mcp-eval-handler.el \
+		-l tests/test-mcp-http.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
+
+.PHONY: test-mcp-unit
+test-mcp-unit:
+	@echo "Running MCP server unit tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		-l tests/test-mcp-protocol.el \
+		-l tests/test-mcp-lifecycle.el \
+		-l tests/test-mcp-eval-handler.el \
+		-l tests/test-mcp-http.el \
+		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-mock
 test-mock: test-agent-mock test-org-mock
