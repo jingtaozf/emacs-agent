@@ -1076,14 +1076,12 @@ attempts.  The counter resets on each new query."
   ;; Guard: check recovery count against limit
   (let ((count (or (claude-org--session-get session-key :recovery-count) 0)))
     (if (>= count claude-org-max-recovery-attempts)
-        (progn
-          (claude-org--insert-error
-           session-key
-           (format "Recovery limit reached (%d attempts). Please retry manually."
-                   count))
-          (claude-org--reset-session-state session-key)
-          (claude-org--stop-spinner session-key)
-          (claude-org--refresh-header-line))
+        ;; insert-error calls cleanup-session internally — no need for
+        ;; redundant reset-session-state, stop-spinner, refresh-header-line
+        (claude-org--insert-error
+         session-key
+         (format "Recovery limit reached (%d attempts). Please retry manually."
+                 count))
       ;; Normal recovery path — increment counter before attempting
       (claude-org--session-put session-key :recovery-count (1+ count))
       (claude-org--session-put session-key :recovering t)
@@ -1094,12 +1092,10 @@ attempts.  The counter resets on each new query."
         ;; Try to find response section by query-id (marker-free approach)
         (let ((response-pos (claude-org--find-response-by-query-id old-query-id)))
           (if (not response-pos)
-              ;; Can't find response section - fail gracefully
+              ;; Can't find response section - full cleanup via centralized function
               (progn
                 (message "Claude: Cannot recover session - response section not found")
-                (claude-org--reset-session-state session-key)
-                (claude-org--stop-spinner session-key)
-                (claude-org--refresh-header-line))
+                (claude-org--cleanup-session session-key "error" t))
             ;; Found response section - create recovery section
             (save-excursion
               (goto-char response-pos)
@@ -1762,8 +1758,16 @@ Hook functions for cleaning up persistent clients based on org lifecycle events.
 
 #+BEGIN_SRC elisp
 (defun claude-org--on-buffer-kill ()
-  "Clean up persistent clients when org buffer is killed.
+  "Clean up active sessions and persistent clients when org buffer is killed.
+Cancels active queries to prevent zombie CLI processes (F21),
+then disconnects persistent clients.
 Added to `kill-buffer-hook' (buffer-local) in `claude-org-mode'."
+  ;; Cancel active queries first (F21: prevents zombie CLI processes)
+  (when (and (bound-and-true-p claude-org--sessions)
+             (hash-table-p claude-org--sessions)
+             (> (hash-table-count claude-org--sessions) 0))
+    (claude-org-cancel-all))
+  ;; Disconnect persistent clients
   (when buffer-file-name
     (claude-org--disconnect-all-clients-for-buffer (current-buffer))))
 
@@ -1861,23 +1865,30 @@ Returns the position where content should be inserted (after properties)."
 #+BEGIN_SRC elisp
 (defun claude-org--find-response-by-query-id (query-id)
   "Find response section by QUERY-ID property.
-Returns the heading position, or nil if not found."
+Returns the heading position, or nil if not found.
+Widens the buffer to ensure the search covers the entire file,
+even when the buffer is narrowed (e.g., via org-narrow-to-subtree)."
   (save-excursion
-    (goto-char (point-min))
-    (when (re-search-forward
-           (format ":QUERY_ID: +%s *$" (regexp-quote query-id)) nil t)
-      (org-back-to-heading t)
-      (point))))
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (when (re-search-forward
+             (format ":QUERY_ID: +%s *$" (regexp-quote query-id)) nil t)
+        (org-back-to-heading t)
+        (point)))))
 
 (defun claude-org--find-response-end-by-query-id (query-id)
   "Find end of response section identified by QUERY-ID.
-Returns position at end of the section subtree (before next sibling)."
+Returns position at end of the section subtree (before next sibling).
+Uses `save-restriction'/`widen' so it works even when buffer is narrowed (F20)."
   (save-excursion
-    (let ((heading-pos (claude-org--find-response-by-query-id query-id)))
-      (when heading-pos
-        (goto-char heading-pos)
-        (org-end-of-subtree t)
-        (point)))))
+    (save-restriction
+      (widen)
+      (let ((heading-pos (claude-org--find-response-by-query-id query-id)))
+        (when heading-pos
+          (goto-char heading-pos)
+          (org-end-of-subtree t)
+          (point))))))
 #+END_SRC
 
 *** Marker-Free Token Insertion
@@ -1886,13 +1897,16 @@ Returns position at end of the section subtree (before next sibling)."
 (defun claude-org--insert-at-response (session-key text)
   "Insert TEXT at end of response section for SESSION-KEY.
 Uses query-id property lookup instead of marker.
-Returns t if insertion succeeded, nil otherwise."
+Returns t if insertion succeeded, nil otherwise.
+Uses `save-restriction'/`widen' so it works even when buffer is narrowed (F20)."
   (let ((query-id (claude-org--session-get session-key :query-id)))
     (when query-id
       (save-excursion
-        (let ((heading-pos (claude-org--find-response-by-query-id query-id)))
-          (when heading-pos
-            (goto-char heading-pos)
+        (save-restriction
+          (widen)
+          (let ((heading-pos (claude-org--find-response-by-query-id query-id)))
+            (when heading-pos
+              (goto-char heading-pos)
             ;; Capture response section level for level-aware stop pattern
             (let* ((response-level (org-current-level))
                    ;; Only stop at headings at SAME or SHALLOWER level than
@@ -1926,14 +1940,16 @@ Returns t if insertion succeeded, nil otherwise."
                 ;; No :END: found, fall back to end of heading line
                 (end-of-line)
                 (insert "\n" text)
-                t))))))))
+                t)))))))))
 
 (defun claude-org--handle-token-v2 (session-key text)
   "Handle incoming TEXT token for SESSION-KEY using query-id lookup.
 Normalizes org headers, auto-breaks long lines, and inserts at response section.
 This is the marker-free version using query-id."
   (let ((query-id (claude-org--session-get session-key :query-id)))
-    (when query-id
+    (if (not query-id)
+        ;; B1/F18: Warn instead of silently dropping tokens
+        (message "Claude: token dropped for %s — nil query-id (recovery race?)" session-key)
       (let* ((target-level (1+ (claude-org--effective-section-level session-key)))
              (normalized-text (claude-org--normalize-headers-in-text text target-level))
              ;; Auto-break long lines
@@ -2669,8 +2685,9 @@ Returns the heading text (without stars and tags) if it matches, nil otherwise."
 
 (defun claude-org--replace-heading-at-marker (marker new-title)
   "Replace heading text at MARKER with NEW-TITLE.
-Preserves heading level (stars), tags, and properties."
-  (when (and marker (marker-buffer marker) (buffer-live-p (marker-buffer marker)))
+Preserves heading level (stars), tags, and properties.
+Frees MARKER after use to prevent leak (F23)."
+  (when (and marker (markerp marker) (marker-buffer marker) (buffer-live-p (marker-buffer marker)))
     (with-current-buffer (marker-buffer marker)
       (save-excursion
         (goto-char marker)
@@ -2688,7 +2705,10 @@ Preserves heading level (stars), tags, and properties."
               (forward-line 1)
               (delete-region line-start (point)))
             ;; Insert new heading with title and tags on same line
-            (insert stars " " new-title tag-str "\n")))))))
+            (insert stars " " new-title tag-str "\n"))))))
+    ;; Free marker after use to prevent leak (F23)
+    (when (markerp marker)
+      (set-marker marker nil)))
 
 (defun claude-org--maybe-auto-generate-title (query heading-marker)
   "Generate title for QUERY and update heading at HEADING-MARKER.
@@ -2700,7 +2720,10 @@ Only runs if `claude-org-auto-generate-title' is non-nil."
        :on-title (lambda (title)
                    (claude-org--replace-heading-at-marker marker title))
        :on-error (lambda (err)
-                   (message "Auto-title generation failed: %s" err))))))
+                   (message "Auto-title generation failed: %s" err)
+                   ;; Free marker on error too (F23)
+                   (when (markerp marker)
+                     (set-marker marker nil)))))))
 #+END_SRC
 
 * Block Insertion
@@ -3823,11 +3846,12 @@ and either schedules delayed execution or runs immediately."
     (claude-org--session-put session-key :loop-current next-iteration)
     ;; Schedule next iteration
     (if (> loop-interval 0)
-        ;; Delayed execution
-        (run-at-time loop-interval nil
-                     #'claude-org--execute-loop-iteration
-                     session-key next-iteration loop-max original-prompt
-                     instr-num custom-id loop-interval)
+        ;; Delayed execution — store timer for cancellation (F22)
+        (let ((timer (run-at-time loop-interval nil
+                       #'claude-org--execute-loop-iteration
+                       session-key next-iteration loop-max original-prompt
+                       instr-num custom-id loop-interval)))
+          (claude-org--session-put session-key :loop-timer timer))
       ;; Immediate execution
       (claude-org--execute-loop-iteration
        session-key next-iteration loop-max original-prompt
@@ -3845,6 +3869,8 @@ INTERVAL is delay between iterations (for display).
 Creates a proper response section with :QUERY_ID: property at the correct
 position (after the previous iteration's response section, found via query-id
 lookup).  This ensures tokens are routed to the new section, not the old one."
+  ;; Clear loop timer reference — timer has fired (F22)
+  (claude-org--session-put session-key :loop-timer nil)
   ;; Get buffer from session marker (needed when called via run-at-time)
   (let ((marker (claude-org--session-get session-key :marker)))
     (when (and marker (marker-buffer marker))
@@ -3868,8 +3894,7 @@ lookup).  This ensures tokens are routed to the new section, not the old one."
           (if (not insert-pos)
               (progn
                 (message "Claude loop: cannot find previous response section, aborting iteration %d" iteration)
-                (claude-org--session-put session-key :busy nil)
-                (claude-org--stop-spinner session-key))
+                (claude-org--cleanup-session session-key "error"))
             (save-excursion
               (goto-char insert-pos)
               (insert "\n\n")
@@ -3901,6 +3926,52 @@ terminal state immediately, without waiting for the CLI process to exit."
   (when-let* ((backend (claude-org--session-get session-key :backend))
               (handle (claude-org--session-get session-key :query-handle)))
     (claude-agent-backend-cancel backend handle)))
+
+(defun claude-org--cleanup-queued-blocks (session-key)
+  "Clear pending queue for SESSION-KEY, reset exec-status on queued blocks, free markers.
+Extracted from insert-error for reuse by cleanup-session."
+  (let ((queue (claude-org--session-get session-key :pending-queue)))
+    (when queue
+      (dolist (block-info queue)
+        (when-let ((queued-marker (plist-get block-info :marker)))
+          (when (and queued-marker (marker-buffer queued-marker))
+            (with-current-buffer (marker-buffer queued-marker)
+              (save-excursion
+                (goto-char queued-marker)
+                (claude-org--set-exec-status nil))))  ; Clear scheduled status
+          ;; Free the queued marker to prevent leak
+          (when (markerp queued-marker)
+            (set-marker queued-marker nil))))
+      (claude-org--clear-queue session-key))))
+
+(defun claude-org--cleanup-session (session-key status &optional clear-queue-p)
+  "Clean up SESSION-KEY to terminal state.  Centralized cleanup function.
+STATUS is \"completed\", \"cancelled\", or \"error\".
+CLEAR-QUEUE-P when non-nil clears the pending queue with status cleanup.
+
+This is the SINGLE cleanup function that all termination paths should call.
+Operations are performed in a fixed, canonical order."
+  ;; 1. Stop spinner
+  (claude-org--stop-spinner session-key)
+  ;; 1.5 Cancel loop timer if pending (F22: prevents orphaned timers)
+  (when-let ((timer (claude-org--session-get session-key :loop-timer)))
+    (when (timerp timer)
+      (cancel-timer timer))
+    (claude-org--session-put session-key :loop-timer nil))
+  ;; 2. Set exec-status (preserve existing 'cancelled' — user intent)
+  (unless (equal (claude-org--get-exec-status-for-session session-key) "cancelled")
+    (claude-org--set-exec-status-for-session session-key status))
+  ;; 3. Reset transient state (:busy, :recovering, :last-assistant-query-id)
+  (claude-org--reset-session-state session-key)
+  ;; 4. Free marker
+  (claude-org--free-marker session-key)
+  ;; 5. Clear queue with status cleanup on queued blocks
+  (when clear-queue-p
+    (claude-org--cleanup-queued-blocks session-key))
+  ;; 6. Unregister from active queries (mode-line/queries buffer)
+  (claude-org--unregister-active-query session-key)
+  ;; 7. Refresh header line
+  (claude-org--refresh-header-line))
 
 (defun claude-org--handle-complete (session-key result)
   "Handle query completion for SESSION-KEY with RESULT.
@@ -4014,38 +4085,29 @@ If already recovering and another error occurs, give up and show error to user."
          (claude-org--insert-error session-key error-msg)))))))
 
 (defun claude-org--insert-error (session-key error-msg)
-  "Insert ERROR-MSG at SESSION-KEY's marker and clean up.
-CRITICAL: This function MUST clear :recovering flag to prevent stuck state."
-  (claude-org--reset-session-state session-key)  ; CRITICAL: Clears :recovering to prevent stuck state
-  (claude-org--stop-spinner session-key)
-  (let ((marker (claude-org--session-get session-key :marker)))
-    (claude-org--with-session-marker marker
-      (save-excursion
-        (goto-char marker)
-        (insert (format "\n[Error: %s]\n" error-msg)))))
-  ;; Set error status on the heading
-  (when-let ((custom-id (claude-org--session-get session-key :custom-id)))
-    (save-excursion
-      (when (claude-org--goto-block-by-custom-id custom-id)
-        (claude-org--set-exec-status "error"))))
-  ;; Free marker to prevent memory leak
-  (claude-org--free-marker session-key)
-  ;; Clear pending queue on error (don't continue with queued blocks)
-  ;; Also clear scheduled status from queued blocks
-  (let ((queue (claude-org--session-get session-key :pending-queue)))
-    (when queue
-      (dolist (block-info queue)
-        (when-let ((queued-marker (plist-get block-info :marker)))
-          (when (and queued-marker (marker-buffer queued-marker))
-            (with-current-buffer (marker-buffer queued-marker)
+  "Insert ERROR-MSG in response section and clean up via centralized cleanup.
+Uses `insert-at-response' (query-id lookup) for correct placement in the
+response section.  Falls back to inserting after #+end_src if no response
+section exists yet (same pattern as cancel)."
+  ;; Insert error text at the response section (F16: unified insertion)
+  (let ((error-text (format "\n[Error: %s]\n" error-msg)))
+    (or (claude-org--insert-at-response session-key error-text)
+        ;; Fallback: if no response section, insert after #+end_src
+        (let ((marker (claude-org--session-get session-key :marker)))
+          (when (and marker (markerp marker) (marker-buffer marker))
+            (with-current-buffer (marker-buffer marker)
               (save-excursion
-                (goto-char queued-marker)
-                (claude-org--set-exec-status nil))))))  ; Clear scheduled status
-      (claude-org--clear-queue session-key)
-      (message "Cleared %d queued block(s) due to error" (length queue))))
-  ;; Unregister from active queries so mode-line/queries buffer update immediately
-  (claude-org--unregister-active-query session-key)
-  (claude-org--refresh-header-line)
+                (goto-char marker)
+                (when (re-search-forward "^#\\+end_src" nil t)
+                  (end-of-line)
+                  (insert error-text))))))))
+  ;; Count queued blocks before cleanup clears them
+  (let ((queue-count (length (or (claude-org--session-get session-key :pending-queue) nil))))
+    ;; Centralized cleanup: stop-spinner, set exec-status, reset-state,
+    ;; free-marker, clear-queue, unregister, refresh-header-line
+    (claude-org--cleanup-session session-key "error" t)
+    (when (> queue-count 0)
+      (message "Cleared %d queued block(s) due to error" queue-count)))
   ;; Run completion hook with error status
   (run-hook-with-args 'claude-org-complete-hook session-key error-msg 'error))
 #+END_SRC
@@ -4359,6 +4421,9 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
     ;; Check if marker is still valid (block not deleted)
     (unless (and orig-marker (marker-buffer orig-marker))
       (message "Skipping queued block - marker invalid (block deleted?)")
+      ;; Free dead marker to prevent leak (F23)
+      (when (markerp orig-marker)
+        (set-marker orig-marker nil))
       ;; Try next in queue
       (when-let ((next (claude-org--dequeue-block session-key)))
         (claude-org--execute-queued-block session-key next))
@@ -4587,7 +4652,8 @@ Assembles components from dedicated badge functions."
 
 #+BEGIN_SRC elisp
 (defun claude-org-cancel ()
-  "Cancel the current session's active query, stop any loop, and clear queue."
+  "Cancel the current session's active query, stop any loop, and clear queue.
+Uses centralized `claude-org--cleanup-session' for complete cleanup (F19)."
   (interactive)
   (let* ((session-key (claude-org--current-session-key))
          (backend (claude-org--session-get session-key :backend))
@@ -4600,18 +4666,9 @@ Assembles components from dedicated badge functions."
           ;; Stop loop by setting current = max
           (when (and loop-max (> loop-max 1))
             (claude-org--session-put session-key :loop-current loop-max))
+          ;; Cancel via backend protocol
           (claude-agent-backend-cancel backend query-handle)
-          ;; Mark closed and unregister so mode-line/queries buffer update immediately
-          (claude-org--unregister-active-query session-key)
-          (claude-org--session-put session-key :busy nil)
-          (claude-org--stop-spinner session-key)
-          ;; Clear pending queue
-          (when (> queue-count 0)
-            (claude-org--clear-queue session-key))
-          ;; Insert cancellation message at end of response section
-          ;; using query-id lookup (same mechanism as token insertion).
-          ;; The :marker points to the AI block, NOT the response section,
-          ;; so using it would insert [Cancelled] inside the src block.
+          ;; Insert cancellation message BEFORE cleanup (needs :query-id and :marker)
           (let ((cancel-text (if (and loop-max (> loop-max 1))
                                  (format "\n[Cancelled at iteration %d/%d]\n"
                                          (or loop-current 1) loop-max)
@@ -4624,56 +4681,58 @@ Assembles components from dedicated badge functions."
                     (with-current-buffer (marker-buffer marker)
                       (save-excursion
                         (goto-char marker)
-                        ;; Find end_src to insert after the block, not inside it
                         (when (re-search-forward "^#\\+end_src" nil t)
                           (end-of-line)
                           (insert cancel-text))))))))
-          ;; Update exec status to cancelled
-          (claude-org--set-exec-status-for-session session-key "cancelled")
-          ;; Free marker immediately to prevent race with sentinel callback
-          ;; (sentinel's handle-complete would otherwise free the NEW marker
-          ;; if user quickly re-executes before sentinel runs)
-          (claude-org--free-marker session-key)
-          (claude-org--refresh-header-line)
+          ;; Full cleanup via centralized function (F19: replaces 7 manual ops)
+          ;; Handles: stop-spinner, set-exec-status, reset-session-state
+          ;; (clears :busy, :recovering, :last-assistant-query-id),
+          ;; free-marker, cleanup-queued-blocks (frees queued markers +
+          ;; resets exec-status), unregister-active-query, refresh-header-line
+          (claude-org--cleanup-session session-key "cancelled" t)
           (if (> queue-count 0)
               (message "Query cancelled, cleared %d queued block(s)" queue-count)
             (message "Query cancelled")))
       (message "No active query to cancel"))))
 
 (defun claude-org-cancel-all ()
-  "Cancel all active queries in this buffer and clear all queues."
+  "Cancel all active queries in this buffer and clear all queues.
+Uses centralized `claude-org--cleanup-session' for complete cleanup."
   (interactive)
   (let ((cancelled 0)
         (queued-cleared 0))
     (maphash (lambda (key state)
                (when (claude-org--session-state-p state)
-                 ;; Clear queue
+                 ;; Count queued blocks before clearing
                  (let ((q-count (length (claude-org--session-state-get state :pending-queue))))
                    (when (> q-count 0)
-                     (cl-incf queued-cleared q-count)
-                     (claude-org--session-state-set state :pending-queue nil)))
-                 ;; Cancel active query via backend protocol
-                 (when (claude-org--session-state-get state :busy)
-                   (when-let* ((backend (claude-org--session-state-get state :backend))
-                               (handle (claude-org--session-state-get state :query-handle)))
-                     (claude-agent-backend-cancel backend handle))
-                   (claude-org--unregister-active-query key)
-                   (claude-org--session-state-set state :busy nil)
-                   (cl-incf cancelled))))
+                     (cl-incf queued-cleared q-count)))
+                 ;; Only cleanup sessions that are busy or have queued blocks;
+                 ;; skip idle sessions to avoid overwriting "completed"/"error" status
+                 (when (or (claude-org--session-state-get state :busy)
+                           (> (length (claude-org--session-state-get state :pending-queue)) 0))
+                   ;; Cancel active query via backend protocol
+                   (when (claude-org--session-state-get state :busy)
+                     (when-let* ((backend (claude-org--session-state-get state :backend))
+                                 (handle (claude-org--session-state-get state :query-handle)))
+                       (claude-agent-backend-cancel backend handle))
+                     (cl-incf cancelled))
+                   ;; Full cleanup via centralized function
+                   (claude-org--cleanup-session key "cancelled" t))))
              claude-org--sessions)
-    (claude-org--refresh-header-line)
     (if (> queued-cleared 0)
         (message "Cancelled %d queries, cleared %d queued blocks" cancelled queued-cleared)
       (message "Cancelled %d queries" cancelled))))
 
 (defun claude-org-cancel-queue ()
-  "Cancel only queued blocks, leaving the running query intact."
+  "Cancel only queued blocks, leaving the running query intact.
+Uses `cleanup-queued-blocks' to properly free markers and reset exec-status."
   (interactive)
   (let* ((session-key (claude-org--current-session-key))
          (queue-count (claude-org--queue-count session-key)))
     (if (> queue-count 0)
         (progn
-          (claude-org--clear-queue session-key)
+          (claude-org--cleanup-queued-blocks session-key)
           (claude-org--refresh-header-line)
           (message "Cleared %d queued block(s), running query continues" queue-count))
       (message "No queued blocks to cancel"))))
