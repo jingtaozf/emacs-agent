@@ -669,3 +669,253 @@ New tests needed for docs/ file creation and INDEX updates.
 - Create =docs/product-specs/= directory + INDEX.md
 - Create =docs/references/= directory + INDEX.md
 - Add structural test: verify docs/ subdirectories exist
+
+* Enforcing Architecture and Taste — Design Proposals
+
+/Added 2026-03-03. Proposals derived from the codebase audit and industry
+research on architecture enforcement for AI agents./
+
+** Context
+
+Our codebase scores well against harness engineering principles (9.5/10 in the
+final readiness assessment). However, the audit identified specific gaps in
+*taste enforcement* — the small, compounding rules that keep agent-generated
+code consistent. These gaps are safe to ignore today but will accumulate as
+more code is AI-generated.
+
+Industry consensus (OpenAI, Factory.ai, CodeScene) shows that mechanical
+enforcement of "taste invariants" is one of the highest-ROI harness
+investments. Each rule applies everywhere at once.
+
+** Goals
+
+- Mechanically enforce naming conventions (currently trust-based)
+- Detect full dependency graph violations (currently only 2 forbidden edges)
+- Provide code health visibility (currently no coverage metrics)
+- Strengthen the failure-to-rule pipeline (currently ad-hoc)
+- All proposals implementable as ERT tests — no new tooling required
+
+** Non-Goals
+
+- Replacing existing enforcement (structural tests, lint, pre-commit are strong)
+- Adding external linting tools (byte-compile + ERT is sufficient for Elisp)
+- Real-time enforcement during editing (test-time is appropriate)
+- Code health scores or metrics dashboards (simple pass/fail is enough)
+
+** Proposed Features
+
+*** F30: Naming Convention Linter
+
+Our CLAUDE.md documents naming rules but doesn't enforce them:
+
+| Convention | Pattern | Currently Enforced? |
+|------------+---------+---------------------|
+| Public API | =claude-*-function= | ✓ docstring required |
+| Internal | =claude-*--function= | ✗ trust-based |
+| Hook vars | =*-functions= (defvar) | ✗ trust-based |
+| Config opts | defcustom with =:type= | ✓ structural test |
+
+*Proposed test* (=test-structural.el=):
+
+#+begin_example elisp
+(ert-deftest test-structural-internal-functions-use-double-dash ()
+  "All non-public functions in claude-* modules use -- prefix."
+  :tags '(:structural :lint)
+  (let ((violations nil))
+    (dolist (sym (apropos-internal "^claude-[^-].*[^-]-[^-]" #'fboundp))
+      (unless (or (string-match-p "--" (symbol-name sym))
+                  ;; Exclude known public API patterns
+                  (member (symbol-name sym) claude-agent--known-public-api))
+        (push sym violations)))
+    (should-with-fix (null violations)
+      (format "Functions without -- prefix (should be internal or added to API list):\n%s"
+              (mapconcat #'symbol-name violations "\n")))))
+#+end_example
+
+*Effort*: 1h | *Priority*: Medium | *Impact*: Prevents naming drift
+
+*** F31: Full Dependency Graph Validation
+
+Currently we test 2 forbidden edges:
+- =claude-agent.org= must NOT require =claude-org=
+- =emacs-mcp-server.org= must NOT require =claude-*=
+
+But we don't validate the /full/ graph. An agent could introduce a circular
+dependency between =claude-org-session.org= and =claude-org-queue.org= and
+no test would catch it.
+
+*Proposed test*:
+
+#+begin_example elisp
+(ert-deftest test-structural-no-circular-dependencies ()
+  "Validate full dependency graph is acyclic."
+  :tags '(:structural :lint)
+  (let* ((modules '("claude-agent-backend" "claude-agent-permission"
+                    "claude-agent-ide" "claude-agent"
+                    "claude-org-session" "claude-org-queue"
+                    "claude-org-response" "claude-org"
+                    "claude-org-history" "claude-org-scheduled"
+                    "emacs-mcp-server"))
+         (graph (mapcar (lambda (m)
+                          (cons m (extract-requires-from-org m)))
+                        modules)))
+    ;; Topological sort — if it fails, there's a cycle
+    (should-with-fix (topological-sort-p graph)
+      "Circular dependency detected. Check module require statements.")))
+#+end_example
+
+Also validate the layer ordering from ARCHITECTURE.org:
+
+#+begin_example elisp
+(ert-deftest test-structural-dependency-direction ()
+  "Dependencies only flow downward: top → core → bottom."
+  :tags '(:structural :lint)
+  (let ((layers '(("claude-org" . 3)           ;; top
+                  ("claude-org-session" . 3)
+                  ("claude-org-queue" . 3)
+                  ("claude-org-response" . 3)
+                  ("claude-agent" . 2)          ;; core
+                  ("claude-agent-backend" . 1)  ;; bottom
+                  ("claude-agent-permission" . 1)
+                  ("claude-agent-ide" . 1)
+                  ("emacs-mcp-server" . 0))))   ;; independent
+    ;; Each module may only require modules at same or lower layer
+    (dolist (entry layers)
+      (let ((module (car entry))
+            (layer (cdr entry)))
+        (dolist (dep (extract-requires-from-org module))
+          (let ((dep-layer (cdr (assoc dep layers))))
+            (when dep-layer
+              (should-with-fix (<= dep-layer layer)
+                (format "%s (L%d) requires %s (L%d) — upward dependency!"
+                        module layer dep dep-layer)))))))))
+#+end_example
+
+*Effort*: 2h | *Priority*: Medium | *Impact*: Prevents architecture erosion
+
+*** F32: Failure-to-Rule Pipeline Template
+
+Currently, agent failures get codified into =.claude/rules/= ad-hoc. Formalize
+this with a template and a structural test:
+
+*Template* (=.claude/rules/TEMPLATE.md=):
+
+#+begin_example
+# Rule Title
+
+## Failure
+What went wrong (date, session, symptom).
+
+## Root Cause
+Why it happened.
+
+## Rule
+What to do differently.
+
+## Enforcement
+How it's mechanically enforced (test name, lint rule, or "advisory").
+#+end_example
+
+*Proposed structural test*:
+
+#+begin_example elisp
+(ert-deftest test-structural-rules-have-enforcement-section ()
+  "Every rule in .claude/rules/ should document its enforcement mechanism."
+  :tags '(:structural)
+  (let ((rules-dir (expand-file-name ".claude/rules/" project-root)))
+    (dolist (file (directory-files rules-dir t "\\.md$"))
+      (unless (string-match-p "TEMPLATE" file)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (should-with-fix
+           (re-search-forward "^## Enforcement" nil t)
+           (format "%s missing ## Enforcement section" (file-name-nondirectory file))))))))
+#+end_example
+
+*Effort*: 1h | *Priority*: High | *Impact*: Systematic knowledge capture
+
+*** F33: Module Size Monitoring
+
+OpenAI enforces file size limits as a taste invariant. Large files resist agent
+comprehension. Track module sizes and warn when they grow:
+
+*Proposed test*:
+
+#+begin_example elisp
+(ert-deftest test-structural-module-size-limits ()
+  "Source modules should stay within readable size limits."
+  :tags '(:structural)
+  (let ((limits '(("claude-agent.org" . 3000)
+                  ("claude-org.org" . 5500)
+                  ("emacs-mcp-server.org" . 1200)
+                  ("claude-agent-backend.org" . 800))))
+    (dolist (entry limits)
+      (let* ((file (expand-file-name (car entry) project-root))
+             (max-lines (cdr entry))
+             (actual (with-temp-buffer
+                       (insert-file-contents file)
+                       (count-lines (point-min) (point-max)))))
+        (should-with-fix (<= actual max-lines)
+          (format "%s has %d lines (limit: %d). Consider extracting a sub-module."
+                  (car entry) actual max-lines))))))
+#+end_example
+
+*Effort*: 30min | *Priority*: Low | *Impact*: Prevents monolith growth
+
+*** F34: Dead Code Detection
+
+Agent-generated code accumulates differently than human code. Periodically
+scan for unused symbols:
+
+*Proposed test*:
+
+#+begin_example elisp
+(ert-deftest test-structural-no-dead-public-functions ()
+  "Public functions should be referenced somewhere (code, tests, or docs)."
+  :tags '(:structural)
+  (let ((public-fns (apropos-internal "^claude-[^-].*" #'fboundp))
+        (all-content (concat-all-source-files))
+        (dead nil))
+    (dolist (sym public-fns)
+      (let ((name (symbol-name sym)))
+        ;; Must appear at least twice (definition + usage)
+        (unless (>= (count-occurrences name all-content) 2)
+          (push name dead))))
+    (should-with-fix (null dead)
+      (format "Dead public functions (defined but never called):\n%s"
+              (mapconcat #'identity dead "\n")))))
+#+end_example
+
+*Effort*: 1.5h | *Priority*: Low | *Impact*: Entropy prevention
+
+** Implementation Order
+
+| Priority | Feature | Effort | Dependencies |
+|----------+---------+--------+--------------|
+| 1 | F32: Failure-to-rule pipeline | 1h | None |
+| 2 | F30: Naming convention linter | 1h | None |
+| 3 | F31: Dependency graph validation | 2h | None |
+| 4 | F33: Module size monitoring | 30min | None |
+| 5 | F34: Dead code detection | 1.5h | None |
+
+All features are independent — can be implemented in any order.
+Total effort: ~6 hours.
+
+** Success Criteria
+
+| Metric | Current | Target |
+|--------+---------+--------|
+| Naming conventions enforced | Trust-based | Mechanical (test) |
+| Dependency edges validated | 2 forbidden | Full acyclic graph |
+| Rules with enforcement section | 0% | 100% |
+| Module size limits | None | All modules tracked |
+| Dead code detection | None | Public API scanned |
+| Structural tests | 14 | ~19 (+5 new) |
+
+** References
+
+- [[https://openai.com/index/harness-engineering/][OpenAI: Harness Engineering]] — taste invariants, layer architecture
+- [[https://factory.ai/news/using-linters-to-direct-agents][Factory.ai: Linters as Agent Infrastructure]] — pipeline pattern
+- [[https://codescene.com/blog/agentic-ai-coding-best-practice-patterns-for-speed-with-quality][CodeScene: Agentic AI Coding Patterns]] — code health metrics
+- [[https://blog.jetbrains.com/idea/2025/05/coding-guidelines-for-your-ai-agents/][JetBrains: Coding Guidelines for AI Agents]] — co-located conventions
+- [[https://arxiv.org/html/2602.20478v1][Codified Context (Academic)]] — computable rules

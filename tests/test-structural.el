@@ -361,5 +361,404 @@ FIX: Add ## Verification section to CLAUDE.md with make test-smoke, make check."
           (should (or (string-match-p "Verification" content)
                       (error "CLAUDE.md missing Verification section.\nFIX: Add ## Verification with make test-smoke, make check."))))))))
 
+;;; F30: Naming Convention Linter
+
+(ert-deftest test-structural-internal-functions-use-double-dash ()
+  "All non-public functions in claude-*/emacs-mcp-server-* use -- prefix.
+Functions defined in source .org files without -- must be in the known
+public API list. This catches functions that should be internal but forgot
+the -- naming convention.
+FIX: Rename the function to use -- prefix (e.g., claude-org--my-func),
+or add it to test-structural--known-public-api if it's intentionally public."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil)
+          (all-defuns (test-structural--extract-defuns-from-sources)))
+      (dolist (name all-defuns)
+        (when (and (or (string-prefix-p "claude-" name)
+                       (string-prefix-p "emacs-mcp-server-" name))
+                   ;; Skip internal functions (already have --)
+                   (not (string-match-p "--" name))
+                   ;; Skip struct accessors/constructors/predicates
+                   (not (string-match-p "-\\(make\\|p\\)$" name))
+                   ;; Skip known public API
+                   (not (member name test-structural--known-public-api)))
+          (push name violations)))
+      (should-with-fix (null violations)
+        (format "Functions without -- prefix (should be internal or added to public API list):\n%s\nFIX: Rename with -- prefix or add to test-structural--known-public-api."
+                (mapconcat #'identity (sort violations #'string<) "\n"))))))
+
+(defvar test-structural--known-public-api
+  '(;; claude-agent: core query API
+    "claude-agent-query"
+    "claude-agent-query-async"
+    "claude-agent-query-accumulate"
+    "claude-agent-query-interrupt"
+    "claude-agent-query-kill"
+    "claude-agent-query-request-id"
+    "claude-agent-query-context-format-id"
+    "claude-agent-query-context-format-label"
+    "claude-agent-cancel"
+    "claude-agent-cancel-all"
+    "claude-agent-cancel-all-queries"
+    "claude-agent-cancel-query"
+    "claude-agent-version"
+    "claude-agent-active-query-count"
+    "claude-agent-list-queries"
+    "claude-agent-options"
+    ;; claude-agent: message extraction
+    "claude-agent-extract-text"
+    "claude-agent-extract-thinking"
+    "claude-agent-extract-tool-uses"
+    "claude-agent-message-type"
+    ;; claude-agent: client API (bidirectional chat)
+    "claude-agent-client-create"
+    "claude-agent-client-connect"
+    "claude-agent-client-disconnect"
+    "claude-agent-client-send"
+    "claude-agent-client-send-message"
+    "claude-agent-client-interrupt"
+    "claude-agent-continue-session"
+    "claude-agent-resume-session"
+    "claude-agent-get-session-id"
+    ;; claude-agent: chat mode (comint-based)
+    "claude-agent-chat"
+    "claude-agent-chat-mode"
+    "claude-agent-chat-send"
+    "claude-agent-chat-interrupt"
+    "claude-agent-chat-quit"
+    "claude-agent-chat-clear"
+    "claude-agent-chat-new-session"
+    "claude-agent-chat-font-lock-keywords"
+    ;; claude-agent: session & state management
+    "claude-agent-make-session-key"
+    "claude-agent-get-effective-permissions"
+    "claude-agent-close-process-state"
+    "claude-agent-cleanup"
+    "claude-agent-kill-all-processes"
+    "claude-agent-registry-cleanup-process"
+    "claude-agent-update-state-callbacks"
+    ;; claude-agent: permission system
+    "claude-agent-check-permission"
+    "claude-agent-permission-check"
+    "claude-agent-permission-handler"
+    "claude-agent-permission-check-patterns"
+    "claude-agent-permission-prompt"
+    "claude-agent-permission-auto-allow"
+    "claude-agent-permission-ask-user-question"
+    ;; claude-agent: IDE context
+    "claude-agent-collect-ide-context"
+    "claude-agent-get-system-reminder"
+    "claude-agent-ide-context"
+    "claude-agent-build-system-reminder"
+    ;; claude-agent: verbose/debug
+    "claude-agent-get-verbose-buffer"
+    "claude-agent-show-session-verbose"
+    "claude-agent-list-session-verbose-buffers"
+    ;; claude-agent: usage & mode-line
+    "claude-agent-usage-callback"
+    "claude-agent-usage-fetch"
+    "claude-agent-usage-fetch-if-working-hours"
+    "claude-agent-usage-format-reset-time"
+    "claude-agent-usage-mode-line-start"
+    "claude-agent-usage-mode-line-stop"
+    "claude-agent-format-elapsed-time"
+    ;; claude-agent: title generation
+    "claude-agent-generate-title"
+    "claude-agent-generate-title-from-text"
+    ;; claude-agent: refine & translate
+    "claude-agent-refine-prompt"
+    "claude-agent-translate"
+    "claude-agent-translate-buffer"
+    "claude-agent-translate-cancel"
+    "claude-agent-translate-dwim"
+    "claude-agent-translate-region"
+    "claude-agent-translate-to-chinese"
+    "claude-agent-translate-to-english"
+    ;; claude-agent: query management buffer
+    "claude-agent-queries-cancel-at-point"
+    "claude-agent-queries-goto-source"
+    ;; claude-agent-backend public API
+    "claude-agent-backend-register"
+    "claude-agent-backend-get"
+    "claude-agent-backend-list"
+    "claude-agent-backend-start"
+    "claude-agent-backend-stop"
+    "claude-agent-backend-send"
+    "claude-agent-backend-cancel"
+    "claude-agent-backend-filter-callbacks"
+    ;; claude-org: core execution
+    "claude-org-execute"
+    "claude-org-cancel"
+    "claude-org-cancel-all"
+    "claude-org-cancel-queue"
+    "claude-org-mode"
+    "claude-org-setup"
+    "claude-org-cleanup"
+    ;; claude-org: navigation & insertion
+    "claude-org-insert-ai-block"
+    "claude-org-insert-block"
+    "claude-org-insert-block-menu"
+    "claude-org-insert-session-block"
+    "claude-org-insert-template"
+    "claude-org-insert-story"
+    "claude-org-next-ai-block"
+    "claude-org-prev-ai-block"
+    "claude-org-jump-to-ai-block"
+    "claude-org-goto-source"
+    "claude-org-goto-custom-id"
+    ;; claude-org: SDD workflow
+    "claude-org-insert-sdd"
+    "claude-org-tag-prompt"
+    ;; claude-org: refine
+    "claude-org-refine"
+    "claude-org-refine-block"
+    "claude-org-refine-prompt"
+    ;; claude-org: session & connection management
+    "claude-org-session-status"
+    "claude-org-set-model"
+    "claude-org-disconnect-all-clients"
+    "claude-org-disconnect-all-sessions"
+    "claude-org-disconnect-session"
+    "claude-org-list-persistent-clients"
+    "claude-org-list-sessions"
+    "claude-org-show-session-info"
+    "claude-org-show-verbose"
+    ;; claude-org: response
+    "claude-org-append-to-response"
+    ;; claude-org: loop
+    "claude-org-loop"
+    "claude-org-loop-abort"
+    "claude-org-loop-inject-warning"
+    ;; claude-org: scheduling
+    "claude-org-schedule-at"
+    "claude-org-schedule-at-transient"
+    "claude-org-schedule-cancel"
+    "claude-org-schedule-list"
+    "claude-org-schedule-clear-all"
+    "claude-org-scheduled-list"
+    "claude-org-scheduled-list-goto"
+    "claude-org-scheduled-list-refresh"
+    "claude-org-scheduled-scan-all"
+    "claude-org-scheduled-start"
+    "claude-org-scheduled-stop"
+    "claude-org-scheduled-run"
+    "claude-org-scheduled-cancel"
+    ;; claude-org: header line & mode
+    "claude-org-header-line"
+    "claude-org-header-line-mode"
+    ;; claude-org: permissions
+    "claude-org-permission-protect-org"
+    "claude-org-switch-permission-mode"
+    ;; claude-org: company completion
+    "claude-org-company-slash-commands"
+    ;; emacs-mcp-server public API
+    "emacs-mcp-server-start"
+    "emacs-mcp-server-stop"
+    "emacs-mcp-server-register-tool"
+    "emacs-mcp-server-unregister-tool"
+    "emacs-mcp-server-clear-tools"
+    "emacs-mcp-server-running-p"
+    "emacs-mcp-server-port"
+    "emacs-mcp-server-show-log"
+    "emacs-mcp-server-toggle-verbose")
+  "Functions that are intentionally public (no -- prefix needed).
+Only add functions here that are genuinely part of the public API.
+When F30 test fails, either rename the function with -- prefix
+or add it here if it's truly public.")
+
+(defun test-structural--extract-defuns-from-sources ()
+  "Extract all defun names from source .org files.
+Returns a list of function name strings."
+  (let ((names nil)
+        (source-files
+         (directory-files test-structural--project-root t
+                          "^\\(claude-\\|emacs-mcp-server\\).*\\.org$")))
+    (dolist (file source-files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (while (re-search-forward
+                "^(\\(?:defun\\|cl-defun\\)\\s-+\\(\\S-+\\)" nil t)
+          (push (match-string-no-properties 1) names))))
+    (delete-dups names)))
+
+;;; F31: Full Dependency Graph Validation
+
+(defun test-structural--extract-internal-requires (module-basename)
+  "Extract internal requires from MODULE-BASENAME.org file.
+Returns a list of module basenames that MODULE-BASENAME depends on.
+Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
+  (let ((file (expand-file-name (concat module-basename ".org")
+                                test-structural--project-root))
+        (requires nil))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (while (re-search-forward
+                "^(require '\\(\\(?:claude-\\|emacs-mcp-server\\)[^)]*\\))" nil t)
+          (let ((req (match-string-no-properties 1)))
+            ;; Normalize: claude-org-session maps to claude-org-session
+            ;; We need module basenames (matching .org filenames without extension)
+            (push req requires)))))
+    (delete-dups requires)))
+
+(defvar test-structural--module-layers
+  '(("emacs-mcp-server"       . 0)   ; independent
+    ("claude-agent-backend"    . 1)   ; bottom layer
+    ("claude-agent-permission" . 1)
+    ("claude-agent-ide"        . 1)
+    ("claude-agent"            . 2)   ; core
+    ("claude-org-session"      . 3)   ; org sub-modules
+    ("claude-org-queue"        . 3)
+    ("claude-org-response"     . 3)
+    ("claude-org"              . 4)   ; top-level org
+    ("claude-org-history"      . 5)   ; top extensions
+    ("claude-org-scheduled"    . 5))
+  "Module layer assignments from ARCHITECTURE.org.
+Higher layers may depend on same or lower layers, but not upward.")
+
+(ert-deftest test-structural-no-circular-dependencies ()
+  "Module dependency graph must be acyclic (no circular requires).
+FIX: Remove the circular (require ...) that creates the cycle.
+See ARCHITECTURE.org Module Boundary Diagram for allowed directions."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let* ((modules (mapcar #'car test-structural--module-layers))
+           (graph (mapcar (lambda (m)
+                            (cons m (test-structural--extract-internal-requires m)))
+                          modules))
+           ;; Kahn's algorithm for topological sort
+           ;; If we can't sort all nodes, there's a cycle
+           (in-degree (make-hash-table :test 'equal))
+           (adjacency (make-hash-table :test 'equal)))
+      ;; Initialize
+      (dolist (m modules)
+        (puthash m 0 in-degree)
+        (puthash m nil adjacency))
+      ;; Build graph
+      (dolist (entry graph)
+        (let ((from (car entry))
+              (deps (cdr entry)))
+          (dolist (to deps)
+            (when (gethash to in-degree)  ; only track known modules
+              (puthash to (1+ (gethash to in-degree 0)) in-degree)
+              (puthash from (cons to (gethash from adjacency)) adjacency)))))
+      ;; Kahn's: start with zero in-degree nodes
+      (let ((queue nil)
+            (sorted nil))
+        (maphash (lambda (k v)
+                   (when (= v 0) (push k queue)))
+                 in-degree)
+        (while queue
+          (let ((node (pop queue)))
+            (push node sorted)
+            (dolist (neighbor (gethash node adjacency))
+              (puthash neighbor (1- (gethash neighbor in-degree)) in-degree)
+              (when (= (gethash neighbor in-degree) 0)
+                (push neighbor queue)))))
+        ;; If sorted count != module count, there's a cycle
+        (let ((unsorted (cl-remove-if (lambda (m) (member m sorted)) modules)))
+          (should-with-fix (null unsorted)
+            (format "Circular dependency detected among: %s\nFIX: Remove circular (require ...) statements. See ARCHITECTURE.org."
+                    (mapconcat #'identity unsorted ", "))))))))
+
+(ert-deftest test-structural-dependency-direction ()
+  "Dependencies only flow downward: higher layers may require same or lower layers.
+FIX: Remove the upward dependency. See ARCHITECTURE.org Module Boundary Diagram."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil))
+      (dolist (entry test-structural--module-layers)
+        (let* ((module (car entry))
+               (layer (cdr entry))
+               (deps (test-structural--extract-internal-requires module)))
+          (dolist (dep deps)
+            (let ((dep-layer (cdr (assoc dep test-structural--module-layers))))
+              (when (and dep-layer (> dep-layer layer))
+                (push (format "%s (L%d) requires %s (L%d) — upward dependency!"
+                              module layer dep dep-layer)
+                      violations))))))
+      (should-with-fix (null violations)
+        (format "Upward dependencies found:\n%s\nFIX: Remove upward requires. See ARCHITECTURE.org."
+                (mapconcat #'identity violations "\n"))))))
+
+;;; F34: Dead Code Detection
+
+(defun test-structural--concat-all-sources ()
+  "Concatenate all source .org files and test .el files into one string."
+  (let ((content ""))
+    ;; Source .org files
+    (dolist (file (directory-files test-structural--project-root t "\\.org$"))
+      (unless (string-match-p "/docs/" file)
+        (setq content (concat content
+                              (with-temp-buffer
+                                (insert-file-contents file)
+                                (buffer-string))
+                              "\n"))))
+    ;; Test .el files
+    (let ((tests-dir (expand-file-name "tests" test-structural--project-root)))
+      (when (file-directory-p tests-dir)
+        (dolist (file (directory-files tests-dir t "\\.el$"))
+          (setq content (concat content
+                                (with-temp-buffer
+                                  (insert-file-contents file)
+                                  (buffer-string))
+                                "\n")))))
+    ;; Also check claude-code.el entry point
+    (let ((entry (expand-file-name "claude-code.el" test-structural--project-root)))
+      (when (file-exists-p entry)
+        (setq content (concat content
+                              (with-temp-buffer
+                                (insert-file-contents entry)
+                                (buffer-string))
+                              "\n"))))
+    ;; Prompts directory
+    (let ((prompts-dir (expand-file-name "prompts" test-structural--project-root)))
+      (when (file-directory-p prompts-dir)
+        (dolist (file (directory-files-recursively prompts-dir "\\.org$"))
+          (setq content (concat content
+                                (with-temp-buffer
+                                  (insert-file-contents file)
+                                  (buffer-string))
+                                "\n")))))
+    content))
+
+(ert-deftest test-structural-no-dead-public-functions ()
+  "Public functions should be referenced somewhere (code, tests, or docs).
+A function that only appears once across all sources is likely dead code.
+FIX: Remove the unused function, or add a test/usage for it."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let* ((all-content (test-structural--concat-all-sources))
+           (public-defuns (test-structural--extract-defuns-from-sources))
+           (dead nil))
+      (dolist (name public-defuns)
+        (when (and (or (string-prefix-p "claude-" name)
+                       (string-prefix-p "emacs-mcp-server-" name))
+                   ;; Only check public functions (no --)
+                   (not (string-match-p "--" name))
+                   ;; Skip struct accessors/constructors/predicates
+                   (not (string-match-p "-\\(make\\|p\\)$" name))
+                   ;; Skip interactive commands (called by users, not code)
+                   (not (and (fboundp (intern name))
+                             (commandp (intern name))))
+                   ;; Skip known public API (entry points are legit single-use)
+                   (not (member name test-structural--known-public-api)))
+          ;; Count occurrences — must appear at least twice (definition + usage)
+          (let ((count 0)
+                (start 0)
+                (search-name (regexp-quote name)))
+            (while (and (< count 2)
+                        (string-match search-name all-content start))
+              (setq count (1+ count)
+                    start (1+ (match-beginning 0))))
+            (when (< count 2)
+              (push name dead)))))
+      (should-with-fix (null dead)
+        (format "Dead public functions (defined but never referenced elsewhere):\n%s\nFIX: Remove unused functions or add usage/tests."
+                (mapconcat #'identity (sort dead #'string<) "\n"))))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here

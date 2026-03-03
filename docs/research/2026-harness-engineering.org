@@ -1390,16 +1390,163 @@ All docs/*.org files audited for cross-reference and content consistency:
 *None of these gaps block autonomous bug-fixing.* They improve L3 (root cause analysis)
 for future sessions.
 
+* Enforcing Architecture and Taste — Industry Best Practices
 
+/Added 2026-03-03. Deep-dive into architecture enforcement patterns across the
+industry, extending Principle 3 (Mechanical Enforcement Over Documentation)./
 
+** OpenAI's Layer Architecture
 
+OpenAI's Codex team divides each business domain into a fixed set of layers with
+strictly validated dependency directions:
 
+#+begin_example
+Types → Config → Repo → Service → Runtime → UI
+#+end_example
 
+Dependencies flow in one direction only. A limited set of permissible edges is
+defined, and violations are caught mechanically via custom linters and structural
+tests — not code review. Agents are restricted to operate within these layers.
 
+Key enforcement mechanisms:
+- *Custom linters* with remediation instructions baked into error messages
+- *Structural tests* that validate dependency direction compliance
+- *Taste invariants*: structured logging, naming conventions for schemas and
+  types, file size limits — small rules that compound into consistency
 
+The paradox: constraining the solution space /increases/ agent reliability.
+Agents don't need to make architectural decisions — the harness decides for them.
 
+** Factory.ai — Linters as Agent Infrastructure
 
+Factory.ai's research on [[https://factory.ai/news/using-linters-to-direct-agents][using linters to direct agents]] identifies linters as the
+bridge between human intent and machine-enforced guarantees:
 
+| Strategy | Purpose |
+|----------+---------|
+| Consistent formatting + named exports | Code easier to search and identify |
+| Predictable code organization | Agents reliably place and refactor code |
+| Cross-layer import blocking | Enforce clear module boundaries |
+| Security linting | Block plain text secrets, require input validation |
 
+Their recommended pipeline: humans define standards in =AGENTS.md= (the "why" +
+examples), then encode those guidelines as lint rules with clear severity and
+autofix policies that run on save, pre-commit, CI, PR bots, and inside agent
+toolchains.
 
+Key insight: /"Linters turn human intent into machine-enforced guarantees that
+allow agents to plan, generate, and self-correct without waiting on humans."/
 
+** CodeScene — Code Health as Agent Guardrail
+
+Adam Tornhill's [[https://codescene.com/blog/agentic-ai-coding-best-practice-patterns-for-speed-with-quality][six operational patterns]] for agentic coding center on measurable
+code quality:
+
+1. *Pull Risk Forward*: Assess "AI readiness" via Code Health score before
+   deploying agents. Low health = higher failure rates + excess token consumption.
+
+2. *Safeguard Generated Code*: Three-tier automated safeguards via MCP server:
+   - Continuous =code_health_review= during generation
+   - =pre_commit_code_health_safeguard= on staged files
+   - =analyze_change_set= for full branch-vs-base PR checks
+
+3. *Refactor to Expand the AI-Ready Surface*: Break monolithic functions into
+   modular units. Agents operate more reliably on smaller, healthier code.
+
+4. *Encode Principles as AGENTS.md*: Transform individual MCP tools into
+   predictable workflows. "Individual tools turn into a predictable workflow."
+
+5. *Code Coverage as Behavioral Guardrail*: Strict coverage gates on PRs as
+   regression signals. Prevents agents from deleting failing tests.
+
+6. *Automate Checks End-to-End*: Complement unit tests with realistic E2E tests.
+   "With AI speed, it becomes non-negotiable."
+
+Their infrastructure stack: Code Health Score + MCP Tools + AGENTS.md.
+Result: 2-3x speedup after going fully agentic.
+
+Central thesis: /"Speed amplifies both good design and bad decisions."/
+
+** JetBrains — Coding Guidelines for AI Agents
+
+JetBrains' [[https://blog.jetbrains.com/idea/2025/05/coding-guidelines-for-your-ai-agents/][coding guidelines for AI agents]] emphasizes:
+- Project-level =.ai/= or =.cursor/= rules files that agents read automatically
+- Explicit architectural boundaries in machine-readable format
+- Convention documentation co-located with code (not in wikis)
+- Style guides as enforcement mechanisms, not aspirational documents
+
+** Codified Context (Academic)
+
+The [[https://arxiv.org/html/2602.20478v1][Codified Context]] paper proposes infrastructure for AI agents in complex
+codebases:
+- /Context files/ as first-class project artifacts
+- Structured metadata about module responsibilities and boundaries
+- Dependency graphs as navigable maps for agents
+- Convention enforcement through computable rules (not prose)
+
+** Common Patterns Across Sources
+
+| Pattern | OpenAI | Factory.ai | CodeScene | JetBrains |
+|---------+--------+------------+-----------+-----------|
+| Layer architecture | ✓ | | | |
+| Custom linters | ✓ | ✓ | | |
+| Structural tests | ✓ | | | |
+| Taste invariants | ✓ | | | |
+| AGENTS.md / rules file | ✓ | ✓ | ✓ | ✓ |
+| Code health metrics | | | ✓ | |
+| MCP-based enforcement | | | ✓ | |
+| Pre-commit gates | ✓ | ✓ | ✓ | |
+| Remediation in errors | ✓ | ✓ | | |
+| Coverage as guardrail | | | ✓ | |
+
+* Codebase Audit — claude-agent vs Harness Principles
+
+/Audit performed 2026-03-03 against the architecture enforcement patterns above./
+
+** What We Already Have (Strengths)
+
+| Mechanism | Implementation | Quality |
+|-----------+----------------+---------|
+| Layer architecture | ARCHITECTURE.org + 2 structural tests | Good — explicit module diagram and load order |
+| Custom linting | test-static-analysis.el (650 lines) | Sophisticated — adaptive symbol extraction |
+| Structural tests | test-structural.el (366 lines, 14 tests) | Complete — FIX messages in every assertion |
+| Taste invariants | Docstring req, defcustom :type req, file size limits | Partial — naming conventions trust-based |
+| AGENTS.md equivalent | CLAUDE.md (132 lines) + ARCHITECTURE.org (110 lines) | Complete — progressive disclosure model |
+| Pre-commit gates | scripts/pre-commit (656 tests, ~50s) | Comprehensive — all fast tests gated |
+| CI pipeline | .github/workflows/ci.yml (smoke → unit → lint) | Good — gated stages |
+| Remediation in errors | should-with-fix macro across all structural tests | Excellent — every failure shows FIX |
+| Test infrastructure | 960+ tests, 60+ files, tag-based filtering | Exceptional — fine-grained control |
+
+** What We're Missing (Gaps)
+
+| Gap | Impact | Priority |
+|-----+--------+----------|
+| *No naming convention linter* | Internal =--= prefix and hook naming are trust-based | Medium |
+| *No code coverage metrics* | 960 tests but no % coverage reported | Medium |
+| *No cyclic dependency detection* | Only 2 manual forbidden-edge tests | Low |
+| *No logging convention enforcement* | =message= vs =claude-agent--log= usage inconsistent | Low |
+| *CI single Emacs version* | Only 30.1, no matrix testing | Low |
+| *No compile-time validation* | Architecture rules checked at test-time via grep | Low (acceptable for Elisp) |
+| *No doc-gardening automation* | ARCHITECTURE.org currency test exists but passive | Low |
+
+** Gap Analysis Summary
+
+Our codebase is already well-aligned with harness engineering principles. The
+enforcement system uses /testing as the primary mechanism/ (appropriate for Elisp
+which lacks a type system). The main gaps are:
+
+1. *Naming conventions* — we document them but don't mechanically enforce them
+2. *Coverage metrics* — we have extensive tests but no visibility into gaps
+3. *Dependency graph completeness* — we test 2 forbidden edges but don't validate
+   the full dependency graph
+
+* References
+
+- [[https://openai.com/index/harness-engineering/][OpenAI: Harness Engineering — Leveraging Codex in an Agent-First World]]
+- [[https://factory.ai/news/using-linters-to-direct-agents][Factory.ai: Using Linters to Direct Agents]]
+- [[https://codescene.com/blog/agentic-ai-coding-best-practice-patterns-for-speed-with-quality][CodeScene: Agentic AI Coding — Best Practice Patterns for Speed with Quality]]
+- [[https://blog.jetbrains.com/idea/2025/05/coding-guidelines-for-your-ai-agents/][JetBrains: Coding Guidelines for Your AI Agents]]
+- [[https://arxiv.org/html/2602.20478v1][Codified Context: Infrastructure for AI Agents in a Complex Codebase]]
+- [[https://martinfowler.com/articles/exploring-gen-ai/harness-engineering.html][Martin Fowler: Harness Engineering]]
+- [[https://tonylee.im/en/blog/openai-harness-engineering-five-principles-codex][5 Harness Engineering Principles (OpenAI summary)]]
+- [[https://medium.com/@christianforce/coding-standards-for-ai-agents-cb5c80696f72][Coding Standards for AI Agents (Medium)]]
