@@ -2957,6 +2957,23 @@ property starting with 'sdd-'. Returns the level (integer) or nil if not found."
               (setq found-level (org-current-level)))))
         found-level))))
 
+(defcustom claude-org-sdd-docs-format "org"
+  "File format for SDD docs/ artifacts (research, design-docs).
+When \"org\", creates .org files with org-mode markup.
+When \"md\", creates .md files with Markdown markup.
+Can be overridden per-story via the SDD_DOCS_FORMAT org property."
+  :type '(choice (const :tag "Org-mode (.org)" "org")
+                 (const :tag "Markdown (.md)" "md"))
+  :group 'claude-org)
+
+(defun claude-org--sdd-docs-format ()
+  "Return the docs format for the current context.
+Checks SDD_DOCS_FORMAT org property (inherited) first,
+then falls back to `claude-org-sdd-docs-format' defcustom."
+  (or (and (derived-mode-p 'org-mode)
+           (org-entry-get nil "SDD_DOCS_FORMAT" t))
+      claude-org-sdd-docs-format))
+
 (defun claude-org--sdd-name-to-slug (name)
   "Convert SDD feature NAME to a file-system slug.
 Lowercases, replaces spaces/special chars with hyphens, collapses runs."
@@ -2968,6 +2985,7 @@ Lowercases, replaces spaces/special chars with hyphens, collapses runs."
 (defun claude-org--sdd-create-docs-files (name session-id)
   "Create docs/ research and design-doc files for SDD story NAME.
 SESSION-ID is the SDD session identifier.
+Uses `claude-org--sdd-docs-format' to determine file extension and template.
 Returns a plist (:research PATH :design PATH) of created file paths,
 or nil if docs/ directories don't exist."
   (let* ((buf-dir (if buffer-file-name
@@ -2977,51 +2995,75 @@ or nil if docs/ directories don't exist."
                            buf-dir))
          (research-dir (expand-file-name "docs/research" project-root))
          (design-dir (expand-file-name "docs/design-docs" project-root))
+         (fmt (claude-org--sdd-docs-format))
+         (ext (concat "." fmt))
          (year (substring session-id 4 8))
          (slug (claude-org--sdd-name-to-slug name))
-         (research-file (expand-file-name (format "%s-%s.org" year slug) research-dir))
-         (design-file (expand-file-name (format "%s-%s.org" year slug) design-dir)))
+         (research-file (expand-file-name (format "%s-%s%s" year slug ext) research-dir))
+         (design-file (expand-file-name (format "%s-%s%s" year slug ext) design-dir))
+         (is-md (equal fmt "md")))
     (when (and (file-directory-p research-dir)
                (file-directory-p design-dir))
       ;; Create research file from template
       (unless (file-exists-p research-file)
         (with-temp-file research-file
-          (insert (format "#+TITLE: Research: %s\n" name))
-          (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
-          (insert (format "#+SDD_SESSION: %s\n" session-id))
-          (insert "#+STATUS: draft\n\n")
-          (insert "* Codebase Patterns\n\n")
-          (insert "* Relevant Files\n\n")
-          (insert "* External References\n\n")
-          (insert "* Findings\n")))
+          (if is-md
+              (progn
+                (insert (format "# Research: %s\n\n" name))
+                (insert (format "**Date**: %s\n" (format-time-string "%Y-%m-%d")))
+                (insert (format "**SDD Session**: %s\n" session-id))
+                (insert "**Status**: draft\n\n")
+                (insert "## Codebase Patterns\n\n")
+                (insert "## Relevant Files\n\n")
+                (insert "## External References\n\n")
+                (insert "## Findings\n"))
+            (insert (format "#+TITLE: Research: %s\n" name))
+            (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
+            (insert (format "#+SDD_SESSION: %s\n" session-id))
+            (insert "#+STATUS: draft\n\n")
+            (insert "* Codebase Patterns\n\n")
+            (insert "* Relevant Files\n\n")
+            (insert "* External References\n\n")
+            (insert "* Findings\n"))))
       ;; Create design doc from template
       (unless (file-exists-p design-file)
         (with-temp-file design-file
-          (insert (format "#+TITLE: Design: %s\n" name))
-          (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
-          (insert (format "#+SDD_SESSION: %s\n" session-id))
-          (insert "#+STATUS: draft\n\n")
-          (insert "* Goals\n\n")
-          (insert "* Non-Goals\n\n")
-          (insert "* Proposed Solution\n\n")
-          (insert "* Technical Design\n\n")
-          (insert "* Features\n")))
+          (if is-md
+              (progn
+                (insert (format "# Design: %s\n\n" name))
+                (insert (format "**Date**: %s\n" (format-time-string "%Y-%m-%d")))
+                (insert (format "**SDD Session**: %s\n" session-id))
+                (insert "**Status**: draft\n\n")
+                (insert "## Goals\n\n")
+                (insert "## Non-Goals\n\n")
+                (insert "## Proposed Solution\n\n")
+                (insert "## Technical Design\n\n")
+                (insert "## Features\n"))
+            (insert (format "#+TITLE: Design: %s\n" name))
+            (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
+            (insert (format "#+SDD_SESSION: %s\n" session-id))
+            (insert "#+STATUS: draft\n\n")
+            (insert "* Goals\n\n")
+            (insert "* Non-Goals\n\n")
+            (insert "* Proposed Solution\n\n")
+            (insert "* Technical Design\n\n")
+            (insert "* Features\n"))))
       ;; Update INDEX.md files
       (claude-org--sdd-update-index research-dir name session-id)
       (claude-org--sdd-update-index design-dir name session-id)
       (list :research research-file :design design-file))))
 
 (defun claude-org--sdd-update-index (dir name session-id)
-  "Append entry to INDEX.md in DIR for SDD story NAME with SESSION-ID."
+  "Append entry to INDEX.md in DIR for SDD story NAME.
+SESSION-ID is accepted for API compatibility but not stored in the index."
   (let ((index-file (expand-file-name "INDEX.md" dir)))
     (when (file-exists-p index-file)
       (with-temp-buffer
         (insert-file-contents index-file)
         (goto-char (point-max))
-        (insert (format "| %s | %s | Draft | %s |\n"
+        (insert (format "| %s | %s | draft |\n"
                         (format-time-string "%Y-%m-%d")
-                        name
-                        session-id))
+                        name))
         (write-region (point-min) (point-max) index-file nil 'silent)))))
 
 (defun claude-org-insert-sdd ()
@@ -3066,8 +3108,9 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     ;; Always include docs/ guidance — use relative paths from slug/year
     (let* ((slug (claude-org--sdd-name-to-slug name))
            (year (substring session-id 4 8))
-           (r (format "docs/research/%s-%s.org" year slug))
-           (d (format "docs/design-docs/%s-%s.org" year slug)))
+           (fmt (claude-org--sdd-docs-format))
+           (r (format "docs/research/%s-%s.%s" year slug fmt))
+           (d (format "docs/design-docs/%s-%s.%s" year slug fmt)))
       (insert (format "
 Docs files for this story:
 - *Research*: =%s=
@@ -3097,7 +3140,7 @@ Docs files for this story:
 | =docs/references/= | When curating external docs, articles, or API references | Quick-lookup index of reference material |
 
 After creating or updating any doc, append/update its row in the
-subdirectory's =INDEX.md= (Date, Title, Status, SDD Session columns).
+subdirectory's =INDEX.md= (Date, Title, Status columns).
 
 " r d r d d d d)))
 

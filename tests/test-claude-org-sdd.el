@@ -110,9 +110,9 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
           (make-directory (expand-file-name "docs/research") t)
           (make-directory (expand-file-name "docs/design-docs") t)
           (with-temp-file (expand-file-name "docs/research/INDEX.md")
-            (insert "# Research Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+            (insert "# Research Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
           (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
-            (insert "# Design Docs Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+            (insert "# Design Docs Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
           (with-temp-buffer
             (org-mode)
             (setq buffer-file-name (expand-file-name "notebook.org"))
@@ -154,9 +154,9 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
           (make-directory (expand-file-name "docs/research") t)
           (make-directory (expand-file-name "docs/design-docs") t)
           (with-temp-file (expand-file-name "docs/research/INDEX.md")
-            (insert "# Research Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+            (insert "# Research Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
           (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
-            (insert "# Design Docs Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+            (insert "# Design Docs Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
           (with-temp-buffer
             (org-mode)
             (setq buffer-file-name (expand-file-name "notebook.org"))
@@ -538,9 +538,9 @@ were not inherited because org-get-tags was called with LOCAL=t."
           (make-directory (expand-file-name "docs/research" test-dir) t)
           (make-directory (expand-file-name "docs/design-docs" test-dir) t)
           (with-temp-file (expand-file-name "docs/research/INDEX.md" test-dir)
-            (insert "# Research Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+            (insert "# Research Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
           (with-temp-file (expand-file-name "docs/design-docs/INDEX.md" test-dir)
-            (insert "# Design Docs Index\n\n| Date | Title | Status | SDD Session |\n|------|-------|--------|-------------|\n"))
+            (insert "# Design Docs Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
           (let ((default-directory test-dir)
                 (test-file (expand-file-name "test-notebook.org" test-dir)))
             (with-temp-buffer
@@ -651,6 +651,175 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (dolist (subdir '("research" "design-docs" "product-specs" "references"))
       (should (file-exists-p
                (expand-file-name (format "docs/%s/INDEX.md" subdir) project-root))))))
+
+
+;;; Unit Tests - Configurable Docs Format
+
+(ert-deftest test-sdd-docs-format-default ()
+  "Test that default docs format is 'org'."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (should (equal "org" claude-org-sdd-docs-format)))
+
+(ert-deftest test-sdd-docs-format-resolver-default ()
+  "Test that resolver returns defcustom value when no property set."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test\n")
+    (goto-char (point-min))
+    (let ((claude-org-sdd-docs-format "org"))
+      (should (equal "org" (claude-org--sdd-docs-format))))))
+
+(ert-deftest test-sdd-docs-format-resolver-property-override ()
+  "Test that SDD_DOCS_FORMAT property overrides defcustom."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Test\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":SDD_DOCS_FORMAT: md\n")
+    (insert ":END:\n")
+    (goto-char (point-min))
+    (re-search-forward "Test")
+    (let ((claude-org-sdd-docs-format "org"))
+      (should (equal "md" (claude-org--sdd-docs-format))))))
+
+(ert-deftest test-sdd-docs-format-resolver-inherited-property ()
+  "Test that SDD_DOCS_FORMAT property is inherited from parent headings."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Project\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":SDD_DOCS_FORMAT: md\n")
+    (insert ":END:\n")
+    (insert "** Child\n")
+    (goto-char (point-min))
+    (re-search-forward "Child")
+    (let ((claude-org-sdd-docs-format "org"))
+      (should (equal "md" (claude-org--sdd-docs-format))))))
+
+(ert-deftest test-sdd-create-docs-files-md-format ()
+  "Test that sdd-create-docs-files creates .md files when format is 'md'."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (let ((default-directory (make-temp-file "sdd-test-md-" t))
+        (claude-org-sdd-docs-format "md"))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "docs/research") t)
+          (make-directory (expand-file-name "docs/design-docs") t)
+          (with-temp-file (expand-file-name "docs/research/INDEX.md")
+            (insert "# Research Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
+          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
+            (insert "# Design Docs Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
+          (with-temp-buffer
+            (org-mode)
+            (setq buffer-file-name (expand-file-name "notebook.org"))
+            (cl-letf (((symbol-function 'read-string) (lambda (_) "Test MD Feature")))
+              (claude-org-insert-sdd))
+            (let* ((session-id (save-excursion
+                                 (goto-char (point-min))
+                                 (re-search-forward "^\\* Test MD Feature")
+                                 (org-entry-get nil "CLAUDE_SESSION_ID")))
+                   (year (substring session-id 4 8))
+                   (slug "test-md-feature")
+                   (research-file (expand-file-name
+                                   (format "docs/research/%s-%s.md" year slug)))
+                   (design-file (expand-file-name
+                                 (format "docs/design-docs/%s-%s.md" year slug))))
+              ;; .md files should exist
+              (should (file-exists-p research-file))
+              (should (file-exists-p design-file))
+              ;; .org files should NOT exist
+              (should-not (file-exists-p
+                           (expand-file-name
+                            (format "docs/research/%s-%s.org" year slug))))
+              (should-not (file-exists-p
+                           (expand-file-name
+                            (format "docs/design-docs/%s-%s.org" year slug))))
+              ;; Verify .md content uses markdown headings
+              (with-temp-buffer
+                (insert-file-contents research-file)
+                (should (string-match-p "^# Research:" (buffer-string)))
+                (should (string-match-p "^## " (buffer-string))))
+              (with-temp-buffer
+                (insert-file-contents design-file)
+                (should (string-match-p "^# Design:" (buffer-string)))
+                (should (string-match-p "^## Goals" (buffer-string)))
+                (should (string-match-p "^## Features" (buffer-string)))))))
+      (delete-directory default-directory t))))
+
+(ert-deftest test-sdd-insert-system-prompt-md-paths ()
+  "Test that System Prompt uses .md paths when format is 'md'."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (let ((default-directory (make-temp-file "sdd-test-md-paths-" t))
+        (claude-org-sdd-docs-format "md"))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "docs/research") t)
+          (make-directory (expand-file-name "docs/design-docs") t)
+          (with-temp-file (expand-file-name "docs/research/INDEX.md")
+            (insert "# Research Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
+          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
+            (insert "# Design Docs Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
+          (with-temp-buffer
+            (org-mode)
+            (setq buffer-file-name (expand-file-name "notebook.org"))
+            (cl-letf (((symbol-function 'read-string) (lambda (_) "MD Story")))
+              (claude-org-insert-sdd))
+            ;; System Prompt should reference .md files
+            (goto-char (point-min))
+            (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+            (let ((section-end (save-excursion (org-end-of-subtree t) (point))))
+              ;; Should have .md paths
+              (should (re-search-forward "\\.md=" section-end t))
+              (goto-char (point-min))
+              (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+              ;; Should NOT have .org paths in docs references
+              (let ((has-org-docs nil))
+                (while (re-search-forward "docs/\\(research\\|design-docs\\)/[^ ]*\\.org" section-end t)
+                  (setq has-org-docs t))
+                (should-not has-org-docs)))))
+      (delete-directory default-directory t))))
+
+(ert-deftest test-sdd-create-docs-files-default-org-format ()
+  "Test that sdd-create-docs-files creates .org files by default."
+  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
+  (let ((default-directory (make-temp-file "sdd-test-org-" t))
+        (claude-org-sdd-docs-format "org"))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "docs/research") t)
+          (make-directory (expand-file-name "docs/design-docs") t)
+          (with-temp-file (expand-file-name "docs/research/INDEX.md")
+            (insert "# Research Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
+          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
+            (insert "# Design Docs Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
+          (with-temp-buffer
+            (org-mode)
+            (setq buffer-file-name (expand-file-name "notebook.org"))
+            (cl-letf (((symbol-function 'read-string) (lambda (_) "Org Story")))
+              (claude-org-insert-sdd))
+            (let* ((session-id (save-excursion
+                                 (goto-char (point-min))
+                                 (re-search-forward "^\\* Org Story")
+                                 (org-entry-get nil "CLAUDE_SESSION_ID")))
+                   (year (substring session-id 4 8))
+                   (slug "org-story"))
+              ;; .org files should exist
+              (should (file-exists-p
+                       (expand-file-name
+                        (format "docs/research/%s-%s.org" year slug))))
+              (should (file-exists-p
+                       (expand-file-name
+                        (format "docs/design-docs/%s-%s.org" year slug))))
+              ;; Verify org content uses org headings
+              (with-temp-buffer
+                (insert-file-contents
+                 (expand-file-name (format "docs/research/%s-%s.org" year slug)))
+                (should (string-match-p "^#\\+TITLE:" (buffer-string)))
+                (should (string-match-p "^\\* " (buffer-string)))))))
+      (delete-directory default-directory t))))
 
 (provide 'test-claude-org-sdd)
 ;;; test-claude-org-sdd.el ends here
