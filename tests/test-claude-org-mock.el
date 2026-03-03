@@ -972,5 +972,196 @@ Say daily-repeater-executed
               (should (re-search-forward "daily-repeater-executed" nil t)))))
       (test-claude-org-mock--cleanup buf temp-file))))
 
+;;; Cancel Bug Reproduction Tests
+;;
+;; These tests reproduce the reported issue: "cancel doesn't take effect
+;; sometimes."  They use a cancel-test fixture with 0.5s delays between
+;; tokens and distinctive FIRST_TOKEN..EIGHTH_TOKEN markers so we can
+;; count exactly how many tokens were inserted before and after cancel.
+
+(defvar test-claude-org-mock--cancel-org
+  "* Test Section
+:PROPERTIES:
+:CUSTOM_ID: test-mock-cancel-repro
+:END:
+
+** Instruction 1 :ai_instruction:
+
+#+begin_src ai
+Write a very long story for cancel testing...
+#+end_src
+"
+  "Org content for cancel reproduction tests.")
+
+(defvar test-claude-org-mock--cancel-tokens
+  '("FIRST_TOKEN" "SECOND_TOKEN" "THIRD_TOKEN" "FOURTH_TOKEN"
+    "FIFTH_TOKEN" "SIXTH_TOKEN" "SEVENTH_TOKEN" "EIGHTH_TOKEN")
+  "Token markers emitted by the cancel-test fixture.")
+
+(defun test-claude-org-mock--count-tokens (text)
+  "Count how many cancel-test tokens appear in TEXT."
+  (cl-count-if (lambda (tok) (string-match-p tok text))
+               test-claude-org-mock--cancel-tokens))
+
+(defun test-claude-org-mock--goto-ai-block ()
+  "Move point to the first AI block in the current buffer."
+  (goto-char (point-min))
+  (re-search-forward "#\\+begin_src ai" nil t))
+
+(defun test-claude-org-mock--wait-for-first-token ()
+  "Wait until FIRST_TOKEN appears in the current buffer."
+  (should (test-claude-wait-until
+           (lambda ()
+             (save-excursion
+               (goto-char (point-min))
+               (re-search-forward "FIRST_TOKEN" nil t)))
+           5)))
+
+(defmacro test-claude-org-mock--with-cancel-fixture (&rest body)
+  "Set up cancel-test fixture buffer, execute AI block, wait for first token, cancel.
+Binds for BODY:
+  `session-key'       — the session key
+  `pre-cancel-tokens' — token count before cancel
+  `query-handle'      — the process-state (never nil if first token arrived)
+  `cancel-process'    — the Emacs process object
+Handles setup and cleanup automatically.
+BODY runs after cancel, with point in the test buffer."
+  (declare (indent 0) (debug t))
+  `(let* ((setup (test-claude-org-mock--setup-buffer
+                  test-claude-org-mock--cancel-org))
+          (buf (car setup))
+          (temp-file (cdr setup)))
+     (unwind-protect
+         (with-current-buffer buf
+           (let ((process-environment
+                  (cons "MOCK_SCENARIO=cancel-test" process-environment))
+                 (claude-agent-cli-path test-claude-mock-cli-path))
+             (test-claude-org-mock--goto-ai-block)
+             (let ((session-key (claude-org--current-session-key)))
+               (claude-org-execute)
+               (test-claude-org-mock--wait-for-first-token)
+               ;; Capture state BEFORE cancel for assertions
+               (let* ((pre-cancel-tokens
+                       (test-claude-org-mock--count-tokens (buffer-string)))
+                      (query-handle
+                       (claude-org--session-get session-key :query-handle))
+                      (cancel-process
+                       (when query-handle
+                         (claude-agent--process-state-process query-handle))))
+                 ;; Guard: query-handle and process must exist if token arrived
+                 (should query-handle)
+                 (should cancel-process)
+                 ;; Re-navigate (execute may move point) and cancel
+                 (test-claude-org-mock--goto-ai-block)
+                 (claude-org-cancel)
+                 ,@body))))
+       (test-claude-org-mock--cleanup buf temp-file))))
+
+(ert-deftest test-org-mock-cancel-stops-token-insertion ()
+  "Test that cancel stops new tokens from appearing in the buffer.
+Reproduction for: 'cancel doesn't take effect sometimes.'
+Starts a slow query, waits for FIRST_TOKEN to appear, cancels, then
+verifies that no tokens beyond the cancel point continue to appear."
+  :tags '(:mock :cancel :reproduction :org :process)
+  (test-claude-org-mock--with-cancel-fixture
+    ;; Wait for process to die and drain any pipe-buffered output
+    (should (test-claude-wait-until
+             (lambda () (not (process-live-p cancel-process)))
+             5))
+    (sleep-for 0.5)
+    (accept-process-output nil 0.3)
+    (let ((tokens-after-drain (test-claude-org-mock--count-tokens
+                               (buffer-string))))
+      ;; Should NOT have all 8 tokens (cancel had no effect)
+      (should (< tokens-after-drain 8))
+      ;; No new tokens appeared after cancel — pre-cancel-tokens was
+      ;; captured BEFORE cancel, so any increase means token leakage
+      (should (= pre-cancel-tokens tokens-after-drain)))))
+
+(ert-deftest test-org-mock-cancel-kills-process ()
+  "Test that cancel actually kills the subprocess.
+If the process stays alive after cancel, it can continue generating
+output and potentially interfere with the next query."
+  :tags '(:mock :cancel :reproduction :org :process)
+  (test-claude-org-mock--with-cancel-fixture
+    ;; cancel-process is captured BEFORE cancel by the macro — no nil risk
+    (should (test-claude-wait-until
+             (lambda () (not (process-live-p cancel-process)))
+             5))))
+
+(ert-deftest test-org-mock-cancel-no-recovery-triggered ()
+  "Test that cancel does NOT trigger auto-recovery.
+A cancelled query should set the cancelled flag, which prevents
+`is-abnormal-exit-p' from triggering recovery.  If recovery fires
+after cancel, the user sees a new query start unexpectedly."
+  :tags '(:mock :cancel :reproduction :org :recovery)
+  ;; Drain stale sentinels from previous tests to prevent cross-test
+  ;; contamination (a prior test's SIGKILL sentinel could fire here).
+  (sleep-for 0.5)
+  (accept-process-output nil 0.3)
+  (let ((claude-agent-auto-recovery t)
+        (recovery-triggered nil))
+    (cl-letf (((symbol-function 'claude-agent--resume-session)
+               (lambda (&rest _args)
+                 (setq recovery-triggered t))))
+      (test-claude-org-mock--with-cancel-fixture
+        ;; query-handle and cancel-process captured BEFORE cancel by macro
+        ;; Verify cancelled flag was set on the process-state
+        (should (claude-agent--process-state-cancelled query-handle))
+        ;; Wait for process to fully exit and sentinel to fire
+        (should (test-claude-wait-until
+                 (lambda () (not (process-live-p cancel-process)))
+                 5))
+        ;; Drain any pending sentinel callbacks
+        (sleep-for 0.5)
+        (accept-process-output nil 0.3)
+        ;; Recovery should NOT have been triggered
+        (should-not recovery-triggered)))))
+
+(ert-deftest test-org-mock-cancel-text-appears ()
+  "Test that [Cancelled] text is inserted after the AI block, not before it."
+  :tags '(:mock :cancel :reproduction :org)
+  (test-claude-org-mock--with-cancel-fixture
+    ;; Find the end of the AI source block
+    (goto-char (point-min))
+    (should (re-search-forward "#\\+end_src" nil t))
+    (let ((end-src-pos (point)))
+      ;; [Cancelled] text should appear AFTER #+end_src
+      (should (re-search-forward "\\[Cancelled\\]" nil t))
+      (should (> (match-beginning 0) end-src-pos)))
+    ;; Session should no longer be busy
+    (should-not (claude-org--session-get session-key :busy))))
+
+(ert-deftest test-org-mock-cancel-execute-cancel-cycle ()
+  "Test rapid execute -> cancel -> re-execute cycle.
+After cancelling, the user should be able to immediately start a new
+query.  If cancel leaves stale state, the re-execute may fail or
+behave incorrectly."
+  :tags '(:mock :cancel :reproduction :org :cycle)
+  (test-claude-org-mock--with-cancel-fixture
+    (should-not (claude-org--session-get session-key :busy))
+    ;; Ensure first process is fully dead before re-executing
+    (should (test-claude-wait-until
+             (lambda () (not (process-live-p cancel-process)))
+             5))
+    (sleep-for 0.3)
+    (accept-process-output nil 0.2)
+    ;; Re-execute with simple-query scenario
+    (let ((process-environment
+           (cons "MOCK_SCENARIO=simple-query" process-environment)))
+      (test-claude-org-mock--goto-ai-block)
+      (claude-org-execute)
+      ;; Should start a new query successfully
+      (should (test-claude-wait-until
+               (lambda ()
+                 (claude-org--session-get session-key :busy))
+               5))
+      ;; Wait for second query to complete
+      (should (test-claude-wait-for-completion session-key 10))
+      ;; Buffer should contain "4" from simple-query (word-boundary match
+      ;; avoids false positives from cancel tokens like FOURTH_TOKEN)
+      (goto-char (point-min))
+      (should (re-search-forward "\\b4\\b" nil t)))))
+
 (provide 'test-claude-org-mock)
 ;;; test-claude-org-mock.el ends here
