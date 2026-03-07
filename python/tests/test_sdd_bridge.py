@@ -1,0 +1,168 @@
+"""Tests for the SDD bridge hook handler."""
+
+import json
+import os
+
+import pytest
+
+from claude_agent.sdd_bridge import (
+    _escape_elisp_string,
+    _extract_full_response,
+    _format_todos_as_elisp,
+    write_status,
+)
+
+
+class TestWriteStatus:
+    def test_writes_status_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        write_status("test-session", "busy")
+        assert (tmp_path / "test-session").read_text() == "busy"
+
+    def test_overwrites_existing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        write_status("test-session", "busy")
+        write_status("test-session", "ready")
+        assert (tmp_path / "test-session").read_text() == "ready"
+
+
+class TestEscapeElispString:
+    def test_plain_string(self):
+        assert _escape_elisp_string("hello") == "hello"
+
+    def test_quotes(self):
+        assert _escape_elisp_string('say "hi"') == 'say \\"hi\\"'
+
+    def test_backslashes(self):
+        assert _escape_elisp_string("a\\b") == "a\\\\b"
+
+    def test_newlines(self):
+        assert _escape_elisp_string("line1\nline2") == "line1\\nline2"
+
+    def test_carriage_return(self):
+        assert _escape_elisp_string("a\rb") == "a\\rb"
+
+
+class TestExtractFullResponse:
+    def _make_transcript(self, tmp_path, entries):
+        transcript = tmp_path / "transcript.jsonl"
+        lines = [json.dumps(e) for e in entries]
+        transcript.write_text("\n".join(lines))
+        return str(transcript)
+
+    def _user(self, text):
+        return {"type": "user", "message": {"content": [{"type": "text", "text": text}]}}
+
+    def _assistant(self, text):
+        return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+    def _assistant_with_tool(self, text, tool_name="Bash"):
+        return {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": text},
+            {"type": "tool_use", "name": tool_name, "input": {}},
+        ]}}
+
+    def _assistant_thinking(self, thinking, text):
+        return {"type": "assistant", "message": {"content": [
+            {"type": "thinking", "text": thinking},
+            {"type": "text", "text": text},
+        ]}}
+
+    def test_single_turn(self, tmp_path):
+        path = self._make_transcript(tmp_path, [
+            self._user("hello"),
+            self._assistant("world"),
+        ])
+        assert _extract_full_response(path) == "world"
+
+    def test_multi_turn_skips_tool_use_turns(self, tmp_path):
+        """Assistant turns containing tool_use blocks are skipped (intermediate noise)."""
+        path = self._make_transcript(tmp_path, [
+            self._user("do X"),
+            self._assistant_with_tool("Let me check"),
+            self._assistant("Done! Here's the result."),
+        ])
+        assert _extract_full_response(path) == "Done! Here's the result."
+
+    def test_multi_turn_keeps_pure_text_turns(self, tmp_path):
+        """Multiple pure-text assistant turns are all kept."""
+        path = self._make_transcript(tmp_path, [
+            self._user("do X"),
+            self._assistant_with_tool("Let me check"),
+            self._assistant("First part."),
+            self._assistant("Second part."),
+        ])
+        assert _extract_full_response(path) == "First part.\n\nSecond part."
+
+    def test_user_in_middle(self, tmp_path):
+        """Only collects text after the LAST user entry."""
+        path = self._make_transcript(tmp_path, [
+            self._user("first question"),
+            self._assistant("first answer"),
+            self._user("second question"),
+            self._assistant("second answer"),
+        ])
+        assert _extract_full_response(path) == "second answer"
+
+    def test_thinking_blocks_skipped(self, tmp_path):
+        path = self._make_transcript(tmp_path, [
+            self._user("think about this"),
+            self._assistant_thinking("deep thoughts", "visible text"),
+        ])
+        assert _extract_full_response(path) == "visible text"
+
+    def test_empty_transcript(self, tmp_path):
+        path = self._make_transcript(tmp_path, [])
+        assert _extract_full_response(path) == ""
+
+    def test_no_user_entry(self, tmp_path):
+        """If no user entry, collects all assistant text."""
+        path = self._make_transcript(tmp_path, [
+            self._assistant("hello"),
+            self._assistant("world"),
+        ])
+        assert _extract_full_response(path) == "hello\n\nworld"
+
+    def test_all_tool_use_turns_returns_empty(self, tmp_path):
+        """If every assistant turn has tool_use, returns empty string."""
+        path = self._make_transcript(tmp_path, [
+            self._user("do X"),
+            self._assistant_with_tool("checking..."),
+            self._assistant_with_tool("still working..."),
+        ])
+        assert _extract_full_response(path) == ""
+
+
+class TestFormatTodosAsElisp:
+    def test_basic(self):
+        todos = [
+            {"content": "Do X", "status": "completed"},
+            {"content": "Do Y", "status": "pending"},
+        ]
+        result = _format_todos_as_elisp(todos)
+        assert result == '((:content "Do X" :status "completed" :priority 0) (:content "Do Y" :status "pending" :priority 0))'
+
+    def test_special_chars(self):
+        todos = [{"content": 'Say "hello"', "status": "pending"}]
+        result = _format_todos_as_elisp(todos)
+        assert result == '((:content "Say \\"hello\\"" :status "pending" :priority 0))'
+
+    def test_empty(self):
+        assert _format_todos_as_elisp([]) == "()"
+
+    def test_with_priority(self):
+        todos = [{"content": "Urgent", "status": "pending", "priority": 1}]
+        result = _format_todos_as_elisp(todos)
+        assert result == '((:content "Urgent" :status "pending" :priority 1))'
+
+    def test_string_priority_coerced(self):
+        """Priority that can't be int-coerced defaults to 0."""
+        todos = [{"content": "X", "status": "pending", "priority": "high"}]
+        result = _format_todos_as_elisp(todos)
+        assert ':priority 0' in result
+
+    def test_non_numeric_priority_safe(self):
+        """Malformed priority cannot inject elisp."""
+        todos = [{"content": "X", "status": "pending", "priority": '1) (evil'}]
+        result = _format_todos_as_elisp(todos)
+        assert ':priority 0' in result

@@ -5976,6 +5976,94 @@ Returns the session ID string, or nil if none saved."
         (org-entry-get nil claude-org-cli-session-property)))))
 #+END_SRC
 
+** Real-time Tool Output
+
+#+BEGIN_SRC elisp
+(defun claude-org-sdd-bridge-update-todos (org-file session-id todos)
+  "Update checkbox list under the last Instruction for SESSION-ID in ORG-FILE.
+TODOS is a list of plists with :content, :status, and :priority keys.
+Finds the last Instruction heading by tag, replaces or creates the checkbox
+list between the src block and any child headings."
+  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org-sdd-bridge--find-workflow session-id)
+        (let* ((workflow-level (org-current-level))
+               (instr-level (1+ workflow-level))
+               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
+                              workflow-level (point-max)))
+               (last-instr-pos nil))
+          ;; Find last instruction by tag
+          (save-excursion
+            (while (re-search-forward
+                    (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
+                    workflow-end t)
+              (setq last-instr-pos (line-beginning-position))))
+          (unless last-instr-pos
+            (error "No Instruction heading found under Workflow for session %s" session-id))
+          (goto-char last-instr-pos)
+          ;; Find the end of the src block (#+end_src)
+          (let* ((instr-end (claude-org-sdd-bridge--find-next-sibling-heading
+                             instr-level workflow-end))
+                 (src-end nil)
+                 (todo-start nil)
+                 (todo-end nil))
+            ;; Find #+end_src within this instruction
+            (save-excursion
+              (when (re-search-forward "^#\\+end_src" instr-end t)
+                (forward-line 1)
+                (setq src-end (point))))
+            (when src-end
+              ;; Find existing todo region: consecutive lines starting with "- ["
+              (goto-char src-end)
+              ;; Skip blank lines after src block
+              (while (and (< (point) instr-end) (looking-at "^[ \t]*$"))
+                (forward-line 1))
+              (when (looking-at "^- \\[")
+                (setq todo-start (point))
+                (while (and (< (point) instr-end) (looking-at "^- \\["))
+                  (forward-line 1))
+                (setq todo-end (point)))
+              ;; Build new checkbox text
+              (let ((checkbox-text
+                     (mapconcat
+                      (lambda (todo)
+                        (let ((content (plist-get todo :content))
+                              (status (plist-get todo :status)))
+                          (format "- [%s] %s"
+                                  (if (string= status "completed") "X" " ")
+                                  content)))
+                      todos "\n")))
+                (if todo-start
+                    ;; Replace existing todo region
+                    (progn
+                      (delete-region todo-start todo-end)
+                      (goto-char todo-start)
+                      (insert checkbox-text "\n"))
+                  ;; Insert after src block
+                  (goto-char src-end)
+                  (unless (looking-at "^[ \t]*$")
+                    (insert "\n"))
+                  (insert checkbox-text "\n"))
+                ;; Update heading cookie
+                (goto-char last-instr-pos)
+                (let* ((done (cl-count-if
+                              (lambda (todo) (string= (plist-get todo :status) "completed"))
+                              todos))
+                       (total (length todos))
+                       (cookie (format " [%d/%d]" done total)))
+                  ;; Remove existing cookie if any
+                  (when (re-search-forward " \\[[0-9]+/[0-9]+\\]" (line-end-position) t)
+                    (replace-match ""))
+                  ;; Insert cookie before tags
+                  (goto-char last-instr-pos)
+                  (when (re-search-forward "\\( +:\\)" (line-end-position) t)
+                    (goto-char (match-beginning 1))
+                    (insert cookie)))))))
+        (save-buffer)
+        (format "Updated %d todos" (length todos))))))
+#+END_SRC
 
 * iTerm2 Backend
 :PROPERTIES:
@@ -5989,10 +6077,11 @@ Prompts sent from Emacs; responses come back via SDD bridge hooks.
 
 #+BEGIN_SRC elisp
 (defcustom claude-org-iterm2-script
-  (expand-file-name "scripts/iterm2-ctl.py"
+  (expand-file-name "python/claude_agent/iterm2_ctl.py"
                     (file-name-directory
                      (or load-file-name buffer-file-name "")))
-  "Path to the iterm2-ctl.py script."
+  "Path to the iterm2_ctl.py module.
+Invoked via `python3' call-process."
   :type 'file
   :group 'claude-org)
 
@@ -6008,21 +6097,15 @@ Can also be a string for a fully custom command."
   :group 'claude-org)
 
 (defcustom claude-org-iterm2-sdd-script
-  (let ((candidates
-         (list
-          ;; 1. Relative to project root (works in dev checkout)
-          (expand-file-name "scripts/claude-sdd"
-                            (file-name-directory
-                             (or load-file-name buffer-file-name "")))
-          ;; 2. On PATH
-          (executable-find "claude-sdd"))))
-    (or (seq-find #'file-exists-p (delq nil candidates))
-        "claude-sdd"))
-  "Path to the claude-sdd launcher script.
+  (let* ((pkg-dir (file-name-directory
+                   (or load-file-name buffer-file-name "")))
+         (uv-cmd (format "uv run --project %s claude-sdd"
+                         (expand-file-name "python" pkg-dir))))
+    uv-cmd)
+  "Command to launch the claude-sdd launcher.
 Used when `claude-org-iterm2-launch-command' is `claude-sdd'.
-Defaults to the scripts/claude-sdd in the package directory,
-falling back to PATH lookup."
-  :type 'file
+Defaults to `uv run --project <pkg>/python claude-sdd'."
+  :type 'string
   :group 'claude-org)
 
 (defcustom claude-org-iterm2-extra-args nil
@@ -6118,13 +6201,18 @@ Format: HEADING [SDD-SESSION-ID] — unique across org files."
 
 (defun claude-org-iterm2--build-launch-command (org-file sdd-session-id project-root)
   "Build the shell command to launch Claude Code.
-Uses `claude-org-iterm2-launch-command' and `claude-org-iterm2-extra-args'.
+Uses `claude-org-iterm2-launch-command', `claude-org-iterm2-extra-args',
+and the org property CLAUDE_EXTRA_ARGS (space-separated CLI flags).
 ORG-FILE is the org notebook path, SDD-SESSION-ID the session,
 PROJECT-ROOT the working directory."
   (ignore project-root)
-  (let ((extra (mapconcat #'shell-quote-argument
-                          (or claude-org-iterm2-extra-args nil)
-                          " ")))
+  (let* ((prop-args (condition-case nil
+                        (claude-org-iterm2--find-session-property
+                         "CLAUDE_EXTRA_ARGS")
+                      (error nil)))
+         (all-extra (append (or claude-org-iterm2-extra-args nil)
+                            (when prop-args (split-string prop-args))))
+         (extra (mapconcat #'shell-quote-argument all-extra " ")))
     (cond
      ;; claude-sdd: passes org-file and session-id, handles everything
      ;; Also passes --resume from CLAUDE_CLI_SESSION if available, so
@@ -6136,7 +6224,7 @@ PROJECT-ROOT the working directory."
                   (claude-org-iterm2--find-session-property
                    "CLAUDE_CLI_SESSION")
                 (error nil)))
-             (parts (list (shell-quote-argument sdd-script)
+             (parts (list sdd-script
                           (shell-quote-argument (or org-file ""))
                           (shell-quote-argument (or sdd-session-id "")))))
         ;; Pass --resume before extra args so claude-sdd can use it

@@ -576,6 +576,7 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-sdd-bridge-save-cli-session"
     "claude-org-sdd-bridge-send-prompt"
     "claude-org-sdd-bridge-system-prompt"
+    "claude-org-sdd-bridge-update-todos"
     ;; claude-org: company completion
     "claude-org-company-slash-commands"
     ;; emacs-mcp-server public API
