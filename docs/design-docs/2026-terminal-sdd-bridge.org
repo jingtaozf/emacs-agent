@@ -16,7 +16,8 @@ SDD section as =#+begin_src ai= / =Response= sections.
 
 - Replacing the Emacs-native =C-c C-c= SDD workflow (this is complementary)
 - Building a general-purpose conversation logger (scoped to SDD only)
-- Real-time streaming into org buffers (batch insert per turn is sufficient)
+- Full real-time streaming into org buffers (batch insert per turn for text;
+  PostToolUse hook provides real-time todo checkbox updates only)
 
 * Solution Overview
 
@@ -299,17 +300,151 @@ Initial version: text-only extraction. Enhance later if needed.
 
 * Features
 
-| ID | Feature | Priority | Notes |
-|----+----------------------------------------------+----------+-------|
-| F1 | Launcher script (claude-sdd) | P0 | MVP |
-| F2 | UserPromptSubmit hook → AI block insertion | P0 | MVP |
-| F3 | Stop hook → Response section insertion | P0 | MVP |
-| F4 | Emacs bridge functions (insert prompt/resp) | P0 | MVP |
-| F5 | System prompt fetch from Emacs | P0 | MVP |
-| F6 | Turn numbering (count org headings) | P0 | MVP |
-| F7 | Tool call summary in response sections | P1 | |
-| F8 | Makefile target: make sdd SESSION=xxx | P2 | |
-| F9 | Resume support (--resume / --continue) | P2 | |
+| ID | Feature | Priority | Status | Notes |
+|-----+----------------------------------------------+----------+--------+-------|
+| F1 | Launcher script (claude-sdd) | P0 | done | Python via uv |
+| F2 | UserPromptSubmit hook → AI block insertion | P0 | done | |
+| F3 | Stop hook → Response section insertion | P0 | done | Full transcript extraction |
+| F4 | Emacs bridge functions (insert prompt/resp) | P0 | done | |
+| F5 | System prompt fetch from Emacs | P0 | done | |
+| F6 | Turn numbering (count org headings) | P0 | done | |
+| F7 | PostToolUse → real-time todo checkboxes | P1 | done | TodoWrite matcher only |
+| F8 | Full transcript extraction (multi-turn) | P1 | done | Skips tool_use turns |
+| F9 | Resume support (--resume / --continue) | P1 | done | CLI session persistence |
+| F10 | Makefile target: make sdd SESSION=xxx | P2 | | |
+| F11 | requestId-based response grouping | P2 | | See P1 in Proposed Improvements |
+| F12 | Context compaction boundary awareness | P2 | | See P4 in Proposed Improvements |
+
+* Transcript Format Analysis (from real session data)
+:PROPERTIES:
+:CUSTOM_ID: transcript-analysis
+:DATE: [2026-03-07]
+:END:
+
+Analyzed 10+ real Claude Code sessions under
+=~/.claude/projects/-Users-jingtao-projects-claude-agent/=.
+Sessions range from 750 to 7,300 entries.
+
+** Entry Type Taxonomy
+
+Seven distinct =type= values in JSONL transcripts:
+
+| Type | Description | Key fields |
+|------+----------------------------------------------------+-------------------------------------------------------|
+| =user= | Human message or tool_result | =message=, =isMeta=, =isCompactSummary=, =toolUseResult= |
+| =assistant= | Model response (text, tool_use, or thinking) | =message=, =requestId=, =slug= |
+| =progress= | Hook execution progress | =data= (has =type=: =hook_progress=), =toolUseID= |
+| =queue-operation= | Internal message queue state | =operation= (enqueue/dequeue/remove/popAll) |
+| =system= | Session events | =subtype=: =compact_boundary=, =stop_hook_summary=, =turn_duration=, =local_command= |
+| =file-history-snapshot= | File state for undo/redo | =snapshot=, =messageId= |
+| =last-prompt= | Most recent user prompt | =lastPrompt= string |
+
+** Content Block Types
+
+Inside =message.content= lists:
+
+| Block type | Parent | Key fields |
+|---+---+---|
+| =text= | =assistant= | =text= |
+| =tool_use= | =assistant= | =id=, =name=, =input=, =caller= |
+| =thinking= | =assistant= | =thinking=, =signature= |
+| =tool_result= | =user= | =tool_use_id=, =is_error=, =content= |
+| =tool_reference= | =tool_result= content | =tool_name= |
+
+** Critical Finding: Multi-block Responses
+
+A single API request (one =requestId=) generates **multiple JSONL lines**.
+Each content block (text, tool_use) is a separate entry linked via =parentUuid=:
+
+#+begin_example
+user[uuid=A]                           ← human message
+  assistant[uuid=B, parent=A, req=R1]  ← text block
+  assistant[uuid=C, parent=B, req=R1]  ← tool_use block (same requestId)
+  user[uuid=D, parent=C]               ← tool_result
+  assistant[uuid=E, parent=D, req=R2]  ← next turn response
+#+end_example
+
+In session =b23db72c=: 1,355 unique requestIds, 871 have multiple entries.
+This means naive "find last assistant entry" misses the full picture.
+
+** Tool Names Observed (21 tools)
+
+Built-in: =Agent=, =AskUserQuestion=, =Bash=, =Edit=, =EnterPlanMode=,
+=ExitPlanMode=, =Glob=, =Grep=, =Read=, =Skill=, =Task=, =TaskOutput=,
+=TaskStop=, =TeamCreate=, =TeamDelete=, =TodoWrite=, =ToolSearch=,
+=WebFetch=, =WebSearch=, =Write=
+
+MCP: =mcp__emacs__evalElisp=, =mcp__emacs__report_invocation=
+
+** Session Boundaries
+
+- No terminal/closing entry type — sessions end with the last =assistant= entry
+- First entry varies: =queue-operation= (8/10) or =file-history-snapshot= (2/10)
+- Context compaction: =system/compact_boundary= followed by =user= with
+  =isCompactSummary: "True"= containing a narrative summary
+
+** Implications for SDD Bridge
+
+1. *Response extraction must filter by content block type, not entry type*:
+   An assistant entry with =tool_use= is an intermediate turn. Only entries
+   with pure =text= blocks (no =tool_use=) contain the final answer.
+
+2. *No =result= entry*: The design doc's transcript fixtures assumed a
+   =type: "result"= terminal entry (line 365). Real transcripts don't have
+   this. The Stop hook's =last_assistant_message= is computed by the CLI,
+   not stored in the transcript.
+
+3. *=system/stop_hook_summary=* entries record hook execution metadata:
+   =hookInfos= (command, durationMs), =hookErrors=, =stopReason=.
+   Useful for debugging slow hooks but not needed for response extraction.
+
+4. *=progress/hook_progress=* entries fire during PostToolUse hooks.
+   These can be used to verify that our hooks are actually running.
+
+5. *TodoWrite tool_input* is available in the =tool_use= content block
+   under =input.todos=. The PostToolUse hook receives this as =tool_input=.
+
+* Proposed Improvements
+
+** P1: Smarter transcript extraction (implemented)
+
+Current: =_extract_full_response()= skips assistant entries containing
+=tool_use= blocks, keeping only pure-text turns.
+
+Limitation: if the final answer also includes a =tool_use= (rare but possible
+with parallel tool calls), its text is lost.
+
+Better approach (future): group entries by =requestId=, collect text blocks
+from the LAST request group. This correctly handles multi-block responses
+where text and tool_use coexist in one API call.
+
+** P2: Use =system/stop_hook_summary= for diagnostics
+
+The =stop_hook_summary= entry records hook timing. We could parse this
+to detect when our hooks are slow (>1s) and log a warning. This would
+help diagnose "save-buffer taking too long" issues proactively.
+
+** P3: Leverage =parentUuid= chain for conversation threading
+
+Instead of "find last user entry, collect everything after", we could
+walk the =parentUuid= chain backward from the last entry. This gives
+the exact conversation thread, handling sidechains (=isSidechain= flag)
+correctly. Current approach works because SDD sessions are linear,
+but parentUuid threading would be more robust.
+
+** P4: Context compaction awareness
+
+When context compaction fires, the =compact_boundary= + summary =user=
+entry resets the conversation context. Our transcript extraction should
+recognize this boundary and only extract responses after the last
+compaction event, not from the original user prompt which may be stale.
+
+** P5: Hook matcher optimization (implemented)
+
+The PostToolUse hook uses ="matcher": "TodoWrite"= in hooks.json so it
+only fires for TodoWrite calls. Without this, the hook fires for every
+tool use (~6,900 per session), causing significant overhead. The matcher
+reduces this to only the ~10-20 TodoWrite calls per session.
 
 * Design Decisions
 
