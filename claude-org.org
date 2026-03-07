@@ -4931,7 +4931,6 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
     ("T" "Native terminal" claude-org-open-native-terminal)
     ("I" "iTerm2 tab" claude-org-iterm2-open-tab)
     ("A" "Archive workflow" claude-org-sdd-archive-workflow)
-    ("W" "Send to WezTerm" claude-org-sdd-bridge-send-prompt)
     ("D" "Disconnect session" claude-org-disconnect-session)
     ("X" "Disconnect all" claude-org-disconnect-all-sessions)]
    ["" ("q" "Quit" transient-quit-one)]])
@@ -5977,50 +5976,6 @@ Returns the session ID string, or nil if none saved."
         (org-entry-get nil claude-org-cli-session-property)))))
 #+END_SRC
 
-** Send Prompt to Terminal
-
-#+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-send-prompt ()
-  "Send the current AI block's prompt to Claude Code running in WezTerm.
-Reads the prompt from the AI block at point, sends it to the WezTerm pane
-stored in the SDD section's WEZTERM_PANE_ID property, and presses Enter.
-The Stop hook will capture the response back to the org file."
-  (interactive)
-  (let* ((element (org-element-at-point))
-         (prompt (when (and (eq (org-element-type element) 'src-block)
-                            (string= (org-element-property :language element) "ai"))
-                   (string-trim (org-element-property :value element)))))
-    (unless prompt
-      (user-error "Point is not inside a #+begin_src ai block"))
-    ;; Find the SDD session and its WezTerm pane ID
-    (let ((pane-id (save-excursion
-                     (save-restriction
-                       (widen)
-                       (let ((found nil))
-                         (while (and (not found) (org-up-heading-safe))
-                           (when (org-entry-get nil "CLAUDE_SESSION_ID")
-                             (setq found t)))
-                         (unless found
-                           (user-error "No SDD section with CLAUDE_SESSION_ID found"))
-                         (or (org-entry-get nil "WEZTERM_PANE_ID")
-                             (user-error
-                              "No WEZTERM_PANE_ID property. Launch via claude-sdd in WezTerm first")))))))
-      ;; Send prompt via bracketed paste (multi-line safe)
-      (let ((exit-code
-             (call-process-shell-command
-              (format "printf '%%s' %s | wezterm cli send-text --pane-id %s"
-                      (shell-quote-argument prompt)
-                      (shell-quote-argument pane-id))
-              nil nil nil)))
-        (unless (= exit-code 0)
-          (user-error "Failed to send text to WezTerm pane %s" pane-id))
-        ;; Press Enter to submit
-        (call-process-shell-command
-         (format "printf '\\r' | wezterm cli send-text --pane-id %s --no-paste"
-                 (shell-quote-argument pane-id))
-         nil nil nil)
-        (message "Sent prompt to WezTerm pane %s (%d chars)" pane-id (length prompt))))))
-#+END_SRC
 
 * iTerm2 Backend
 :PROPERTIES:

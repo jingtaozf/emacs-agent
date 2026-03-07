@@ -336,7 +336,7 @@ test_response_after_new_prompt_inserted() {
       bash scripts/sdd-bridge.sh prompt >/dev/null
 
   # Response A arrives late
-  echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"Terminal research results: WezTerm is the best."}' \
+  echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"Terminal research results: iTerm2 is the best."}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
       bash scripts/sdd-bridge.sh response >/dev/null
 
@@ -383,16 +383,15 @@ test_large_response_with_many_org_headings() {
 
 | Terminal | API Type | Language |
 |----------+----------+----------|
-| *WezTerm* | CLI + Lua | Lua 5.4 |
-| *Kitty* | CLI + Socket | Python |
 | *iTerm2* | Python API | Python 3 |
+| *Kitty* | CLI + Socket | Python |
 
-**** WezTerm - Best for Emacs Integration
+**** iTerm2 - Best for Emacs Integration
 
 #+begin_example
-wezterm cli set-tab-title "my title"
-pane_id=$(wezterm cli spawn -- bash -l)
-echo "make test" | wezterm cli send-text --pane-id $pane_id
+iterm2-ctl.py launch --title "my story" --cwd /project
+iterm2-ctl.py send --session UUID < prompt.txt
+iterm2-ctl.py status --session UUID
 #+end_example
 
 **** Kitty - Strongest Protocol
@@ -413,13 +412,12 @@ kitty @ send-text --match title:myterm "ls\n"
 
 *** Recommendation
 
-1. *WezTerm* - Drop-in replacement
-2. *Kitty* - Equally powerful
-3. *iTerm2* - macOS only
+1. *iTerm2* - Best for macOS + Emacs integration
+2. *Kitty* - Cross-platform alternative
 
 *** Sources
 
-- [[https://wezterm.org/cli/general.html][WezTerm CLI Reference]]
+- [[https://iterm2.com/python-api/][iTerm2 Python API]]
 - [[https://sw.kovidgoyal.net/kitty/remote-control/][Kitty Remote Control]]
 RESP
 )"
@@ -436,7 +434,7 @@ RESP
   # Response must exist
   assert_contains "$content" "Response 1"
   assert_contains "$content" ":ai_output:"
-  assert_contains "$content" "WezTerm"
+  assert_contains "$content" "iTerm2"
   assert_contains "$content" "Kitty"
   assert_contains "$content" "Recommendation"
 
