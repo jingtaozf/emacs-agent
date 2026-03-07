@@ -21,6 +21,10 @@
   - [[#display-settings][Display Settings]]
   - [[#execution-behavior][Execution Behavior]]
   - [[#execution-hooks][Execution Hooks]]
+    - [[#user-facing-hooks-defcustom-buffer-local][User-Facing Hooks (defcustom, buffer-local)]]
+    - [[#loop-detection-utilities][Loop Detection Utilities]]
+    - [[#pre-completion-utilities][Pre-Completion Utilities]]
+    - [[#telemetry-persistence][Telemetry Persistence]]
   - [[#block-history][Block History]]
     - [[#configuration][Configuration]]
     - [[#state-variables][State Variables]]
@@ -48,18 +52,16 @@
   - [[#system-prompts][System Prompts]]
 - [[#process-management][Process Management]]
   - [[#state-variables-1][State Variables]]
-    - [[#session-state-struct][Session State Struct]]
-    - [[#session-registry][Session Registry]]
+    - [[#session-state-see-claude-org-sessionorg][Session State (see claude-org-session.org)]]
   - [[#persistent-client-registry][Persistent Client Registry]]
   - [[#lifecycle-hooks][Lifecycle Hooks]]
-  - [[#session-state-accessors][Session State Accessors]]
   - [[#query-id-system][Query-ID System]]
-    - [[#query-id-generation][Query-ID Generation]]
+    - [[#query-id-generation-see-claude-org-responseorg][Query-ID Generation (see claude-org-response.org)]]
     - [[#response-section-creation][Response Section Creation]]
     - [[#query-id-based-response-lookup][Query-ID Based Response Lookup]]
     - [[#marker-free-token-insertion][Marker-Free Token Insertion]]
   - [[#marker-lifecycle-management][Marker Lifecycle Management]]
-  - [[#pending-block-queue][Pending Block Queue]]
+  - [[#pending-block-queue-see-claude-org-queueorg][Pending Block Queue (see claude-org-queue.org)]]
   - [[#execution-status-property][Execution Status Property]]
 - [[#behavior-prompts][Behavior Prompts]]
   - [[#tag-prompt-lookup][Tag Prompt Lookup]]
@@ -68,8 +70,6 @@
     - [[#sdd-root-detection][SDD Root Detection]]
     - [[#custom_id-generation][CUSTOM_ID Generation]]
     - [[#sdd-link-generation][SDD Link Generation]]
-    - [[#sdd-specific-method][SDD-Specific Method]]
-    - [[#sdd-subsection-update-helper][SDD Subsection Update Helper]]
   - [[#header-prompt-lookup][Header Prompt Lookup]]
   - [[#collect-current-context][Collect Current Context]]
   - [[#build-behavior-prompt][Build Behavior Prompt]]
@@ -98,21 +98,16 @@
   - [[#company-backend][Company Backend]]
 - [[#response-handling][Response Handling]]
   - [[#response-section-boundary-detection][Response Section Boundary Detection]]
-  - [[#debounced-font-lock][Debounced Font-Lock]]
-  - [[#header-normalization][Header Normalization]]
+  - [[#debounced-font-lock-see-claude-org-responseorg][Debounced Font-Lock (see claude-org-response.org)]]
+  - [[#header-normalization-see-claude-org-responseorg][Header Normalization (see claude-org-response.org)]]
   - [[#token-handling][Token Handling]]
   - [[#message-handling][Message Handling]]
   - [[#error-handling][Error Handling]]
-- [[#block-history-1][Block History]]
-  - [[#persistence-functions][Persistence Functions]]
-  - [[#hook-functions][Hook Functions]]
-  - [[#navigation-functions][Navigation Functions]]
+- [[#block-history-see-claude-org-historyorg][Block History (see claude-org-history.org)]]
 - [[#execution][Execution]]
   - [[#execute-command][Execute Command]]
   - [[#send-request-helpers][Send Request Helpers]]
-  - [[#iteration-sections][Iteration Sections]]
   - [[#send-request][Send Request]]
-- Scheduled Execution → =claude-org-scheduled.org=
 - [[#header-line][Header Line]]
   - [[#state-variables-2][State Variables]]
   - [[#spinner-control][Spinner Control]]
@@ -134,6 +129,17 @@
     - [[#deny-message-helper][Deny Message Helper]]
     - [[#main-protection-function][Main Protection Function]]
   - [[#protection-installation][Protection Installation]]
+- [[#native-terminal][Native Terminal]]
+  - [[#configuration-2][Configuration]]
+  - [[#buffer-naming][Buffer Naming]]
+  - [[#terminal-lifecycle][Terminal Lifecycle]]
+  - [[#session-resumption][Session Resumption]]
+  - [[#prompt-sending][Prompt Sending]]
+  - [[#minor-mode-1][Minor Mode]]
+  - [[#sending-special-keys][Sending Special Keys]]
+  - [[#command-menu][Command Menu]]
+  - [[#native-keymap-updated][Native Keymap (updated)]]
+  - [[#buffer-local-keymap-setup][Buffer-local Keymap Setup]]
 - [[#package-footer][Package Footer]]
 
 * Introduction
@@ -722,6 +728,14 @@ configuration. Using constants ensures consistency across the codebase.
 (defconst claude-org-sdk-uuid-property "CLAUDE_SDK_UUID"
   "Org property name for SDK session UUID (used for --resume).")
 
+(defconst claude-org-native-session-id-property "CLAUDE_NATIVE_SESSION_ID"
+  "Org property for native terminal CLI session ID (used for --resume).
+Persisted to the org heading so session can be resumed after Emacs restart.")
+
+(defconst claude-org-cli-session-property "CLAUDE_CLI_SESSION"
+  "Org property for SDD bridge CLI session ID (used for --resume).
+Persisted to the SDD section so terminal sessions can be resumed.")
+
 (defconst claude-org-setting-sources-property "CLAUDE_SETTING_SOURCES"
   "Org property name for setting sources (comma-separated list).")
 
@@ -942,6 +956,44 @@ Removes the property from the appropriate scope based on where CLAUDE_SESSION_ID
                        claude-org-sdk-uuid-property)
                nil t)
           (replace-match ""))))))
+
+(defun claude-org--get-native-session-id ()
+  "Get native CLI session ID from org property for current session.
+Returns the value of CLAUDE_NATIVE_SESSION_ID from the heading that
+defines the session scope, or nil if not set."
+  (let ((session-heading (claude-org--find-session-scope-heading)))
+    (when session-heading
+      (save-excursion
+        (goto-char session-heading)
+        (org-entry-get nil claude-org-native-session-id-property nil)))))
+
+(defun claude-org--set-native-session-id (session-key session-id)
+  "Persist SESSION-ID as org property in the heading for SESSION-KEY.
+Writes CLAUDE_NATIVE_SESSION_ID to the property drawer of the session
+scope heading.  Must be called with the org buffer current.
+
+Cannot rely on `claude-org--find-session-scope-heading' because point may
+not be in the correct section (e.g. when called from emacsclient context).
+Instead, extracts the CLAUDE_SESSION_ID from SESSION-KEY and searches for
+the matching heading directly."
+  (let* ((sdd-id (when (string-match "::\\(.+\\)$" session-key)
+                   (match-string 1 session-key)))
+         (heading-pos
+          (when sdd-id
+            (save-excursion
+              (goto-char (point-min))
+              (catch 'found
+                (while (re-search-forward
+                        (format ":CLAUDE_SESSION_ID:[ \t]+%s"
+                                (regexp-quote sdd-id))
+                        nil t)
+                  (org-back-to-heading t)
+                  (throw 'found (point)))
+                nil)))))
+    (when heading-pos
+      (save-excursion
+        (goto-char heading-pos)
+        (org-set-property claude-org-native-session-id-property session-id)))))
 #+END_SRC
 
 ** Session Recovery
@@ -1459,6 +1511,11 @@ Usage in org file:
     :PROJECT_ROOT: /other/path
     :END:"
   (ignore-errors
+    ;; Ensure file-level #+PROPERTY keywords are parsed.
+    ;; org-keyword-properties may be nil if the buffer was modified
+    ;; externally or narrowing prevented a full re-parse.
+    (unless (bound-and-true-p org-keyword-properties)
+      (org-set-regexps-and-options))
     (org-entry-get nil "PROJECT_ROOT" t)))
 #+END_SRC
 
@@ -1702,26 +1759,31 @@ REASON is an optional string explaining why (for logging)."
 (defun claude-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
 Dispatches on CLAUDE_BACKEND org property (if set) or `claude-org-backend-type'.
-Returns a backend struct (json-backend or claude-backend)."
+Returns a backend struct (json-backend or claude-backend), or nil for native."
   (let* ((prop-value (claude-org--get-org-property "CLAUDE_BACKEND" t))
          (backend-type (or (cond
                              ((equal prop-value "claude-cli") 'claude-cli)
                              ((equal prop-value "json-stream") 'json-stream)
+                             ((equal prop-value "native") 'native)
                              (t nil))
                            claude-org-backend-type)))
-    (pcase backend-type
-    ('claude-cli
-     (unless (featurep 'eat)
-       (user-error "The `eat' package is required for claude-cli backend. \
+    (cond
+     ((eq backend-type 'native)
+      ;; Native: set flag, return nil (no automated backend)
+      (claude-org--session-put session-key :native-mode t)
+      nil)
+     ((eq backend-type 'claude-cli)
+      (unless (featurep 'eat)
+        (user-error "The `eat' package is required for claude-cli backend. \
 Install with: M-x package-install RET eat RET"))
-     (claude-agent-claude-backend--create
-      :session-key session-key
-      :cwd (or (claude-org--get-project-root) default-directory)
-      :options options))
-    (_ ; json-stream (default)
-     (claude-agent-json-backend--create
-      :session-key session-key
-      :persistent-p claude-org-persistent-sessions)))))
+      (claude-agent-claude-backend--create
+       :session-key session-key
+       :cwd (or (claude-org--get-project-root) default-directory)
+       :options options))
+     (t ; json-stream (default)
+      (claude-agent-json-backend--create
+       :session-key session-key
+       :persistent-p claude-org-persistent-sessions)))))
 
 (defun claude-org--get-or-create-persistent-client (session-key options)
   "Get or create a persistent client for SESSION-KEY.
@@ -3160,6 +3222,66 @@ subdirectory's =INDEX.md= (Date, Title, Status columns).
     (re-search-backward "^#\\+begin_src ai")
     (forward-line 1)
     (message "Created SDD '%s' with session ID: %s" name session-id)))
+
+(defun claude-org-sdd-archive-workflow ()
+  "Archive the current Workflow via `org-archive-subtree' and create a fresh one.
+Uses the buffer's #+ARCHIVE: property to determine the archive location.
+Inserts a new Workflow at the same position and level with an empty AI block.
+Also clears CLAUDE_CLI_SESSION so the next terminal launch starts fresh."
+  (interactive)
+  (save-excursion
+    (org-back-to-heading t)
+    ;; Walk up to find the SDD top-level heading with CLAUDE_SESSION_ID
+    (let ((sdd-pos nil)
+          (session-id nil))
+      (save-excursion
+        (while (and (not session-id) (org-up-heading-safe))
+          (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
+          (when session-id (setq sdd-pos (point)))))
+      (unless session-id
+        (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
+        (when session-id (setq sdd-pos (point))))
+      (unless session-id
+        (user-error "Not inside an SDD section (no CLAUDE_SESSION_ID found)"))
+      ;; Find the active Workflow heading under this SDD
+      (goto-char sdd-pos)
+      (let* ((sdd-end (save-excursion (org-end-of-subtree t t) (point)))
+             (workflow-pos nil))
+        (save-excursion
+          (while (and (not workflow-pos)
+                      (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" sdd-end t))
+            (unless (member "ARCHIVE" (org-get-tags nil t))
+              (setq workflow-pos (line-beginning-position)))))
+        (unless workflow-pos
+          (user-error "No active Workflow section found under this SDD"))
+        (goto-char workflow-pos)
+        (let* ((wf-level (org-current-level))
+               (stars (make-string wf-level ?*))
+               (stars-instr (make-string (1+ wf-level) ?*))
+               (file-base (when buffer-file-name (file-name-base buffer-file-name))))
+          ;; Archive the workflow subtree using org's native archive
+          (org-archive-subtree)
+          ;; Point is now where the workflow was — insert new one
+          (insert stars " Workflow :sdd:\n")
+          (insert ":PROPERTIES:\n")
+          (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Workflow" file-base) "\n")
+          (insert ":END:\n\n")
+          (insert stars-instr " Instruction 1 :" claude-org-heading-tag ":\n")
+          (insert ":PROPERTIES:\n")
+          (let ((instr-id (claude-org--generate-instruction-custom-id file-base 1 session-id)))
+            (when instr-id
+              (insert ":CUSTOM_ID: " instr-id "\n")))
+          (insert ":END:\n\n")
+          (insert "#+begin_src ai\n\n#+end_src\n")
+          ;; Clear CLI session so next terminal launch starts fresh
+          (save-excursion
+            (goto-char sdd-pos)
+            (org-delete-property claude-org-cli-session-property))
+          (save-buffer)
+          ;; Position cursor inside the new AI block
+          (re-search-backward "^#\\+begin_src ai")
+          (forward-line 1)
+          (message "Archived workflow to archive file, created fresh Workflow section"))))))
 #+END_SRC
 
 ** Prompt Refinement
@@ -4190,6 +4312,28 @@ If the session is busy, queues the block for execution when current query comple
                              (copy-marker (point))))))
     (unless content
       (user-error "Empty ai block"))
+    ;; Clear stale :native-mode if backend property changed away from native
+    (when (and (claude-org--session-get session-key :native-mode)
+               (let ((prop (claude-org--get-org-property "CLAUDE_BACKEND" t)))
+                 (and prop (not (equal prop "native")))))
+      (claude-org--session-put session-key :native-mode nil))
+    ;; iTerm2 backend: send prompt to external iTerm2 terminal
+    (when (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
+                        "iterm2")
+      (claude-org-iterm2--execute-ai-block)
+      (cl-return-from claude-org-execute nil))
+    ;; Native mode: open terminal and paste prompt, skip org capture
+    (when (or (claude-org--session-get session-key :native-mode)
+              (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
+                            "native"))
+      (claude-org--session-put session-key :native-mode t)
+      (claude-org-open-native-terminal)
+      (let ((buf (claude-org--session-get session-key :native-buffer)))
+        (if (claude-org--native-buffer-alive-p buf)
+            (claude-org--native-send-prompt buf content)
+          (user-error
+           "Native terminal not ready; re-run once the terminal shows a prompt")))
+      (cl-return-from claude-org-execute nil))
     ;; If session is busy, queue the block instead of erroring
     (when (claude-org--session-get session-key :busy)
       (let* ((block-info (list :custom-id custom-id
@@ -4784,6 +4928,10 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
     ("l" "List sessions" claude-org-list-sessions)
     ("m" "Query manager" claude-agent-list-queries)
     ("p" "Permission mode" claude-org-switch-permission-mode)
+    ("T" "Native terminal" claude-org-open-native-terminal)
+    ("I" "iTerm2 tab" claude-org-iterm2-open-tab)
+    ("A" "Archive workflow" claude-org-sdd-archive-workflow)
+    ("W" "Send to WezTerm" claude-org-sdd-bridge-send-prompt)
     ("D" "Disconnect session" claude-org-disconnect-session)
     ("X" "Disconnect all" claude-org-disconnect-all-sessions)]
    ["" ("q" "Quit" transient-quit-one)]])
@@ -5022,6 +5170,1262 @@ The protection must be global because it runs in process filter context."
     (setq claude-agent-permission-functions
           (delq #'claude-org-permission-protect-org
                 claude-agent-permission-functions))))
+#+END_SRC
+
+* Native Terminal
+:PROPERTIES:
+:CUSTOM_ID: native-terminal
+:END:
+
+Interactive Claude Code terminal with system prompts from the org context.
+When =CLAUDE_BACKEND= is set to "native", =C-c C-c= opens a visible terminal
+(vterm by default, or eat) instead of capturing responses into the org buffer.
+Terminal type is controlled by =CLAUDE_NATIVE_TERMINAL= org property or
+=claude-org-native-terminal-backend= defcustom.
+
+** Configuration
+
+#+BEGIN_SRC elisp
+;; Forward declarations for optional terminal packages
+(declare-function vterm-mode "vterm" ())
+(declare-function vterm-send-string "vterm" (string &optional paste-p))
+(declare-function vterm-send-return "vterm" ())
+(declare-function eat-make "eat" (name program &optional startfile &rest switches))
+(declare-function eat-term-send-string "eat" (terminal string))
+
+(defcustom claude-org-native-display-function #'pop-to-buffer
+  "Function to display the native Claude terminal buffer.
+Called with the terminal buffer as sole argument."
+  :type 'function
+  :group 'claude-org)
+
+(defcustom claude-org-native-prompt-timeout 30
+  "Seconds to wait for Claude CLI prompt before giving up."
+  :type 'integer
+  :group 'claude-org)
+
+(defcustom claude-org-native-input-delay 0.3
+  "Seconds to wait after pasting before sending Enter."
+  :type 'number
+  :group 'claude-org)
+
+(defcustom claude-org-native-terminal-backend 'vterm
+  "Terminal emulator for the native Claude terminal.
+Can be overridden per-file with the CLAUDE_NATIVE_TERMINAL org property."
+  :type '(choice (const :tag "Vterm (full terminal emulation, default)" vterm)
+                 (const :tag "Eat (lightweight)" eat))
+  :group 'claude-org)
+
+(defun claude-org--native-terminal-type ()
+  "Return the terminal backend type: \\='eat or \\='vterm.
+Reads CLAUDE_NATIVE_TERMINAL org property first, falls back to
+`claude-org-native-terminal-backend' defcustom."
+  (let ((prop (claude-org--get-org-property "CLAUDE_NATIVE_TERMINAL" t)))
+    (cond
+     ((equal prop "vterm") 'vterm)
+     ((equal prop "eat") 'eat)
+     (t (when (and prop (not (member prop '("vterm" "eat"))))
+          (message "Warning: unknown CLAUDE_NATIVE_TERMINAL value %S, using default" prop))
+        claude-org-native-terminal-backend))))
+
+(defvar-local claude-org--native-type nil
+  "Terminal type (\\='eat or \\='vterm) for this native terminal buffer.")
+
+(defvar-local claude-org--native-pending-timer nil
+  "Pending timer for delayed Enter key in this native terminal buffer.")
+
+(defvar-local claude-org--native-resumed-p nil
+  "Non-nil if this native terminal was launched with --resume.")
+
+(defvar-local claude-org--native-session-key nil
+  "Session key for this native terminal buffer.")
+
+(defvar-local claude-org--native-org-file nil
+  "Path to the org file that owns this native terminal session.")
+#+END_SRC
+
+** Buffer Naming
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-buffer-name (session-key)
+  "Return the buffer name for a native terminal with SESSION-KEY."
+  (format "*claude-native<%s>*" session-key))
+#+END_SRC
+
+** Terminal Lifecycle
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-buffer-alive-p (buf)
+  "Return non-nil if BUF is a live buffer with a live process."
+  (and buf
+       (buffer-live-p buf)
+       (get-buffer-process buf)
+       (process-live-p (get-buffer-process buf))))
+
+(defun claude-org--native-create-terminal (terminal-type buf-name cli switches)
+  "Create a terminal buffer using TERMINAL-TYPE (\\='eat or \\='vterm).
+BUF-NAME is the full buffer name (e.g. *claude-native<key>*).
+CLI is the path to the claude binary.  SWITCHES is a list of CLI flags.
+Returns the created buffer."
+  (cond
+   ((eq terminal-type 'vterm)
+    (unless (featurep 'vterm)
+      (user-error "The `vterm' package is required. \
+Install with: M-x package-install RET vterm RET"))
+    (let* ((vterm-shell (mapconcat #'shell-quote-argument
+                                   (cons cli switches) " "))
+           (buf (get-buffer-create buf-name)))
+      (with-current-buffer buf
+        (vterm-mode)
+        (setq claude-org--native-type 'vterm))
+      buf))
+   (t ; eat (default)
+    (unless (featurep 'eat)
+      (user-error "The `eat' package is required for native terminal. \
+Install with: M-x package-install RET eat RET"))
+    ;; Strip the surrounding *...* for eat-make name arg
+    (let* ((eat-name (substring buf-name 1 (1- (length buf-name))))
+           (buf (apply #'eat-make eat-name cli nil switches)))
+      (with-current-buffer buf
+        (setq claude-org--native-type 'eat))
+      buf))))
+
+(defun claude-org-open-native-terminal ()
+  "Open a native Claude Code terminal with system prompts from current org context.
+Creates a terminal (eat or vterm) running the Claude CLI with the assembled
+system prompt from :system_prompt: sections, behavior prompts, and file-based
+prompts.  Terminal type is controlled by CLAUDE_NATIVE_TERMINAL org property
+or `claude-org-native-terminal-backend' defcustom.
+
+If a live terminal for this session already exists, switches to it."
+  (interactive)
+  (let* ((session-key (claude-org--current-session-key))
+         (buf-name (claude-org--native-buffer-name session-key))
+         (existing (get-buffer buf-name)))
+    ;; Reuse existing live buffer
+    (if (claude-org--native-buffer-alive-p existing)
+        (funcall claude-org-native-display-function existing)
+      ;; Kill stale buffer
+      (when existing (kill-buffer existing))
+      ;; Build terminal
+      (let* ((terminal-type (claude-org--native-terminal-type))
+             (project-root (or (claude-org--get-project-root) default-directory))
+             (system-prompt (claude-org--build-system-prompt))
+             (sdk-uuid (claude-agent--get-sdk-uuid session-key))
+             (options (claude-org--build-query-options
+                       project-root system-prompt sdk-uuid))
+             ;; Add --resume if we have a previous session-id
+             ;; Check in-memory first, fall back to org property (survives restart)
+             (prev-session-id (or (claude-org--session-get session-key
+                                                           :native-session-id)
+                                  (claude-org--get-native-session-id)))
+             (options (if prev-session-id
+                          (plist-put (copy-sequence options)
+                                     :resume-session-id prev-session-id)
+                        options))
+             (cli (claude-agent--find-cli))
+             (switches (claude-agent-claude-backend--build-switches options))
+             (default-directory project-root)
+             (normalized-cwd (claude-agent-claude-backend--normalize-cwd
+                              project-root))
+             (env-vars (plist-get options :env))
+             (cli-dir (when cli (file-name-directory cli)))
+             (process-environment (if env-vars
+                                      (claude-agent--build-process-environment
+                                       env-vars cli-dir)
+                                    process-environment)))
+        ;; Register cwd BEFORE launch so SessionStart hook can find us.
+        ;; Uses a list to support multiple stories sharing the same cwd.
+        (when normalized-cwd
+          (let ((existing (gethash normalized-cwd
+                                   claude-org--native-cwd-to-session)))
+            (puthash normalized-cwd
+                     (cons session-key (if (listp existing) existing nil))
+                     claude-org--native-cwd-to-session)))
+        (let ((buf (claude-org--native-create-terminal
+                    terminal-type buf-name cli switches)))
+          ;; Set up buffer: minor mode + local keymap + cleanup hook
+          (with-current-buffer buf
+            (claude-org-native-mode 1)
+            (claude-org--native-setup-local-keymap)
+            ;; Track resume state for exit handler
+            (setq claude-org--native-resumed-p (and prev-session-id t))
+            (setq claude-org--native-session-key session-key)
+            (setq claude-org--native-org-file
+                  (if (string-match "^\\(.+\\)::" session-key)
+                      (match-string 1 session-key)
+                    session-key))
+            ;; Exit hooks: detect stale --resume failure and clear session ID
+            (cond
+             ((eq terminal-type 'vterm)
+              (add-hook 'vterm-exit-functions
+                        #'claude-org--native-on-exit-vterm nil t))
+             (t  ; eat
+              (add-hook 'eat-exit-hook
+                        #'claude-org--native-on-exit-eat nil t)))
+            ;; lexical-let required: dynamic binding won't capture sk in timer
+            (lexical-let ((sk session-key))
+              (add-hook 'kill-buffer-hook
+                        (lambda ()
+                          (claude-org--session-put sk :native-buffer nil))
+                        nil t)))
+          ;; Store reference in session
+          (claude-org--session-put session-key :native-mode t)
+          (claude-org--session-put session-key :native-buffer buf)
+          ;; Display
+          (funcall claude-org-native-display-function buf))))))
+#+END_SRC
+
+** Session Resumption
+
+When a native terminal is killed and re-opened, we resume the previous Claude
+conversation using =--resume <session-id>=.  The SessionStart hook captures
+the CLI session ID asynchronously; we store it in the org session state so it
+survives terminal buffer kills.
+
+#+BEGIN_SRC elisp
+(defvar claude-org--native-cwd-to-session (make-hash-table :test 'equal)
+  "Maps normalized-cwd → list of session-keys awaiting SessionStart.
+Populated before terminal launch, consumed (popped) by the session-start handler.
+Uses a list to support multiple stories sharing the same project root.")
+
+(defun claude-org--native-on-session-start (session-id normalized-cwd)
+  "Capture SESSION-ID for native terminal launched in NORMALIZED-CWD.
+Called via `claude-agent-claude-backend-session-start-functions' hook.
+Pops the first waiting session-key from the list and stores the session-id
+in its org session state for later --resume.
+
+IMPORTANT: This is called from `emacsclient --eval' context where the
+current buffer is ` *server*', NOT the org buffer.  We must switch to the
+correct org buffer before calling `claude-org--session-put' (which uses
+buffer-local `claude-org--sessions') and `claude-org--set-native-session-id'
+(which uses `org-set-property')."
+  (when normalized-cwd
+    (let ((keys (gethash normalized-cwd claude-org--native-cwd-to-session)))
+      (when (and keys (listp keys))
+        (let* ((session-key (car keys))
+               (rest (cdr keys))
+               ;; Extract org file path from session-key ("path::id" or "path")
+               (file-path (if (string-match "^\\(.+\\)::" session-key)
+                              (match-string 1 session-key)
+                            session-key))
+               (buf (find-buffer-visiting file-path)))
+          ;; Store in the correct org buffer's session state.
+          ;; If we can find the org buffer, switch to it first (required
+          ;; because claude-org--sessions is buffer-local).  Otherwise
+          ;; fall back to storing in whatever buffer is current (test env).
+          (if buf
+              (with-current-buffer buf
+                (claude-org--session-put session-key :native-session-id session-id)
+                ;; Persist as org property for cross-restart survival
+                (org-with-wide-buffer
+                 (claude-org--set-native-session-id session-key session-id)))
+            ;; Fallback: no org buffer found (e.g. test environment)
+            (claude-org--session-put session-key :native-session-id session-id))
+          ;; Pop consumed entry from the pending registry
+          (if rest
+              (puthash normalized-cwd rest claude-org--native-cwd-to-session)
+            (remhash normalized-cwd claude-org--native-cwd-to-session)))))))
+
+(add-hook 'claude-agent-claude-backend-session-start-functions
+          #'claude-org--native-on-session-start)
+
+(defun claude-org--native-clear-session-id (session-key org-file-path)
+  "Clear stale native session ID for SESSION-KEY.
+Removes both in-memory and persisted org property.
+ORG-FILE-PATH is the path to the org buffer for property removal."
+  (let ((buf (when org-file-path (find-buffer-visiting org-file-path))))
+    ;; Clear in-memory
+    (if buf
+        (with-current-buffer buf
+          (claude-org--session-put session-key :native-session-id nil))
+      (claude-org--session-put session-key :native-session-id nil))
+    ;; Clear org property
+    (when buf
+      (with-current-buffer buf
+        (org-with-wide-buffer
+         (goto-char (point-min))
+         (catch 'done
+           (let ((sdd-id (when (string-match "::\\(.+\\)$" session-key)
+                           (match-string 1 session-key))))
+             (when sdd-id
+               (while (re-search-forward
+                       (format ":CLAUDE_SESSION_ID:[ \t]+%s" (regexp-quote sdd-id))
+                       nil t)
+                 (org-back-to-heading t)
+                 (org-delete-property claude-org-native-session-id-property)
+                 (throw 'done t))))))))))
+
+(defun claude-org--native-on-exit-vterm (buf event)
+  "Handle vterm process exit for native Claude terminal.
+BUF is the vterm buffer, EVENT is the exit event string.
+When the process exits abnormally and --resume was used,
+clears the stale session ID and offers to retry without resume."
+  (when (and buf (buffer-live-p buf))
+    (let ((resumed (buffer-local-value 'claude-org--native-resumed-p buf))
+          (sk (buffer-local-value 'claude-org--native-session-key buf))
+          (org-path (buffer-local-value 'claude-org--native-org-file buf)))
+      (when (and resumed
+                 (string-match-p "abnormally\\|code 1" event))
+        ;; Clear the stale session ID
+        (claude-org--native-clear-session-id sk org-path)
+        (message "Claude: Stale session cleared. Re-open terminal to start fresh.")))))
+
+(defun claude-org--native-on-exit-eat (process)
+  "Handle eat process exit for native Claude terminal.
+PROCESS is the eat process that exited.
+When the process exits abnormally and --resume was used,
+clears the stale session ID and offers to retry without resume."
+  (let* ((buf (process-buffer process))
+         (status (process-exit-status process)))
+    (when (and buf (buffer-live-p buf))
+      (let ((resumed (buffer-local-value 'claude-org--native-resumed-p buf))
+            (sk (buffer-local-value 'claude-org--native-session-key buf))
+            (org-path (buffer-local-value 'claude-org--native-org-file buf)))
+        (when (and resumed (not (zerop status)))
+          (claude-org--native-clear-session-id sk org-path)
+          (message "Claude: Stale session cleared. Re-open terminal to start fresh."))))))
+#+END_SRC
+
+** Prompt Sending
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-prompt-ready-p (buf)
+  "Return non-nil if BUF shows a fresh Claude CLI prompt (❯) near the end."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (save-excursion
+        (goto-char (max (point-min) (- (point-max) 500)))
+        (search-forward "❯" nil t)))))
+
+(defun claude-org--native-wait-for-ready (buf)
+  "Wait until BUF shows a fresh Claude CLI prompt.
+Signals error if timeout is reached."
+  (let ((deadline (+ (float-time) claude-org-native-prompt-timeout)))
+    (while (and (not (claude-org--native-prompt-ready-p buf))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.2))
+    (unless (claude-org--native-prompt-ready-p buf)
+      (error "Claude CLI did not become ready within %d seconds"
+             claude-org-native-prompt-timeout))))
+
+(defun claude-org--native-schedule-enter (buf send-fn)
+  "Schedule SEND-FN to run in BUF after `claude-org-native-input-delay'.
+Cancels any pending enter-key timer for BUF first (prevents double-enter
+on rapid successive calls)."
+  (when (buffer-live-p buf)
+    (let ((existing (buffer-local-value 'claude-org--native-pending-timer buf)))
+      (when (timerp existing)
+        (cancel-timer existing))))
+  ;; lexical-let required: dynamic binding won't capture buf/send-fn in timer
+  (lexical-let ((buf buf) (send-fn send-fn))
+    (let ((timer (run-at-time claude-org-native-input-delay nil
+                   (lambda ()
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (setq claude-org--native-pending-timer nil)
+                         (funcall send-fn)))))))
+      (with-current-buffer buf
+        (setq claude-org--native-pending-timer timer)))))
+
+(defun claude-org--native-send-prompt (buf prompt)
+  "Send PROMPT to the native terminal BUF using bracketed paste.
+Waits for the CLI prompt, then pastes PROMPT and sends Enter.
+Dispatches on `claude-org--native-type' buffer-local (set at creation)."
+  (unless (claude-org--native-buffer-alive-p buf)
+    (error "Native terminal buffer is not alive"))
+  (claude-org--native-wait-for-ready buf)
+  (with-current-buffer buf
+    (let ((type claude-org--native-type))
+      (cond
+       ((eq type 'vterm)
+        (vterm-send-string prompt t)
+        (claude-org--native-schedule-enter buf #'vterm-send-return))
+       ((eq type 'eat)
+        (let ((terminal eat-terminal))
+          (eat-term-send-string terminal
+            (concat "\e[200~" prompt "\e[201~"))
+          ;; lexical-let needed to capture terminal for the timer callback
+          (lexical-let ((terminal terminal))
+            (claude-org--native-schedule-enter buf
+              (lambda () (eat-term-send-string terminal "\r"))))))
+       (t (error "Native buffer has unknown terminal type: %S" type))))))
+#+END_SRC
+
+** Minor Mode
+
+#+BEGIN_SRC elisp
+(defvar claude-org-native-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-q") #'claude-org-native-kill)
+    (define-key map (kbd "C-c C-r") #'claude-org-native-refresh)
+    map)
+  "Keymap for `claude-org-native-mode'.")
+
+(define-minor-mode claude-org-native-mode
+  "Minor mode for native Claude Code terminal buffers.
+Provides keybindings for managing the terminal.
+
+Key bindings:
+  \\[claude-org-native-kill]     Kill this terminal
+  \\[claude-org-native-refresh]  Refresh (relaunch with updated system prompt)
+
+\\{claude-org-native-mode-map}"
+  :lighter " ClaudeNative"
+  :keymap claude-org-native-mode-map)
+
+(defun claude-org-native-kill ()
+  "Kill the current native Claude terminal buffer."
+  (interactive)
+  (when (yes-or-no-p "Kill native Claude terminal? ")
+    ;; Suppress Emacs's own process-buffer prompt to avoid double-confirm
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer (current-buffer)))))
+
+(defun claude-org-native-refresh ()
+  "Refresh native terminal: kill and relaunch with updated system prompt.
+Must be called from within a native terminal buffer."
+  (interactive)
+  (message "To refresh: C-c C-q to kill, then C-c C-c or M-x claude-org-open-native-terminal in the org file."))
+#+END_SRC
+
+** Sending Special Keys
+
+Interactive commands to send keys that Emacs/evil intercept before they
+reach the terminal process.  Each dispatches on =claude-org--native-type=
+(vterm vs eat).
+
+#+BEGIN_SRC elisp
+(defun claude-org-native--send-key (key &optional meta)
+  "Send KEY string to the current native terminal buffer.
+Dispatches on `claude-org--native-type' (vterm or eat).
+When META is non-nil, send with Meta modifier (vterm only)."
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-send-key key nil meta))
+   ((eq claude-org--native-type 'eat)
+    (eat-term-send-string eat-terminal
+                          (if meta (concat "\e" key) key)))
+   (t (error "Unknown native terminal type: %S" claude-org--native-type))))
+
+(defun claude-org-native-send-escape ()
+  "Send Escape to the Claude CLI.  Cancels current response or rejects a prompt."
+  (interactive)
+  (claude-org-native--send-key "\C-["))
+
+(defun claude-org-native-send-return ()
+  "Send Return to the Claude CLI.  Submits prompt or accepts a confirmation."
+  (interactive)
+  (claude-org-native--send-key "\C-m"))
+
+(defun claude-org-native-send-interrupt ()
+  "Send Ctrl+C (SIGINT) to the Claude CLI.  Hard interrupt."
+  (interactive)
+  (claude-org-native--send-key "\C-c"))
+
+(defun claude-org-native-send-shift-tab ()
+  "Send Shift-Tab to cycle Claude mode (default → accept-edits → plan)."
+  (interactive)
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-send-key "\e[Z" nil nil t))    ; raw escape sequence
+   ((eq claude-org--native-type 'eat)
+    (eat-term-send-string eat-terminal "\e[Z"))))
+
+(defun claude-org-native-send-option (n)
+  "Send option number N (1-3) to the Claude CLI."
+  (interactive "nOption (1-3): ")
+  (let ((text (format "%d\C-m" n)))
+    (cond
+     ((eq claude-org--native-type 'vterm)
+      (vterm-send-string (number-to-string n))
+      (vterm-send-return))
+     ((eq claude-org--native-type 'eat)
+      (eat-term-send-string eat-terminal text)))))
+
+(defun claude-org-native-send-command (cmd)
+  "Send CMD string to the Claude CLI followed by Return."
+  (interactive "sCommand: ")
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-send-string cmd t)       ; t = bracketed paste
+    (vterm-send-return))
+   ((eq claude-org--native-type 'eat)
+    (eat-term-send-string eat-terminal
+                          (concat "\e[200~" cmd "\e[201~\r")))))
+
+(defun claude-org-native-send-slash (slash-cmd)
+  "Send a /command to the Claude CLI.
+SLASH-CMD should NOT include the leading slash."
+  (interactive "sSlash command (without /): ")
+  (claude-org-native-send-command (concat "/" slash-cmd)))
+
+(defun claude-org-native-toggle-copy-mode ()
+  "Toggle copy/selection mode in the native terminal."
+  (interactive)
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-copy-mode (if vterm-copy-mode -1 1)))
+   ((eq claude-org--native-type 'eat)
+    ;; Toggle between semi-char and emacs mode
+    (if (eq eat--semi-char-mode t)
+        (eat-emacs-mode)
+      (eat-semi-char-mode)))))
+#+END_SRC
+
+** Command Menu
+
+A transient menu providing quick access to all native terminal actions.
+Accessible via =C-c C-/= in the terminal buffer, mirroring the main
+=claude-org-menu= binding.
+
+#+BEGIN_SRC elisp
+(transient-define-prefix claude-org-native-menu ()
+  "Claude native terminal command menu."
+  ["Claude Native Terminal"
+   ["Quick Actions"
+    ("e" "Escape (cancel)" claude-org-native-send-escape)
+    ("RET" "Return (accept)" claude-org-native-send-return)
+    ("C" "Ctrl+C (interrupt)" claude-org-native-send-interrupt)
+    ("M" "Cycle mode (S-Tab)" claude-org-native-send-shift-tab)
+    ("t" "Toggle copy mode" claude-org-native-toggle-copy-mode)]
+   ["Respond"
+    ("1" "Send \"1\"" (lambda () (interactive) (claude-org-native-send-option 1)))
+    ("2" "Send \"2\"" (lambda () (interactive) (claude-org-native-send-option 2)))
+    ("3" "Send \"3\"" (lambda () (interactive) (claude-org-native-send-option 3)))]
+   ["Slash Commands"
+    ("/h" "/help"    (lambda () (interactive) (claude-org-native-send-command "/help")))
+    ("/c" "/clear"   (lambda () (interactive) (claude-org-native-send-command "/clear")))
+    ("/C" "/compact" (lambda () (interactive) (claude-org-native-send-command "/compact")))
+    ("/m" "/model"   (lambda () (interactive) (claude-org-native-send-command "/model")))
+    ("/s" "/status"  (lambda () (interactive) (claude-org-native-send-command "/status")))
+    ("/$" "/cost"    (lambda () (interactive) (claude-org-native-send-command "/cost")))]
+   ["Terminal"
+    (":" "Send command" claude-org-native-send-command)
+    ("S" "Slash command" claude-org-native-send-slash)
+    ("r" "Refresh" claude-org-native-refresh)
+    ("q" "Kill" claude-org-native-kill)]])
+#+END_SRC
+
+** Native Keymap (updated)
+
+#+BEGIN_SRC elisp
+;; Add menu and escape binding to the native mode keymap
+(define-key claude-org-native-mode-map (kbd "C-c C-/") #'claude-org-native-menu)
+(define-key claude-org-native-mode-map (kbd "C-c /")   #'claude-org-native-menu)
+#+END_SRC
+
+** Buffer-local Keymap Setup
+
+When the native terminal is created, we augment the local keymap to
+remap =C-g= → send Escape (following claude-code.el pattern).
+This lets users press =C-g= to cancel Claude responses even with evil mode.
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-setup-local-keymap ()
+  "Set up buffer-local key overrides for the native Claude terminal.
+Must be called after vterm-mode or eat-mode has established `current-local-map'.
+Adds C-g → send Escape, which works even in evil normal state."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map (current-local-map))
+    (define-key map (kbd "C-g") #'claude-org-native-send-escape)
+    (use-local-map map))
+  ;; Also restore after exiting vterm-copy-mode (vterm resets the keymap)
+  (when (eq claude-org--native-type 'vterm)
+    (add-hook 'vterm-copy-mode-hook
+              (lambda ()
+                (unless vterm-copy-mode
+                  (claude-org--native-setup-local-keymap)))
+              nil t)))
+#+END_SRC
+
+* Terminal SDD Bridge
+
+Functions for bridging between Claude Code CLI (running in a terminal) and
+org-mode SDD sections. Called non-interactively via MCP ~evalElisp~ from
+hook scripts in ~scripts/sdd-bridge.sh~.
+
+** Buffer and Navigation
+
+#+BEGIN_SRC elisp
+(defun claude-org-sdd-bridge--ensure-buffer (org-file)
+  "Ensure ORG-FILE is loaded in Emacs and return its buffer.
+Opens the file via `find-file-noselect' if not already visiting."
+  (or (find-buffer-visiting org-file)
+      (find-file-noselect org-file)))
+
+(defun claude-org-sdd-bridge-list-sessions (org-file)
+  "List all SDD sessions in ORG-FILE.
+Returns a newline-separated string of \"SESSION_ID\\tHEADING\\tPARENT\" lines,
+one per SDD section found. PARENT is the outline path above the SDD heading."
+  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (let (results)
+          (while (re-search-forward
+                  "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+\\(.+?\\)[ \t]*$" nil t)
+            (let ((sid (match-string-no-properties 1)))
+              (save-excursion
+                (org-back-to-heading t)
+                (let* ((heading (substring-no-properties (org-get-heading t t t t)))
+                       (parent (mapconcat
+                                (lambda (s) (substring-no-properties s))
+                                (org-get-outline-path)
+                                " / ")))
+                  (push (format "%s\t%s\t%s" sid heading parent) results)))))
+          (mapconcat #'identity (nreverse results) "\n"))))))
+
+(defun claude-org-sdd-bridge--goto-session (session-id)
+  "Move point to the SDD section matching SESSION-ID in current buffer.
+Searches for :CLAUDE_SESSION_ID: property matching SESSION-ID.
+Signals error if not found."
+  (goto-char (point-min))
+  (let ((found nil))
+    (while (and (not found)
+                (re-search-forward
+                 (format "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+%s[ \t]*$"
+                         (regexp-quote session-id))
+                 nil t))
+      (setq found (point)))
+    (unless found
+      (error "SDD session %s not found in buffer" session-id))
+    ;; Move to the heading that owns this property
+    (org-back-to-heading t)))
+
+(defun claude-org-sdd-bridge--find-workflow (session-id)
+  "Find the Workflow subsection under the SDD heading for SESSION-ID.
+Returns the position of the Workflow heading, or signals error."
+  (claude-org-sdd-bridge--goto-session session-id)
+  (let ((sdd-end (save-excursion (org-end-of-subtree t t) (point)))
+        (found nil))
+    (save-excursion
+      (while (and (not found)
+                  (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" sdd-end t))
+        (setq found (line-beginning-position))))
+    (unless found
+      (error "Workflow section not found under session %s" session-id))
+    (goto-char found)))
+#+END_SRC
+
+** System Prompt
+
+#+BEGIN_SRC elisp
+(defun claude-org-sdd-bridge-system-prompt (org-file session-id)
+  "Build and return the SDD system prompt for SESSION-ID in ORG-FILE.
+Called by the launcher script to get the system prompt text.
+Navigates to the SDD section and reuses existing prompt-building logic."
+  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org-sdd-bridge--goto-session session-id)
+        ;; Narrow to the SDD subtree so collect-system-prompts finds
+        ;; only this story's system prompt section
+        (org-narrow-to-subtree)
+        (claude-org--build-system-prompt)))))
+#+END_SRC
+
+** Prompt Insertion
+
+#+BEGIN_SRC elisp
+(defun claude-org-sdd-bridge-insert-prompt (org-file session-id prompt)
+  "Insert PROMPT as a new AI block in the SDD Workflow for SESSION-ID in ORG-FILE.
+Creates a new Instruction N subsection under the Workflow heading."
+  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org-sdd-bridge--find-workflow session-id)
+        (let* ((workflow-level (org-current-level))
+               (instr-level (1+ workflow-level))
+               (stars (make-string instr-level ?*))
+               ;; Use regex to find workflow boundary (safe against embedded headings)
+               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
+                              workflow-level (point-max)))
+               (instr-count 0))
+          ;; Count existing instructions by tag (headings may be renamed by auto-title)
+          (save-excursion
+            (while (re-search-forward
+                    (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
+                    workflow-end t)
+              (setq instr-count (1+ instr-count))))
+          (let ((next-num (1+ instr-count)))
+            ;; Go to end of workflow subtree to insert new instruction
+            (goto-char workflow-end)
+            ;; Ensure blank line before heading
+            (unless (bolp) (insert "\n"))
+            (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
+              (insert "\n"))
+            (insert (format "%s Instruction %d :%s:\n" stars next-num claude-org-heading-tag))
+            (let ((heading-marker (copy-marker (line-beginning-position 0))))
+              (insert ":PROPERTIES:\n")
+              (insert ":END:\n\n")
+              (insert "#+begin_src ai\n")
+              (insert prompt "\n")
+              (insert "#+end_src\n")
+              ;; Auto-generate a meaningful title for the heading
+              (when claude-org-auto-generate-title
+                (claude-org--maybe-auto-generate-title prompt heading-marker)))))))
+    (save-buffer)
+    (format "Inserted Instruction with prompt (%d chars)" (length prompt))))
+#+END_SRC
+
+** Response Insertion
+
+#+BEGIN_SRC elisp
+(defun claude-org-sdd-bridge--shift-org-headings (text parent-level)
+  "Shift org heading levels in TEXT to be subsections of PARENT-LEVEL.
+Lines starting with *+ get PARENT-LEVEL additional stars prepended,
+making them children of the parent heading."
+  (let ((prefix (make-string parent-level ?*)))
+    (replace-regexp-in-string
+     "^\\(\\*+ \\)"
+     (concat prefix "\\1")
+     text)))
+
+(defun claude-org-sdd-bridge--find-next-sibling-heading (level limit)
+  "Find the next heading at LEVEL or shallower before LIMIT.
+Searches by regex to avoid `org-end-of-subtree' confusion from
+embedded org headings in response content.
+Returns the position, or LIMIT if none found."
+  (save-excursion
+    ;; Skip current heading line
+    (forward-line 1)
+    (let ((pattern (format "^\\*\\{1,%d\\} " level)))
+      (if (re-search-forward pattern limit t)
+          (line-beginning-position)
+        limit))))
+
+(defun claude-org-sdd-bridge-insert-response (org-file session-id response)
+  "Insert RESPONSE as a Response section after the last AI block in ORG-FILE.
+Finds the SDD section by SESSION-ID, locates the last Instruction block,
+and creates a sibling Response N heading with :ai_output: tag.
+Org headings in response content are shifted to become subsections of
+the Response heading, preserving document structure."
+  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org-sdd-bridge--find-workflow session-id)
+        (let* ((workflow-level (org-current-level))
+               (instr-level (1+ workflow-level))
+               (stars (make-string instr-level ?*))
+               ;; Use regex search to find workflow boundary, not org-end-of-subtree
+               ;; which gets confused by embedded org headings in response content.
+               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
+                              workflow-level (point-max)))
+               ;; Find the last Instruction heading by :claude_chat: tag
+               ;; (headings may be renamed by auto-title)
+               (last-instr-pos nil)
+               (instr-count 0))
+          ;; Find last instruction by tag, not heading text
+          (save-excursion
+            (while (re-search-forward
+                    (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
+                    workflow-end t)
+              (setq last-instr-pos (line-beginning-position))
+              (setq instr-count (1+ instr-count))))
+          (unless last-instr-pos
+            (error "No Instruction heading found under Workflow for session %s" session-id))
+          ;; Find insertion point: after the last instruction, skip past any
+          ;; existing Response sibling (which may contain embedded org headings).
+          ;; Use regex to find the next real heading at instruction level.
+          (goto-char last-instr-pos)
+          (let ((insert-pos (claude-org-sdd-bridge--find-next-sibling-heading
+                             instr-level workflow-end))
+                (timestamp (format-time-string "%Y-%m-%d %H:%M")))
+            (goto-char insert-pos)
+            ;; Ensure blank line before heading
+            (unless (bolp) (insert "\n"))
+            (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
+              (insert "\n"))
+            (insert (format "%s Response %d (%s) :ai_output:\n"
+                            stars instr-count timestamp))
+            (insert ":PROPERTIES:\n")
+            (insert (format ":QUERY_TYPE: terminal\n"))
+            (insert ":END:\n\n")
+            (insert (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n")))))
+    (save-buffer)
+    (format "Inserted Response (%d chars)" (length response))))
+#+END_SRC
+
+** CLI Session Persistence
+
+#+BEGIN_SRC elisp
+(defun claude-org-sdd-bridge-save-cli-session (org-file session-id cli-session-id)
+  "Save CLI-SESSION-ID as a property on the SDD section for SESSION-ID in ORG-FILE.
+This allows resuming the same Claude CLI session on next launch.
+Does not call `save-buffer' — callers should save if needed."
+  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org-sdd-bridge--goto-session session-id)
+        (org-set-property claude-org-cli-session-property cli-session-id)
+        cli-session-id))))
+
+(defun claude-org-sdd-bridge-get-cli-session (org-file session-id)
+  "Get the saved Claude CLI session ID for SESSION-ID in ORG-FILE.
+Returns the session ID string, or nil if none saved."
+  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org-sdd-bridge--goto-session session-id)
+        (org-entry-get nil claude-org-cli-session-property)))))
+#+END_SRC
+
+** Send Prompt to Terminal
+
+#+BEGIN_SRC elisp
+(defun claude-org-sdd-bridge-send-prompt ()
+  "Send the current AI block's prompt to Claude Code running in WezTerm.
+Reads the prompt from the AI block at point, sends it to the WezTerm pane
+stored in the SDD section's WEZTERM_PANE_ID property, and presses Enter.
+The Stop hook will capture the response back to the org file."
+  (interactive)
+  (let* ((element (org-element-at-point))
+         (prompt (when (and (eq (org-element-type element) 'src-block)
+                            (string= (org-element-property :language element) "ai"))
+                   (string-trim (org-element-property :value element)))))
+    (unless prompt
+      (user-error "Point is not inside a #+begin_src ai block"))
+    ;; Find the SDD session and its WezTerm pane ID
+    (let ((pane-id (save-excursion
+                     (save-restriction
+                       (widen)
+                       (let ((found nil))
+                         (while (and (not found) (org-up-heading-safe))
+                           (when (org-entry-get nil "CLAUDE_SESSION_ID")
+                             (setq found t)))
+                         (unless found
+                           (user-error "No SDD section with CLAUDE_SESSION_ID found"))
+                         (or (org-entry-get nil "WEZTERM_PANE_ID")
+                             (user-error
+                              "No WEZTERM_PANE_ID property. Launch via claude-sdd in WezTerm first")))))))
+      ;; Send prompt via bracketed paste (multi-line safe)
+      (let ((exit-code
+             (call-process-shell-command
+              (format "printf '%%s' %s | wezterm cli send-text --pane-id %s"
+                      (shell-quote-argument prompt)
+                      (shell-quote-argument pane-id))
+              nil nil nil)))
+        (unless (= exit-code 0)
+          (user-error "Failed to send text to WezTerm pane %s" pane-id))
+        ;; Press Enter to submit
+        (call-process-shell-command
+         (format "printf '\\r' | wezterm cli send-text --pane-id %s --no-paste"
+                 (shell-quote-argument pane-id))
+         nil nil nil)
+        (message "Sent prompt to WezTerm pane %s (%d chars)" pane-id (length prompt))))))
+#+END_SRC
+
+* iTerm2 Backend
+:PROPERTIES:
+:CUSTOM_ID: iterm2-backend
+:END:
+
+Control Claude Code running in iTerm2 via stateless Python scripts.
+Prompts sent from Emacs; responses come back via SDD bridge hooks.
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defcustom claude-org-iterm2-script
+  (expand-file-name "scripts/iterm2-ctl.py"
+                    (file-name-directory
+                     (or load-file-name buffer-file-name "")))
+  "Path to the iterm2-ctl.py script."
+  :type 'file
+  :group 'claude-org)
+
+(defcustom claude-org-iterm2-launch-command 'claude-sdd
+  "Launch command for Claude Code in iTerm2.
+When set to `claude-sdd', uses the SDD bridge launcher which sets up
+hooks, system prompt, MCP config, and plugin directory automatically.
+When set to `claude', uses bare Claude CLI with --system-prompt-file.
+Can also be a string for a fully custom command."
+  :type '(choice (const :tag "claude-sdd (SDD bridge)" claude-sdd)
+                 (const :tag "claude (bare CLI)" claude)
+                 (string :tag "Custom command"))
+  :group 'claude-org)
+
+(defcustom claude-org-iterm2-sdd-script
+  (let ((candidates
+         (list
+          ;; 1. Relative to project root (works in dev checkout)
+          (expand-file-name "scripts/claude-sdd"
+                            (file-name-directory
+                             (or load-file-name buffer-file-name "")))
+          ;; 2. On PATH
+          (executable-find "claude-sdd"))))
+    (or (seq-find #'file-exists-p (delq nil candidates))
+        "claude-sdd"))
+  "Path to the claude-sdd launcher script.
+Used when `claude-org-iterm2-launch-command' is `claude-sdd'.
+Defaults to the scripts/claude-sdd in the package directory,
+falling back to PATH lookup."
+  :type 'file
+  :group 'claude-org)
+
+(defcustom claude-org-iterm2-extra-args nil
+  "Extra command-line arguments to pass to the Claude launch command.
+Each element should be a string. These are appended after the base
+command and its standard arguments.
+Example: (\"--model\" \"opus\" \"--verbose\")"
+  :type '(repeat string)
+  :group 'claude-org)
+#+END_SRC
+
+** Internal Helpers
+
+#+BEGIN_SRC elisp
+(defun claude-org-iterm2--goto-session-heading ()
+  "Move point to the nearest ancestor heading with CLAUDE_SESSION_ID.
+Starts at current heading, walks up. Returns non-nil if found.
+Caller should wrap in `save-excursion' / `save-restriction' as needed."
+  (widen)
+  (condition-case nil (org-back-to-heading t) (error nil))
+  (or (org-entry-get nil "CLAUDE_SESSION_ID")
+      (let ((found nil))
+        (while (and (not found) (org-up-heading-safe))
+          (setq found (org-entry-get nil "CLAUDE_SESSION_ID")))
+        found)))
+
+(defun claude-org-iterm2--find-session-property (prop)
+  "Find PROP by checking current heading first, then walking up ancestors.
+Returns the property value or nil. Uses `org-back-to-heading' to check
+the current heading before `org-up-heading-safe' to avoid skipping it."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (condition-case nil (org-back-to-heading t) (error nil))
+      (or (org-entry-get nil prop)
+          (let ((val nil))
+            (while (and (not val) (org-up-heading-safe))
+              (setq val (org-entry-get nil prop)))
+            val)))))
+
+(defun claude-org-iterm2--call (subcommand &rest args)
+  "Call iterm2-ctl.py SUBCOMMAND with ARGS. Return stdout string.
+If ARGS contains :stdin KEY, that value is written to a temp file
+and used as stdin for the process (avoids ARG_MAX for large prompts)."
+  (let* ((stdin-text nil)
+         (cli-args nil))
+    ;; Separate :stdin from positional args
+    (while args
+      (if (eq (car args) :stdin)
+          (progn
+            (setq stdin-text (cadr args))
+            (setq args (cddr args)))
+        (push (car args) cli-args)
+        (setq args (cdr args))))
+    (setq cli-args (nreverse cli-args))
+    (let* ((flat-args (cons subcommand (flatten-tree cli-args)))
+           (stderr-file (make-temp-file "iterm2-stderr-"))
+           (buf (generate-new-buffer " *iterm2-ctl*"))
+           (stdin-file (when stdin-text
+                         (let ((f (make-temp-file "iterm2-stdin-")))
+                           (with-temp-file f (insert stdin-text))
+                           f)))
+           ;; Separate stderr to temp file so it doesn't pollute stdout
+           (exit-code (apply #'call-process
+                             "python3" stdin-file
+                             (list buf stderr-file) nil
+                             claude-org-iterm2-script flat-args)))
+      (unwind-protect
+          (with-current-buffer buf
+            (if (= exit-code 0)
+                (string-trim (buffer-string))
+              ;; Include stderr in error message for diagnostics
+              (let ((stderr (string-trim
+                             (with-temp-buffer
+                               (insert-file-contents stderr-file)
+                               (buffer-string)))))
+                (error "iterm2-ctl %s failed (exit %d): %s"
+                       subcommand exit-code stderr))))
+        (kill-buffer buf)
+        (when stdin-file (delete-file stdin-file t))
+        (delete-file stderr-file t)))))
+
+(defun claude-org-iterm2--tab-title ()
+  "Generate iTerm2 tab title for current SDD session.
+Format: HEADING [SDD-SESSION-ID] — unique across org files."
+  (save-excursion
+    (save-restriction
+      (let ((sdd-id (claude-org-iterm2--goto-session-heading)))
+        (format "%s [%s]"
+                (truncate-string-to-width
+                 (or (org-get-heading t t t t) "untitled") 40)
+                (or sdd-id "no-session"))))))
+
+(defun claude-org-iterm2--build-launch-command (org-file sdd-session-id project-root)
+  "Build the shell command to launch Claude Code.
+Uses `claude-org-iterm2-launch-command' and `claude-org-iterm2-extra-args'.
+ORG-FILE is the org notebook path, SDD-SESSION-ID the session,
+PROJECT-ROOT the working directory."
+  (ignore project-root)
+  (let ((extra (mapconcat #'shell-quote-argument
+                          (or claude-org-iterm2-extra-args nil)
+                          " ")))
+    (cond
+     ;; claude-sdd: passes org-file and session-id, handles everything
+     ;; Also passes --resume from CLAUDE_CLI_SESSION if available, so
+     ;; claude-sdd can resume even when MCP is unreachable.
+     ((eq claude-org-iterm2-launch-command 'claude-sdd)
+      (let* ((sdd-script claude-org-iterm2-sdd-script)
+             (cli-session
+              (condition-case nil
+                  (claude-org-iterm2--find-session-property
+                   "CLAUDE_CLI_SESSION")
+                (error nil)))
+             (parts (list (shell-quote-argument sdd-script)
+                          (shell-quote-argument (or org-file ""))
+                          (shell-quote-argument (or sdd-session-id "")))))
+        ;; Pass --resume before extra args so claude-sdd can use it
+        (when cli-session
+          (setq parts (append parts
+                              (list "--"
+                                    "--resume"
+                                    (shell-quote-argument cli-session)))))
+        (when (and extra (not (string-empty-p extra)))
+          (unless cli-session
+            (setq parts (append parts (list "--"))))
+          (setq parts (append parts (list extra))))
+        (mapconcat #'identity parts " ")))
+     ;; bare claude: build --system-prompt-file and --resume manually
+     ((eq claude-org-iterm2-launch-command 'claude)
+      (let* ((system-prompt
+              (condition-case nil
+                  (claude-org-sdd-bridge-system-prompt org-file sdd-session-id)
+                (error "")))
+             (sp-file (make-temp-file "claude-sp-"))
+             (cli-session
+              (condition-case nil
+                  (claude-org-sdd-bridge-get-cli-session org-file sdd-session-id)
+                (error nil)))
+             (parts (list "claude")))
+        (with-temp-file sp-file (insert (or system-prompt "")))
+        (push (format "--system-prompt \"$(cat %s)\"" (shell-quote-argument sp-file))
+              parts)
+        (when cli-session
+          (push (format "--resume %s" (shell-quote-argument cli-session)) parts))
+        (when (and extra (not (string-empty-p extra)))
+          (push extra parts))
+        (mapconcat #'identity (nreverse parts) " ")))
+     ;; Custom string command
+     ((stringp claude-org-iterm2-launch-command)
+      (if (and extra (not (string-empty-p extra)))
+          (concat claude-org-iterm2-launch-command " " extra)
+        claude-org-iterm2-launch-command))
+     (t (error "Invalid claude-org-iterm2-launch-command: %S"
+               claude-org-iterm2-launch-command)))))
+
+(defun claude-org-iterm2--ensure-session ()
+  "Ensure an iTerm2 session exists for the current SDD story.
+Returns the iTerm2 session UUID. Launches if needed, reuses by title.
+Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
+  ;; Best-effort MCP server auto-start (claude-sdd degrades gracefully without it)
+  (when (and (fboundp 'emacs-mcp-server-running-p)
+             (not (emacs-mcp-server-running-p))
+             (fboundp 'emacs-mcp-server-start))
+    (condition-case err
+        (progn
+          (emacs-mcp-server-start)
+          (sleep-for 1)
+          (if (emacs-mcp-server-running-p)
+              (message "Started Emacs MCP server for SDD bridge")
+            (message "WARNING: MCP server didn't start — SDD bridge will be limited")))
+      (error (message "WARNING: MCP server start failed: %s" err))))
+  (let* ((saved-id (claude-org-iterm2--find-session-property "ITERM2_SESSION_ID"))
+         (title (claude-org-iterm2--tab-title)))
+    ;; Check if saved session is alive
+    (if (and saved-id
+             (condition-case nil
+                 (let* ((json-str (claude-org-iterm2--call
+                                   "status" "--session" saved-id))
+                        (data (json-read-from-string json-str)))
+                   (not (string= (cdr (assq 'state data)) "dead")))
+               (error nil)))
+        saved-id
+      ;; Launch: finds existing tab by title or creates new
+      (let* ((sdd-session-id
+              (claude-org-iterm2--find-session-property "CLAUDE_SESSION_ID"))
+             (_ (unless sdd-session-id
+                  (user-error
+                   "No CLAUDE_SESSION_ID found. Create an SDD section first")))
+             (org-file (buffer-file-name))
+             (project-root (or (claude-org--get-project-root)
+                               default-directory))
+             ;; Build the launch command string based on defcustom
+             (launch-cmd (claude-org-iterm2--build-launch-command
+                          org-file sdd-session-id project-root)))
+        (let ((result (apply #'claude-org-iterm2--call
+                       "launch"
+                       "--title" title
+                       "--cwd" project-root
+                       "--launch-cmd" launch-cmd
+                       nil)))
+              ;; Save ITERM2_SESSION_ID on the heading that has CLAUDE_SESSION_ID
+              (save-excursion
+                (save-restriction
+                  (claude-org-iterm2--goto-session-heading)
+                  (org-set-property "ITERM2_SESSION_ID" result)))
+              ;; Store mapping for polling
+              (when sdd-session-id
+                (claude-org--session-put
+                 (claude-org--current-session-key)
+                 :iterm2-session result))
+              (save-buffer)
+              (message "Claude Code in iTerm2 (session: %s)" result)
+              result)))))
+
+(defun claude-org-iterm2--read-hook-status (sdd-session-id)
+  "Read Claude Code status from hook-written file. Fast, no API call."
+  (let ((file (expand-file-name (or sdd-session-id "unknown")
+                                "/tmp/claude-agent-status")))
+    (if (file-exists-p file)
+        (string-trim (with-temp-buffer
+                       (insert-file-contents file)
+                       (buffer-string)))
+      "unknown")))
+
+(defun claude-org-iterm2--get-status (sdd-session-id iterm2-session-id)
+  "Get Claude Code status.
+SDD-SESSION-ID keys the hook file; ITERM2-SESSION-ID keys the API."
+  (let ((hook-status (claude-org-iterm2--read-hook-status sdd-session-id)))
+    (if (member hook-status '("ready" "busy"))
+        hook-status
+      ;; Fallback to iTerm2 API
+      (condition-case nil
+          (let* ((json-str (claude-org-iterm2--call "status"
+                            "--session" iterm2-session-id))
+                 (data (json-read-from-string json-str)))
+            (cdr (assq 'state data)))
+        (error "unknown")))))
+#+END_SRC
+
+** Mode-Line Activity
+
+#+BEGIN_SRC elisp
+(defvar claude-org-iterm2--busy-count 0
+  "Number of iTerm2 sessions currently busy.")
+
+(defvar claude-org-iterm2--activity-timer nil
+  "Timer for iTerm2 activity spinner.")
+
+(defconst claude-org-iterm2--spinner-frames '("◐" "◓" "◑" "◒")
+  "Spinner animation frames for iTerm2 activity indicator.")
+
+(defvar claude-org-iterm2--spinner-index 0
+  "Current index in spinner-frames.")
+
+(defun claude-org-iterm2--update-mode-line ()
+  "Update mode-line with iTerm2 activity indicator."
+  (if (> claude-org-iterm2--busy-count 0)
+      (let* ((spinner (nth claude-org-iterm2--spinner-index
+                           claude-org-iterm2--spinner-frames))
+             (display (format " [iT:%s]" spinner)))
+        (setq claude-org-iterm2--spinner-index
+              (mod (1+ claude-org-iterm2--spinner-index)
+                   (length claude-org-iterm2--spinner-frames)))
+        (setq claude-org-iterm2--activity-string
+              (propertize display 'face '(:weight bold))))
+    (setq claude-org-iterm2--activity-string "")
+    (setq claude-org-iterm2--spinner-index 0)
+    (when claude-org-iterm2--activity-timer
+      (cancel-timer claude-org-iterm2--activity-timer)
+      (setq claude-org-iterm2--activity-timer nil)))
+  (force-mode-line-update t))
+
+(defvar claude-org-iterm2--activity-string ""
+  "Mode-line string for iTerm2 activity indicator.")
+
+(unless (member '(:eval claude-org-iterm2--activity-string) mode-line-misc-info)
+  (push '(:eval claude-org-iterm2--activity-string) mode-line-misc-info))
+
+(defun claude-org-iterm2--set-busy (sdd-session-id)
+  "Mark session as busy, start mode-line spinner.
+Called by sdd-bridge.sh prompt event via MCP.
+SDD-SESSION-ID identifies the SDD story session."
+  (let ((session-key (claude-org--current-session-key)))
+    (claude-org--session-put session-key :iterm2-busy t))
+  (cl-incf claude-org-iterm2--busy-count)
+  (unless claude-org-iterm2--activity-timer
+    (setq claude-org-iterm2--activity-timer
+          (run-with-timer 0 0.3 #'claude-org-iterm2--update-mode-line))))
+
+(defun claude-org-iterm2--set-ready (sdd-session-id)
+  "Mark session as ready, stop mode-line spinner.
+Called by sdd-bridge.sh response event via MCP.
+SDD-SESSION-ID identifies the SDD story session."
+  (let ((session-key (claude-org--current-session-key)))
+    (when (claude-org--session-get session-key :iterm2-busy)
+      (claude-org--session-put session-key :iterm2-busy nil)
+      (cl-decf claude-org-iterm2--busy-count)
+      (when (< claude-org-iterm2--busy-count 0)
+        (setq claude-org-iterm2--busy-count 0))))
+  (claude-org-iterm2--update-mode-line))
+#+END_SRC
+
+** Execution
+
+#+BEGIN_SRC elisp
+(defun claude-org-iterm2--write-from-emacs-flag (sdd-session-id)
+  "Write flag file indicating the next prompt was sent from Emacs.
+sdd-bridge.sh checks this to skip duplicate instruction insertion."
+  (let ((dir "/tmp/claude-agent-status"))
+    (make-directory dir t)
+    (with-temp-file (expand-file-name
+                     (concat sdd-session-id ".from-emacs") dir)
+      (insert "1"))))
+
+(defun claude-org-iterm2--execute-ai-block ()
+  "Execute current AI block via iTerm2 backend.
+Ensures session exists, checks readiness, sends prompt via stdin.
+Writes a from-emacs flag so the prompt hook skips duplicate insertion.
+Does NOT set busy — the UserPromptSubmit hook handles that."
+  (let* ((element (org-element-at-point))
+         (prompt (when (and (eq (org-element-type element) 'src-block)
+                            (string= (org-element-property :language element) "ai"))
+                   (string-trim (org-element-property :value element)))))
+    (unless prompt
+      (user-error "Point is not inside a #+begin_src ai block"))
+    (let* ((iterm2-id (claude-org-iterm2--ensure-session))
+           (sdd-session-id
+            (claude-org-iterm2--find-session-property "CLAUDE_SESSION_ID"))
+           (status (claude-org-iterm2--get-status sdd-session-id iterm2-id)))
+      (when (string= status "busy")
+        (user-error "Claude Code busy (status: %s). Cancel first?" status))
+      ;; Write flag BEFORE sending — hook checks and deletes it
+      (when sdd-session-id
+        (claude-org-iterm2--write-from-emacs-flag sdd-session-id))
+      (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
+      (message "Sent to iTerm2 (%d chars)" (length prompt)))))
+#+END_SRC
+
+** User Commands
+
+#+BEGIN_SRC elisp
+(defun claude-org-iterm2-open-tab ()
+  "Open (or focus) the iTerm2 tab for this SDD session.
+Launches Claude Code if no matching tab exists."
+  (interactive)
+  (let ((session-id (claude-org-iterm2--ensure-session)))
+    (claude-org-iterm2--call "focus" "--session" session-id)
+    (message "iTerm2 tab focused (session: %s)" session-id)))
+
+(defun claude-org-iterm2-cancel ()
+  "Cancel the current Claude Code instruction in iTerm2.
+Sends Escape to the TUI. The Stop hook will fire and set-ready."
+  (interactive)
+  (let ((iterm2-id (claude-org-iterm2--find-session-property "ITERM2_SESSION_ID")))
+    (unless iterm2-id
+      (user-error "No iTerm2 session for this story"))
+    (claude-org-iterm2--call "cancel" "--session" iterm2-id)
+    (message "Cancel sent to Claude Code (waiting for hook...)")))
 #+END_SRC
 
 * Package Footer

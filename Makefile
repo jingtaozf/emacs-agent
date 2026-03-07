@@ -51,6 +51,7 @@ help:
 	@echo "  make test-org-mock    - Run org mock CLI tests"
 	@echo "  make test-docker      - Run Docker unit tests (path translation)"
 	@echo "  make test-docker-sandbox - Run Docker sandbox tests (requires container)"
+	@echo "  make test-sdd-bridge  - E2E tests for terminal SDD bridge (requires MCP)"
 	@echo "  make test-readme-smoke - Run README tutorial smoke tests (no API)"
 	@echo "  make test-readme      - Run full README tutorial tests (requires API)"
 	@echo ""
@@ -134,7 +135,18 @@ test-smoke:
 
 # Unit test targets are independent — use 'make -j3 test-unit' for parallel (4.5s vs 13s)
 .PHONY: test-unit
-test-unit: test-agent-unit test-org-unit test-backend-unit
+test-unit: test-agent-unit test-org-unit test-backend-unit test-native
+
+.PHONY: test-native
+test-native:
+	@echo "Running native terminal unit tests..."
+	$(BATCH) $(LOAD_PATH) \
+		--eval "(require 'literate-elisp)" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		-l tests/test-claude-org-native.el \
+		-l tests/test-iterm2-e2e-simulated.el \
+		-f ert-run-tests-batch-and-exit
 
 # Convenience target: run unit tests in parallel automatically
 UNIT_PARALLEL_JOBS ?= 3
@@ -587,6 +599,13 @@ watch:
 		echo "Files changed, reloading..."; \
 		$(MAKE) test-unit; \
 	done
+
+# SDD Bridge E2E tests (requires running Emacs MCP server)
+EMACS_MCP_PORT ?= 9999
+.PHONY: test-sdd-bridge
+test-sdd-bridge:
+	@echo "Running SDD Bridge E2E tests (MCP port $(EMACS_MCP_PORT))..."
+	bash tests/test-sdd-bridge-e2e.sh $(EMACS_MCP_PORT)
 
 # Quick development cycle
 .PHONY: dev

@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# claude-sdd - Launch Claude Code CLI with SDD bridge hooks
+#
+# Usage: claude-sdd <org-file> [session-id] [-- extra-args...]
+#
+# org-file:    path to the org notebook containing the SDD section
+# session-id:  CLAUDE_SESSION_ID (optional — lists available sessions if omitted)
+# extra-args:  any additional arguments are passed through to claude CLI
+
+set -euo pipefail
+
+ORG_FILE="${1:?Usage: claude-sdd <org-file> [session-id] [-- extra-args...]}"
+shift
+
+# If next arg doesn't start with -, treat it as session-id
+SESSION_ID=""
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+  SESSION_ID="$1"
+  shift
+fi
+# Skip optional -- separator
+if [ $# -gt 0 ] && [ "$1" = "--" ]; then
+  shift
+fi
+EXTRA_ARGS=("$@")
+
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+EMACS_MCP_URL="${EMACS_MCP_URL:-http://localhost:9999/mcp}"
+
+# Resolve to absolute path
+ORG_FILE="$(cd "$(dirname "$ORG_FILE")" && pwd)/$(basename "$ORG_FILE")"
+
+mcp_eval() {
+  # MCP response is double-wrapped JSON. After two jq -r passes, elisp
+  # strings arrive as "value" with quotes, \n as literal two-char \n,
+  # and \t already unescaped to real tabs.
+  # Strip surrounding quotes and convert remaining \n to real newlines.
+  curl -sf --connect-timeout 3 --max-time 10 "$EMACS_MCP_URL" \
+    -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",
+         \"params\":{\"name\":\"evalElisp\",
+                     \"arguments\":{\"code\":$(printf '%s' "$1" | jq -Rs .)}}}" \
+    | jq -r '.result.content[0].text' \
+    | jq -r '.result // empty' \
+    | sed 's/[[:space:]]*$//' \
+    | sed 's/^"//;s/"$//' \
+    | sed 's/\\n/\
+/g'
+}
+
+# Check MCP connection — soft requirement, Claude starts either way
+echo "Checking Emacs MCP server at $EMACS_MCP_URL..."
+PING_RESULT=$(mcp_eval "(+ 1 1)" 2>/dev/null) || true
+MCP_OK=false
+
+if [ "$PING_RESULT" = "2" ]; then
+  MCP_OK=true
+  echo "  MCP server OK"
+else
+  # Diagnostic: show why MCP eval failed
+  echo "  WARNING: MCP server not reachable at $EMACS_MCP_URL" >&2
+  echo "  Got: '$PING_RESULT' (expected '2')" >&2
+  # Check if port is open at all
+  if curl -sf --connect-timeout 2 "$EMACS_MCP_URL" >/dev/null 2>&1; then
+    echo "  Port is open but eval failed — check jq/curl in PATH" >&2
+  else
+    echo "  Port not responding — start in Emacs: (emacs-mcp-server-start)" >&2
+  fi
+  echo "  SDD bridge hooks disabled. Launching without SDD integration..." >&2
+fi
+
+# ── MCP-dependent setup (skipped if MCP unavailable) ──────────────
+
+SYSTEM_PROMPT=""
+CLI_SESSION=""
+STORY_NAME=""
+
+if [ "$MCP_OK" = true ]; then
+  # If no session-id given, list available sessions and prompt
+  if [ -z "$SESSION_ID" ]; then
+    SESSIONS=$(mcp_eval "(let ((debug-on-error nil) (debug-on-quit nil)) (claude-org-sdd-bridge-list-sessions \"$ORG_FILE\"))" 2>/dev/null) || true
+
+    if [ -z "$SESSIONS" ]; then
+      echo "No SDD sessions found in $ORG_FILE" >&2
+      exit 1
+    fi
+
+    echo ""
+    echo "Available SDD sessions in $(basename "$ORG_FILE"):"
+
+    i=1
+    current_parent="__unset__"
+    declare -a session_ids
+    while IFS=$'\t' read -r sid heading parent; do
+      if [ "$parent" != "$current_parent" ]; then
+        echo ""
+        if [ -n "$parent" ]; then
+          echo "  [$parent]"
+        else
+          echo "  [top-level]"
+        fi
+        current_parent="$parent"
+      fi
+      printf "    %d) %s  (%s)\n" "$i" "$heading" "$sid"
+      session_ids+=("$sid")
+      ((i++))
+    done <<< "$SESSIONS"
+
+    echo ""
+    read -rp "Select session [1-$((i-1))]: " choice
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -ge "$i" ]; then
+      echo "Invalid selection" >&2
+      exit 1
+    fi
+
+    SESSION_ID="${session_ids[$((choice-1))]}"
+    echo "Selected: $SESSION_ID"
+    echo ""
+  fi
+
+  # Fetch session metadata
+  echo "Building session metadata for $SESSION_ID..."
+  SESSION_META=$(mcp_eval "(let ((debug-on-error nil) (debug-on-quit nil))
+    (let* ((prompt (claude-org-sdd-bridge-system-prompt \"$ORG_FILE\" \"$SESSION_ID\"))
+           (cli-sid (or (claude-org-sdd-bridge-get-cli-session \"$ORG_FILE\" \"$SESSION_ID\") \"\"))
+           (story (with-current-buffer (claude-org-sdd-bridge--ensure-buffer \"$ORG_FILE\")
+                    (save-excursion (save-restriction (widen)
+                      (claude-org-sdd-bridge--goto-session \"$SESSION_ID\")
+                      (substring-no-properties (org-get-heading t t t t)))))))
+      (format \"%s\\t%s\\n%s\" cli-sid story prompt)))" 2>/dev/null) || true
+
+  FIRST_LINE=$(echo "$SESSION_META" | head -1)
+  CLI_SESSION=$(echo "$FIRST_LINE" | cut -f1)
+  STORY_NAME=$(echo "$FIRST_LINE" | cut -f2)
+  SYSTEM_PROMPT=$(echo "$SESSION_META" | tail -n +2)
+
+  if [ -z "$SYSTEM_PROMPT" ] || [ "$SYSTEM_PROMPT" = "null" ]; then
+    echo "  WARNING: Could not build system prompt — launching without it" >&2
+  fi
+
+  # Save WezTerm pane ID for programmatic input from Emacs
+  if command -v wezterm >/dev/null 2>&1 && [ -n "$WEZTERM_PANE" ]; then
+    echo "  WezTerm pane: $WEZTERM_PANE"
+    mcp_eval "(let ((debug-on-error nil) (debug-on-quit nil))
+      (with-current-buffer (claude-org-sdd-bridge--ensure-buffer \"$ORG_FILE\")
+        (save-excursion (save-restriction (widen)
+          (claude-org-sdd-bridge--goto-session \"$SESSION_ID\")
+          (org-set-property \"WEZTERM_PANE_ID\" \"$WEZTERM_PANE\")
+          (save-buffer)
+          \"ok\"))))" >/dev/null 2>&1 || true
+  fi
+fi
+
+# ── Export for hook scripts ───────────────────────────────────────
+
+export SDD_ORG_FILE="$ORG_FILE"
+export SDD_SESSION_ID="${SESSION_ID:-}"
+export EMACS_MCP_URL
+
+# ── Build claude CLI args ─────────────────────────────────────────
+
+RESUME_ARGS=()
+if [ -n "$CLI_SESSION" ] && [ "$CLI_SESSION" != "null" ] && [ "$CLI_SESSION" != "nil" ]; then
+  echo "Resuming Claude CLI session: $CLI_SESSION"
+  RESUME_ARGS=(--resume "$CLI_SESSION")
+fi
+
+# Set terminal tab title
+FILE_BASE="$(basename "${ORG_FILE%.org}")"
+TAB_TITLE="${FILE_BASE}:${STORY_NAME:-${SESSION_ID:-standalone}}"
+export WARP_DISABLE_AUTO_TITLE=true
+echo -ne "\033]0;${TAB_TITLE}\007"
+
+PROMPT_ARGS=()
+if [ -n "$SYSTEM_PROMPT" ] && [ "$SYSTEM_PROMPT" != "null" ]; then
+  PROMPT_ARGS=(--system-prompt "$SYSTEM_PROMPT")
+fi
+
+# Always include plugin-dir and mcp-config, even if MCP was unreachable
+# at launch time. The hooks fire LATER when Claude finishes responding —
+# by then MCP may be available. Skipping these means no response ever
+# flows back to Emacs.
+PLUGIN_ARGS=(--plugin-dir "$PLUGIN_DIR")
+MCP_ARGS=(--mcp-config "{\"mcpServers\":{\"emacs\":{\"type\":\"http\",\"url\":\"$EMACS_MCP_URL\"}}}")
+
+echo "Starting Claude Code..."
+echo "  Org file:   $ORG_FILE"
+echo "  Session ID: ${SESSION_ID:-none}"
+echo "  Story:      ${STORY_NAME:-unknown}"
+echo "  MCP bridge: $MCP_OK"
+echo ""
+
+# Note: ${arr[@]+"${arr[@]}"} is the bash 3.2 (macOS) safe pattern
+# for expanding potentially empty arrays with set -u.
+# Plain "${arr[@]}" errors with "unbound variable" in bash < 4.4.
+claude \
+  "${PLUGIN_ARGS[@]}" \
+  "${MCP_ARGS[@]}" \
+  ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} \
+  ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}

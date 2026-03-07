@@ -550,6 +550,32 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-org: permissions
     "claude-org-permission-protect-org"
     "claude-org-switch-permission-mode"
+    ;; claude-org: native terminal
+    "claude-org-open-native-terminal"
+    "claude-org-native-mode"
+    "claude-org-native-kill"
+    "claude-org-native-refresh"
+    "claude-org-native-menu"
+    "claude-org-native-send-command"
+    "claude-org-native-send-escape"
+    "claude-org-native-send-interrupt"
+    "claude-org-native-send-option"
+    "claude-org-native-send-return"
+    "claude-org-native-send-shift-tab"
+    "claude-org-native-send-slash"
+    "claude-org-native-toggle-copy-mode"
+    ;; claude-org: iTerm2 backend
+    "claude-org-iterm2-open-tab"
+    "claude-org-iterm2-cancel"
+    ;; claude-org: SDD bridge (terminal workflow)
+    "claude-org-sdd-archive-workflow"
+    "claude-org-sdd-bridge-get-cli-session"
+    "claude-org-sdd-bridge-insert-prompt"
+    "claude-org-sdd-bridge-insert-response"
+    "claude-org-sdd-bridge-list-sessions"
+    "claude-org-sdd-bridge-save-cli-session"
+    "claude-org-sdd-bridge-send-prompt"
+    "claude-org-sdd-bridge-system-prompt"
     ;; claude-org: company completion
     "claude-org-company-slash-commands"
     ;; emacs-mcp-server public API

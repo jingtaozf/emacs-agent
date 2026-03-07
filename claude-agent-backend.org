@@ -640,6 +640,10 @@ since those are for the JSON streaming backend."
     (when-let ((mcp-config (plist-get options :mcp-config)))
       (push mcp-config switches)
       (push "--mcp-config" switches))
+    ;; Resume a previous session by ID
+    (when-let ((resume-id (plist-get options :resume-session-id)))
+      (push resume-id switches)
+      (push "--resume" switches))
     ;; Include hooks settings via --settings flag
     (let ((hooks-file (claude-agent-claude-backend--hooks-settings-file)))
       (when hooks-file
@@ -1011,6 +1015,11 @@ Populated by the =SessionStart= hook, queried by the =Stop= hook.
   "Hash table mapping session_id (or cwd) to claude-backend instances.
 Populated by --on-session-start, queried by --on-stop.")
 
+(defvar claude-agent-claude-backend-session-start-functions nil
+  "Abnormal hook run when SessionStart fires.
+Each function is called with (SESSION-ID NORMALIZED-CWD).
+Used by claude-org native terminal to capture session IDs.")
+
 (defun claude-agent-claude-backend--normalize-cwd (path)
   "Strip trailing slash from PATH for consistent hash-table keys.
 The CLI reports cwd without trailing slash but Emacs `default-directory'
@@ -1021,14 +1030,19 @@ always includes one.  Normalizing both sides avoids lookup mismatches."
 (defun claude-agent-claude-backend--on-session-start (session-id cwd)
   "Handle SessionStart hook: map SESSION-ID to the backend for CWD.
 Looks up the backend previously registered by cwd, then stores
-a second entry keyed by SESSION-ID for later use by --on-stop."
+a second entry keyed by SESSION-ID for later use by --on-stop.
+Also runs `claude-agent-claude-backend-session-start-functions' so
+other subsystems (e.g. native terminal) can capture the session-id."
   (when (and session-id (not (string-empty-p session-id)))
     (let* ((key (claude-agent-claude-backend--normalize-cwd cwd))
            (backend (gethash key claude-agent-claude-backend--session-registry)))
       (when backend
         (setf (claude-agent-claude-backend-session-id backend) session-id)
         (puthash session-id backend
-                 claude-agent-claude-backend--session-registry)))))
+                 claude-agent-claude-backend--session-registry))
+      ;; Notify listeners (e.g., native terminal session capture)
+      (run-hook-with-args 'claude-agent-claude-backend-session-start-functions
+                          session-id key))))
 
 (defvar claude-agent-claude-backend--stop-log nil
   "Debug log of Stop hook invocations.
