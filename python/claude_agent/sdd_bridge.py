@@ -160,7 +160,13 @@ def handle_response(
         f'"{_escape_elisp_string(session_id)}" '
         f'"{_escape_elisp_string(response)}" '
         f'"{_escape_elisp_string(custom_id)}") '
-        f'{save_sexp})'
+        f'{save_sexp} '
+        f'(with-current-buffer (claude-org-sdd-bridge--ensure-buffer '
+        f'"{_escape_elisp_string(org_file)}") '
+        f'(run-hook-with-args '
+        f"'claude-org-complete-hook "
+        f'(claude-org--current-session-key) nil '
+        f"'completed)))"
     )
     mcp.eval_elisp(elisp)
 

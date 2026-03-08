@@ -1,0 +1,90 @@
+#+TITLE: Design: Block History for All Backends
+#+DATE: [2026-03-08]
+#+STATUS: implemented
+
+* Problem
+
+"Jump to AI block" (=claude-org-jump-to-ai-block=) only works for the JSON
+stream backend because the history hooks fire inside =claude-org--execute-core=,
+which is never reached by the iTerm2 or native backends.
+
+- =claude-org-execute-hook= fires at =claude-org.org:4341= inside =execute-core=
+- =claude-org-complete-hook= fires at =claude-org.org:4160= inside =handle-complete=
+- iTerm2 backend early-exits at =claude-org.org:4408= before reaching =execute-core=
+- Native backend early-exits at =claude-org.org:4414= before reaching =execute-core=
+
+* Goals
+
+- All backends record AI block execution in =claude-org--block-history=
+- "Jump to AI block" shows blocks from all backends
+- Zero changes to =claude-org-history.org= — it already hooks correctly
+- Completion status updated for iTerm2 (=completed= when response hook fires)
+
+* Non-Goals
+
+- Changing the hook signatures or the history persistence format
+- Adding error status tracking for iTerm2 (no error hook exists yet)
+
+* Design
+
+** Strategy: Fire execute-hook in =claude-org-execute= before backend dispatch
+
+Move =run-hook-with-args 'claude-org-execute-hook= from =execute-core= (line 4341)
+to =claude-org-execute= (before line 4405), so it runs for all backends.
+
+This is safe because =claude-org--record-block-execution= only needs:
+1. Point to be inside the AI block (true at this point for all backends)
+2. =session-key= (already bound at line 4377)
+3. A valid =CUSTOM_ID= on the instruction heading (true for iTerm2 blocks)
+
+** Changes
+
+*** 1. Fire execute-hook in =claude-org-execute= (before backend dispatch)
+
+Add this before the iTerm2 early-exit at line 4405:
+
+#+begin_src elisp
+;; Record execution for all backends (history, jump-to-block)
+(run-hook-with-args 'claude-org-execute-hook session-key content nil)
+#+end_src
+
+*** 2. Remove duplicate hook call from =execute-core=
+
+Remove the =run-hook-with-args 'claude-org-execute-hook= at line 4341.
+Otherwise JSON stream backend blocks would fire the hook twice.
+
+*** 3. Fire complete-hook from Python response handler
+
+In =handle_response= (=sdd_bridge.py=), after inserting the response, call:
+
+#+begin_src python
+mcp.eval_elisp(
+    f'(run-hook-with-args \'claude-org-complete-hook '
+    f'"{_escape_elisp_string(session_id)}" nil \'completed)'
+)
+#+end_src
+
+This updates the block's =:status= from =in-progress= to =completed= via
+the existing =claude-org--update-block-status= hook function.
+
+Note: The =session-key= parameter for =update-block-status= must match what
+was used during =record-block-execution=. Since =claude-org--current-session-key=
+returns a buffer-local key, and both the execute and complete hooks run in the
+same org buffer context (MCP evalElisp operates in the file's buffer), the
+session-key will be consistent.
+
+** What Doesn't Change
+
+- =claude-org-history.org= — no modifications needed
+- =claude-org--record-block-execution= — already works with any backend
+- =claude-org--update-block-status= — already works with session-key lookup
+- History persistence format — same =(block-id . plist)= alist
+- "Jump to AI block" UI — same completing-read with dynamic title building
+- JSON stream backend behavior — hook fires once (moved, not duplicated)
+
+** Implementation Order
+
+1. Move =execute-hook= call from =execute-core= to =claude-org-execute=
+2. Add =complete-hook= call to Python =handle_response=
+3. Reload elisp, test with iTerm2 backend
+4. Verify "Jump to AI block" shows iTerm2-executed blocks
