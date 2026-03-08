@@ -5,7 +5,9 @@ Launches Claude Code CLI with SDD bridge hooks and MCP integration.
 Usage: claude-sdd <org-file> [session-id] [-- extra-args...]
 """
 
+import atexit
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -162,7 +164,22 @@ def build_claude_args(
         args.extend(["--resume", cli_session])
 
     args.extend(extra_args)
+    args.append("--ide")
     return args
+
+
+def cleanup_ide_server(mcp: McpClient, session_id: str) -> None:
+    """Stop the IDE server in Emacs for this SDD session."""
+    if not session_id:
+        return
+    try:
+        mcp.eval_elisp(
+            '(condition-case nil'
+            f'  (claude-ide-stop-server "{_escape_elisp_string(session_id)}")'
+            '  (error nil))'
+        )
+    except Exception:
+        pass  # Best-effort — Emacs may be gone too
 
 
 def main() -> None:
@@ -240,7 +257,21 @@ def main() -> None:
     print(f"  MCP bridge: {mcp_ok}")
     print()
 
-    os.execvp(args[0], args)
+    # Unset CLAUDECODE to avoid "cannot launch inside another Claude Code session" error
+    os.environ.pop("CLAUDECODE", None)
+
+    # Register atexit as belt-and-suspenders for edge cases
+    if mcp_ok and session_id:
+        atexit.register(cleanup_ide_server, mcp, session_id)
+
+    result = subprocess.run(args)
+
+    # Primary cleanup: stop IDE server when Claude Code exits
+    if mcp_ok and session_id:
+        cleanup_ide_server(mcp, session_id)
+        atexit.unregister(cleanup_ide_server)
+
+    sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

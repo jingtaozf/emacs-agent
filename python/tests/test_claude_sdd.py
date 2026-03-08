@@ -4,9 +4,12 @@ import json
 
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from claude_agent.claude_sdd import (
     _is_valid_session,
     build_claude_args,
+    cleanup_ide_server,
     parse_args,
 )
 
@@ -92,3 +95,43 @@ class TestBuildClaudeArgs:
         args = build_claude_args("/p", "http://custom:8080/mcp", "", "", [])
         config = json.loads(args[args.index("--mcp-config") + 1])
         assert config["mcpServers"]["emacs"]["url"] == "http://custom:8080/mcp"
+
+
+class TestBuildClaudeArgsIde:
+    """Tests for --ide flag in build_claude_args."""
+
+    def test_ide_flag_always_present(self):
+        """build_claude_args always includes --ide."""
+        args = build_claude_args("/plugin", "http://mcp", "", "", [])
+        assert "--ide" in args
+
+    def test_ide_flag_with_extra_args(self):
+        """--ide coexists with extra args."""
+        args = build_claude_args("/plugin", "http://mcp", "", "", ["--verbose"])
+        assert "--ide" in args
+        assert "--verbose" in args
+
+
+class TestCleanupIdeServer:
+    """Tests for cleanup_ide_server."""
+
+    def test_cleanup_calls_mcp(self):
+        """cleanup_ide_server calls MCP to stop the IDE server."""
+        mcp = MagicMock()
+        cleanup_ide_server(mcp, "test-123")
+        assert mcp.eval_elisp.called
+        call_arg = mcp.eval_elisp.call_args[0][0]
+        assert "claude-ide-stop-server" in call_arg
+        assert "test-123" in call_arg
+
+    def test_cleanup_swallows_errors(self):
+        """cleanup_ide_server does not raise even if MCP is unreachable."""
+        mcp = MagicMock()
+        mcp.eval_elisp.side_effect = ConnectionError("unreachable")
+        cleanup_ide_server(mcp, "test")  # should not raise
+
+    def test_cleanup_skips_empty_session(self):
+        """cleanup_ide_server skips MCP call for empty session_id."""
+        mcp = MagicMock()
+        cleanup_ide_server(mcp, "")
+        assert not mcp.eval_elisp.called

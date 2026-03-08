@@ -223,7 +223,18 @@ Response will appear here after pressing C-c C-c inside the ai block.
                     "claude-org-scheduled"))
     (unless (featurep (intern module))
       (literate-elisp-load
-       (expand-file-name (concat module ".org") module-dir)))))
+       (expand-file-name (concat module ".org") module-dir))))
+  ;; Load claude-ide conditionally (requires websocket package)
+  (when (require 'websocket nil t)
+    (unless (featurep 'claude-ide)
+      (literate-elisp-load
+       (expand-file-name "claude-ide.org" module-dir)))))
+
+;; Forward declarations for claude-ide (conditionally loaded)
+(declare-function claude-ide--session-alive-p "claude-ide" (key))
+(declare-function claude-ide--session-port "claude-ide" (session))
+(declare-function claude-ide-start-server-in-directory "claude-ide" (key directory))
+(declare-function claude-ide-stop-server "claude-ide" (key))
 #+END_SRC
 
 * Customization
@@ -6437,6 +6448,8 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
              ;; Build the launch command string based on defcustom
              (launch-cmd (claude-org-iterm2--build-launch-command
                           org-file sdd-session-id project-root)))
+        ;; Ensure IDE server is running before Claude Code launches
+        (claude-org-iterm2--ensure-ide-server project-root sdd-session-id)
         (let ((result (apply #'claude-org-iterm2--call
                        "launch"
                        "--title" title
@@ -6603,6 +6616,17 @@ Launches Claude Code if no matching tab exists."
   (let ((session-id (claude-org-iterm2--ensure-session)))
     (claude-org-iterm2--call "focus" "--session" session-id)
     (message "iTerm2 tab focused (session: %s)" session-id)))
+
+(defun claude-org-iterm2--ensure-ide-server (project-root sdd-session-id)
+  "Ensure IDE WebSocket server is running for this SDD session.
+Starts the server if not already alive.
+The lockfile must exist before Claude Code launches."
+  (when (fboundp 'claude-ide--session-alive-p)
+    (unless (claude-ide--session-alive-p sdd-session-id)
+      (let ((port (claude-ide--session-port
+                   (claude-ide-start-server-in-directory sdd-session-id project-root))))
+        (message "IDE server started on port %d for %s"
+                 port (file-name-nondirectory project-root))))))
 
 (defun claude-org-iterm2-cancel ()
   "Cancel the current Claude Code instruction in iTerm2.
