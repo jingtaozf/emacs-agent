@@ -12,8 +12,10 @@ from claude_agent.sdd_bridge import (
     _extract_full_response,
     _format_todos_as_elisp,
     _read_custom_id,
+    _read_request_id,
     _write_custom_id,
     handle_prompt,
+    handle_response,
     write_status,
 )
 
@@ -46,6 +48,47 @@ class TestCustomIdPersistence:
         _write_custom_id("sid", "sdd-123-instr-1")
         _write_custom_id("sid", "sdd-123-instr-2")
         assert _read_custom_id("sid") == "sdd-123-instr-2"
+
+
+class TestRequestIdPersistence:
+    def test_read_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        assert _read_request_id("nonexistent") is None
+
+    def test_read_existing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        (tmp_path / "sid.request-id").write_text("req-42-1234")
+        assert _read_request_id("sid") == "req-42-1234"
+
+
+class TestHandleResponseQueryCompleted:
+    """handle_response calls query-completed to unregister from active-queries."""
+
+    def test_query_completed_called(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        _write_custom_id("sid", "instr-custom-id")
+        mcp = MagicMock()
+        handle_response(
+            mcp,
+            {"last_assistant_message": "hello"},
+            "/tmp/f.org",
+            "sid",
+        )
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
+        assert any("claude-org-iterm2--query-completed" in c for c in calls)
+
+    def test_query_completed_called_even_without_response(self, tmp_path, monkeypatch):
+        """query-completed fires even when there's no response text."""
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        mcp = MagicMock()
+        handle_response(
+            mcp,
+            {},
+            "/tmp/f.org",
+            "sid",
+        )
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
+        assert any("claude-org-iterm2--query-completed" in c for c in calls)
 
 
 class TestEscapeElispString:

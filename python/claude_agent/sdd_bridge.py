@@ -39,6 +39,17 @@ def _read_custom_id(session_id: str) -> str | None:
         return None
 
 
+def _read_request_id(session_id: str) -> str | None:
+    """Read the active-query request-id written by Emacs, or None."""
+    path = os.path.join(STATUS_DIR, f"{session_id}.request-id")
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+            return value if value else None
+    except FileNotFoundError:
+        return None
+
+
 def _escape_elisp_string(s: str) -> str:
     """Escape a string for embedding in an elisp double-quoted string."""
     return (
@@ -114,6 +125,12 @@ def handle_response(
 ) -> None:
     """Handle Stop hook event."""
     write_status(session_id, "ready")
+
+    # Unregister from Emacs active-queries (mode-line + *Claude Queries* buffer)
+    mcp.eval_elisp(
+        f'(claude-org-iterm2--query-completed '
+        f'"{_escape_elisp_string(session_id)}")'
+    )
 
     # Extract full response from transcript (skips intermediate tool-use turns)
     response = ""

@@ -6438,67 +6438,67 @@ SDD-SESSION-ID keys the hook file; ITERM2-SESSION-ID keys the API."
         (error "unknown")))))
 #+END_SRC
 
-** Mode-Line Activity
+** Query Registration
+
+Register iTerm2 queries into =claude-agent--active-queries= so they appear
+in the global mode-line spinner and =*Claude Queries*= buffer alongside
+native JSON stream queries.
 
 #+BEGIN_SRC elisp
-(defvar claude-org-iterm2--busy-count 0
-  "Number of iTerm2 sessions currently busy.")
+(defun claude-org-iterm2--save-request-id (sdd-session-id request-id)
+  "Save REQUEST-ID to status file for SDD-SESSION-ID.
+The Python response hook reads this to call query-completed."
+  (let ((dir "/tmp/claude-agent-status"))
+    (make-directory dir t)
+    (with-temp-file (expand-file-name
+                     (concat sdd-session-id ".request-id") dir)
+      (insert request-id))))
 
-(defvar claude-org-iterm2--activity-timer nil
-  "Timer for iTerm2 activity spinner.")
+(defun claude-org-iterm2--read-request-id (sdd-session-id)
+  "Read the request-id for SDD-SESSION-ID, or nil if not set."
+  (let ((path (expand-file-name
+               (concat sdd-session-id ".request-id")
+               "/tmp/claude-agent-status")))
+    (when (file-exists-p path)
+      (let ((val (string-trim (with-temp-buffer
+                                (insert-file-contents path)
+                                (buffer-string)))))
+        (unless (string-empty-p val) val)))))
 
-(defconst claude-org-iterm2--spinner-frames '("◐" "◓" "◑" "◒")
-  "Spinner animation frames for iTerm2 activity indicator.")
+(defun claude-org-iterm2--register-query (sdd-session-id iterm2-id)
+  "Register the current AI block as an active query.
+Creates a process-state, registers in `claude-agent--active-queries',
+and saves the request-id to a status file for the Python hook.
+SDD-SESSION-ID is the SDD session, ITERM2-ID is the iTerm2 pane UUID."
+  (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
+         (heading (org-get-heading t t t t))
+         (instr-num (when (and heading
+                               (string-match "\\bInstruction \\([0-9]+\\)" heading))
+                      (string-to-number (match-string 1 heading))))
+         (req-id (claude-agent--generate-request-id))
+         (ctx (claude-agent-make-query-context
+               :instruction-num instr-num
+               :custom-id custom-id))
+         (state (claude-agent--make-process-state
+                 :request-id req-id
+                 :start-time (float-time)
+                 :source-buffer (current-buffer)
+                 :query-context ctx
+                 :source-location-fn (when custom-id #'claude-org-goto-custom-id)
+                 :source-location-args (when custom-id (list custom-id)))))
+    (claude-agent--register-query req-id state)
+    (claude-org-iterm2--save-request-id sdd-session-id req-id)))
 
-(defvar claude-org-iterm2--spinner-index 0
-  "Current index in spinner-frames.")
-
-(defun claude-org-iterm2--update-mode-line ()
-  "Update mode-line with iTerm2 activity indicator."
-  (if (> claude-org-iterm2--busy-count 0)
-      (let* ((spinner (nth claude-org-iterm2--spinner-index
-                           claude-org-iterm2--spinner-frames))
-             (display (format " [iT:%s]" spinner)))
-        (setq claude-org-iterm2--spinner-index
-              (mod (1+ claude-org-iterm2--spinner-index)
-                   (length claude-org-iterm2--spinner-frames)))
-        (setq claude-org-iterm2--activity-string
-              (propertize display 'face '(:weight bold))))
-    (setq claude-org-iterm2--activity-string "")
-    (setq claude-org-iterm2--spinner-index 0)
-    (when claude-org-iterm2--activity-timer
-      (cancel-timer claude-org-iterm2--activity-timer)
-      (setq claude-org-iterm2--activity-timer nil)))
-  (force-mode-line-update t))
-
-(defvar claude-org-iterm2--activity-string ""
-  "Mode-line string for iTerm2 activity indicator.")
-
-(unless (member '(:eval claude-org-iterm2--activity-string) mode-line-misc-info)
-  (push '(:eval claude-org-iterm2--activity-string) mode-line-misc-info))
-
-(defun claude-org-iterm2--set-busy (sdd-session-id)
-  "Mark session as busy, start mode-line spinner.
-Called by sdd-bridge.sh prompt event via MCP.
-SDD-SESSION-ID identifies the SDD story session."
-  (let ((session-key (claude-org--current-session-key)))
-    (claude-org--session-put session-key :iterm2-busy t))
-  (cl-incf claude-org-iterm2--busy-count)
-  (unless claude-org-iterm2--activity-timer
-    (setq claude-org-iterm2--activity-timer
-          (run-with-timer 0 0.3 #'claude-org-iterm2--update-mode-line))))
-
-(defun claude-org-iterm2--set-ready (sdd-session-id)
-  "Mark session as ready, stop mode-line spinner.
-Called by sdd-bridge.sh response event via MCP.
-SDD-SESSION-ID identifies the SDD story session."
-  (let ((session-key (claude-org--current-session-key)))
-    (when (claude-org--session-get session-key :iterm2-busy)
-      (claude-org--session-put session-key :iterm2-busy nil)
-      (cl-decf claude-org-iterm2--busy-count)
-      (when (< claude-org-iterm2--busy-count 0)
-        (setq claude-org-iterm2--busy-count 0))))
-  (claude-org-iterm2--update-mode-line))
+(defun claude-org-iterm2--query-completed (sdd-session-id)
+  "Mark the iTerm2 query for SDD-SESSION-ID as completed.
+Unregisters from `claude-agent--active-queries' so the mode-line
+and *Claude Queries* buffer update automatically."
+  (let ((req-id (claude-org-iterm2--read-request-id sdd-session-id)))
+    (when req-id
+      (let ((state (claude-agent--get-active-query req-id)))
+        (when state
+          (setf (claude-agent--process-state-closed state) t)
+          (claude-agent--unregister-query req-id))))))
 #+END_SRC
 
 ** Execution
@@ -6524,7 +6524,7 @@ Also writes the current instruction's CUSTOM_ID for response correlation."
   "Execute current AI block via iTerm2 backend.
 Ensures session exists, checks readiness, sends prompt via stdin.
 Writes a from-emacs flag so the prompt hook skips duplicate insertion.
-Does NOT set busy — the UserPromptSubmit hook handles that."
+Registers in `claude-agent--active-queries' for mode-line and query manager."
   (let* ((element (org-element-at-point))
          (prompt (when (and (eq (org-element-type element) 'src-block)
                             (string= (org-element-property :language element) "ai"))
@@ -6540,6 +6540,11 @@ Does NOT set busy — the UserPromptSubmit hook handles that."
       ;; Write flag BEFORE sending — hook checks and deletes it
       (when sdd-session-id
         (claude-org-iterm2--write-from-emacs-flag sdd-session-id))
+      ;; Register in active-queries for mode-line and *Claude Queries* display
+      (save-excursion
+        (org-back-to-heading t)
+        (when sdd-session-id
+          (claude-org-iterm2--register-query sdd-session-id iterm2-id)))
       (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
       (message "Sent to iTerm2 (%d chars)" (length prompt)))))
 #+END_SRC

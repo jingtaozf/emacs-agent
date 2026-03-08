@@ -649,50 +649,49 @@ REGRESSION: Path resolved from load-file-name which differs per install."
       (when (file-exists-p status-file) (delete-file status-file)))))
 
 ;;; ============================================================================
-;;; Mode-Line Activity (real state)
+;;; Query Registration (active-queries integration)
 ;;; ============================================================================
 
-(ert-deftest test-iterm2-activity-busy-ready-cycle ()
-  "set-busy/set-ready cycle updates counter and timer correctly."
+(ert-deftest test-iterm2-query-register-unregister-cycle ()
+  "register-query / query-completed cycle manages active-queries table."
   :tags '(:unit :iterm2 :e2e)
-  (let ((orig-count claude-org-iterm2--busy-count)
-        (orig-timer claude-org-iterm2--activity-timer)
-        (orig-string claude-org-iterm2--activity-string))
+  (let* ((test-session "sdd-test-reg-unreg")
+         (status-dir "/tmp/claude-agent-status")
+         (req-id-file (expand-file-name
+                       (concat test-session ".request-id") status-dir))
+         (tmp-file (make-temp-file "iterm2-reg-test" nil ".org"))
+         (buf nil))
+    (make-directory status-dir t)
     (unwind-protect
         (progn
-          (setq claude-org-iterm2--busy-count 0
-                claude-org-iterm2--activity-string ""
-                claude-org-iterm2--activity-timer nil)
-          (claude-org-iterm2--set-busy "test")
-          (should (= 1 claude-org-iterm2--busy-count))
-          (should claude-org-iterm2--activity-timer)
-          (claude-org-iterm2--set-ready "test")
-          (should (= 0 claude-org-iterm2--busy-count))
-          (should (equal "" claude-org-iterm2--activity-string)))
-      (when claude-org-iterm2--activity-timer
-        (cancel-timer claude-org-iterm2--activity-timer))
-      (setq claude-org-iterm2--busy-count orig-count
-            claude-org-iterm2--activity-timer orig-timer
-            claude-org-iterm2--activity-string orig-string))))
+          (with-temp-file tmp-file
+            (insert "* Test :claude_chat:\n"
+                    ":PROPERTIES:\n"
+                    ":CUSTOM_ID: test-instr-1\n"
+                    ":END:\n\n"
+                    "#+begin_src ai\ntest\n#+end_src\n"))
+          (setq buf (find-file-noselect tmp-file))
+          (with-current-buffer buf
+            (org-mode)
+            (goto-char (point-min))
+            (org-back-to-heading t)
+            ;; Register
+            (claude-org-iterm2--register-query test-session "fake-iterm-id")
+            (let ((req-id (claude-org-iterm2--read-request-id test-session)))
+              (should req-id)
+              (should (claude-agent--get-active-query req-id))
+              ;; Unregister
+              (claude-org-iterm2--query-completed test-session)
+              (should-not (claude-agent--get-active-query req-id)))))
+      (when buf (kill-buffer buf))
+      (when (file-exists-p tmp-file) (delete-file tmp-file))
+      (when (file-exists-p req-id-file) (delete-file req-id-file)))))
 
-(ert-deftest test-iterm2-activity-no-negative ()
-  "Double set-ready doesn't go below zero."
+(ert-deftest test-iterm2-query-completed-idempotent ()
+  "query-completed is safe to call when no request-id exists."
   :tags '(:unit :iterm2 :e2e)
-  (let ((orig-count claude-org-iterm2--busy-count)
-        (orig-timer claude-org-iterm2--activity-timer)
-        (orig-string claude-org-iterm2--activity-string))
-    (unwind-protect
-        (progn
-          (setq claude-org-iterm2--busy-count 0
-                claude-org-iterm2--activity-string "")
-          (claude-org-iterm2--set-ready "test")
-          (claude-org-iterm2--set-ready "test")
-          (should (>= claude-org-iterm2--busy-count 0)))
-      (when claude-org-iterm2--activity-timer
-        (cancel-timer claude-org-iterm2--activity-timer))
-      (setq claude-org-iterm2--busy-count orig-count
-            claude-org-iterm2--activity-timer orig-timer
-            claude-org-iterm2--activity-string orig-string))))
+  ;; Should not error
+  (claude-org-iterm2--query-completed "nonexistent-session"))
 
 ;;; ============================================================================
 ;;; sdd-bridge.sh Status File Integration (real shell script)
