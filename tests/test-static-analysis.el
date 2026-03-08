@@ -387,7 +387,9 @@ source files and checks they are properly defined."
             (unless (or (string-suffix-p "-map" (symbol-name name))  ; keymaps optional
                         (string-suffix-p "-hook" (symbol-name name)) ; hooks optional
                         ;; External dynamic vars (bound at runtime by other packages)
-                        (memq name '(org-state))) ; Org todo-state-change hook
+                        (memq name '(org-state
+                                     copilot-chat--instances
+                                     copilot-chat--magic)))
               (when-let ((err (test-static--check-symbol-bound type name)))
                 (push (format "%s: %s" (file-name-nondirectory file) err)
                       file-errors)))))

@@ -383,7 +383,7 @@ Can be overridden per-section via CLAUDE_SETTING_SOURCES property."
   "Whether to auto-generate titles for AI blocks with generic headings.
 When non-nil, headings matching `claude-org-auto-title-heading-pattern'
 (e.g., \"Instruction 1\") will be replaced with AI-generated titles
-using the Haiku model in parallel with the main query."
+in parallel with the main query."
   :type 'boolean
   :group 'claude-org)
 
@@ -392,6 +392,14 @@ using the Haiku model in parallel with the main query."
 Only headings matching this pattern will have their titles replaced.
 Default matches \"Instruction 1\", \"Instruction 2\", etc."
   :type 'regexp
+  :group 'claude-org)
+
+(defcustom claude-org-title-backend 'copilot
+  "Backend for auto-generating instruction titles.
+`copilot' uses GitHub Copilot via copilot-chat (no Claude API usage).
+`claude' uses Claude Haiku model via claude-agent-generate-title."
+  :type '(choice (const :tag "GitHub Copilot" copilot)
+                 (const :tag "Claude Haiku" claude))
   :group 'claude-org)
 #+END_SRC
 
@@ -2613,20 +2621,97 @@ Frees MARKER after use to prevent leak (F23)."
     (when (markerp marker)
       (set-marker marker nil)))
 
+;; Forward declarations for copilot-chat (optional dependency)
+(defvar copilot-chat--instances)
+(defvar copilot-chat--magic)
+(declare-function copilot-chat--create "copilot-chat-copilot" (directory &optional model type))
+(declare-function copilot-chat--ask "copilot-chat-copilot" (instance prompt callback &optional out-of-context))
+
+(defvar claude-org--copilot-title-instance nil
+  "Dedicated copilot-chat instance for title generation.")
+
+(defun claude-org--clean-title (title max-chars)
+  "Clean up a generated TITLE string, truncating to MAX-CHARS.
+Strips surrounding quotes and truncates with ellipsis if needed.
+Returns cleaned title or nil if empty."
+  (let ((cleaned (string-trim title)))
+    ;; Remove surrounding quotes
+    (when (and (>= (length cleaned) 2)
+               (string-match-p "^[\"'].*[\"']$" cleaned))
+      (setq cleaned (substring cleaned 1 -1)))
+    ;; Remove common bad prefixes
+    (when (string-match "^\\(?:Title:\\s-*\\|Here's\\s-*\\(?:a\\|the\\)\\s-*title:\\s-*\\)" cleaned)
+      (setq cleaned (substring cleaned (match-end 0))))
+    ;; Truncate if too long
+    (when (> (length cleaned) max-chars)
+      (setq cleaned (concat (substring cleaned 0 (- max-chars 3)) "...")))
+    (unless (string-empty-p cleaned)
+      cleaned)))
+
+(defun claude-org--generate-title-via-copilot (query on-title on-error)
+  "Generate a short title for QUERY using GitHub Copilot.
+ON-TITLE is called with the generated title string.
+ON-ERROR is called with an error message string."
+  (condition-case err
+      (progn
+        (require 'copilot-chat)
+        (require 'copilot-chat-copilot)
+        (require 'copilot-chat-common)
+        ;; Reuse or create a dedicated instance
+        (unless (and claude-org--copilot-title-instance
+                     (memq claude-org--copilot-title-instance
+                           copilot-chat--instances))
+          (setq claude-org--copilot-title-instance
+                (copilot-chat--create default-directory)))
+        (lexical-let ((accumulated "")
+                      (on-title-cb on-title)
+                      (on-error-cb on-error)
+                      (max-chars claude-agent-title-max-chars)
+                      (fired nil))
+          (copilot-chat--ask
+           claude-org--copilot-title-instance
+           (format "Generate a short title (5-8 words, max %d chars) for this text. Output ONLY the title, no quotes, no explanation:\n\n%s"
+                   max-chars
+                   (truncate-string-to-width query 500))
+           (lambda (_inst content)
+             (if (string= content copilot-chat--magic)
+                 ;; Response complete
+                 (unless fired
+                   (setq fired t)
+                   (let ((title (claude-org--clean-title accumulated max-chars)))
+                     (if title
+                         (funcall on-title-cb title)
+                       (funcall on-error-cb "Copilot returned empty title"))))
+               ;; Accumulate streamed tokens
+               (setq accumulated (concat accumulated content))))
+           t)))  ; out-of-context = t
+    (error
+     (funcall on-error (error-message-string err)))))
+
 (defun claude-org--maybe-auto-generate-title (query heading-marker)
   "Generate title for QUERY and update heading at HEADING-MARKER.
-Only runs if `claude-org-auto-generate-title' is non-nil."
+Only runs if `claude-org-auto-generate-title' is non-nil.
+Uses `claude-org-title-backend' to select the generation backend."
   (when claude-org-auto-generate-title
     (lexical-let ((marker heading-marker))
-      (claude-agent-generate-title
-       `((user . ,query))
-       :on-title (lambda (title)
-                   (claude-org--replace-heading-at-marker marker title))
-       :on-error (lambda (err)
-                   (message "Auto-title generation failed: %s" err)
-                   ;; Free marker on error too (F23)
-                   (when (markerp marker)
-                     (set-marker marker nil)))))))
+      (let ((on-title (lambda (title)
+                        (claude-org--replace-heading-at-marker marker title)))
+            (on-error (lambda (err)
+                        (message "Auto-title generation failed: %s" err)
+                        (when (markerp marker)
+                          (set-marker marker nil)))))
+        (pcase claude-org-title-backend
+          ('copilot
+           (claude-org--generate-title-via-copilot query on-title on-error))
+          ('claude
+           (claude-agent-generate-title
+            `((user . ,query))
+            :on-title on-title
+            :on-error on-error))
+          (_
+           (message "Unknown title backend: %s" claude-org-title-backend)
+           (when (markerp marker)
+             (set-marker marker nil))))))))
 #+END_SRC
 
 * Block Insertion
@@ -4281,7 +4366,7 @@ Supports loop execution via header arguments:
 When `claude-org-auto-create-response-section' is non-nil, creates a Response
 section with :ai_output: tag for flat pattern organization.
 When `claude-org-auto-generate-title' is non-nil, generates a title for
-headings matching `claude-org-auto-title-heading-pattern' using Haiku.
+headings matching `claude-org-auto-title-heading-pattern' (see `claude-org-title-backend').
 
 If the session is busy, queues the block for execution when current query completes."
   (interactive)
