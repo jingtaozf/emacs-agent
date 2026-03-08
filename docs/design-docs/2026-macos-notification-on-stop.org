@@ -1,0 +1,103 @@
+#+TITLE: Design: macOS Notification on Query Completion
+#+DATE: [2026-03-08]
+#+STATUS: implemented
+
+* Problem
+
+When a Claude Code query completes (Stop hook), the user may not be looking at
+Emacs. There is no alert — they discover it only when they switch back.
+
+* Goals
+
+- Play a sound and show a macOS Notification Center banner when a query completes
+- Work for all backends (JSON stream, iTerm2, native)
+- Zero external dependencies (macOS built-in =osascript= only)
+- User-configurable: enable/disable, choose sound, customize title
+
+* Non-Goals
+
+- Custom app icon or sender name (=osascript= always shows as "Script Editor")
+- Notifications for intermediate events (tool use, streaming tokens)
+- Linux/Windows support (macOS-only via AppleScript)
+
+* Design
+
+** Strategy: Notify from =claude-org-complete-hook=
+
+The completion hook already fires for all backends (JSON stream natively,
+iTerm2 via the Python bridge added in the previous commit). Adding a
+notification function to this hook means all backends get notifications
+with zero per-backend code.
+
+** Notification mechanism
+
+A single =osascript -e 'display notification ...'= call delivers both the
+banner and sound. Non-blocking via =start-process=.
+
+** Changes
+
+*** 1. User customization (=claude-org.org=)
+
+#+begin_src elisp
+(defcustom claude-org-notify-on-complete t
+  "When non-nil, show a macOS notification when a query completes."
+  :type 'boolean
+  :group 'claude-org)
+
+(defcustom claude-org-notify-sound "Glass"
+  "macOS sound name for completion notifications.
+Available sounds: Basso, Blow, Bottle, Frog, Funk, Glass, Hero,
+Morse, Ping, Pop, Purr, Sosumi, Submarine, Tink.
+Set to nil for silent notifications (banner only)."
+  :type '(choice (string :tag "Sound name")
+                 (const :tag "No sound" nil))
+  :group 'claude-org)
+#+end_src
+
+*** 2. Notification function (=claude-org.org=)
+
+#+begin_src elisp
+(defun claude-org--notify (title message &optional sound)
+  "Send a macOS desktop notification. Non-blocking."
+  (when (eq system-type 'darwin)
+    (let* ((sound-clause (if sound
+                             (format " sound name %S" sound)
+                           ""))
+           (script (format "display notification %S with title %S%s"
+                           message title sound-clause)))
+      (start-process "claude-notify" nil "osascript" "-e" script))))
+#+end_src
+
+*** 3. Hook function (=claude-org.org=)
+
+#+begin_src elisp
+(defun claude-org--notify-on-complete (session-key _result status)
+  "Send macOS notification on query completion.
+STATUS is `completed' or `error'."
+  (when claude-org-notify-on-complete
+    (let* ((buf (claude-org--session-get session-key :source-buffer))
+           (buf-name (if (and buf (buffer-live-p buf))
+                         (file-name-nondirectory (buffer-file-name buf))
+                       "query"))
+           (title (if (eq status 'error)
+                      "Claude: Error"
+                    "Claude: Complete"))
+           (message (format "%s finished" buf-name)))
+      (claude-org--notify title message claude-org-notify-sound))))
+
+(add-hook 'claude-org-complete-hook #'claude-org--notify-on-complete)
+#+end_src
+
+** What Doesn't Change
+
+- Hook infrastructure — =claude-org-complete-hook= already fires for all backends
+- Python code — no changes needed
+- Existing completion flow — notification is a side effect, not in the critical path
+
+** Implementation Order
+
+1. Add defcustoms for =claude-org-notify-on-complete= and =claude-org-notify-sound=
+2. Add =claude-org--notify= utility function
+3. Add =claude-org--notify-on-complete= hook function
+4. Register on =claude-org-complete-hook=
+5. Reload and test

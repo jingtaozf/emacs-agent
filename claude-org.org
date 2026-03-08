@@ -401,6 +401,49 @@ Default matches \"Instruction 1\", \"Instruction 2\", etc."
   :type '(choice (const :tag "GitHub Copilot" copilot)
                  (const :tag "Claude Haiku" claude))
   :group 'claude-org)
+
+(defcustom claude-org-notify-on-complete t
+  "When non-nil, show a macOS notification when a query completes."
+  :type 'boolean
+  :group 'claude-org)
+
+(defcustom claude-org-notify-sound "Glass"
+  "macOS sound name for completion notifications.
+Available sounds: Basso, Blow, Bottle, Frog, Funk, Glass, Hero,
+Morse, Ping, Pop, Purr, Sosumi, Submarine, Tink.
+Set to nil for silent notifications (banner only)."
+  :type '(choice (string :tag "Sound name")
+                 (const :tag "No sound" nil))
+  :group 'claude-org)
+#+END_SRC
+
+** macOS Notifications
+
+Send a desktop notification with sound when a query completes.
+Uses =osascript= (built into macOS, zero dependencies).
+
+#+BEGIN_SRC elisp
+(defun claude-org--notify (title message &optional sound)
+  "Send a macOS desktop notification with optional SOUND. Non-blocking."
+  (when (eq system-type 'darwin)
+    (let* ((sound-clause (if sound
+                             (format " sound name %S" sound)
+                           ""))
+           (script (format "display notification %S with title %S%s"
+                           message title sound-clause)))
+      (start-process "claude-notify" nil "osascript" "-e" script))))
+
+(defun claude-org--notify-on-complete (session-key _result status)
+  "Send macOS notification on query completion.
+STATUS is `completed' or `error'.  Added to `claude-org-complete-hook'."
+  (when claude-org-notify-on-complete
+    (let* ((title (if (eq status 'error)
+                      "Claude: Error"
+                    "Claude: Complete"))
+           (message (format "%s" (or (buffer-name) "query"))))
+      (claude-org--notify title message claude-org-notify-sound))))
+
+(add-hook 'claude-org-complete-hook #'claude-org--notify-on-complete)
 #+END_SRC
 
 ** Execution Hooks
