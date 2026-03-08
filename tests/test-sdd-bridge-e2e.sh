@@ -78,7 +78,7 @@ test_single_prompt() {
 
   echo '{"prompt":"explain this function","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -102,12 +102,12 @@ test_single_response() {
   # Insert a prompt first
   echo '{"prompt":"explain this function","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   # Simulate Stop hook with last_assistant_message (as real Claude CLI does)
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"This function takes a list and returns the first element."}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -130,20 +130,20 @@ test_multi_turn() {
   # Turn 1
   echo '{"prompt":"what does this module do?","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"This module handles HTTP routing."}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   # Turn 2
   echo '{"prompt":"show me the main entry point","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"The main entry point is the start-server function on line 42."}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   # Assert counts
   local instr_count resp_count
@@ -171,12 +171,12 @@ test_tool_response_text_only() {
 
   echo '{"prompt":"read the config file","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   # last_assistant_message is always text-only (Claude CLI strips tool calls)
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"The config file contains database settings with host=localhost and port=5432."}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -193,7 +193,7 @@ test_mcp_unreachable() {
   echo '{"prompt":"test prompt","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="/tmp/test-sdd-tc5.org" SDD_SESSION_ID="sdd-test-tc5" \
       EMACS_MCP_URL="http://localhost:19999/mcp" \
-      bash scripts/sdd-bridge.sh prompt 2>/dev/null
+      uv run --project python sdd-bridge prompt 2>/dev/null
   local exit_code=$?
   assert_equals "$exit_code" "0"
 }
@@ -209,7 +209,7 @@ test_empty_prompt_ignored() {
 
   echo '{"prompt":"","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   local instr_count
   instr_count=$(count_headings "$org_file" "Instruction [0-9]")
@@ -249,20 +249,20 @@ test_response_with_org_headings() {
   # Turn 1: prompt + response containing ** and *** org headings
   echo '{"prompt":"1+1","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   printf '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"Here is the answer:\\n\\n** Heading Level 2\\n\\nSome content\\n\\n*** Heading Level 3\\n\\nMore content"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   # Turn 2: prompt + response
   echo '{"prompt":"2+2","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"4"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   # Verify structure using raw text between known headings (not org-end-of-subtree,
   # which is the function that's broken by embedded org headings).
@@ -328,17 +328,17 @@ test_response_after_new_prompt_inserted() {
   # Prompt A
   echo '{"prompt":"research terminals","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   # Prompt B inserted BEFORE response A arrives
   echo '{"prompt":"fix the bug","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   # Response A arrives late
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"Terminal research results: iTerm2 is the best."}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -368,7 +368,7 @@ test_large_response_with_many_org_headings() {
 
   echo '{"prompt":"research terminals","session_id":"cli-001","transcript_path":"/dev/null"}' \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh prompt >/dev/null
+      uv run --project python sdd-bridge prompt >/dev/null
 
   # Build a large response similar to the terminal research one
   local big_response
@@ -426,7 +426,7 @@ RESP
   printf '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":%s}' \
     "$(printf '%s' "$big_response" | jq -Rs .)" \
     | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      bash scripts/sdd-bridge.sh response >/dev/null
+      uv run --project python sdd-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -452,7 +452,7 @@ RESP
 # ---------------------------------------------------------------------------
 test_launcher_fails_fast() {
   EMACS_MCP_URL="http://localhost:19999/mcp" \
-    timeout 10 bash scripts/claude-sdd /tmp/test-sdd-tc8.org sdd-test-tc8 2>/dev/null
+    timeout 10 uv run --project python claude-sdd /tmp/test-sdd-tc8.org sdd-test-tc8 2>/dev/null
   local exit_code=$?
   assert_not_equals "$exit_code" "0"
   # 124 = timeout, which means it didn't fail fast

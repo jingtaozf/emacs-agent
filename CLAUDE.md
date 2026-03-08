@@ -12,7 +12,8 @@ make test-backend-unit  # Run backend protocol unit tests
 make test-mock          # Run mock CLI tests (no API, fast)
 make test-integration   # Run integration tests (requires API key)
 make lint               # Static analysis (undefined functions/variables)
-make check              # lint + test-unit (pre-commit gate)
+make test-python        # Run Python CLI tool tests
+make check              # lint + test-unit + test-python (pre-commit gate)
 ```
 
 ## Verification

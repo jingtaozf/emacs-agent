@@ -128,7 +128,7 @@ test_sdd_bridge_writes_status() {
     SDD_SESSION_ID="$test_id" \
     SDD_ORG_FILE="/tmp/fake.org" \
     EMACS_MCP_URL="$MCP_URL" \
-    bash "$PROJECT_DIR/scripts/sdd-bridge.sh" prompt 2>/dev/null || true
+    uv run --project "$PROJECT_DIR/python" sdd-bridge prompt 2>/dev/null || true
 
   # Check status file was written
   [ -f "$status_dir/$test_id" ] || return 1
@@ -141,7 +141,7 @@ test_sdd_bridge_writes_status() {
     SDD_SESSION_ID="$test_id" \
     SDD_ORG_FILE="/tmp/fake.org" \
     EMACS_MCP_URL="$MCP_URL" \
-    bash "$PROJECT_DIR/scripts/sdd-bridge.sh" response 2>/dev/null || true
+    uv run --project "$PROJECT_DIR/python" sdd-bridge response 2>/dev/null || true
 
   status=$(cat "$status_dir/$test_id")
   [ "$status" = "ready" ] || return 1
@@ -159,7 +159,7 @@ test_activity_mode_line_variable() {
 test_iterm2_ctl_list() {
   # Verify iterm2-ctl.py list works (returns JSON array)
   local result
-  result=$(python3 "$PROJECT_DIR/scripts/iterm2-ctl.py" list 2>/dev/null) || return 1
+  result=$(python3 "$PROJECT_DIR/python/claude_agent/iterm2_ctl.py" list 2>/dev/null) || return 1
   echo "$result" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null
 }
 

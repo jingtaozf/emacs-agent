@@ -538,6 +538,41 @@ causing fallthrough to json-stream backend."
         (should (string-match-p "cli-uuid-999" cmd))
         (should (string-match-p "--model" cmd))))))
 
+(ert-deftest test-iterm2-build-command-extra-args-from-org-property ()
+  "CLAUDE_EXTRA_ARGS org property is included in launch command."
+  :tags '(:unit :iterm2 :e2e)
+  (let ((claude-org-iterm2-launch-command 'claude-sdd)
+        (claude-org-iterm2-extra-args nil))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Story\n:PROPERTIES:\n:CLAUDE_SESSION_ID: sdd-X\n"
+              ":CLAUDE_EXTRA_ARGS: --model opus --verbose\n:END:\n")
+      (goto-char (point-min))
+      (org-next-visible-heading 1)
+      (let ((cmd (claude-org-iterm2--build-launch-command
+                  "/tmp/test.org" "sdd-X" "/tmp")))
+        (should (string-match-p "--model" cmd))
+        (should (string-match-p "opus" cmd))
+        (should (string-match-p "--verbose" cmd))))))
+
+(ert-deftest test-iterm2-build-command-extra-args-merged ()
+  "CLAUDE_EXTRA_ARGS property merges with defcustom extra-args."
+  :tags '(:unit :iterm2 :e2e)
+  (let ((claude-org-iterm2-launch-command 'claude-sdd)
+        (claude-org-iterm2-extra-args '("--debug")))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* Story\n:PROPERTIES:\n:CLAUDE_SESSION_ID: sdd-X\n"
+              ":CLAUDE_EXTRA_ARGS: --model opus\n:END:\n")
+      (goto-char (point-min))
+      (org-next-visible-heading 1)
+      (let ((cmd (claude-org-iterm2--build-launch-command
+                  "/tmp/test.org" "sdd-X" "/tmp")))
+        ;; Both defcustom and property args present
+        (should (string-match-p "--debug" cmd))
+        (should (string-match-p "--model" cmd))
+        (should (string-match-p "opus" cmd))))))
+
 (ert-deftest test-iterm2-build-command-custom-string ()
   "Custom string command passes through."
   :tags '(:unit :iterm2 :e2e)
@@ -664,19 +699,19 @@ REGRESSION: Path resolved from load-file-name which differs per install."
 ;;; ============================================================================
 
 (ert-deftest test-iterm2-sdd-bridge-prompt-writes-busy ()
-  "sdd-bridge.sh prompt event writes 'busy' to status file."
+  "sdd-bridge prompt event writes 'busy' to status file."
   :tags '(:unit :iterm2 :e2e)
   (let* ((test-id (format "test-bridge-%d" (random 100000)))
          (status-dir "/tmp/claude-agent-status")
          (status-file (expand-file-name test-id status-dir))
-         (bridge (expand-file-name "scripts/sdd-bridge.sh"
-                                   test-iterm2--project-root)))
+         (project-dir (expand-file-name "python"
+                                        test-iterm2--project-root)))
     (make-directory status-dir t)
     (unwind-protect
         (progn
           (call-process-shell-command
-           (format "echo '{\"prompt\":\"test\"}' | SDD_SESSION_ID='%s' SDD_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' bash '%s' prompt"
-                   test-id bridge)
+           (format "echo '{\"prompt\":\"test\"}' | SDD_SESSION_ID='%s' SDD_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' uv run --project '%s' sdd-bridge prompt"
+                   test-id project-dir)
            nil nil nil)
           (should (file-exists-p status-file))
           (should (equal "busy"
@@ -686,19 +721,19 @@ REGRESSION: Path resolved from load-file-name which differs per install."
       (when (file-exists-p status-file) (delete-file status-file)))))
 
 (ert-deftest test-iterm2-sdd-bridge-response-writes-ready ()
-  "sdd-bridge.sh response event writes 'ready' to status file."
+  "sdd-bridge response event writes 'ready' to status file."
   :tags '(:unit :iterm2 :e2e)
   (let* ((test-id (format "test-bridge-%d" (random 100000)))
          (status-dir "/tmp/claude-agent-status")
          (status-file (expand-file-name test-id status-dir))
-         (bridge (expand-file-name "scripts/sdd-bridge.sh"
-                                   test-iterm2--project-root)))
+         (project-dir (expand-file-name "python"
+                                        test-iterm2--project-root)))
     (make-directory status-dir t)
     (unwind-protect
         (progn
           (call-process-shell-command
-           (format "echo '{\"last_assistant_message\":\"hi\"}' | SDD_SESSION_ID='%s' SDD_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' bash '%s' response"
-                   test-id bridge)
+           (format "echo '{\"last_assistant_message\":\"hi\"}' | SDD_SESSION_ID='%s' SDD_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' uv run --project '%s' sdd-bridge response"
+                   test-id project-dir)
            nil nil nil)
           (should (file-exists-p status-file))
           (should (equal "ready"
@@ -1003,61 +1038,6 @@ passed to claude-sdd. FIX: build-launch-command should read CLAUDE_CLI_SESSION \
 and pass it as extra arg to claude-sdd.")
       ;; Must contain the actual CLI session UUID
       (should (string-match-p "abc123-cli-session-uuid" launch-cmd)))))
-
-;;; ============================================================================
-;;; Issue 2: MCP eval diagnostics in claude-sdd
-;;; ============================================================================
-
-(ert-deftest test-iterm2-claude-sdd-bash-empty-array-safe ()
-  "claude-sdd must not fail on empty arrays with bash 3.2 + set -u.
-REGRESSION: macOS default /bin/bash (3.2) errors on ${EMPTY[@]} with
-set -u. When MCP is unavailable, PROMPT_ARGS and RESUME_ARGS are empty
-arrays, causing silent script failure at the claude invocation line.
-FIX: Use ${arr[@]+\"${arr[@]}\"} pattern for potentially empty arrays."
-  :tags '(:unit :iterm2 :e2e :regression)
-  (let ((sdd-script (expand-file-name "scripts/claude-sdd"
-                                       test-iterm2--project-root)))
-    (skip-unless (file-exists-p sdd-script))
-    ;; Test the safe pattern: ${arr[@]+"${arr[@]}"} with /bin/bash
-    ;; This is the pattern claude-sdd uses for PROMPT_ARGS, RESUME_ARGS, EXTRA_ARGS
-    (let ((exit-code
-           (call-process "/bin/bash" nil nil nil "-c"
-                         (concat
-                          "set -euo pipefail\n"
-                          "PLUGIN_ARGS=(--plugin-dir /tmp)\n"
-                          "MCP_ARGS=(--mcp-config '{}')\n"
-                          "PROMPT_ARGS=()\n"
-                          "RESUME_ARGS=()\n"
-                          "EXTRA_ARGS=()\n"
-                          ;; Safe pattern: ${arr[@]+"${arr[@]}"}
-                          "echo "
-                          "\"${PLUGIN_ARGS[@]}\" "
-                          "\"${MCP_ARGS[@]}\" "
-                          "${PROMPT_ARGS[@]+\"${PROMPT_ARGS[@]}\"} "
-                          "${RESUME_ARGS[@]+\"${RESUME_ARGS[@]}\"} "
-                          "${EXTRA_ARGS[@]+\"${EXTRA_ARGS[@]}\"} "
-                          ">/dev/null 2>&1"))))
-      (should-with-fix (= 0 exit-code)
-        "Safe array expansion pattern fails on macOS bash 3.2 with set -u. \
-The ${arr[@]+\"${arr[@]}\"} pattern should work but didn't."))))
-
-(ert-deftest test-iterm2-bash32-broken-empty-array-confirms-bug ()
-  "Confirm that macOS bash 3.2 DOES break on plain ${EMPTY[@]} + set -u.
-This is the regression guard: if this test starts passing, the safe
-pattern in claude-sdd may no longer be needed (but keep it anyway)."
-  :tags '(:unit :iterm2 :e2e)
-  ;; /bin/bash on macOS is 3.2 — plain empty array expansion SHOULD fail
-  (let ((exit-code
-         (call-process "/bin/bash" nil nil nil "-c"
-                       (concat
-                        "set -euo pipefail\n"
-                        "EMPTY=()\n"
-                        "echo \"${EMPTY[@]}\" >/dev/null 2>&1"))))
-    ;; On bash 3.2 this fails (exit 1). On bash 5+ it succeeds.
-    ;; Skip if bash is new enough that the bug doesn't exist.
-    (when (= 0 exit-code)
-      (ert-skip "/bin/bash handles empty arrays — not bash 3.2"))
-    (should (= 1 exit-code))))
 
 (provide 'test-iterm2-e2e-simulated)
 ;;; test-iterm2-e2e-simulated.el ends here

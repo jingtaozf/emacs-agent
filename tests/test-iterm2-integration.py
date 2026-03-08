@@ -28,7 +28,7 @@ from iterm2_fixtures import (
 
 import iterm2
 
-CTL = os.path.join(PROJECT_DIR, "scripts", "iterm2-ctl.py")
+CTL = os.path.join(PROJECT_DIR, "python", "claude_agent", "iterm2_ctl.py")
 
 PASS = 0
 FAIL = 0

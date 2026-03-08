@@ -5,10 +5,13 @@ import os
 
 import pytest
 
+from unittest.mock import MagicMock
+
 from claude_agent.sdd_bridge import (
     _escape_elisp_string,
     _extract_full_response,
     _format_todos_as_elisp,
+    handle_prompt,
     write_status,
 )
 
@@ -166,3 +169,48 @@ class TestFormatTodosAsElisp:
         todos = [{"content": "X", "status": "pending", "priority": '1) (evil'}]
         result = _format_todos_as_elisp(todos)
         assert ':priority 0' in result
+
+
+class TestHandlePromptFiltering:
+    """Test that handle_prompt skips non-human prompts."""
+
+    def _make_mcp(self):
+        mcp = MagicMock()
+        mcp.eval_elisp = MagicMock(return_value="ok")
+        return mcp
+
+    def test_normal_prompt_calls_mcp(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        mcp = self._make_mcp()
+        handle_prompt(mcp, {"prompt": "explain this function"}, "/tmp/f.org", "sid")
+        assert mcp.eval_elisp.called
+
+    def test_task_notification_skipped(self, tmp_path, monkeypatch):
+        """Task notifications from background agents should not create Instruction headings."""
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        mcp = self._make_mcp()
+        prompt = (
+            '<task-notification>\n'
+            '<task-id>abc123</task-id>\n'
+            '<status>completed</status>\n'
+            '<summary>Agent "Research" completed</summary>\n'
+            '<result>Found the answer.</result>\n'
+            '</task-notification>'
+        )
+        handle_prompt(mcp, {"prompt": prompt}, "/tmp/f.org", "sid")
+        # Should NOT call eval_elisp to insert a prompt
+        assert not mcp.eval_elisp.called
+
+    def test_system_reminder_skipped(self, tmp_path, monkeypatch):
+        """System reminders injected by CLI should not create Instruction headings."""
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        mcp = self._make_mcp()
+        prompt = '<system-reminder>\nThe task tools haven\'t been used recently.\n</system-reminder>'
+        handle_prompt(mcp, {"prompt": prompt}, "/tmp/f.org", "sid")
+        assert not mcp.eval_elisp.called
+
+    def test_empty_prompt_skipped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        mcp = self._make_mcp()
+        handle_prompt(mcp, {"prompt": ""}, "/tmp/f.org", "sid")
+        assert not mcp.eval_elisp.called

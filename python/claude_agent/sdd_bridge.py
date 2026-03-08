@@ -58,6 +58,10 @@ def handle_prompt(
     if not prompt:
         return
 
+    # Skip system-injected messages — these are not human prompts
+    if prompt.lstrip().startswith("<"):
+        return
+
     save_sexp = _build_save_cli_session_sexp(
         org_file, session_id, input_data.get("session_id", "")
     )

@@ -566,13 +566,20 @@ lint:
 		-l tests/test-static-analysis.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :static))"
 
-# Release checks - runs lint + unit tests
+# Python package tests
+.PHONY: test-python
+test-python:
+	@echo "Running Python package tests..."
+	cd python && uv run pytest -v
+
+# Release checks - runs lint + unit tests + python tests
 .PHONY: check
-check: lint test-unit
+check: lint test-unit test-python
 	@echo ""
 	@echo "Pre-release checks completed:"
 	@echo "  - Static analysis: PASSED"
 	@echo "  - Unit tests: PASSED"
+	@echo "  - Python tests: PASSED"
 
 .PHONY: package
 package: clean check
