@@ -5916,44 +5916,49 @@ Navigates to the SDD section and reuses existing prompt-building logic."
 #+BEGIN_SRC elisp
 (defun claude-org-sdd-bridge-insert-prompt (org-file session-id prompt)
   "Insert PROMPT as a new AI block in the SDD Workflow for SESSION-ID in ORG-FILE.
-Creates a new Instruction N subsection under the Workflow heading."
+Creates a new Instruction N subsection under the Workflow heading.
+Returns the CUSTOM_ID string for correlating with the Stop hook."
   (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (save-excursion
-      (save-restriction
-        (widen)
-        (claude-org-sdd-bridge--find-workflow session-id)
-        (let* ((workflow-level (org-current-level))
-               (instr-level (1+ workflow-level))
-               (stars (make-string instr-level ?*))
-               ;; Use regex to find workflow boundary (safe against embedded headings)
-               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
-                              workflow-level (point-max)))
-               (instr-count 0))
-          ;; Count existing instructions by tag (headings may be renamed by auto-title)
-          (save-excursion
-            (while (re-search-forward
-                    (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
-                    workflow-end t)
-              (setq instr-count (1+ instr-count))))
-          (let ((next-num (1+ instr-count)))
-            ;; Go to end of workflow subtree to insert new instruction
-            (goto-char workflow-end)
-            ;; Ensure blank line before heading
-            (unless (bolp) (insert "\n"))
-            (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
-              (insert "\n"))
-            (insert (format "%s Instruction %d :%s:\n" stars next-num claude-org-heading-tag))
-            (let ((heading-marker (copy-marker (line-beginning-position 0))))
-              (insert ":PROPERTIES:\n")
-              (insert ":END:\n\n")
-              (insert "#+begin_src ai\n")
-              (insert prompt "\n")
-              (insert "#+end_src\n")
-              ;; Auto-generate a meaningful title for the heading
-              (when claude-org-auto-generate-title
-                (claude-org--maybe-auto-generate-title prompt heading-marker)))))))
-    (save-buffer)
-    (format "Inserted Instruction with prompt (%d chars)" (length prompt))))
+    (let ((custom-id nil))
+      (save-excursion
+        (save-restriction
+          (widen)
+          (claude-org-sdd-bridge--find-workflow session-id)
+          (let* ((workflow-level (org-current-level))
+                 (instr-level (1+ workflow-level))
+                 (stars (make-string instr-level ?*))
+                 ;; Use regex to find workflow boundary (safe against embedded headings)
+                 (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
+                                workflow-level (point-max)))
+                 (instr-count 0))
+            ;; Count existing instructions by tag (headings may be renamed by auto-title)
+            (save-excursion
+              (while (re-search-forward
+                      (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
+                      workflow-end t)
+                (setq instr-count (1+ instr-count))))
+            (let* ((instr-num (1+ instr-count))
+                   (file-base (file-name-sans-extension (file-name-nondirectory org-file))))
+              (setq custom-id (claude-org--generate-instruction-custom-id file-base instr-num session-id))
+              ;; Go to end of workflow subtree to insert new instruction
+              (goto-char workflow-end)
+              ;; Ensure blank line before heading
+              (unless (bolp) (insert "\n"))
+              (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
+                (insert "\n"))
+              (insert (format "%s Instruction %d :%s:\n" stars instr-num claude-org-heading-tag))
+              (let ((heading-marker (copy-marker (line-beginning-position 0))))
+                (insert ":PROPERTIES:\n")
+                (insert (format ":CUSTOM_ID: %s\n" custom-id))
+                (insert ":END:\n\n")
+                (insert "#+begin_src ai\n")
+                (insert prompt "\n")
+                (insert "#+end_src\n")
+                ;; Auto-generate a meaningful title for the heading
+                (when claude-org-auto-generate-title
+                  (claude-org--maybe-auto-generate-title prompt heading-marker)))))))
+      (save-buffer)
+      custom-id)))
 #+END_SRC
 
 ** Response Insertion
@@ -5982,12 +5987,17 @@ Returns the position, or LIMIT if none found."
           (line-beginning-position)
         limit))))
 
-(defun claude-org-sdd-bridge-insert-response (org-file session-id response)
-  "Insert RESPONSE as a Response section after the last AI block in ORG-FILE.
-Finds the SDD section by SESSION-ID, locates the last Instruction block,
-and creates a sibling Response N heading with :ai_output: tag.
-Org headings in response content are shifted to become subsections of
-the Response heading, preserving document structure."
+(defun claude-org-sdd-bridge--find-heading-by-custom-id (custom-id limit)
+  "Find heading with CUSTOM_ID before LIMIT.  Returns position or nil."
+  (save-excursion
+    (let ((pattern (format ":CUSTOM_ID: %s" (regexp-quote custom-id))))
+      (when (re-search-forward pattern limit t)
+        (org-back-to-heading t)
+        (point)))))
+
+(defun claude-org-sdd-bridge-insert-response (org-file session-id response instr-custom-id)
+  "Insert RESPONSE after the Instruction with INSTR-CUSTOM-ID in ORG-FILE.
+Org headings in response content are shifted to become subsections."
   (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
@@ -5996,37 +6006,35 @@ the Response heading, preserving document structure."
         (let* ((workflow-level (org-current-level))
                (instr-level (1+ workflow-level))
                (stars (make-string instr-level ?*))
-               ;; Use regex search to find workflow boundary, not org-end-of-subtree
-               ;; which gets confused by embedded org headings in response content.
                (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
                               workflow-level (point-max)))
-               ;; Find the last Instruction heading by :claude_chat: tag
-               ;; (headings may be renamed by auto-title)
-               (last-instr-pos nil)
-               (instr-count 0))
-          ;; Find last instruction by tag, not heading text
+               (instr-pos (claude-org-sdd-bridge--find-heading-by-custom-id
+                           instr-custom-id workflow-end))
+               (response-num 0))
+          (unless instr-pos
+            (error "Instruction %s not found under Workflow for session %s"
+                   instr-custom-id session-id))
+          ;; Count which instruction this is among siblings
           (save-excursion
-            (while (re-search-forward
-                    (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
-                    workflow-end t)
-              (setq last-instr-pos (line-beginning-position))
-              (setq instr-count (1+ instr-count))))
-          (unless last-instr-pos
-            (error "No Instruction heading found under Workflow for session %s" session-id))
-          ;; Find insertion point: after the last instruction, skip past any
-          ;; existing Response sibling (which may contain embedded org headings).
-          ;; Use regex to find the next real heading at instruction level.
-          (goto-char last-instr-pos)
+            (let ((found nil))
+              (while (and (not found)
+                          (re-search-forward
+                           (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
+                           workflow-end t))
+                (setq response-num (1+ response-num))
+                (when (= (line-beginning-position) instr-pos)
+                  (setq found t)))))
+          ;; Insert after the instruction's subtree
+          (goto-char instr-pos)
           (let ((insert-pos (claude-org-sdd-bridge--find-next-sibling-heading
                              instr-level workflow-end))
                 (timestamp (format-time-string "%Y-%m-%d %H:%M")))
             (goto-char insert-pos)
-            ;; Ensure blank line before heading
             (unless (bolp) (insert "\n"))
             (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
               (insert "\n"))
             (insert (format "%s Response %d (%s) :ai_output:\n"
-                            stars instr-count timestamp))
+                            stars response-num timestamp))
             (insert ":PROPERTIES:\n")
             (insert (format ":QUERY_TYPE: terminal\n"))
             (insert ":END:\n\n")
@@ -6064,11 +6072,10 @@ Returns the session ID string, or nil if none saved."
 ** Real-time Tool Output
 
 #+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-update-todos (org-file session-id todos)
-  "Update checkbox list under the last Instruction for SESSION-ID in ORG-FILE.
+(defun claude-org-sdd-bridge-update-todos (org-file session-id todos instr-custom-id)
+  "Update checkbox list under the Instruction with INSTR-CUSTOM-ID.
 TODOS is a list of plists with :content, :status, and :priority keys.
-Finds the last Instruction heading by tag, replaces or creates the checkbox
-list between the src block and any child headings."
+Replaces or creates the checkbox list between the src block and child headings."
   (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
@@ -6078,15 +6085,11 @@ list between the src block and any child headings."
                (instr-level (1+ workflow-level))
                (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
                               workflow-level (point-max)))
-               (last-instr-pos nil))
-          ;; Find last instruction by tag
-          (save-excursion
-            (while (re-search-forward
-                    (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
-                    workflow-end t)
-              (setq last-instr-pos (line-beginning-position))))
+               (last-instr-pos (claude-org-sdd-bridge--find-heading-by-custom-id
+                                instr-custom-id workflow-end)))
           (unless last-instr-pos
-            (error "No Instruction heading found under Workflow for session %s" session-id))
+            (error "Instruction %s not found under Workflow for session %s"
+                   instr-custom-id session-id))
           (goto-char last-instr-pos)
           ;; Find the end of the src block (#+end_src)
           (let* ((instr-end (claude-org-sdd-bridge--find-next-sibling-heading
@@ -6503,12 +6506,19 @@ SDD-SESSION-ID identifies the SDD story session."
 #+BEGIN_SRC elisp
 (defun claude-org-iterm2--write-from-emacs-flag (sdd-session-id)
   "Write flag file indicating the next prompt was sent from Emacs.
-sdd-bridge.sh checks this to skip duplicate instruction insertion."
+sdd-bridge.sh checks this to skip duplicate instruction insertion.
+Also writes the current instruction's CUSTOM_ID for response correlation."
   (let ((dir "/tmp/claude-agent-status"))
     (make-directory dir t)
     (with-temp-file (expand-file-name
                      (concat sdd-session-id ".from-emacs") dir)
-      (insert "1"))))
+      (insert "1"))
+    ;; Save CUSTOM_ID of the current instruction for response hook
+    (let ((custom-id (org-entry-get nil "CUSTOM_ID")))
+      (when custom-id
+        (with-temp-file (expand-file-name
+                         (concat sdd-session-id ".custom-id") dir)
+          (insert custom-id))))))
 
 (defun claude-org-iterm2--execute-ai-block ()
   "Execute current AI block via iTerm2 backend.

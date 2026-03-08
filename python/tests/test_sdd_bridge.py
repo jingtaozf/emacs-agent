@@ -11,6 +11,8 @@ from claude_agent.sdd_bridge import (
     _escape_elisp_string,
     _extract_full_response,
     _format_todos_as_elisp,
+    _read_custom_id,
+    _write_custom_id,
     handle_prompt,
     write_status,
 )
@@ -27,6 +29,23 @@ class TestWriteStatus:
         write_status("test-session", "busy")
         write_status("test-session", "ready")
         assert (tmp_path / "test-session").read_text() == "ready"
+
+
+class TestCustomIdPersistence:
+    def test_write_and_read(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        _write_custom_id("sid", "sdd-123-instr-3")
+        assert _read_custom_id("sid") == "sdd-123-instr-3"
+
+    def test_read_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        assert _read_custom_id("nonexistent") is None
+
+    def test_overwrite(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        _write_custom_id("sid", "sdd-123-instr-1")
+        _write_custom_id("sid", "sdd-123-instr-2")
+        assert _read_custom_id("sid") == "sdd-123-instr-2"
 
 
 class TestEscapeElispString:
@@ -182,8 +201,17 @@ class TestHandlePromptFiltering:
     def test_normal_prompt_calls_mcp(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
+        mcp.eval_elisp.return_value = "sid-instr-1"
         handle_prompt(mcp, {"prompt": "explain this function"}, "/tmp/f.org", "sid")
         assert mcp.eval_elisp.called
+
+    def test_prompt_saves_custom_id(self, tmp_path, monkeypatch):
+        """handle_prompt saves the instruction CUSTOM_ID returned by MCP."""
+        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        mcp = self._make_mcp()
+        mcp.eval_elisp.return_value = "sdd-123-instr-5"
+        handle_prompt(mcp, {"prompt": "do X"}, "/tmp/f.org", "sid")
+        assert _read_custom_id("sid") == "sdd-123-instr-5"
 
     def test_task_notification_skipped(self, tmp_path, monkeypatch):
         """Task notifications from background agents should not create Instruction headings."""

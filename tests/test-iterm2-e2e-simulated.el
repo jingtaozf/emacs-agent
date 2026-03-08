@@ -796,6 +796,9 @@ REGRESSION: Path resolved from load-file-name which differs per install."
 :END:
 
 *** Instruction 1 :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: sdd-resp-test-instr-1
+:END:
 
 #+begin_src ai
 What is 2+2?
@@ -831,7 +834,8 @@ because the response insertion path (sdd-bridge hooks) wasn't tested end-to-end.
                     ;; the Stop hook fires → sdd-bridge.sh → MCP evalElisp →
                     ;; claude-org-sdd-bridge-insert-response
                     (claude-org-sdd-bridge-insert-response
-                     tmp-file "sdd-resp-test" "The answer is 4.")
+                     tmp-file "sdd-resp-test" "The answer is 4."
+                     "sdd-resp-test-instr-1")
 
                     ;; 3. Verify response section exists in buffer
                     (goto-char (point-min))

@@ -21,6 +21,24 @@ def write_status(session_id: str, status: str) -> None:
         f.write(status)
 
 
+def _write_custom_id(session_id: str, custom_id: str) -> None:
+    """Save the active instruction CUSTOM_ID for prompt→response correlation."""
+    path = os.path.join(STATUS_DIR, f"{session_id}.custom-id")
+    with open(path, "w") as f:
+        f.write(custom_id)
+
+
+def _read_custom_id(session_id: str) -> str | None:
+    """Read the active instruction CUSTOM_ID, or None if not set."""
+    path = os.path.join(STATUS_DIR, f"{session_id}.custom-id")
+    try:
+        with open(path) as f:
+            value = f.read().strip()
+            return value if value else None
+    except FileNotFoundError:
+        return None
+
+
 def _escape_elisp_string(s: str) -> str:
     """Escape a string for embedding in an elisp double-quoted string."""
     return (
@@ -75,14 +93,17 @@ def handle_prompt(
     else:
         escaped_prompt = _escape_elisp_string(prompt)
         elisp = (
-            f'(progn '
             f'(claude-org-sdd-bridge-insert-prompt '
             f'"{_escape_elisp_string(org_file)}" '
             f'"{_escape_elisp_string(session_id)}" '
-            f'"{escaped_prompt}") '
-            f'{save_sexp})'
+            f'"{escaped_prompt}")'
         )
-        mcp.eval_elisp(elisp)
+        result = mcp.eval_elisp(elisp)
+        # Save instruction CUSTOM_ID for response correlation
+        if result:
+            _write_custom_id(session_id, result)
+        if save_sexp:
+            mcp.eval_elisp(save_sexp)
 
 
 def handle_response(
@@ -111,12 +132,17 @@ def handle_response(
         org_file, session_id, input_data.get("session_id", "")
     )
 
+    custom_id = _read_custom_id(session_id)
+    if not custom_id:
+        return  # No instruction to attach response to
+
     elisp = (
         f'(progn '
         f'(claude-org-sdd-bridge-insert-response '
         f'"{_escape_elisp_string(org_file)}" '
         f'"{_escape_elisp_string(session_id)}" '
-        f'"{_escape_elisp_string(response)}") '
+        f'"{_escape_elisp_string(response)}" '
+        f'"{_escape_elisp_string(custom_id)}") '
         f'{save_sexp})'
     )
     mcp.eval_elisp(elisp)
@@ -215,12 +241,17 @@ def _handle_todo_tool(
     if not todos:
         return
 
+    custom_id = _read_custom_id(session_id)
+    if not custom_id:
+        return  # No instruction to attach todos to
+
     elisp_todos = _format_todos_as_elisp(todos)
     elisp = (
         f'(claude-org-sdd-bridge-update-todos '
         f'"{_escape_elisp_string(org_file)}" '
         f'"{_escape_elisp_string(session_id)}" '
-        f"'{elisp_todos})"
+        f"'{elisp_todos} "
+        f'"{_escape_elisp_string(custom_id)}")'
     )
     mcp.eval_elisp(elisp)
 
