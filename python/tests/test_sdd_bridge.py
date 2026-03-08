@@ -14,6 +14,8 @@ from claude_agent.sdd_bridge import (
     _read_custom_id,
     _read_request_id,
     _write_custom_id,
+    handle_permission,
+    handle_permission_clear,
     handle_prompt,
     handle_response,
     write_status,
@@ -285,3 +287,56 @@ class TestHandlePromptFiltering:
         mcp = self._make_mcp()
         handle_prompt(mcp, {"prompt": ""}, "/tmp/f.org", "sid")
         assert not mcp.eval_elisp.called
+
+
+class TestHandlePermission:
+    """Tests for PreToolUse permission notification."""
+
+    def test_ask_user_question_notifies_emacs(self, capsys):
+        """AskUserQuestion triggers notification + returns ask."""
+        mcp = MagicMock()
+        handle_permission(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
+        call_arg = mcp.eval_elisp.call_args[0][0]
+        assert "claude-org-iterm2--permission-needed" in call_arg
+        assert "AskUserQuestion" in call_arg
+        output = json.loads(capsys.readouterr().out)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_exit_plan_mode_notifies_emacs(self, capsys):
+        """ExitPlanMode triggers notification + returns ask."""
+        mcp = MagicMock()
+        handle_permission(mcp, {"tool_name": "ExitPlanMode"}, "/tmp/f.org", "sid")
+        assert mcp.eval_elisp.called
+        output = json.loads(capsys.readouterr().out)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    def test_regular_tool_no_notification(self, capsys):
+        """Bash/Edit/etc. produce no output and no notification."""
+        mcp = MagicMock()
+        handle_permission(mcp, {"tool_name": "Bash"}, "/tmp/f.org", "sid")
+        assert not mcp.eval_elisp.called
+        assert capsys.readouterr().out == ""
+
+    def test_ask_even_on_mcp_failure(self, capsys):
+        """Permission decision is printed even if MCP call fails."""
+        mcp = MagicMock()
+        mcp.eval_elisp.side_effect = ConnectionError("unreachable")
+        handle_permission(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
+        output = json.loads(capsys.readouterr().out)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+class TestHandlePermissionClear:
+    """Tests for PostToolUse permission clear."""
+
+    def test_clears_in_emacs(self):
+        mcp = MagicMock()
+        handle_permission_clear(mcp, {"tool_name": "Bash"}, "/tmp/f.org", "sid")
+        call_arg = mcp.eval_elisp.call_args[0][0]
+        assert "claude-org-iterm2--permission-resolved" in call_arg
+        assert "sid" in call_arg
+
+    def test_swallows_mcp_errors(self):
+        mcp = MagicMock()
+        mcp.eval_elisp.side_effect = ConnectionError("gone")
+        handle_permission_clear(mcp, {}, "/tmp/f.org", "sid")  # should not raise

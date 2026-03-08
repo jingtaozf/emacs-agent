@@ -6461,11 +6461,13 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
                 (save-restriction
                   (claude-org-iterm2--goto-session-heading)
                   (org-set-property "ITERM2_SESSION_ID" result)))
-              ;; Store mapping for polling
+              ;; Store mapping for polling and permission-click lookup
               (when sdd-session-id
                 (claude-org--session-put
                  (claude-org--current-session-key)
-                 :iterm2-session result))
+                 :iterm2-session result)
+                (puthash sdd-session-id result
+                         claude-org-iterm2--sdd-to-iterm2))
               (save-buffer)
               (message "Claude Code in iTerm2 (session: %s)" result)
               result)))))
@@ -6637,6 +6639,85 @@ Sends Escape to the TUI. The Stop hook will fire and set-ready."
       (user-error "No iTerm2 session for this story"))
     (claude-org-iterm2--call "cancel" "--session" iterm2-id)
     (message "Cancel sent to Claude Code (waiting for hook...)")))
+
+(defun claude-org-iterm2--permission-needed (sdd-session-id tool-name)
+  "Handle notification that SDD-SESSION-ID needs permission for TOOL-NAME.
+Called by the PreToolUse hook via MCP. Registers the pending permission,
+brings Emacs to foreground, and sends macOS notification."
+  ;; Register pending permission
+  (puthash sdd-session-id tool-name claude-agent--pending-permissions)
+
+  ;; Bring Emacs to foreground
+  (claude-org-iterm2--activate-emacs)
+
+  ;; macOS notification
+  (claude-org--notify
+   "Claude: Permission Needed"
+   (format "%s needs approval for %s"
+           (claude-agent--permission-label sdd-session-id)
+           tool-name)
+   claude-org-notify-sound)
+
+  ;; Force immediate mode-line update
+  (claude-agent--update-activity-string)
+  "ok")
+
+(defun claude-org-iterm2--permission-resolved (sdd-session-id)
+  "Clear pending permission for SDD-SESSION-ID.
+Called by the PostToolUse hook via MCP, or by mode-line click. Idempotent."
+  (remhash sdd-session-id claude-agent--pending-permissions)
+  (claude-agent--update-activity-string)
+  "ok")
+
+(defun claude-org-iterm2--activate-emacs ()
+  "Bring Emacs to the foreground on macOS."
+  (when (eq system-type 'darwin)
+    (start-process "activate-emacs" nil
+                   "osascript" "-e"
+                   "tell application \"Emacs\" to activate"))
+  (raise-frame))
+
+(defun claude-org-iterm2--focus-by-sdd-session (sdd-session-id)
+  "Focus the iTerm2 tab associated with SDD-SESSION-ID."
+  (let ((iterm2-uuid (claude-org-iterm2--lookup-iterm2-session sdd-session-id)))
+    (when iterm2-uuid
+      (claude-org-iterm2--call "focus" "--session" iterm2-uuid))))
+
+(defvar claude-org-iterm2--sdd-to-iterm2 (make-hash-table :test 'equal)
+  "Map of SDD session-id → iTerm2 UUID for quick lookup from MCP calls.")
+
+(defun claude-org-iterm2--lookup-iterm2-session (sdd-session-id)
+  "Look up the iTerm2 UUID for SDD-SESSION-ID.
+Checks the fast in-memory map first, then falls back to scanning
+org buffers for the ITERM2_SESSION_ID property."
+  (or (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)
+      ;; Fallback: scan org buffers for property match
+      (let ((uuid (claude-org-iterm2--find-iterm2-uuid-in-buffers sdd-session-id)))
+        (when uuid
+          ;; Cache for next time
+          (puthash sdd-session-id uuid claude-org-iterm2--sdd-to-iterm2))
+        uuid)))
+
+(defun claude-org-iterm2--find-iterm2-uuid-in-buffers (sdd-session-id)
+  "Search org buffers for ITERM2_SESSION_ID on the heading with SDD-SESSION-ID."
+  (let ((session-pattern (concat ":CLAUDE_SESSION_ID: "
+                                 (regexp-quote sdd-session-id)))
+        (result nil))
+    (cl-dolist (buf (buffer-list))
+      (when (and (buffer-file-name buf)
+                 (string-suffix-p ".org" (buffer-file-name buf)))
+        (with-current-buffer buf
+          (save-excursion
+            (save-restriction
+              (widen)
+              (goto-char (point-min))
+              (when (re-search-forward session-pattern nil t)
+                (org-back-to-heading t)
+                (let ((uuid (org-entry-get nil "ITERM2_SESSION_ID")))
+                  (when (and uuid (not (string-prefix-p "Warning" uuid)))
+                    (setq result uuid)
+                    (cl-return result)))))))))
+    result))
 #+END_SRC
 
 * Package Footer

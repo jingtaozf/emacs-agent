@@ -1,0 +1,1081 @@
+#+TITLE: Design: IDE Integration for SDD Stories
+#+DATE: [2026-03-08]
+#+STATUS: draft
+
+* Problem
+
+Claude Code has an IDE integration protocol that provides rich editor features:
+file open, diagnostics, selection tracking, interactive diff review, workspace
+folders, and open editors tracking. The =monet= package implements this protocol
+for Emacs via a WebSocket MCP server with lockfile discovery.
+
+Currently, monet is a standalone package. SDD stories launched via =claude-sdd=
+don't get IDE features. This means Claude Code running in iTerm2 can't see
+diagnostics, can't show diffs for review, and can't track the user's selection
+in Emacs.
+
+* Goals
+
+- Migrate monet into claude-agent as =claude-ide.org= (literate programming style)
+- Pass =--ide= flag to Claude Code when launching via =claude-sdd=
+- Auto-start an IDE WebSocket server per SDD story, ensure lockfile exists
+  and server is ready *before* Claude Code launches
+- Store the IDE port per SDD session in Emacs for lifecycle management
+- Auto-stop the IDE server when the Claude Code process exits for that SDD session
+- Migrate monet's test (=test-diff-visibility.el=) into =tests/=
+
+* Non-Goals
+
+- IDE support for the JSON stream backend (it doesn't launch a Claude CLI
+  process that could read lockfiles)
+- Changing the IDE protocol itself
+- Supporting multiple IDE servers per SDD story
+
+* Architecture
+
+** How the IDE Protocol Works
+
+1. =claude-ide-start-server= picks a random port, starts a WebSocket server
+   on localhost, writes =$HOME/.claude/ide/<port>.lock= with workspace metadata
+2. Claude Code (launched with =--ide=) reads =~/.claude/ide/*.lock=, matches
+   =workspaceFolders= against its working directory, connects via WebSocket
+3. IDE tools (diagnostics, selection, diff, file operations) are served over
+   the WebSocket using MCP JSON-RPC 2.0
+4. =claude-ide-stop-server= closes the WebSocket and removes the lockfile
+
+** Lockfile Format
+
+#+begin_src json
+{
+  "pid": 12345,
+  "workspaceFolders": ["/path/to/project"],
+  "ideName": "Emacs (session-key)",
+  "transport": "ws",
+  "authToken": "uuid"
+}
+#+end_src
+
+Claude Code matches =workspaceFolders= against its own =--cwd= directory.
+
+* Design
+
+** Phase 1: Migrate monet into claude-agent
+
+*** New file: =claude-ide.org=
+
+Convert =monet.el= (93KB) into literate org format following the project's
+conventions. Rename the =monet-= prefix to =claude-ide-=. Key sections:
+
+| Section            | Content                                                   |
+|--------------------+-----------------------------------------------------------|
+| WebSocket Server   | Port selection, server start/stop, lockfile management    |
+| MCP Protocol       | Initialize, tools/list, tools/call dispatch               |
+| IDE Tools          | Selection, diagnostics, file ops, workspace, open editors |
+| Diff Tools         | Simple diff, ediff, deferred response pattern             |
+| Session Management | Session struct, hash table, hooks                         |
+| External Tool API  | Register/unregister tools at runtime                      |
+
+*** Migrate test
+
+Move =test-diff-visibility.el= to =tests/test-claude-ide-diff.el=, updating
+function references from =monet-= to =claude-ide-=.
+
+*** Module loading
+
+Add =claude-ide= to the module load list in =claude-org.org= alongside
+=claude-org-session=, =claude-org-queue=, etc. Load conditionally — if the
+=websocket= package is available (monet's only dependency).
+
+** Phase 2: SDD Integration
+
+*** =--ide= flag in =claude-sdd=
+
+In =build_claude_args= (=claude_sdd.py=), always append =--ide=:
+
+#+begin_src python
+args.append("--ide")
+#+end_src
+
+This tells Claude Code to look for IDE lockfiles.
+
+*** IDE server lifecycle per SDD session
+
+**** Start: ensure server before launch
+
+In =claude-org-iterm2--ensure-session=, after the emacs-mcp-server auto-start
+and *before* launching Claude Code:
+
+#+begin_src elisp
+(defun claude-org-iterm2--ensure-ide-server (project-root sdd-session-id)
+  "Ensure IDE WebSocket server is running for this SDD session.
+Starts the server if needed, stores the port in the session state.
+The lockfile must exist before Claude Code launches."
+  (let ((key (format "sdd-%s" sdd-session-id)))
+    (unless (claude-ide--session-alive-p key)
+      (let ((port (claude-ide-start-server-in-directory key project-root)))
+        ;; Store port for later cleanup
+        (claude-org-iterm2--save-ide-port sdd-session-id port)
+        (message "IDE server started on port %d for %s"
+                 port (file-name-nondirectory project-root))))))
+#+end_src
+
+The function blocks until the lockfile is written (synchronous — lockfile
+creation is part of =start-server-in-directory=).
+
+**** Port persistence
+
+Store the IDE port in a status file for cross-process access:
+
+- Elisp: write =/tmp/claude-agent-status/<sdd-session-id>.ide-port=
+- This allows the stop logic to find the right server to shut down
+
+Also store in the Emacs session hash for fast in-process lookup:
+
+#+begin_src elisp
+(claude-org--session-put session-key :ide-port port)
+(claude-org--session-put session-key :ide-session-key key)
+#+end_src
+
+**** Stop: =claude-sdd= process exit cleanup (primary)
+
+The primary cleanup mechanism runs in the =claude-sdd= Python process.
+
+**Problem with =os.execvp=**: Currently =claude_sdd.py= uses =os.execvp= to
+replace itself with the =claude= process. This means the Python process ceases
+to exist — =atexit= handlers never fire, no code runs after =claude= exits.
+
+**Solution**: Replace =os.execvp= with =subprocess.run=. The Python parent
+process stays alive while =claude= runs as a child. When =claude= exits
+(normally, crash, or kill), =subprocess.run= returns and cleanup code executes.
+
+#+begin_src python
+# Before (no cleanup possible):
+os.execvp(args[0], args)
+
+# After (cleanup runs when claude exits):
+import subprocess
+result = subprocess.run(args)
+cleanup_ide_server(mcp, session_id)
+sys.exit(result.returncode)
+#+end_src
+
+This works because =subprocess.run= with no I/O redirection inherits the
+parent's stdin/stdout/stderr, so Claude Code's interactive terminal works
+identically. Signal handling (Ctrl+C → SIGINT) is forwarded to the child
+automatically by the OS since both are in the same process group.
+
+**Cleanup function** calls Emacs MCP to stop the IDE server:
+
+#+begin_src python
+def cleanup_ide_server(mcp: McpClient, session_id: str) -> None:
+    """Stop the IDE server in Emacs for this SDD session."""
+    try:
+        key = f"sdd-{session_id}"
+        mcp.eval_elisp(
+            f'(condition-case nil '
+            f'  (claude-ide-stop-server "{key}") '
+            f'  (error nil))'
+        )
+    except Exception:
+        pass  # Best-effort — Emacs may be gone too
+#+end_src
+
+**=atexit= as belt-and-suspenders**: Register an =atexit= handler for the
+edge case where =subprocess.run= raises an exception (e.g., =KeyboardInterrupt=
+during setup) rather than returning normally:
+
+#+begin_src python
+import atexit
+
+def main():
+    # ... setup ...
+    atexit.register(cleanup_ide_server, mcp, session_id)
+    result = subprocess.run(args)
+    cleanup_ide_server(mcp, session_id)
+    atexit.unregister(cleanup_ide_server)  # avoid double-cleanup
+    sys.exit(result.returncode)
+#+end_src
+
+**** Stop: Emacs-side fallback mechanisms
+
+In addition to the Python-side primary cleanup:
+
+1. **=kill-emacs-hook=**: Stop all IDE servers when Emacs exits.
+
+#+begin_src elisp
+(add-hook 'kill-emacs-hook #'claude-ide-stop-all-servers)
+#+end_src
+
+2. **Dead session detection**: In =ensure-session=, when an iTerm2 session
+   is detected as dead, stop the old IDE server before relaunching.
+
+#+begin_src elisp
+(when (string= state "dead")
+  (claude-org-iterm2--stop-ide-server sdd-session-id))
+#+end_src
+
+3. **=claude-org-iterm2-cancel=**: When the user cancels and the terminal
+   closes, stop the IDE server.
+
+#+begin_src elisp
+(defun claude-org-iterm2--stop-ide-server (sdd-session-id)
+  "Stop the IDE server for SDD-SESSION-ID if running."
+  (let ((key (format "sdd-%s" sdd-session-id)))
+    (condition-case nil
+        (claude-ide-stop-server key)
+      (error nil))))
+#+end_src
+
+** Data Flow
+
+#+begin_src text
+  C-c C-c (iTerm2 backend)
+    │
+    ▼
+  claude-org-iterm2--ensure-session
+    │  ① Auto-start emacs-mcp-server (existing)
+    │  ② Ensure IDE server for project dir (NEW)
+    │     → claude-ide-start-server-in-directory
+    │     → lockfile written to ~/.claude/ide/<port>.lock
+    │     → port saved to session state + status file
+    │  ③ Launch Claude Code with --ide in iTerm2 (existing + --ide)
+    │
+    ▼
+  Claude Code starts with --ide flag
+    │  Reads ~/.claude/ide/*.lock
+    │  Matches workspaceFolders against --cwd
+    │  Connects via WebSocket to claude-ide server
+    │
+    ▼
+  IDE features active: diagnostics, selection, diff, file ops
+    │
+    ▼  (Claude Code exits)
+    │
+    ▼
+  subprocess.run returns in claude-sdd parent process
+    │  cleanup_ide_server() → MCP → Emacs stops IDE server
+    │  Lockfile removed, WebSocket closed
+    │  sys.exit(result.returncode)
+#+end_src
+
+** What Changes
+
+| Component                       | Change                                                |
+|---------------------------------+-------------------------------------------------------|
+| =claude-ide.org= (NEW)         | Migrated from monet.el, =claude-ide-= prefix          |
+| =tests/test-claude-ide-diff.el= (NEW) | Migrated from monet's test                      |
+| =claude-org.org=                | Load claude-ide module, wire into iTerm2 lifecycle     |
+| =claude_sdd.py=                 | =--ide= flag, =subprocess.run= + cleanup, =atexit=    |
+| =hooks/hooks.json=              | No change (cleanup via parent process, not hooks)      |
+| =claude-org.org= ensure-session | Call =ensure-ide-server= before launch                 |
+| =claude-org.org= ensure-session | Call =stop-ide-server= when dead session detected      |
+
+** What Doesn't Change
+
+- emacs-mcp-server — remains independent (HTTP for =evalElisp=)
+- hooks/hooks.json — no new hooks needed
+- Python sdd_bridge.py — IDE lifecycle managed in claude_sdd.py
+- The IDE protocol itself — identical to monet's implementation
+
+* TDD Specs
+
+** Python Tests (=tests/test_claude_sdd.py=)
+
+*** =TestBuildClaudeArgs=
+
+#+begin_src python
+def test_ide_flag_always_present():
+    """build_claude_args always includes --ide."""
+    args = build_claude_args("/plugin", "http://mcp", "", "", [])
+    assert "--ide" in args
+
+def test_ide_flag_with_extra_args():
+    """--ide coexists with extra args."""
+    args = build_claude_args("/plugin", "http://mcp", "", "", ["--verbose"])
+    assert "--ide" in args
+    assert "--verbose" in args
+#+end_src
+
+*** =TestCleanupIdeServer=
+
+#+begin_src python
+def test_cleanup_calls_mcp(self):
+    """cleanup_ide_server calls MCP to stop the IDE server."""
+    mcp = MagicMock()
+    cleanup_ide_server(mcp, "sdd-test-123")
+    assert mcp.eval_elisp.called
+    call_arg = mcp.eval_elisp.call_args[0][0]
+    assert "claude-ide-stop-server" in call_arg
+    assert "sdd-sdd-test-123" in call_arg
+
+def test_cleanup_swallows_errors(self):
+    """cleanup_ide_server does not raise even if MCP is unreachable."""
+    mcp = MagicMock()
+    mcp.eval_elisp.side_effect = ConnectionError("unreachable")
+    cleanup_ide_server(mcp, "test")  # should not raise
+
+def test_cleanup_with_empty_session(self):
+    """cleanup_ide_server handles empty session_id gracefully."""
+    mcp = MagicMock()
+    cleanup_ide_server(mcp, "")
+    assert mcp.eval_elisp.called
+#+end_src
+
+*** =TestMainSubprocessRun=
+
+#+begin_src python
+def test_main_uses_subprocess_run(self, monkeypatch):
+    """main() uses subprocess.run instead of os.execvp."""
+    # Verify os.execvp is NOT called
+    # Verify subprocess.run IS called with the claude args
+    # Verify cleanup_ide_server is called after subprocess.run returns
+    pass
+
+def test_main_propagates_exit_code(self, monkeypatch):
+    """main() exits with the same code as the claude subprocess."""
+    # Mock subprocess.run to return exit code 42
+    # Verify sys.exit(42) is called
+    pass
+
+def test_main_cleanup_on_keyboard_interrupt(self, monkeypatch):
+    """Cleanup runs even when subprocess.run is interrupted."""
+    # Mock subprocess.run to raise KeyboardInterrupt
+    # Verify cleanup still runs (via atexit or explicit handler)
+    pass
+#+end_src
+
+** Elisp Tests (=tests/test-claude-ide-lifecycle.el=)
+
+*** IDE Server Ensure
+
+#+begin_src elisp
+(ert-deftest test-ide-ensure-starts-server ()
+  "ensure-ide-server starts a new IDE server when none exists."
+  :tags '(:unit :ide)
+  ;; Mock claude-ide-start-server-in-directory to record calls
+  ;; Verify it's called with (format "sdd-%s" session-id) and project-root
+  ;; Verify IDE port is saved to status file
+  )
+
+(ert-deftest test-ide-ensure-reuses-existing ()
+  "ensure-ide-server does not start a new server if one exists for the session."
+  :tags '(:unit :ide)
+  ;; Pre-populate claude-ide--sessions with a live session
+  ;; Call ensure-ide-server
+  ;; Verify start-server-in-directory is NOT called
+  )
+#+end_src
+
+*** IDE Server Stop
+
+#+begin_src elisp
+(ert-deftest test-ide-stop-removes-session ()
+  "stop-ide-server cleans up the session."
+  :tags '(:unit :ide)
+  ;; Start a server, then stop it
+  ;; Verify session is removed from hash table
+  ;; Verify lockfile is deleted
+  )
+
+(ert-deftest test-ide-stop-idempotent ()
+  "stop-ide-server is safe to call when no server exists."
+  :tags '(:unit :ide)
+  (claude-org-iterm2--stop-ide-server "nonexistent-session"))
+#+end_src
+
+*** Port Persistence
+
+#+begin_src elisp
+(ert-deftest test-ide-port-save-and-read ()
+  "IDE port is persisted to status file and readable."
+  :tags '(:unit :ide)
+  ;; Save port 12345 for session "test-sid"
+  ;; Read back and verify it's 12345
+  ;; Clean up status file
+  )
+#+end_src
+
+** Elisp Tests (=tests/test-claude-ide-diff.el=)
+
+Migrated from monet's =test-diff-visibility.el= with =monet-= → =claude-ide-=
+prefix renaming. Tests diff visibility and cleanup logic.
+
+** Implementation Order
+
+1. Create =claude-ide.org= by converting monet.el to literate org format
+   - Rename =monet-= prefix to =claude-ide-=
+   - Follow project conventions (=defcustom=, internal =--= functions, etc.)
+2. Migrate =test-diff-visibility.el= → =tests/test-claude-ide-diff.el=
+3. Add =claude-ide= to module loading in =claude-org.org=
+4. Verify the migrated code works: =make test-smoke=, =make test-unit=
+5. Write TDD test stubs for Python (=test_claude_sdd.py=)
+6. Add =--ide= flag to =build_claude_args=
+7. Replace =os.execvp= with =subprocess.run= + =cleanup_ide_server= + =atexit=
+8. Write TDD test stubs for Elisp (=test-claude-ide-lifecycle.el=)
+9. Add =ensure-ide-server= and =stop-ide-server= to iTerm2 lifecycle
+10. Add =kill-emacs-hook= cleanup
+11. Test end-to-end with a real SDD story
+
+* Research: Capturing Claude Code Questions in Emacs
+
+** Problem
+
+When Claude Code is running in iTerm2, it sometimes pauses to ask the user
+questions (permission prompts, =AskUserQuestion= tool, clarification requests).
+The user must switch from Emacs to iTerm2 to answer. This breaks flow.
+
+** Goal
+
+Either:
+1. Capture questions in Emacs and let the user answer without switching (ideal)
+2. At minimum, notify the user in Emacs when Claude is waiting for input
+
+** Findings: Claude Code Hook System
+
+*** Available Hook Types
+
+| Hook Event          | Fires When                              | Can Return Decision? |
+|---------------------+-----------------------------------------+----------------------|
+| =PreToolUse=        | Before any tool executes                | Yes (allow/deny/ask) |
+| =PostToolUse=       | After any tool completes                | No                   |
+| =UserPromptSubmit=  | When user submits a prompt              | No                   |
+| =Stop=              | Claude finishes a turn                  | No                   |
+| =SubagentStop=      | Sub-agent finishes                      | No                   |
+| =PreCompact=        | Before context compaction               | No                   |
+| =Notification=      | Claude needs user attention             | No                   |
+| =SessionStart=      | Session begins/resumes                  | No                   |
+| =SessionEnd=        | Session terminates                      | No                   |
+
+*** Key Finding: No "Question" Hook Exists
+
+There is *no dedicated hook* that fires when Claude Code displays an interactive
+question or permission prompt in the terminal. Permission prompts are purely TTY
+interaction — Claude writes to the terminal and blocks on stdin.
+
+*** Three Mechanisms for Programmatic Permission Handling
+
+**** Mechanism 1: =PreToolUse= Hook with =permissionDecision=
+
+A =PreToolUse= hook can intercept tool execution and return a permission decision
+*before* the interactive prompt would appear:
+
+#+begin_src json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": "Approved by Emacs"
+  }
+}
+#+end_src
+
+Returning ="ask"= delegates to the normal interactive prompt. This is the most
+practical mechanism for the hooks.json approach.
+
+*Limitation*: The hook must respond within its timeout (default 10s). For
+questions that need human review, this requires an Emacs prompt that completes
+within the timeout.
+
+**** Mechanism 2: =--permission-prompt-tool stdio= (SDK Control Protocol)
+
+The SDK's bidirectional JSON protocol delivers permission requests as structured
+messages over stdout, and accepts allow/deny responses on stdin:
+
+#+begin_src json
+{
+  "type": "control_request",
+  "request_id": "req_1_abc123",
+  "request": {
+    "subtype": "can_use_tool",
+    "tool_name": "Bash",
+    "input": {"command": "rm -rf /tmp/test"},
+    "permission_suggestions": [...]
+  }
+}
+#+end_src
+
+This requires =--input-format stream-json --output-format stream-json
+--permission-prompt-tool stdio=. It is *not compatible* with the iTerm2 backend
+(which needs interactive terminal mode).
+
+**** Mechanism 3: =AskUserQuestion= Tool Interception
+
+Claude Code uses the =AskUserQuestion= tool when it needs to ask the user a
+question (not a permission prompt). This *does* fire =PreToolUse= hooks:
+
+#+begin_src json
+{
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "question": "Which database should I use?",
+    "options": ["PostgreSQL", "SQLite", "MySQL"]
+  }
+}
+#+end_src
+
+The native JSON-stream backend already handles this via
+=claude-agent-permission-ask-user-question= (in =permission.org:438=), which
+presents choices via =completing-read=. The iTerm2 backend does *not* intercept
+this — it goes to the terminal.
+
+** Existing Infrastructure in This Project
+
+*** What Already Works
+
+- =PreToolUse= handling exists in the native backend (=claude-agent-backend.org:874=)
+  via =claude-agent--run-permission-functions= → returns =permissionDecision=
+- =AskUserQuestion= interception exists in =permission.org:438= via
+  =completing-read= (native backend only)
+- macOS notifications already fire on =Stop= via =claude-org--notify=
+- Mode-line spinner shows busy/idle state
+- Status files at =/tmp/claude-agent-status/= track busy/ready per session
+
+*** What's Missing for iTerm2 Backend
+
+- No =PreToolUse= hook in =hooks.json= (only =UserPromptSubmit=, =PostToolUse=,
+  =Stop= are registered)
+- No =AskUserQuestion= interception for iTerm2 sessions
+- No screen-scraping for question detection (=detect_state= only returns
+  ready/busy/dead, not "waiting-for-input")
+- No notification when Claude is blocked on a permission prompt
+
+** Design Options
+
+*** Option A: =PreToolUse= Hook for Permission Proxy (Recommended)
+
+Add a =PreToolUse= hook to =hooks.json= that:
+1. Fires for all tools (or specific dangerous ones)
+2. Calls Emacs MCP to present the permission question
+3. User answers in Emacs (=y-or-n-p= or =completing-read=)
+4. Returns =permissionDecision= to Claude Code
+
+#+begin_src json
+{
+  "PreToolUse": [{
+    "hooks": [{
+      "type": "command",
+      "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python sdd-bridge permission",
+      "timeout": 30
+    }]
+  }]
+}
+#+end_src
+
+*Pros*: Works within existing hooks.json infrastructure. No terminal scraping.
+Captures tool name and input for informed decisions.
+
+*Cons*: Only handles tool permission prompts, not free-form questions.
+Timeout must be long enough for human response (30s+). Blocks Claude Code
+while waiting.
+
+*** Option B: =AskUserQuestion= Interception via =PreToolUse=
+
+Add a =PreToolUse= matcher specifically for =AskUserQuestion=:
+
+#+begin_src json
+{
+  "PreToolUse": [{
+    "matcher": "AskUserQuestion",
+    "hooks": [{
+      "type": "command",
+      "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python sdd-bridge question",
+      "timeout": 60
+    }]
+  }]
+}
+#+end_src
+
+The Python handler would:
+1. Extract the question text and options from =tool_input=
+2. Call Emacs MCP with an elisp expression that shows the question
+3. Wait for the user's answer (Emacs =completing-read= or minibuffer prompt)
+4. Return the answer to Claude Code (or return ="ask"= to fall through)
+
+*Pros*: Captures structured questions with options. User answers in Emacs.
+*Cons*: Only works for =AskUserQuestion= tool, not arbitrary permission prompts.
+
+*** Option C: Notification-Only (Minimal Viable)
+
+Don't try to answer questions from Emacs. Instead, add a =PreToolUse= hook
+that sends a macOS notification when Claude needs permission:
+
+#+begin_src python
+def handle_permission_notify(mcp, input_data, org_file, session_id):
+    tool_name = input_data.get("tool_name", "unknown")
+    mcp.eval_elisp(
+        f'(claude-org--notify "Claude needs permission" '
+        f'  "Tool: {tool_name} — switch to iTerm2")')
+    # Return "ask" to let normal terminal prompt happen
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask"
+        }
+    }))
+#+end_src
+
+*Pros*: Simple. No timeout issues. User still answers in terminal.
+*Cons*: Still requires switching to iTerm2.
+
+*** Option D: Terminal Screen Scraping (Fragile)
+
+Enhance =iterm2_ctl.py= =detect_state= to recognize question patterns in the
+terminal output and return a ="waiting"= state. Poll periodically.
+
+*Pros*: Catches all types of questions including free-form text.
+*Cons*: Fragile — depends on terminal rendering. Polling adds latency.
+Cannot answer from Emacs (still need to switch to iTerm2).
+
+** Recommendation
+
+Implement in phases:
+
+1. *Phase 1 (quick win)*: Option C — notification on =PreToolUse=. ~30 min.
+   User gets a macOS notification + Emacs mode-line indicator when Claude
+   needs attention. Still answers in iTerm2.
+
+2. *Phase 2 (high value)*: Option B — =AskUserQuestion= interception.
+   Captures structured questions and presents them in Emacs minibuffer.
+   User can answer without switching windows.
+
+3. *Phase 3 (full proxy)*: Option A — full permission proxy. Presents
+   tool name + input in Emacs, user approves/denies. Requires careful
+   timeout handling and a good UI for reviewing tool calls.
+
+** References
+
+- Claude Code hooks docs: https://docs.anthropic.com/en/docs/claude-code/hooks
+- SDK control protocol: =reference/claude-agent-sdk-python/src/claude_agent_sdk/_internal/query.py=
+- Existing permission handling: =claude-agent-backend.org:874= (=PreToolUse= handler)
+- Existing AskUserQuestion: =permission.org:438= (native backend only)
+- Hook wrapper: =bin/claude-agent-hook-wrapper=
+- Hook types: =reference/claude-agent-sdk-python/src/claude_agent_sdk/types.py:163=
+
+* Design: PreToolUse Permission Notification
+
+** Problem (Refined)
+
+When Claude Code pauses for permission (tool approval) or asks a question
+(=AskUserQuestion=), the user must manually notice and switch to iTerm2.
+With multiple SDD stories running concurrently, the user has no way to know
+*which* story needs attention or quickly jump to the right terminal tab.
+
+** Goals
+
+1. Detect when any SDD story's Claude Code is waiting for permission
+2. Bring Emacs to the foreground (user may be in another app)
+3. Show *which* SDD stories need attention in the mode-line
+4. Support multiple concurrent stories each waiting for input
+5. Click mode-line → focus the correct iTerm2 tab for that story
+6. Send macOS notification with sound
+
+** Non-Goals
+
+- Answering permission prompts from within Emacs (Phase 3 — future work)
+- Handling non-tool prompts (free-form terminal questions)
+- Changing the existing =PreToolUse= permission decision (always return ="ask"=)
+
+** Architecture
+
+*** Data Flow
+
+#+begin_src text
+  Claude Code (iTerm2 tab)
+    │  Needs permission for tool X
+    │
+    ▼
+  PreToolUse hook fires
+    │  stdin: {tool_name, tool_input, session_id, ...}
+    │
+    ▼
+  sdd-bridge permission (Python)
+    │  ① Call Emacs MCP: claude-org-iterm2--permission-needed
+    │  ② stdout: {"permissionDecision": "ask"}  (fall through to terminal)
+    │
+    ▼
+  Emacs receives MCP call
+    │  ① Register "waiting" state in claude-agent--pending-permissions
+    │  ② Update mode-line: [C:⚠ story1 story2]
+    │  ③ Bring Emacs frame to front (raise-frame + activate via AppleScript)
+    │  ④ macOS notification with sound
+    │  ⑤ User sees mode-line, clicks story name
+    │
+    ▼
+  Mode-line click handler (path A: user acknowledges)
+    │  ① Remove from claude-agent--pending-permissions
+    │  ② Update mode-line (⚠ disappears for this story)
+    │  ③ claude-org-iterm2--call "focus" --session <iterm2-uuid>
+    │  ④ iTerm2 tab activates, user answers the prompt
+
+  ── OR ──
+
+  PostToolUse hook fires (path B: tool already executed)
+    │  ① Call Emacs MCP: claude-org-iterm2--permission-resolved
+    │  ② Remove from claude-agent--pending-permissions
+    │  ③ Update mode-line (⚠ disappears for this story)
+#+end_src
+
+Two clearance paths ensure accurate mode-line: the user's click clears
+immediately (and focuses iTerm2), while =PostToolUse= auto-clears if the
+permission was already granted (user answered in iTerm2 directly, or the
+tool was auto-approved).
+
+*** State Model
+
+Each SDD session can be in one of these states:
+
+| State     | Mode-line | Cleared by                                |
+|-----------+-----------+-------------------------------------------|
+| idle      | (nothing) | —                                         |
+| busy      | =◐=       | =Stop= hook                               |
+| waiting   | =⚠=       | User clicks mode-line OR =PostToolUse= hook |
+
+The "waiting" state is purely in-memory (=claude-agent--pending-permissions=
+hash table). =PreToolUse= pushes state into Emacs via MCP. Two clearance
+paths: user click (acknowledges + focuses iTerm2), or =PostToolUse= hook
+(tool executed, permission was already granted).
+
+** Detailed Design
+
+*** 1. =hooks.json= Changes
+
+Add =PreToolUse= hook (all tools) and a catch-all =PostToolUse= to clear
+pending state when the tool executes:
+
+#+begin_src json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ ... }],
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python sdd-bridge permission",
+        "timeout": 5
+      }]
+    }],
+    "PostToolUse": [
+      {
+        "matcher": "TodoWrite",
+        "hooks": [{
+          "type": "command",
+          "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python sdd-bridge tool",
+          "timeout": 5
+        }]
+      },
+      {
+        "hooks": [{
+          "type": "command",
+          "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python sdd-bridge permission-clear",
+          "timeout": 5
+        }]
+      }
+    ],
+    "Stop": [{ ... }]
+  }
+}
+#+end_src
+
+=PreToolUse= timeout is short (5s) — we always return ="ask"= immediately.
+=PostToolUse= catch-all clears the ⚠ indicator (tool executed = permission resolved).
+
+*** 2. Python: =sdd_bridge.py= New Functions
+
+**** =handle_permission(mcp, input_data, org_file, session_id)=
+
+Called by =PreToolUse= hook. Steps:
+1. Extract =tool_name= from =input_data=
+2. Call Emacs MCP: =claude-org-iterm2--permission-needed=
+3. Print JSON to stdout with =permissionDecision: "ask"=
+
+No status files are written — the state lives only in Emacs memory.
+
+#+begin_src python
+def handle_permission(mcp, input_data, org_file, session_id):
+    tool_name = input_data.get("tool_name", "unknown")
+
+    # Notify Emacs (best-effort — don't block the permission decision)
+    try:
+        esc_sid = _escape_elisp_string(session_id)
+        esc_tool = _escape_elisp_string(tool_name)
+        mcp.eval_elisp(
+            f'(claude-org-iterm2--permission-needed "{esc_sid}" "{esc_tool}")'
+        )
+    except Exception:
+        pass
+
+    # Always fall through to normal terminal prompt
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask"
+        }
+    }))
+#+end_src
+
+**** =handle_permission_clear(mcp, input_data, org_file, session_id)=
+
+Called by =PostToolUse= catch-all hook. Clears pending permission state
+in Emacs since the tool has already executed (permission was granted).
+
+#+begin_src python
+def handle_permission_clear(mcp, input_data, org_file, session_id):
+    try:
+        esc_sid = _escape_elisp_string(session_id)
+        mcp.eval_elisp(
+            f'(claude-org-iterm2--permission-resolved "{esc_sid}")'
+        )
+    except Exception:
+        pass
+#+end_src
+
+*** 3. Elisp: Mode-Line Integration (=claude-agent.org=)
+
+**** New State: =claude-agent--pending-permissions=
+
+#+begin_src elisp
+(defvar claude-agent--pending-permissions (make-hash-table :test 'equal)
+  "Map of SDD session-id → tool-name for sessions waiting on permission.")
+#+end_src
+
+**** Update =claude-agent--update-activity-string=
+
+When =claude-agent--pending-permissions= is non-empty, override the spinner
+character from =◐= to =⚠= and append story names. The mode-line format
+becomes:
+
+- No queries active, no permissions: =""= (empty)
+- Queries active, no permissions: =" [C:◐ story1]"= or =" [C:◐×3]=
+- Permissions pending: =" [C:⚠ story1 story2]"= (bold + warning face)
+
+Each story name in the permission segment is individually clickable.
+
+#+begin_src elisp
+;; Inside claude-agent--update-activity-string:
+(let ((perm-count (hash-table-count claude-agent--pending-permissions))
+      (query-count (claude-agent-active-query-count)))
+  (cond
+   ((> perm-count 0)
+    ;; Build clickable story segments
+    (let ((segments '()))
+      (maphash
+       (lambda (sid tool)
+         (push (propertize
+                (claude-org-iterm2--story-label sid)
+                'face '(:foreground "orange" :weight bold)
+                'help-echo (format "Permission needed: %s\nClick to focus iTerm2" tool)
+                'mouse-face 'mode-line-highlight
+                'local-map (claude-agent--make-permission-click-map sid))
+               segments))
+       claude-agent--pending-permissions)
+      (setq claude-agent-activity-string
+            (concat " [C:⚠ " (string-join (nreverse segments) " ") "]"))))
+   ((> query-count 0)
+    ;; Existing spinner logic
+    ...)
+   (t (setq claude-agent-activity-string ""))))
+#+end_src
+
+**** Click Handler: Acknowledge + Focus iTerm2 Tab
+
+Clicking a story name in the mode-line does two things:
+1. Clears the pending permission for that story (user has acknowledged it)
+2. Focuses the corresponding iTerm2 tab so the user can answer
+
+#+begin_src elisp
+(defun claude-agent--make-permission-click-map (sdd-session-id)
+  "Create a keymap that focuses the iTerm2 tab for SDD-SESSION-ID on click."
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1]
+      (lexical-let ((sid sdd-session-id))
+        (lambda (e)
+          (interactive "e")
+          (claude-org-iterm2--acknowledge-permission sid))))
+    map))
+
+(defun claude-org-iterm2--acknowledge-permission (sdd-session-id)
+  "Acknowledge pending permission and focus iTerm2 tab for SDD-SESSION-ID.
+Removes the ⚠ indicator for this story and switches to its terminal."
+  ;; Clear pending state (idempotent — may already be cleared by PostToolUse)
+  (claude-org-iterm2--permission-resolved sdd-session-id)
+  ;; Focus the iTerm2 tab
+  (let ((iterm2-uuid (claude-org-iterm2--lookup-iterm2-session sdd-session-id)))
+    (when iterm2-uuid
+      (claude-org-iterm2--call "focus" "--session" iterm2-uuid))))
+#+end_src
+
+**** Tooltip on =⚠= Segment
+
+The tooltip (=help-echo=) shows per-story detail:
+
+#+begin_src text
+Permission needed:
+  • story1: Bash — rm -rf /tmp/test
+  • story2: Edit — /path/to/file.py
+Click story name to focus its iTerm2 tab
+#+end_src
+
+*** 4. Elisp: Notification and Focus (=claude-org.org=)
+
+**** =claude-org-iterm2--permission-needed=
+
+Called by Python =handle_permission= via MCP. Registers the pending permission,
+brings Emacs to foreground, and sends macOS notification.
+
+#+begin_src elisp
+(defun claude-org-iterm2--permission-needed (sdd-session-id tool-name)
+  "Handle notification that SDD-SESSION-ID needs permission for TOOL-NAME."
+  ;; Register pending permission
+  (puthash sdd-session-id tool-name claude-agent--pending-permissions)
+
+  ;; Bring Emacs to foreground
+  (claude-org-iterm2--activate-emacs)
+
+  ;; macOS notification
+  (claude-org--notify
+   "Claude: Permission Needed"
+   (format "%s needs approval for %s"
+           (claude-org-iterm2--story-label sdd-session-id)
+           tool-name)
+   claude-org-notify-sound)
+
+  ;; Force immediate mode-line update
+  (claude-agent--update-activity-string)
+  "ok")
+#+end_src
+
+**** =claude-org-iterm2--permission-resolved=
+
+Called by Python =handle_permission_clear= via MCP when =PostToolUse= fires.
+Also called by the mode-line click handler. Idempotent — safe to call twice.
+
+#+begin_src elisp
+(defun claude-org-iterm2--permission-resolved (sdd-session-id)
+  "Clear pending permission for SDD-SESSION-ID."
+  (remhash sdd-session-id claude-agent--pending-permissions)
+  (claude-agent--update-activity-string)
+  "ok")
+#+end_src
+
+**** =claude-org-iterm2--activate-emacs=
+
+Bring Emacs frame to the front on macOS:
+
+#+begin_src elisp
+(defun claude-org-iterm2--activate-emacs ()
+  "Bring Emacs to the foreground on macOS."
+  (when (eq system-type 'darwin)
+    (start-process "activate-emacs" nil
+                   "osascript" "-e"
+                   "tell application \"Emacs\" to activate"))
+  (raise-frame))
+#+end_src
+
+*** 5. SDD Session → Story Label Mapping
+
+For mode-line display, we need a short human-readable label per SDD session.
+
+#+begin_src elisp
+(defun claude-org-iterm2--story-label (sdd-session-id)
+  "Return a short label for SDD-SESSION-ID (e.g. story heading name).
+Falls back to the last segment of the session ID."
+  (or (claude-org--session-get sdd-session-id :story-name)
+      (car (last (split-string sdd-session-id "-")))))
+#+end_src
+
+The =:story-name= is already stored during =ensure-session= from the org
+heading text. If unavailable, falls back to the timestamp portion of the
+session ID.
+
+*** 6. SDD Session → iTerm2 UUID Lookup
+
+#+begin_src elisp
+(defun claude-org-iterm2--lookup-iterm2-session (sdd-session-id)
+  "Look up the iTerm2 UUID for SDD-SESSION-ID.
+Checks in-memory session state first, then falls back to org property."
+  (or (claude-org--session-get sdd-session-id :iterm2-session)
+      ;; Fallback: scan org file for ITERM2_SESSION_ID property
+      ;; on the heading with matching CLAUDE_SESSION_ID
+      nil))
+#+end_src
+
+*** 7. =*Claude Queries*= Buffer Enhancement
+
+Extend the query manager to show permission status per query:
+
+#+begin_src text
+Active Claude Queries:
+  ● story1#5  [32s]  ⚠ Permission: Bash
+  ● story2#3  [15s]
+#+end_src
+
+When a query has a pending permission, append =⚠ Permission: <tool>= in
+warning face. Pressing =RET= on such a line focuses the iTerm2 tab.
+
+** What Changes
+
+| Component                   | Change                                               |
+|-----------------------------+------------------------------------------------------|
+| =hooks/hooks.json=          | Add =PreToolUse= hook, add catch-all =PostToolUse=   |
+| =python/.../sdd_bridge.py=  | =handle_permission=, =handle_permission_clear=       |
+| =claude-agent.org=          | =pending-permissions= hash, mode-line ⚠ segment     |
+| =claude-org.org=            | =permission-needed=, =permission-resolved=, =activate-emacs= |
+| =claude-org.org=            | =acknowledge-permission=, =story-label=, =lookup-iterm2-session= |
+
+** What Doesn't Change
+
+- Permission decision is always ="ask"= — user still answers in iTerm2
+- Existing spinner for busy queries — still works alongside ⚠
+- Existing notification on completion — still fires on =Stop=
+- =Stop= hook — unchanged
+- Status file system — unchanged, no new files needed
+
+** Edge Cases
+
+*** Multiple stories waiting simultaneously
+
+The mode-line shows all stories: =[C:⚠ story1 story2 story3]=. Each is
+independently clickable. The tooltip shows per-story tool details.
+
+*** Permission resolved before user clicks
+
+If the user answers in iTerm2 without clicking the mode-line, the
+=PostToolUse= hook fires and auto-clears the ⚠ indicator via
+=permission-resolved=. The mode-line updates within seconds. No stale
+indicators accumulate.
+
+*** Emacs MCP server unreachable
+
+The Python handler catches exceptions from =mcp.eval_elisp=. If Emacs is
+unreachable, the permission flow still works — user just doesn't get the
+notification. The =permissionDecision: "ask"= is printed regardless.
+
+*** PreToolUse fires for auto-approved tools
+
+When =--allowedTools= pre-approves a tool, =PreToolUse= still fires but
+the terminal prompt doesn't appear. The ⚠ indicator appears briefly,
+then =PostToolUse= fires immediately and clears it. The notification
+may flash for a moment — acceptable since auto-approved tools execute
+quickly.
+
+To reduce noise further: the Python =handle_permission= could check
+=input_data= for permission mode hints and skip notification for tools
+that won't actually prompt. This is a future refinement.
+
+*** Rapid successive PreToolUse for same session
+
+If Claude Code needs permission for multiple tools in sequence (unlikely
+but possible), each =PreToolUse= overwrites the previous tool name in
+=pending-permissions= for that session. The ⚠ indicator shows the latest
+tool. This is fine — the user clicks once to go to iTerm2 and handles
+all pending prompts there.
+
+** Implementation Order
+
+1. Python: =handle_permission=, =handle_permission_clear= + =main()= routing + tests
+2. =hooks.json=: add =PreToolUse= and catch-all =PostToolUse=
+3. Elisp: =pending-permissions= hash table, =permission-needed=, =permission-resolved=
+4. Elisp: mode-line ⚠ segment with per-story click maps
+5. Elisp: =acknowledge-permission=, =activate-emacs=, =story-label=, =lookup-iterm2-session=
+6. Elisp: query manager enhancement (=⚠ Permission: Bash= per query line)
+7. =make check= — all tests pass
+8. Manual E2E test with real SDD story

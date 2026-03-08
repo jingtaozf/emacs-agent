@@ -3195,6 +3195,11 @@ Shows spinner when queries are active, empty when idle.")
 
 (defvar claude-agent--spinner-index 0
   "Current index in spinner-frames for animation.")
+
+(defvar claude-agent--pending-permissions (make-hash-table :test 'equal)
+  "Map of SDD session-id to tool-name for sessions waiting on permission.
+Populated by `claude-org-iterm2--permission-needed', cleared by
+`claude-org-iterm2--permission-resolved' or mode-line click.")
 #+END_SRC
 
 ** Activity Count
@@ -3298,42 +3303,90 @@ Shows details about all active queries."
     (mapconcat #'identity (nreverse lines) "\n")))
 
 (defun claude-agent--update-activity-string ()
-  "Update the activity mode-line string based on active queries."
-  (let ((count (claude-agent-active-query-count)))
-    (if (> count 0)
-        (let* ((spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
-               (docker-p (claude-agent--any-docker-mode-p))
-               ;; For single query, show identity; for multiple, show count
-               ;; Add Docker indicator if any query is in Docker mode
-               (docker-prefix (if docker-p "D:" "C:"))
-               (display (if (= count 1)
-                            (let* ((state (claude-agent--get-single-active-state))
-                                   (identity (when state
-                                               (claude-agent--format-query-identity state))))
-                              (if identity
-                                  (format " [%s%s %s]" docker-prefix spinner identity)
-                                (format " [%s%s]" docker-prefix spinner)))
-                          (format " [%s%s×%d]" docker-prefix spinner count)))
-               ;; Use consistent bold face for all modes (e-ink friendly - no colors)
-               (face '(:weight bold)))
-          (setq claude-agent--spinner-index
-                (mod (1+ claude-agent--spinner-index)
-                     (length claude-agent--spinner-frames)))
-          (setq claude-agent-activity-string
-                (propertize display
-                            'face face
-                            'help-echo (claude-agent--format-activity-tooltip)
-                            'mouse-face 'mode-line-highlight
-                            'local-map (let ((map (make-sparse-keymap)))
-                                         (define-key map [mode-line mouse-1]
-                                                     #'claude-agent-list-queries)
-                                         map))))
-      ;; No active queries
+  "Update the activity mode-line string based on active queries and pending permissions."
+  (let ((count (claude-agent-active-query-count))
+        (perm-count (hash-table-count claude-agent--pending-permissions)))
+    (cond
+     ;; Pending permissions — show ⚠ with clickable story labels
+     ((> perm-count 0)
+      (let ((segments '()))
+        (maphash
+         (lambda (sid tool)
+           (push (propertize
+                  (claude-agent--permission-label sid)
+                  'face '(:foreground "orange" :weight bold)
+                  'help-echo (format "Permission needed: %s\nClick to focus iTerm2" tool)
+                  'mouse-face 'mode-line-highlight
+                  'local-map (claude-agent--make-permission-click-map sid))
+                 segments))
+         claude-agent--pending-permissions)
+        (setq claude-agent-activity-string
+              (concat " [C:⚠ " (string-join (nreverse segments) " ") "]")))
+      (setq claude-agent--spinner-index 0))
+     ;; Active queries — show spinner
+     ((> count 0)
+      (let* ((spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
+             (docker-p (claude-agent--any-docker-mode-p))
+             ;; For single query, show identity; for multiple, show count
+             ;; Add Docker indicator if any query is in Docker mode
+             (docker-prefix (if docker-p "D:" "C:"))
+             (display (if (= count 1)
+                          (let* ((state (claude-agent--get-single-active-state))
+                                 (identity (when state
+                                             (claude-agent--format-query-identity state))))
+                            (if identity
+                                (format " [%s%s %s]" docker-prefix spinner identity)
+                              (format " [%s%s]" docker-prefix spinner)))
+                        (format " [%s%s×%d]" docker-prefix spinner count)))
+             ;; Use consistent bold face for all modes (e-ink friendly - no colors)
+             (face '(:weight bold)))
+        (setq claude-agent--spinner-index
+              (mod (1+ claude-agent--spinner-index)
+                   (length claude-agent--spinner-frames)))
+        (setq claude-agent-activity-string
+              (propertize display
+                          'face face
+                          'help-echo (claude-agent--format-activity-tooltip)
+                          'mouse-face 'mode-line-highlight
+                          'local-map (let ((map (make-sparse-keymap)))
+                                       (define-key map [mode-line mouse-1]
+                                                   #'claude-agent-list-queries)
+                                       map)))))
+     ;; Idle
+     (t
       (setq claude-agent-activity-string "")
-      (setq claude-agent--spinner-index 0)))
+      (setq claude-agent--spinner-index 0))))
   (force-mode-line-update t)
   ;; Auto-refresh queries buffer if visible
   (claude-agent--maybe-refresh-queries-buffer))
+
+(defun claude-agent--permission-label (sdd-session-id)
+  "Return a short label for SDD-SESSION-ID for mode-line display.
+Extracts the timestamp portion from session IDs like sdd-20260303-132101."
+  (let ((parts (split-string sdd-session-id "-")))
+    ;; sdd-YYYYMMDD-HHMMSS → show HHMMSS
+    (if (>= (length parts) 3)
+        (car (last parts))
+      sdd-session-id)))
+
+(defun claude-agent--make-permission-click-map (sdd-session-id)
+  "Create a keymap that acknowledges permission and focuses iTerm2 for SDD-SESSION-ID."
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1]
+      (lexical-let ((sid sdd-session-id))
+        (lambda (e)
+          (interactive "e")
+          (claude-agent--acknowledge-permission sid))))
+    map))
+
+(defun claude-agent--acknowledge-permission (sdd-session-id)
+  "Acknowledge pending permission and focus iTerm2 tab for SDD-SESSION-ID."
+  ;; Clear pending state
+  (remhash sdd-session-id claude-agent--pending-permissions)
+  (claude-agent--update-activity-string)
+  ;; Focus iTerm2 tab (if the function is available)
+  (when (fboundp 'claude-org-iterm2--focus-by-sdd-session)
+    (claude-org-iterm2--focus-by-sdd-session sdd-session-id)))
 
 (defun claude-agent--maybe-refresh-queries-buffer ()
   "Refresh *Claude Queries* buffer if it exists and is visible."

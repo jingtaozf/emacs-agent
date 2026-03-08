@@ -236,6 +236,7 @@ def main() -> None:
     os.environ["SDD_ORG_FILE"] = org_file
     os.environ["SDD_SESSION_ID"] = session_id or ""
     os.environ["EMACS_MCP_URL"] = mcp_url
+    os.environ["CLAUDE_PLUGIN_ROOT"] = plugin_dir
 
     # Set terminal tab title
     file_base = os.path.splitext(os.path.basename(org_file))[0]

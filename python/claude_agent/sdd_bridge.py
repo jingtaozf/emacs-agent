@@ -279,6 +279,59 @@ def _handle_todo_tool(
     mcp.eval_elisp(elisp)
 
 
+# Tools that require user interaction — notify Emacs and return "ask"
+_INTERACTIVE_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
+
+
+def handle_permission(
+    mcp: McpClient,
+    input_data: dict,
+    org_file: str,
+    session_id: str,
+) -> None:
+    """Handle PreToolUse hook — notify Emacs for interactive tools only.
+
+    For AskUserQuestion/ExitPlanMode: notify Emacs + return "ask" (needs user).
+    For all other tools: no notification, no permission override (empty output).
+    """
+    tool_name = input_data.get("tool_name", "unknown")
+
+    if tool_name in _INTERACTIVE_TOOLS:
+        # Notify Emacs (best-effort)
+        try:
+            mcp.eval_elisp(
+                f'(claude-org-iterm2--permission-needed '
+                f'"{_escape_elisp_string(session_id)}" '
+                f'"{_escape_elisp_string(tool_name)}")'
+            )
+        except Exception:
+            pass
+
+        # Return "ask" so the terminal prompt appears
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+            }
+        }))
+
+
+def handle_permission_clear(
+    mcp: McpClient,
+    input_data: dict,
+    org_file: str,
+    session_id: str,
+) -> None:
+    """Handle PostToolUse hook — clear pending permission in Emacs."""
+    try:
+        mcp.eval_elisp(
+            f'(claude-org-iterm2--permission-resolved '
+            f'"{_escape_elisp_string(session_id)}")'
+        )
+    except Exception:
+        pass
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print("Usage: sdd-bridge <event-type>", file=sys.stderr)
@@ -307,6 +360,10 @@ def main() -> None:
         handle_response(mcp, input_data, org_file, session_id)
     elif event == "tool":
         handle_tool(mcp, input_data, org_file, session_id)
+    elif event == "permission":
+        handle_permission(mcp, input_data, org_file, session_id)
+    elif event == "permission-clear":
+        handle_permission_clear(mcp, input_data, org_file, session_id)
     else:
         print(f"sdd-bridge: unknown event: {event}", file=sys.stderr)
 
