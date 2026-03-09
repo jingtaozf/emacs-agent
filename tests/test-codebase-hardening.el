@@ -31,7 +31,7 @@ FIX: Wrap process-send-eof in timer callbacks with (when (process-live-p proc) .
 See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    (let* ((file (expand-file-name "claude-agent.org" test-hardening--project-root))
+    (let* ((file (expand-file-name "claude-agent-backend.org" test-hardening--project-root))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string))))
@@ -85,15 +85,17 @@ FIX: Wrap timer body with (when (process-live-p ...) ...) or
 See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    ;; Check claude-agent.org: any process-send-eof near run-at-time
-    ;; should have process-live-p nearby
-    (let* ((agent-file (expand-file-name "claude-agent.org" test-hardening--project-root))
-           (agent-content (with-temp-buffer
-                            (insert-file-contents agent-file)
-                            (buffer-string))))
-      (when (string-match-p "run-at-time" agent-content)
-        (should (or (string-match-p "process-live-p" agent-content)
-                    (error "Timer in claude-agent.org without process-live-p guard.\nFIX: See ARCHITECTURE.org Invariants.")))))))
+    ;; Check claude-agent.org and claude-agent-backend.org: any process-send-eof
+    ;; near run-at-time should have process-live-p nearby
+    (dolist (org-file '("claude-agent.org" "claude-agent-backend.org"))
+      (let* ((file (expand-file-name org-file test-hardening--project-root))
+             (content (with-temp-buffer
+                        (insert-file-contents file)
+                        (buffer-string))))
+        (when (and (string-match-p "run-at-time" content)
+                   (string-match-p "process-send-eof" content))
+          (should (or (string-match-p "process-live-p" content)
+                      (error "Timer in %s without process-live-p guard.\nFIX: See ARCHITECTURE.org Invariants." org-file))))))))
 
 (provide 'test-codebase-hardening)
 ;;; test-codebase-hardening.el ends here

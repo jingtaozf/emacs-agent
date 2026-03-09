@@ -226,15 +226,15 @@
   ;; With no buffer stored, should return nil
   (should-not (claude-agent-get-verbose-buffer "nonexistent-key")))
 
-(ert-deftest test-classify-error-public ()
-  "Error classification predicates should have public wrappers."
+(ert-deftest test-classify-error-internal ()
+  "Error classification predicates should work correctly."
   :tags '(:unit :fast :stable :isolated :backend :phase-4)
-  (should (fboundp 'claude-agent-session-expired-p))
-  (should (fboundp 'claude-agent-context-too-long-p))
-  (should (claude-agent-session-expired-p "No conversation found with session ID x"))
-  (should (claude-agent-context-too-long-p "Prompt is too long"))
-  (should-not (claude-agent-session-expired-p "random error"))
-  (should-not (claude-agent-context-too-long-p "random error")))
+  (should (fboundp 'claude-agent--session-expired-p))
+  (should (fboundp 'claude-agent--context-too-long-p))
+  (should (claude-agent--session-expired-p "No conversation found with session ID x"))
+  (should (claude-agent--context-too-long-p "Prompt is too long"))
+  (should-not (claude-agent--session-expired-p "random error"))
+  (should-not (claude-agent--context-too-long-p "random error")))
 
 ;;; Phase 5: Capability-based feature negotiation
 
