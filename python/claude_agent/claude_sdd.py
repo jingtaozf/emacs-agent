@@ -165,6 +165,7 @@ def build_claude_args(
 
     args.extend(extra_args)
     args.append("--ide")
+    args.append("--chrome")
     return args
 
 
@@ -260,6 +261,21 @@ def main() -> None:
 
     # Unset CLAUDECODE to avoid "cannot launch inside another Claude Code session" error
     os.environ.pop("CLAUDECODE", None)
+
+    # Start IDE WebSocket server in Emacs before Claude Code launches
+    # Claude Code with --ide reads ~/.claude/ide/*.lock to find the server
+    if mcp_ok and session_id:
+        project_root = os.getcwd()
+        try:
+            mcp.eval_elisp(
+                '(let ((debug-on-error nil) (debug-on-quit nil))'
+                f'  (claude-org-iterm2--ensure-ide-server '
+                f'"{_escape_elisp_string(project_root)}" '
+                f'"{_escape_elisp_string(session_id)}"))'
+            )
+            print(f"  IDE server: started for {os.path.basename(project_root)}")
+        except Exception as e:
+            print(f"  IDE server: failed to start ({e})", file=sys.stderr)
 
     # Register atexit as belt-and-suspenders for edge cases
     if mcp_ok and session_id:
