@@ -4457,6 +4457,11 @@ If the session is busy, queues the block for execution when current query comple
     ;; Auto-generate title for all backends
     (when heading-marker
       (claude-org--maybe-auto-generate-title content heading-marker))
+    ;; Initialize loop state for ALL backends (before backend-specific early returns)
+    (claude-org--session-put session-key :loop-max loop-max)
+    (claude-org--session-put session-key :loop-current 1)
+    (claude-org--session-put session-key :loop-interval loop-interval)
+    (claude-org--session-put session-key :original-prompt content)
     ;; iTerm2 backend: send prompt to external iTerm2 terminal
     (when (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
                         "iterm2")
@@ -4472,7 +4477,13 @@ If the session is busy, queues the block for execution when current query comple
         (if (claude-org--native-buffer-alive-p buf)
             (claude-org--native-send-prompt buf content)
           (user-error
-           "Native terminal not ready; re-run once the terminal shows a prompt")))
+           "Native terminal not ready; re-run once the terminal shows a prompt"))
+        ;; Schedule remaining loop iterations (timer-based, no completion detection)
+        (when (> loop-max 1)
+          (cl-loop for i from 2 to loop-max
+                   do (run-at-time (* (1- i) (max loop-interval 1)) nil
+                                   #'claude-org--native-loop-send
+                                   session-key buf content i loop-max))))
       (cl-return-from claude-org-execute nil))
     ;; If session is busy, queue the block instead of erroring
     (when (claude-org--session-get session-key :busy)
@@ -5689,6 +5700,14 @@ Dispatches on `claude-org--native-type' buffer-local (set at creation)."
             (claude-org--native-schedule-enter buf
               (lambda () (eat-term-send-string terminal "\r"))))))
        (t (error "Native buffer has unknown terminal type: %S" type))))))
+
+(defun claude-org--native-loop-send (session-key buf prompt iteration max)
+  "Send loop iteration PROMPT to native terminal buffer BUF.
+SESSION-KEY identifies the org session.
+ITERATION is the current loop number, MAX is total iterations."
+  (when (claude-org--native-buffer-alive-p buf)
+    (claude-org--native-send-prompt buf prompt)
+    (message "Sent loop iteration %d/%d to native terminal" iteration max)))
 #+END_SRC
 
 ** Minor Mode
@@ -6467,7 +6486,9 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
                  (claude-org--current-session-key)
                  :iterm2-session result)
                 (puthash sdd-session-id result
-                         claude-org-iterm2--sdd-to-iterm2))
+                         claude-org-iterm2--sdd-to-iterm2)
+                (puthash sdd-session-id (claude-org--current-session-key)
+                         claude-org-iterm2--sdd-to-session-key))
               (save-buffer)
               (message "Claude Code in iTerm2 (session: %s)" result)
               result)))))
@@ -6551,13 +6572,58 @@ SDD-SESSION-ID is the SDD session, ITERM2-ID is the iTerm2 pane UUID."
 (defun claude-org-iterm2--query-completed (sdd-session-id)
   "Mark the iTerm2 query for SDD-SESSION-ID as completed.
 Unregisters from `claude-agent--active-queries' so the mode-line
-and *Claude Queries* buffer update automatically."
+and *Claude Queries* buffer update automatically.
+When loop state is active, schedules the next iteration."
   (let ((req-id (claude-org-iterm2--read-request-id sdd-session-id)))
     (when req-id
       (let ((state (claude-agent--get-active-query req-id)))
         (when state
           (setf (claude-agent--process-state-closed state) t)
-          (claude-agent--unregister-query req-id))))))
+          (claude-agent--unregister-query req-id)))))
+  ;; Check loop continuation
+  (let ((session-key (gethash sdd-session-id claude-org-iterm2--sdd-to-session-key)))
+    (when session-key
+      (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
+            (loop-max (or (claude-org--session-get session-key :loop-max) 1)))
+        (if (< loop-current loop-max)
+            ;; More iterations — schedule next
+            (let ((interval (or (claude-org--session-get session-key :loop-interval) 0))
+                  (prompt (claude-org--session-get session-key :original-prompt))
+                  (iterm2-id (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)))
+              (claude-org--session-put session-key :loop-current (1+ loop-current))
+              (if (> interval 0)
+                  (run-at-time interval nil
+                               #'claude-org-iterm2--loop-send
+                               sdd-session-id iterm2-id prompt session-key)
+                (claude-org-iterm2--loop-send sdd-session-id iterm2-id prompt session-key)))
+          ;; Loop complete — cleanup
+          (claude-org--session-put session-key :loop-max nil)
+          (claude-org--session-put session-key :loop-current nil))))))
+
+
+(defun claude-org-iterm2--loop-send (sdd-session-id iterm2-id prompt session-key)
+  "Send next loop iteration PROMPT to iTerm2.
+SDD-SESSION-ID and ITERM2-ID identify the session.
+SESSION-KEY is the org session for loop state.
+Navigates to saved org buffer/marker for org-context-dependent calls."
+  (let ((org-buf (claude-org--session-get session-key :loop-org-buffer))
+        (marker (claude-org--session-get session-key :loop-block-marker)))
+    ;; write-from-emacs-flag and register-query need org buffer context
+    (when (and org-buf (buffer-live-p org-buf) marker (marker-buffer marker))
+      (with-current-buffer org-buf
+        (save-excursion
+          (goto-char marker)
+          (when sdd-session-id
+            (claude-org-iterm2--write-from-emacs-flag sdd-session-id))
+          (save-excursion
+            (org-back-to-heading t)
+            (when sdd-session-id
+              (claude-org-iterm2--register-query sdd-session-id iterm2-id)))))))
+  (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
+  (let ((current (claude-org--session-get session-key :loop-current))
+        (max (claude-org--session-get session-key :loop-max)))
+    (message "Sent loop iteration %d/%d to iTerm2 (%d chars)"
+             current max (length prompt))))
 #+END_SRC
 
 ** Execution
@@ -6596,6 +6662,15 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
            (status (claude-org-iterm2--get-status sdd-session-id iterm2-id)))
       (when (string= status "busy")
         (user-error "Claude Code busy (status: %s). Cancel first?" status))
+      ;; Ensure sdd→session-key mapping for loop dispatch from query-completed
+      (when sdd-session-id
+        (puthash sdd-session-id (claude-org--current-session-key)
+                 claude-org-iterm2--sdd-to-session-key))
+      ;; Save org buffer + marker for loop-send (timer callbacks need context)
+      (claude-org--session-put (claude-org--current-session-key)
+                               :loop-org-buffer (current-buffer))
+      (claude-org--session-put (claude-org--current-session-key)
+                               :loop-block-marker (copy-marker (point)))
       ;; Write flag BEFORE sending — hook checks and deletes it
       (when sdd-session-id
         (claude-org-iterm2--write-from-emacs-flag sdd-session-id))
@@ -6685,6 +6760,9 @@ Called by the PostToolUse hook via MCP, or by mode-line click. Idempotent."
 
 (defvar claude-org-iterm2--sdd-to-iterm2 (make-hash-table :test 'equal)
   "Map of SDD session-id → iTerm2 UUID for quick lookup from MCP calls.")
+
+(defvar claude-org-iterm2--sdd-to-session-key (make-hash-table :test 'equal)
+  "Map of SDD session-id → org session-key for loop dispatch from query-completed.")
 
 (defun claude-org-iterm2--lookup-iterm2-session (sdd-session-id)
   "Look up the iTerm2 UUID for SDD-SESSION-ID.
