@@ -1,0 +1,228 @@
+#+TITLE: Design: Extract iTerm2 and Native Backends from claude-org.org
+#+DATE: [2026-03-10]
+#+STATUS: proposal
+
+* Problem
+
+=claude-org.org= conflates two concerns:
+
+1. *Generic org integration* — block detection, session management, execution
+   dispatch, response rendering, queue/loop orchestration
+2. *Backend implementations* — iTerm2 bridge (~500 lines), native terminal
+   (~500 lines) — each with their own state, tests, and helpers
+
+The JSON stream backend was already extracted to =claude-agent-backend.org=.
+The iTerm2 and native backends remain in =claude-org.org=, making it ~6000
+lines and harder to navigate, test independently, or load selectively.
+
+This document proposes extracting each backend into its own =.org= file,
+consistent with the ARCHITECTURE.org extension point:
+
+#+begin_quote
+New backend → Create claude-agent-BACKEND.org, add to claude-code.el
+#+end_quote
+
+This was already noted as Future Work in =2026-json-stream-extraction.org= (lines 503-505).
+
+* Goals
+
+- Extract iTerm2 backend into =claude-org-iterm2.org=
+- Extract native terminal backend into =claude-org-native.org=
+- Move shared helpers into =claude-org-session.org= (already loads early, already owns shared state)
+- Keep =claude-org.org= as a pure dispatch/coordination layer
+- Zero behavior change — pure structural refactor
+- Enable selective loading (don't load iTerm2 if =iterm2-ctl.py= absent)
+
+* Non-Goals
+
+- Changing the JSON stream backend (already in =claude-agent-backend.org=)
+- Changing backend behavior or APIs
+- Adding the =cl-defgeneric= backend protocol to org-level backends (separate task)
+
+* Pros and Cons
+
+** Pros
+
+| Benefit | Details |
+|---------+---------|
+| Consistent architecture | Matches the ARCHITECTURE.org extension pattern; JSON stream already follows this |
+| Reduced file size | =claude-org.org= drops from ~6000 to ~4000 lines |
+| Independent development | iTerm2 changes don't touch native code and vice versa |
+| Cleaner git history | Per-backend diffs are scoped to one file |
+| Selective loading | Can =require= only the backends available on this system |
+| Test alignment | =test-iterm2-e2e-simulated.el= and =test-claude-org-native.el= already exist per-backend |
+| Self-documenting | Each file has its own section headers and prose |
+
+** Cons
+
+| Cost | Mitigation |
+|------+------------|
+| More files in =claude-code.el= | +2 entries (iterm2, native) — minor |
+| Need shared utils layer | Create =claude-org-utils.org= once; ~30 helpers to move |
+| Migration effort | ~1000 lines moved, zero behavior change; smoke+unit verifies |
+| Navigation: dispatch → impl across files | Use =M-.= / CUSTOM_ID links; same as existing backend separation |
+
+* Current Structure
+
+#+begin_example
+  claude-org.org (~6000 lines)
+  ├── Block detection, session management, execution dispatch
+  ├── Response rendering, queue, loop orchestration
+  ├── JSON stream callbacks (handle-message, handle-complete, etc.)
+  ├── iTerm2 backend (~500 lines)
+  │     defvars, session launch, status, query registration,
+  │     loop continuation, execution, user commands, tab management
+  └── Native terminal backend (~500 lines)
+        defvars, terminal types, buffer management, send/wait,
+        session tracking, keymap, minor mode
+#+end_example
+
+Note: test files already reflect the intended split:
+- =tests/test-iterm2-e2e-simulated.el= — iTerm2 only
+- =tests/test-claude-org-native.el= — native only
+
+* Proposed Structure
+
+#+begin_example
+  claude-org-iterm2.org  (extracted from claude-org.org)
+  ├── defcustom: claude-org-iterm2-*, claude-org-notify-*
+  ├── defvar: sdd-to-iterm2, sdd-to-session-key
+  ├── Session launch/ensure, status check
+  ├── Query registration, query-completed, loop-send
+  ├── Execution: execute-ai-block, write-from-emacs-flag
+  └── User commands: open-tab, cancel, permission-needed, focus
+
+  claude-org-native.org  (extracted from claude-org.org)
+  ├── defcustom: claude-org-native-*
+  ├── defvar: --native-cwd-to-session
+  ├── Terminal type detection, buffer management
+  ├── Terminal creation (vterm/eat dispatch)
+  ├── Session tracking, on-session-start hook
+  ├── send-prompt, wait-for-ready, schedule-enter
+  ├── loop-send (new)
+  └── Minor mode, keymap, user commands
+
+  claude-org.org  (slimmed — dispatch + coordination)
+  ├── Block detection, session key, execution dispatch
+  ├── execute-core, send-request, loop iteration
+  ├── handle-complete, handle-token, handle-error, handle-message
+  ├── Response section management
+  ├── Queue, open-native-terminal (thin wrapper)
+  └── Public commands: execute, cancel, goto-custom-id, etc.
+#+end_example
+
+* Load Order
+
+#+begin_example
+  claude-code.el load order (additions in bold):
+
+  1  claude-agent-backend   (SDK core, no changes)
+  2  claude-agent-permission
+  3  claude-agent-ide
+  4  claude-agent            (coordination, no changes)
+  5  claude-org-session      (+ shared helpers moved here)
+  6  claude-org-queue
+  7  claude-org-response
+  8  claude-org              (dispatch — calls iterm2/native by name, resolved at runtime)
+  9  claude-org-history
+  10 claude-org-scheduled
+  11 *claude-org-iterm2*     (iTerm2 backend)
+  12 *claude-org-native*     (native terminal backend)
+  13 emacs-mcp-server        (independent)
+  opt claude-ide
+#+end_example
+
+** Why backends load AFTER claude-org.org
+
+Emacs Lisp uses dynamic binding: =claude-org-execute= calls
+=claude-org-iterm2--execute-ai-block= by name at runtime, not at load time.
+No forward declarations needed. Loading backends last means:
+
+- They can freely reference everything in =claude-org.org= (session helpers,
+  response helpers, etc.)
+- =claude-org.org= dispatch references backend function names that will exist
+  by the time any user actually calls them
+
+** Selective loading
+
+#+begin_src elisp
+;; In user init — only load native backend if vterm/eat is available
+(when (or (featurep 'vterm) (featurep 'eat))
+  (literate-elisp-load "claude-org-native.org"))
+
+;; Only load iTerm2 backend if iterm2-ctl.py is accessible
+(when (executable-find "iterm2-ctl")
+  (literate-elisp-load "claude-org-iterm2.org"))
+#+end_src
+
+* Shared Helpers to Move to claude-org-session.org
+
+These are currently in =claude-org.org= and used by both backends.
+Move them into =claude-org-session.org= (already loads early, already owns
+shared state — no new file needed):
+
+| Function | Used by |
+|----------+---------|
+| =claude-org--get-org-property= | iTerm2 (backend detection), native (backend detection) |
+| =claude-org--notify= | iTerm2 (permission notification) |
+| =claude-org--get-project-root= | iTerm2 (ensure-session) |
+| =claude-org--set-exec-status= | native (not yet, but natural) |
+| =claude-org--session-get/put= | Both (already in claude-org-session.org ✓) |
+| =claude-org--current-session-key= | Both (already in claude-org-session.org ✓) |
+
+Only ~5 helpers need to move. Everything else is already in =claude-org-session.org=.
+
+* Migration Strategy
+
+** Phase 1: Move shared helpers into claude-org-session.org
+
+Move the ~5 shared helpers listed above into =claude-org-session.org=.
+Verify nothing breaks.
+
+#+begin_src sh
+make test-smoke && make lint
+#+end_src
+
+** Phase 2: Extract claude-org-native.org
+
+Move all native terminal code (defcustom, defvar, defun sections starting
+at the "Native Terminal Backend" org heading in =claude-org.org=).
+Add to =claude-code.el= load order.
+
+#+begin_src sh
+make check  # lint + unit + python
+#+end_src
+
+** Phase 3: Extract claude-org-iterm2.org
+
+Move all iTerm2 code (everything under the "iTerm2 Backend" heading).
+Add to =claude-code.el= and Makefile.
+
+#+begin_src sh
+make check
+#+end_src
+
+** Phase 4: Update ARCHITECTURE.org
+
+Add new modules to the load order table and module boundary diagram.
+
+* Verification Plan
+
+1. =make test-smoke= — all .org files parse cleanly after each step
+2. =make test-unit-parallel= — all 86+ unit tests pass
+3. =make lint= — no undefined function/variable warnings
+4. =make check= — full pre-commit gate
+5. Manual E2E: iTerm2 backend with =:loop 3 :interval 1= (loop feature)
+6. Manual E2E: native terminal =#+begin_src ai= block
+7. Verify: =claude-org.org= contains no iterm2/native defvar/defcustom
+8. Verify: test files load their backend file, not =claude-org.org= directly
+
+* Relation to Other Design Docs
+
+- =2026-json-stream-extraction.org= — extracts JSON stream from =claude-agent.org=
+  into =claude-agent-json-stream.org=, AND extracts Claude CLI backend from
+  =claude-agent-backend.org= into =claude-agent-cli.org=. Together with this doc,
+  they achieve one-file-per-backend across the entire codebase.
+- =2026-native-claude-code-backend.org= — architecture of the native terminal backend;
+  extraction doesn't change the design, only the file location.
+- ARCHITECTURE.org =Extension Points= — this proposal implements the stated pattern.

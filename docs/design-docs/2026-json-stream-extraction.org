@@ -1,0 +1,573 @@
+#+TITLE: Design: Extract JSON Stream Code from claude-agent.org
+#+DATE: [2026-03-09]
+#+STATUS: draft
+
+* Problem
+
+=claude-agent.org= is 5000+ lines and conflates two concerns:
+
+1. *Generic SDK coordination* — session management, query registry, mode-line,
+   verbose buffers, hooks
+2. *JSON stream backend implementation* — process spawning, pipe-based process
+   filter, JSON parsing, bidirectional control protocol, stdin management,
+   message/block structs, background task tracking
+
+The backend protocol in =claude-agent-backend.org= defines clean generics
+(=backend-query=, =backend-cancel=, etc.) but the JSON stream backend's
+=backend-query= simply delegates to =claude-agent-query= in =claude-agent.org=
+— the actual implementation was never extracted.
+
+Similarly, =claude-org.org= has JSON-stream-specific callback handlers
+(=handle-message=, =handle-token-v2=, =handle-complete=, =handle-error=)
+that directly use JSON-stream message struct types. These should be wrapped
+behind =defmethod= interfaces so =claude-org= only calls generic methods.
+
+* Goals
+
+- Create =claude-agent-json-stream.org= — one file per backend, consistent with
+  =claude-org-iterm2.org= and =claude-org-native.org=
+- Create =claude-agent-cli.org= — extract Claude CLI eat backend from
+  =claude-agent-backend.org=
+- Move ALL JSON-stream-specific code from =claude-agent.org= into
+  =claude-agent-json-stream.org=
+- Move JSON-stream-specific callbacks from =claude-org.org= into backend
+  =defmethod= implementations in =claude-agent-json-stream.org=
+- Make =claude-agent.org= a pure coordination layer with zero process/JSON knowledge
+- Make =claude-agent-backend.org= pure shared utilities + protocol generics (no backends)
+- Make =claude-org.org= only call generic backend methods (=cl-defgeneric=)
+- Redesign =claude-agent--process-state= as a generic =claude-agent-query-state=
+- No backward compatibility — clean break
+
+* Non-Goals
+
+- Adding new features or changing runtime behavior
+- Adding new features
+- Changing runtime behavior
+
+* Current State Analysis
+
+** What is JSON-stream-specific in =claude-agent.org=
+
+*** Message/Block Structs (JSON-stream-only)
+
+These structs represent parsed JSON stream protocol messages. The Claude CLI
+backend never produces them — it sends raw text via =:on-token= and completion
+via =:on-complete=. Therefore they belong to the JSON stream backend:
+
+- =claude-agent-text-block=, =claude-agent-thinking-block=
+- =claude-agent-tool-use-block=, =claude-agent-tool-result-block=
+- =claude-agent-user-message=, =claude-agent-assistant-message=
+- =claude-agent-system-message=, =claude-agent-result-message=
+
+Callers in =claude-agent.org=:
+- =extract-text=, =extract-tool-uses=, =extract-thinking= — struct accessors
+- =--dispatch-pre/post-tool-use= — iterate content blocks
+- =--render-block=, =--format-message-for-display= — verbose buffer rendering
+- =--simple-query-callback= — accumulates text from messages
+- =--handle-init-message= — reads session-id from result message
+
+Callers in =claude-org.org=:
+- =claude-org--handle-message= — guards on =-result-message-p=,
+  =-assistant-message-p=, =-system-message-p=, reads struct fields
+
+All these callers must move with the structs.
+
+*** Argument Building
+- =claude-agent--build-args= — hardcodes =--output-format stream-json=
+
+*** Process Filter & JSON Parsing
+- =--process-filter=, =--process-json-buffer=, =--try-parse-json=
+- =--validate-json-message=, =--is-cli-text-output-p=
+
+*** Token/Error Extraction from JSON
+- =--extract-tokens=, =--json-true-p=
+- =--extract-json-error=, =--extract-result-error=, =--extract-assistant-error=
+- =--known-error-subtypes=
+
+*** Bidirectional Control Protocol
+- =--handle-control-request=, =--send-control-response=
+- =--pending-control-requests= hash table + track/untrack/clear
+
+*** Streaming Init & Stdin Management
+- =--streaming-init=, =--send-stdin=, =--send-json-safe=
+- =--drain-output=, =--configure-process-io=, =--maybe-close-stdin=
+
+*** Background Task Tracking
+- =--pending-background-tasks= + tracker/predicate
+
+*** JSON Protocol Parsing
+- =--parse-content-block=, =--parse-content-blocks=, =--parse-message=
+
+*** Process Lifecycle
+- =--start-process=, =--process-sentinel=, =--sentinel-handle-*=
+- =--process-normal-message=, =handle-message= (generic + methods)
+
+*** Recovery
+- =--resume-session=, =--is-abnormal-exit-p=, =--insert-recovery-message=
+
+*** Pipe Customizations
+- =max-json-buffer-size=, =stdin-chunk-size=, =stdin-close-delay=
+- =bun-memory-limit=
+
+*** Public API That Depends on Structs
+- =claude-agent-extract-text= — reads =assistant-message-content=
+- =claude-agent-extract-tool-uses= — filters =tool-use-block-p=
+- =claude-agent-extract-thinking= — filters =thinking-block-p=
+- =claude-agent-query-accumulate= — uses =extract-text=
+- =claude-agent--dispatch-pre-tool-use=, =--dispatch-post-tool-use=
+  — iterate struct content blocks
+
+*** Verbose Buffer Rendering (uses structs)
+- =--render-block=, =--format-message-for-display=
+- =--render-verbose-message=
+
+** What is shared backend infrastructure (move to =claude-agent-backend.org=)
+
+These are used by multiple backends and should live in the backend module
+(which loads first), eliminating forward declarations:
+
+*** CLI Discovery & Docker
+- =claude-agent--find-cli= — called from JSON backend (=--start-process=),
+  Claude CLI backend (=--ensure-process=), native terminal (=claude-org.org=),
+  and chat mode
+- =claude-agent--cli-version=
+- All Docker functions (=--docker-command-p=, =--ensure-docker-container=, etc.)
+
+*** Process Environment
+- =claude-agent--build-process-environment= — called from JSON backend,
+  Claude CLI backend, and native terminal
+- =claude-agent--stripped-env-vars=
+
+*** Permission Mode
+- =claude-agent--permission-mode-to-string= — used by =--build-args= and
+  =claude-agent-claude-backend--build-switches=
+
+** What stays in =claude-agent.org= (generic coordination)
+
+=claude-agent.org= becomes a thin coordination layer:
+
+*** Query State (redesigned from =process-state=)
+- =claude-agent-query-state= — renamed, generalized (see redesign section)
+
+*** Session Management
+- =--session-mapping=, =--make-session-key=, =--get-sdk-uuid=
+- =--store-sdk-uuid=, =--clear-session=
+- =--session-expired-p=, =--context-too-long-p=
+
+*** Query Registry & Cancellation
+- =--active-queries= hash table, =--register-query=, =--unregister-query=
+- =cancel-query=, =cancel-all-queries=, =cleanup=
+- Periodic cleanup timer
+
+*** Mode-Line / Activity
+- Spinner, =--update-activity-string=
+- =--pending-permissions= (iTerm2 permission badges)
+- Query manager buffer
+
+*** Hook Variables
+- =pre-tool-use-functions=, =post-tool-use-functions=
+- =stop-functions=, =invocation-hook=
+
+*** Options API
+- =claude-agent-options= — creates option plists
+
+*** Chat Mode
+- Chat mode creates a backend and calls =backend-query= — backend-agnostic.
+  It uses =extract-text= which moves to backend, so chat mode's message callback
+  will call through a backend =defmethod= instead.
+
+*** Utilities (truly generic)
+- =claude-agent-format-elapsed-time=
+- Translation, title generation, prompt refinement — these use
+  =claude-agent-query-accumulate= which calls =extract-text=. After refactoring,
+  they will call through backend methods.
+
+** What is in =claude-org.org= that should move to backend
+
+*** JSON Stream Callbacks → become =defmethod= implementations
+
+Currently =claude-org.org= has:
+- =claude-org--handle-message= — uses =-result-message-p=, =-assistant-message-p=,
+  =-system-message-p= struct predicates, reads struct fields like =.session-id=,
+  =.content=, =.subtype=
+- =claude-org--handle-token-v2= — receives text tokens (actually generic)
+- =claude-org--handle-complete= — triggers loop/queue processing (actually generic)
+- =claude-org--handle-error= — error classification (calls =backend-classify-error=)
+
+=handle-message= is the problematic one — it directly uses JSON-stream-specific
+struct types. The others are generic.
+
+* Proposed Design
+
+** Design Principle: One File Per Backend
+
+Following the pattern established by =claude-org-iterm2.org= and
+=claude-org-native.org=, the JSON stream backend gets its own file:
+=claude-agent-json-stream.org=.
+
+This is consistent with ARCHITECTURE.org's extension point:
+#+begin_quote
+New backend → Create claude-agent-BACKEND.org, add to claude-code.el
+#+end_quote
+
+=claude-agent-json-stream.org= loads AFTER =claude-agent.org= (position 5).
+Emacs Lisp is dynamic — =claude-agent.org= calls JSON stream functions by name
+at runtime, not at load time. No forward declarations needed.
+
+** Redesign: =claude-agent--process-state= → =claude-agent-query-state=
+
+The current =process-state= is misnamed — it tracks query lifecycle, not just
+a process. Rename to =claude-agent-query-state= and split concerns:
+
+#+begin_src elisp
+(cl-defstruct claude-agent-query-state
+  "Generic query lifecycle state used by all backends."
+  request-id          ; unique query identifier
+  session-key         ; buffer-local session key
+  session-id          ; CLI session UUID (set after init)
+  source-buffer       ; originating buffer
+  query-context       ; display metadata (claude-agent-query-context)
+  source-location-fn  ; function to navigate back to source
+  source-location-args ; args for source-location-fn
+  start-time          ; query start timestamp
+  ;; Lifecycle flags
+  ready               ; backend reported ready for next query
+  closed              ; query finished (success or failure)
+  cancelled           ; user cancelled this query
+  got-result          ; received final result
+  ;; Callbacks (generic)
+  token-callback      ; (fn TEXT) — incremental text
+  callback            ; (fn MESSAGE) — structured messages (JSON stream only)
+  error-callback      ; (fn ERROR-MSG) — error notification
+  complete-callback   ; (fn) — query finished
+  ;; Backend-specific opaque data
+  backend-data)       ; plist for backend-private fields
+#+end_src
+
+Backend-specific fields move into =backend-data= plist:
+- JSON stream: =:json-buffer=, =:process=, =:buffer=, =:docker-mode=,
+  =:path-mappings=, =:options= (for recovery)
+- Claude CLI: none needed (state lives on the backend struct itself)
+
+This removes the need for =claude-agent.org= to know about processes.
+
+** New Backend Protocol Methods
+
+Add new =cl-defgeneric= methods to expose backend-specific features
+through generic interfaces:
+
+#+begin_src elisp
+;; Verbose buffer display — each backend renders differently
+(cl-defgeneric claude-agent-backend-render-verbose (backend query-state message)
+  "Render MESSAGE into the verbose buffer for this backend."
+  nil)
+
+;; Message handling — JSON stream parses structs, CLI backend is no-op
+(cl-defgeneric claude-agent-backend-handle-message (backend query-state message)
+  "Process a structured MESSAGE from the backend.
+For JSON stream: dispatches result/assistant/system message types.
+For CLI backend: no-op (uses :on-token callback only)."
+  nil)
+
+;; Text extraction from backend-specific message format
+(cl-defgeneric claude-agent-backend-extract-text (backend message)
+  "Extract plain text from a backend-specific MESSAGE."
+  nil)
+
+;; Session ID extraction from backend-specific message
+(cl-defgeneric claude-agent-backend-extract-session-id (backend message)
+  "Extract the CLI session UUID from a backend-specific MESSAGE.
+Returns nil if the message does not carry a session ID."
+  nil)
+
+;; Tool use extraction from backend-specific message
+(cl-defgeneric claude-agent-backend-extract-tool-uses (backend message)
+  "Extract tool use blocks from a backend-specific MESSAGE."
+  nil)
+
+;; Recovery support
+(cl-defgeneric claude-agent-backend-recover (backend query-state error-msg)
+  "Attempt to recover from ERROR-MSG by restarting the query.
+Returns non-nil if recovery was attempted."
+  nil)
+#+end_src
+
+** Revised Module Contents After Refactoring
+
+*** =claude-agent-backend.org= (loads first — shared utilities + protocol generics ONLY)
+
+**** Shared Backend Utilities section (existing, expanded)
+- CLI discovery: =--find-cli=, =--cli-version=
+- Docker: =--docker-command-p=, =--ensure-docker-container=, etc.
+- Process environment: =--build-process-environment=, =--stripped-env-vars=
+- Permission mode: =--permission-mode-to-string=
+
+**** Protocol Generics section (existing + new)
+- Existing: =backend-query=, =backend-cancel=, =backend-cleanup=, =backend-active-p=,
+  =backend-session-id=, =backend-send-input=, =backend-supports-p=,
+  =backend-classify-error=, =backend-verbose-buffer=, =backend-ready-p=
+- New: =backend-render-verbose=, =backend-handle-message=,
+  =backend-extract-text=, =backend-extract-session-id=,
+  =backend-extract-tool-uses=, =backend-recover=
+
+Note: BOTH backend implementations (JSON stream and Claude CLI) move OUT
+of this file. =claude-agent-backend.org= becomes pure shared infrastructure
+and protocol generics.
+
+*** =claude-agent-cli.org= (new — Claude CLI eat/terminal backend, ~688 lines)
+
+Extracted from =claude-agent-backend.org= =* Claude CLI Backend= section.
+Self-contained with eat terminal, hook system, =defmethod= implementations.
+
+*** =claude-agent-json-stream.org= (new — position 5 in load order)
+
+Everything that currently lives in =claude-agent.org= for JSON stream:
+
+| Category | Functions |
+|--------------------------------------------+-------------------------------------------|
+| Message/block structs | =text-block=, =thinking-block=, |
+| | =tool-use-block=, =tool-result-block=, |
+| | =user-message=, =assistant-message=, |
+| | =system-message=, =result-message= |
+| Struct accessors | =extract-text=, =extract-tool-uses=, |
+| | =extract-thinking= |
+| Argument building | =--build-args= |
+| Process filter & JSON parsing | =--process-filter=, =--process-json-buffer=, |
+| | =--try-parse-json=, =--validate-json-message= |
+| Token/error extraction | =--extract-tokens=, =--json-true-p=, |
+| | =--extract-json-error= and friends |
+| Control protocol | =--handle-control-request=, |
+| | =--send-control-response= |
+| Stdin management | =--streaming-init=, =--send-stdin=, |
+| | =--send-json-safe=, =--drain-output= |
+| Background tasks | =--pending-background-tasks= + tracker |
+| JSON→struct parsing | =--parse-content-block=, =--parse-message= |
+| Process lifecycle | =--start-process=, =--process-sentinel=, |
+| | =handle-message= (generic + methods) |
+| Recovery | =--resume-session=, =--is-abnormal-exit-p= |
+| Pipe customizations | =max-json-buffer-size=, =stdin-chunk-size= |
+| Hook dispatch | =--dispatch-pre/post-tool-use= |
+| Verbose buffer rendering | =--render-block=, =--format-message-for-display= |
+| defmethod implementations | =backend-query=, =backend-handle-message=, |
+| | =backend-extract-text=, |
+| | =backend-extract-session-id=, |
+| | =backend-render-verbose=, =backend-recover= |
+
+=claude-agent-json-stream.org= loads after =claude-agent.org= and can freely
+reference all functions from it (sessions, registry, hooks, mode-line).
+
+*** =claude-agent.org= (loads before json-stream — pure coordination)
+
+| Category | What remains |
+|----------------------------+---------------------------------------------|
+| Query state | =claude-agent-query-state= (redesigned) |
+| Session management | =--session-mapping=, =--make-session-key=, |
+| | =--get/store-sdk-uuid= |
+| Query registry | =--active-queries=, =--register/unregister= |
+| Cancellation | =cancel-query=, =cancel-all-queries= |
+| Mode-line / activity | Spinner, =--update-activity-string=, |
+| | =--pending-permissions=, query manager |
+| Hook variables | =pre-tool-use-functions=, etc. |
+| Options API | =claude-agent-options= |
+| Chat mode | Backend-agnostic, calls =backend-query= |
+| Title generation | Uses =backend-extract-text= method |
+| Translation | Uses =backend-extract-text= method |
+| Prompt refinement | Uses =backend-extract-text= method |
+
+Note: =claude-agent.org= has ZERO knowledge of processes, JSON, pipes, or
+message structs. It only calls =cl-defgeneric= methods on backend objects.
+
+*** =claude-org.org= (org integration — calls only generic methods)
+
+| What stays | What moves to backend |
+|------------------------------+---------------------------------------|
+| Block detection/execution | =handle-message= struct dispatch |
+| Response section management | (becomes =backend-handle-message= |
+| System prompt building | defmethod for JSON stream) |
+| Session/scope management | |
+| Queue/loop orchestration | |
+| Backend factory/dispatch | |
+| =handle-token-v2= (generic) | |
+| =handle-complete= (generic) | |
+| =handle-error= (generic) | |
+
+After refactoring, =claude-org--send-request= builds callbacks that call
+generic backend methods:
+
+#+begin_src elisp
+;; Before (JSON-stream-specific in claude-org):
+(setq callbacks
+  (list :on-message #'claude-org--handle-message  ; uses struct types!
+        :on-token   #'claude-org--handle-token-v2
+        :on-error   #'claude-org--handle-error
+        :on-complete #'claude-org--handle-complete))
+
+;; After (generic in claude-org):
+(setq callbacks
+  (list :on-message (lambda (msg)
+                      (claude-agent-backend-handle-message backend query-state msg)
+                      ;; Extract session-id generically
+                      (when-let* ((sid (claude-agent-backend-extract-session-id backend msg)))
+                        (claude-org--store-session-id sid)))
+        :on-token   #'claude-org--handle-token-v2   ; already generic
+        :on-error   #'claude-org--handle-error       ; already generic
+        :on-complete #'claude-org--handle-complete))  ; already generic
+#+end_src
+
+The JSON stream backend's =backend-handle-message= method does the struct
+dispatch internally, then calls back into simple org helper functions
+(e.g., =claude-org--handle-tool-use= for TodoWrite updates).
+
+* Load Order After Refactoring
+
+#+begin_example
+  claude-code.el load order:
+
+  1  claude-agent-backend       shared utils + protocol generics ONLY
+  2  claude-agent-permission
+  3  claude-agent-ide
+  4  claude-agent                coordination only (sessions, registry, mode-line)
+  5  *claude-agent-json-stream*  JSON stream backend (new — from claude-agent.org)
+  6  *claude-agent-cli*          Claude CLI eat backend (new — from claude-agent-backend.org)
+  7  claude-org-session
+  8  claude-org-queue
+  9  claude-org-response
+  10 claude-org
+  11 claude-org-history
+  12 claude-org-scheduled
+  13 claude-org-iterm2
+  14 claude-org-native
+  15 emacs-mcp-server
+#+end_example
+
+* Dependency Direction After Refactoring
+
+#+begin_example
+  claude-org.org  ─── claude-org-iterm2.org, claude-org-native.org
+       │ calls cl-defgeneric methods only
+       ▼
+  claude-agent.org  (coordination: query-state, sessions, registry, mode-line)
+       │                             ▲ reference freely (loads before)
+       │                             │
+  claude-agent-json-stream.org  ─────┤  (JSON stream: structs, process, JSON parsing)
+  claude-agent-cli.org  ─────────────┘  (Claude CLI: eat terminal, hooks)
+       │ defmethod implementations for protocol generics
+       ▼
+  claude-agent-backend.org  (loads first — shared utils + protocol generics only)
+#+end_example
+
+Key properties:
+- =claude-agent-backend.org= is pure infrastructure — shared utils + =cl-defgeneric= declarations
+- =claude-agent.org= has ZERO process/JSON/struct/terminal knowledge
+- Each backend is one file: =claude-agent-json-stream.org=, =claude-agent-cli.org=,
+  =claude-org-iterm2.org=, =claude-org-native.org=
+- =claude-org.org= calls ONLY generic =backend-*= methods for backend features
+- All backend-specific features accessed through =defmethod= dispatch
+
+* Migration Strategy
+
+** Step 1: Move shared utilities into claude-agent-backend.org
+
+Move =find-cli=, Docker functions, =build-process-environment=,
+=permission-mode-to-string= into a new "Shared Utilities" section at the top
+of =claude-agent-backend.org=. Remove all forward declarations.
+
+Verify: =make test-smoke && make lint=
+
+** Step 2: Add new protocol generics to claude-agent-backend.org
+
+Add =cl-defgeneric= declarations for the new methods:
+=backend-render-verbose=, =backend-handle-message=, =backend-extract-text=,
+=backend-extract-session-id=, =backend-extract-tool-uses=, =backend-recover=.
+
+These are declared here (loads first) and implemented in
+=claude-agent-json-stream.org=.
+
+Verify: =make test-smoke=
+
+** Step 3: Create claude-agent-json-stream.org — structs + accessors
+
+Create the new file with the standard module header.
+Move all =cl-defstruct= definitions for message/block types and their
+accessors (=extract-text=, =extract-tool-uses=, =extract-thinking=).
+
+Add initial =defmethod= implementations:
+- =backend-extract-text= for JSON stream
+- =backend-extract-session-id= for JSON stream
+- =backend-extract-tool-uses= for JSON stream
+
+Update callers in =claude-agent.org= (chat mode, title gen, translation)
+to call through =defmethod=.
+
+Add to =claude-code.el= at position 5 (after =claude-agent=).
+Add load to =Makefile= test targets that need JSON stream functions.
+
+Verify: =make check=
+
+** Step 4: Move process lifecycle + JSON parsing
+
+Move =--start-process=, =--process-filter=, =--process-sentinel=, all JSON
+parsing, control protocol, stdin management, background tasks, recovery
+into =claude-agent-json-stream.org=.
+
+Make =backend-query= self-contained (no delegation to =claude-agent-query=).
+Remove =claude-agent-query= entirely (no backward compat needed).
+
+Verify: =make check=
+
+** Step 5: Move verbose buffer rendering
+
+Move =--render-block=, =--format-message-for-display= into
+=claude-agent-json-stream.org=. Implement =backend-render-verbose= defmethod.
+
+Verify: =make check=
+
+** Step 6: Move hook dispatch + message handling from claude-org
+
+Move =claude-org--handle-message= struct dispatch logic into
+=backend-handle-message= defmethod for JSON stream in
+=claude-agent-json-stream.org=.
+
+Update =claude-org.org= callbacks to call generic methods.
+
+Verify: =make check= + manual E2E
+
+** Step 7: Extract Claude CLI backend into claude-agent-cli.org
+
+Move =* Claude CLI Backend= section (~688 lines) from =claude-agent-backend.org=
+into new =claude-agent-cli.org=. Same pattern as iTerm2/native extraction:
+standard module header, =(provide 'claude-agent-cli)=, loads at position 6.
+
+Update =claude-code.el=, =Makefile= test targets, ARCHITECTURE.org.
+
+=claude-agent-backend.org= becomes pure shared utilities + protocol generics.
+
+Verify: =make check=
+
+** Step 8: Redesign query-state
+
+Rename =process-state= → =query-state=. Move backend-specific fields into
+=backend-data= plist. Update all callers.
+
+Verify: full test suite + E2E
+
+* Verification Plan
+
+1. =make test-smoke= — all .org files parse cleanly after each step
+2. =make test-unit-parallel= — all 1050+ tests pass
+3. =make test-python= — Python tests pass
+4. =make lint= — no undefined function/variable warnings
+5. Manual E2E: JSON stream backend (SDD story with streaming)
+6. Manual E2E: Claude CLI backend (native terminal)
+7. Manual E2E: chat mode
+8. Verify: zero forward declarations in =claude-agent-backend.org=
+9. Verify: =claude-agent.org= has no =json=, =process-filter=, =sentinel= references
+10. Verify: =claude-agent-json-stream.org= has =(provide 'claude-agent-json-stream)=
+
+* Relation to Other Design Docs
+
+- =2026-backend-extraction.org= — completed: iTerm2 and native backends extracted
+  to =claude-org-iterm2.org= and =claude-org-native.org= respectively. This doc
+  is the agent-layer equivalent.
+- ARCHITECTURE.org =Extension Points= — this proposal implements the stated pattern
+  at the agent layer.

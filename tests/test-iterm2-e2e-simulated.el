@@ -21,7 +21,11 @@
   (load (expand-file-name "tests/support/test-helpers.el" project-root) nil t)
   (require 'literate-elisp)
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org.org" project-root)))
+  (literate-elisp-load (expand-file-name "claude-org.org" project-root))
+  ;; Load claude-ide if websocket is available (needed for IDE integration tests)
+  (when (require 'websocket nil t)
+    (literate-elisp-load (expand-file-name "claude-ide.org" project-root)))
+  (literate-elisp-load (expand-file-name "claude-org-iterm2.org" project-root)))
 
 (defvar test-iterm2--project-root
   (file-name-directory
@@ -1175,6 +1179,128 @@ Simulates the Stop hook calling query-completed after iteration 1."
       (should (equal (claude-org--current-session-key) session-key))
       ;; Cleanup
       (remhash "sdd-loop-test" claude-org-iterm2--sdd-to-session-key))))
+
+;;; ============================================================================
+;;; IDE Server Integration Tests
+;;; ============================================================================
+
+(defvar test-iterm2--ide-server-calls nil
+  "Log of (project-root . sdd-session-id) calls to ensure-ide-server.")
+
+(defun test-iterm2--mock-ensure-ide-server (project-root sdd-session-id)
+  "Mock replacement for `claude-org-iterm2--ensure-ide-server'.
+Logs calls without starting a real WebSocket server."
+  (push (cons project-root sdd-session-id) test-iterm2--ide-server-calls))
+
+(defmacro test-iterm2--with-ide-mock (content &rest body)
+  "Like `test-iterm2--with-org-buffer' but also mocks ensure-ide-server.
+Binds both iterm2-ctl and ide-server mocks."
+  (declare (indent 1))
+  `(let ((test-iterm2--mock-call-log nil)
+         (test-iterm2--ide-server-calls nil)
+         (tmp-file (make-temp-file "iterm2-test-" nil ".org")))
+     (unwind-protect
+         (progn
+           (with-temp-file tmp-file (insert ,content))
+           (with-current-buffer (find-file-noselect tmp-file)
+             (goto-char (point-min))
+             (cl-letf (((symbol-function 'claude-org-iterm2--call)
+                        #'test-iterm2--mock-call)
+                       ((symbol-function 'claude-org-iterm2--ensure-ide-server)
+                        #'test-iterm2--mock-ensure-ide-server))
+               (unwind-protect
+                   (progn ,@body)
+                 (set-buffer-modified-p nil)
+                 (kill-buffer (current-buffer))))))
+       (when (file-exists-p tmp-file)
+         (delete-file tmp-file)))))
+
+(ert-deftest test-iterm2-ide-server-called-on-new-session ()
+  "ensure-ide-server is called when launching a NEW iTerm2 session.
+REGRESSION: IDE must start before Claude Code launches with --ide."
+  :tags '(:unit :iterm2 :ide)
+  (test-iterm2--with-ide-mock test-iterm2--org-content-basic
+    (search-forward "What is 2")
+    (claude-org-iterm2--execute-ai-block)
+    ;; ensure-ide-server should have been called
+    (should test-iterm2--ide-server-calls)
+    ;; Should be called with the sdd-session-id from org property
+    (let ((call (car test-iterm2--ide-server-calls)))
+      (should (equal "sdd-test-123" (cdr call)))
+      ;; project-root should be a real directory path
+      (should (stringp (car call))))))
+
+(ert-deftest test-iterm2-ide-server-called-on-existing-session ()
+  "ensure-ide-server is called even for EXISTING (alive) sessions.
+REGRESSION: after backend extraction, IDE server must start for
+reattached sessions too — Claude Code may have been restarted."
+  :tags '(:unit :iterm2 :ide :regression)
+  (test-iterm2--with-ide-mock
+      ;; Content with BOTH session IDs (simulating existing session)
+      "* Dev Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: sdd-existing-456
+:CLAUDE_BACKEND: iterm2
+:ITERM2_SESSION_ID: MOCK-UUID-1234-5678-ABCD-EF0123456789
+:END:
+
+** Instructions
+
+#+begin_src ai
+existing session test
+#+end_src
+"
+    (re-search-forward "existing session test")
+    (claude-org-iterm2--execute-ai-block)
+    ;; ensure-ide-server should be called EVEN for existing sessions
+    (should test-iterm2--ide-server-calls)
+    (let ((call (car test-iterm2--ide-server-calls)))
+      (should (equal "sdd-existing-456" (cdr call))))))
+
+(ert-deftest test-iterm2-ide-server-gets-correct-project-root ()
+  "ensure-ide-server receives PROJECT_ROOT from org properties."
+  :tags '(:unit :iterm2 :ide)
+  (test-iterm2--with-ide-mock test-iterm2--org-content-nested
+    (re-search-forward "Explain quantum computing")
+    (claude-org-iterm2--execute-ai-block)
+    (should test-iterm2--ide-server-calls)
+    (let ((call (car test-iterm2--ide-server-calls)))
+      ;; PROJECT_ROOT is /tmp in the nested content
+      (should (equal "/tmp" (car call)))
+      (should (equal "sdd-nested-456" (cdr call))))))
+
+(ert-deftest test-ide-stale-lockfile-cleanup ()
+  "Starting a new IDE server removes stale lockfiles for the same workspace.
+REGRESSION: multiple lockfiles for the same workspaceFolders caused
+Claude Code to connect to the wrong IDE server."
+  :tags '(:unit :iterm2 :ide :regression)
+  (skip-unless (fboundp 'claude-ide--remove-stale-lockfiles-for-directory))
+  (let ((lock-dir (make-temp-file "ide-lock-test-" t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-ide--get-lockfile-dir)
+                   (lambda () lock-dir)))
+          ;; Create two stale lockfiles for the same workspace
+          (let ((stale-1 (expand-file-name "11111.lock" lock-dir))
+                (stale-2 (expand-file-name "22222.lock" lock-dir))
+                (other (expand-file-name "33333.lock" lock-dir)))
+            (with-temp-file stale-1
+              (insert (json-encode '((workspaceFolders . ["/tmp/my-project"])
+                                     (ideName . "Emacs (sdd-old-1)")))))
+            (with-temp-file stale-2
+              (insert (json-encode '((workspaceFolders . ["/tmp/my-project"])
+                                     (ideName . "Emacs (sdd-old-2)")))))
+            ;; A lockfile for a DIFFERENT workspace — should NOT be removed
+            (with-temp-file other
+              (insert (json-encode '((workspaceFolders . ["/tmp/other-project"])
+                                     (ideName . "Emacs (sdd-other)")))))
+            ;; Run cleanup for /tmp/my-project, keeping port 99999
+            (claude-ide--remove-stale-lockfiles-for-directory "/tmp/my-project" 99999)
+            ;; Stale lockfiles should be removed
+            (should-not (file-exists-p stale-1))
+            (should-not (file-exists-p stale-2))
+            ;; Other workspace lockfile should survive
+            (should (file-exists-p other))))
+      (delete-directory lock-dir t))))
 
 (provide 'test-iterm2-e2e-simulated)
 ;;; test-iterm2-e2e-simulated.el ends here

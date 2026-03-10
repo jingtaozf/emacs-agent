@@ -18,7 +18,8 @@ ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
 LITERATE_ELISP_DIR ?= $(HOME)/projects/literate-elisp
 WEB_SERVER_DIR ?= $(HOME)/.emacs.d/straight/build/web-server
 COMPANY_DIR ?= $(HOME)/.emacs.d/straight/build/company
-LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR)
+WEBSOCKET_DIR ?= $(HOME)/.emacs.d/straight/build/websocket
+LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR)
 
 .PHONY: all
 all: compile test-unit
@@ -144,6 +145,8 @@ test-native:
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-native.org\")" \
 		-l tests/test-claude-org-native.el \
 		-l tests/test-iterm2-e2e-simulated.el \
 		-f ert-run-tests-batch-and-exit

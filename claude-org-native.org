@@ -1,0 +1,599 @@
+#+TITLE: Claude Org Native Terminal Backend
+#+PROPERTY: literate-load yes
+
+* Claude Org Native Terminal
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+Native Claude Code terminal backend (vterm/eat).
+Opens a visible terminal inside Emacs for Claude Code interaction.
+Part of claude-org; loaded after claude-org.org.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+#+END_SRC
+
+* Native Terminal
+:PROPERTIES:
+:CUSTOM_ID: native-terminal
+:END:
+
+Interactive Claude Code terminal with system prompts from the org context.
+When =CLAUDE_BACKEND= is set to "native", =C-c C-c= opens a visible terminal
+(vterm by default, or eat) instead of capturing responses into the org buffer.
+Terminal type is controlled by =CLAUDE_NATIVE_TERMINAL= org property or
+=claude-org-native-terminal-backend= defcustom.
+
+** Configuration
+
+#+BEGIN_SRC elisp
+;; Forward declarations for optional terminal packages
+(declare-function vterm-mode "vterm" ())
+(declare-function vterm-send-string "vterm" (string &optional paste-p))
+(declare-function vterm-send-return "vterm" ())
+(declare-function eat-make "eat" (name program &optional startfile &rest switches))
+(declare-function eat-term-send-string "eat" (terminal string))
+
+(defcustom claude-org-native-display-function #'pop-to-buffer
+  "Function to display the native Claude terminal buffer.
+Called with the terminal buffer as sole argument."
+  :type 'function
+  :group 'claude-org)
+
+(defcustom claude-org-native-prompt-timeout 30
+  "Seconds to wait for Claude CLI prompt before giving up."
+  :type 'integer
+  :group 'claude-org)
+
+(defcustom claude-org-native-input-delay 0.3
+  "Seconds to wait after pasting before sending Enter."
+  :type 'number
+  :group 'claude-org)
+
+(defcustom claude-org-native-terminal-backend 'vterm
+  "Terminal emulator for the native Claude terminal.
+Can be overridden per-file with the CLAUDE_NATIVE_TERMINAL org property."
+  :type '(choice (const :tag "Vterm (full terminal emulation, default)" vterm)
+                 (const :tag "Eat (lightweight)" eat))
+  :group 'claude-org)
+
+(defun claude-org--native-terminal-type ()
+  "Return the terminal backend type: \\='eat or \\='vterm.
+Reads CLAUDE_NATIVE_TERMINAL org property first, falls back to
+`claude-org-native-terminal-backend' defcustom."
+  (let ((prop (claude-org--get-org-property "CLAUDE_NATIVE_TERMINAL" t)))
+    (cond
+     ((equal prop "vterm") 'vterm)
+     ((equal prop "eat") 'eat)
+     (t (when (and prop (not (member prop '("vterm" "eat"))))
+          (message "Warning: unknown CLAUDE_NATIVE_TERMINAL value %S, using default" prop))
+        claude-org-native-terminal-backend))))
+
+(defvar-local claude-org--native-type nil
+  "Terminal type (\\='eat or \\='vterm) for this native terminal buffer.")
+
+(defvar-local claude-org--native-pending-timer nil
+  "Pending timer for delayed Enter key in this native terminal buffer.")
+
+(defvar-local claude-org--native-resumed-p nil
+  "Non-nil if this native terminal was launched with --resume.")
+
+(defvar-local claude-org--native-session-key nil
+  "Session key for this native terminal buffer.")
+
+(defvar-local claude-org--native-org-file nil
+  "Path to the org file that owns this native terminal session.")
+#+END_SRC
+
+** Buffer Naming
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-buffer-name (session-key)
+  "Return the buffer name for a native terminal with SESSION-KEY."
+  (format "*claude-native<%s>*" session-key))
+#+END_SRC
+
+** Terminal Lifecycle
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-buffer-alive-p (buf)
+  "Return non-nil if BUF is a live buffer with a live process."
+  (and buf
+       (buffer-live-p buf)
+       (get-buffer-process buf)
+       (process-live-p (get-buffer-process buf))))
+
+(defun claude-org--native-create-terminal (terminal-type buf-name cli switches)
+  "Create a terminal buffer using TERMINAL-TYPE (\\='eat or \\='vterm).
+BUF-NAME is the full buffer name (e.g. *claude-native<key>*).
+CLI is the path to the claude binary.  SWITCHES is a list of CLI flags.
+Returns the created buffer."
+  (cond
+   ((eq terminal-type 'vterm)
+    (unless (featurep 'vterm)
+      (user-error "The `vterm' package is required. \
+Install with: M-x package-install RET vterm RET"))
+    (let* ((vterm-shell (mapconcat #'shell-quote-argument
+                                   (cons cli switches) " "))
+           (buf (get-buffer-create buf-name)))
+      (with-current-buffer buf
+        (vterm-mode)
+        (setq claude-org--native-type 'vterm))
+      buf))
+   (t ; eat (default)
+    (unless (featurep 'eat)
+      (user-error "The `eat' package is required for native terminal. \
+Install with: M-x package-install RET eat RET"))
+    ;; Strip the surrounding *...* for eat-make name arg
+    (let* ((eat-name (substring buf-name 1 (1- (length buf-name))))
+           (buf (apply #'eat-make eat-name cli nil switches)))
+      (with-current-buffer buf
+        (setq claude-org--native-type 'eat))
+      buf))))
+
+(defun claude-org-open-native-terminal ()
+  "Open a native Claude Code terminal with system prompts from current org context.
+Creates a terminal (eat or vterm) running the Claude CLI with the assembled
+system prompt from :system_prompt: sections, behavior prompts, and file-based
+prompts.  Terminal type is controlled by CLAUDE_NATIVE_TERMINAL org property
+or `claude-org-native-terminal-backend' defcustom.
+
+If a live terminal for this session already exists, switches to it."
+  (interactive)
+  (let* ((session-key (claude-org--current-session-key))
+         (buf-name (claude-org--native-buffer-name session-key))
+         (existing (get-buffer buf-name)))
+    ;; Reuse existing live buffer
+    (if (claude-org--native-buffer-alive-p existing)
+        (funcall claude-org-native-display-function existing)
+      ;; Kill stale buffer
+      (when existing (kill-buffer existing))
+      ;; Build terminal
+      (let* ((terminal-type (claude-org--native-terminal-type))
+             (project-root (or (claude-org--get-project-root) default-directory))
+             (system-prompt (claude-org--build-system-prompt))
+             (sdk-uuid (claude-agent--get-sdk-uuid session-key))
+             (options (claude-org--build-query-options
+                       project-root system-prompt sdk-uuid))
+             ;; Add --resume if we have a previous session-id
+             ;; Check in-memory first, fall back to org property (survives restart)
+             (prev-session-id (or (claude-org--session-get session-key
+                                                           :native-session-id)
+                                  (claude-org--get-native-session-id)))
+             (options (if prev-session-id
+                          (plist-put (copy-sequence options)
+                                     :resume-session-id prev-session-id)
+                        options))
+             (cli (claude-agent--find-cli))
+             (switches (claude-agent-claude-backend--build-switches options))
+             (default-directory project-root)
+             (normalized-cwd (claude-agent-claude-backend--normalize-cwd
+                              project-root))
+             (env-vars (plist-get options :env))
+             (cli-dir (when cli (file-name-directory cli)))
+             (process-environment (if env-vars
+                                      (claude-agent--build-process-environment
+                                       env-vars cli-dir)
+                                    process-environment)))
+        ;; Register cwd BEFORE launch so SessionStart hook can find us.
+        ;; Uses a list to support multiple stories sharing the same cwd.
+        (when normalized-cwd
+          (let ((existing (gethash normalized-cwd
+                                   claude-org--native-cwd-to-session)))
+            (puthash normalized-cwd
+                     (cons session-key (if (listp existing) existing nil))
+                     claude-org--native-cwd-to-session)))
+        (let ((buf (claude-org--native-create-terminal
+                    terminal-type buf-name cli switches)))
+          ;; Set up buffer: minor mode + local keymap + cleanup hook
+          (with-current-buffer buf
+            (claude-org-native-mode 1)
+            (claude-org--native-setup-local-keymap)
+            ;; Track resume state for exit handler
+            (setq claude-org--native-resumed-p (and prev-session-id t))
+            (setq claude-org--native-session-key session-key)
+            (setq claude-org--native-org-file
+                  (if (string-match "^\\(.+\\)::" session-key)
+                      (match-string 1 session-key)
+                    session-key))
+            ;; Exit hooks: detect stale --resume failure and clear session ID
+            (cond
+             ((eq terminal-type 'vterm)
+              (add-hook 'vterm-exit-functions
+                        #'claude-org--native-on-exit-vterm nil t))
+             (t  ; eat
+              (add-hook 'eat-exit-hook
+                        #'claude-org--native-on-exit-eat nil t)))
+            ;; lexical-let required: dynamic binding won't capture sk in timer
+            (lexical-let ((sk session-key))
+              (add-hook 'kill-buffer-hook
+                        (lambda ()
+                          (claude-org--session-put sk :native-buffer nil))
+                        nil t)))
+          ;; Store reference in session
+          (claude-org--session-put session-key :native-mode t)
+          (claude-org--session-put session-key :native-buffer buf)
+          ;; Display
+          (funcall claude-org-native-display-function buf))))))
+#+END_SRC
+
+** Session Resumption
+
+When a native terminal is killed and re-opened, we resume the previous Claude
+conversation using =--resume <session-id>=.  The SessionStart hook captures
+the CLI session ID asynchronously; we store it in the org session state so it
+survives terminal buffer kills.
+
+#+BEGIN_SRC elisp
+(defvar claude-org--native-cwd-to-session (make-hash-table :test 'equal)
+  "Maps normalized-cwd → list of session-keys awaiting SessionStart.
+Populated before terminal launch, consumed (popped) by the session-start handler.
+Uses a list to support multiple stories sharing the same project root.")
+
+(defun claude-org--native-on-session-start (session-id normalized-cwd)
+  "Capture SESSION-ID for native terminal launched in NORMALIZED-CWD.
+Called via `claude-agent-claude-backend-session-start-functions' hook.
+Pops the first waiting session-key from the list and stores the session-id
+in its org session state for later --resume.
+
+IMPORTANT: This is called from `emacsclient --eval' context where the
+current buffer is ` *server*', NOT the org buffer.  We must switch to the
+correct org buffer before calling `claude-org--session-put' (which uses
+buffer-local `claude-org--sessions') and `claude-org--set-native-session-id'
+(which uses `org-set-property')."
+  (when normalized-cwd
+    (let ((keys (gethash normalized-cwd claude-org--native-cwd-to-session)))
+      (when (and keys (listp keys))
+        (let* ((session-key (car keys))
+               (rest (cdr keys))
+               ;; Extract org file path from session-key ("path::id" or "path")
+               (file-path (if (string-match "^\\(.+\\)::" session-key)
+                              (match-string 1 session-key)
+                            session-key))
+               (buf (find-buffer-visiting file-path)))
+          ;; Store in the correct org buffer's session state.
+          ;; If we can find the org buffer, switch to it first (required
+          ;; because claude-org--sessions is buffer-local).  Otherwise
+          ;; fall back to storing in whatever buffer is current (test env).
+          (if buf
+              (with-current-buffer buf
+                (claude-org--session-put session-key :native-session-id session-id)
+                ;; Persist as org property for cross-restart survival
+                (org-with-wide-buffer
+                 (claude-org--set-native-session-id session-key session-id)))
+            ;; Fallback: no org buffer found (e.g. test environment)
+            (claude-org--session-put session-key :native-session-id session-id))
+          ;; Pop consumed entry from the pending registry
+          (if rest
+              (puthash normalized-cwd rest claude-org--native-cwd-to-session)
+            (remhash normalized-cwd claude-org--native-cwd-to-session)))))))
+
+(add-hook 'claude-agent-claude-backend-session-start-functions
+          #'claude-org--native-on-session-start)
+
+(defun claude-org--native-clear-session-id (session-key org-file-path)
+  "Clear stale native session ID for SESSION-KEY.
+Removes both in-memory and persisted org property.
+ORG-FILE-PATH is the path to the org buffer for property removal."
+  (let ((buf (when org-file-path (find-buffer-visiting org-file-path))))
+    ;; Clear in-memory
+    (if buf
+        (with-current-buffer buf
+          (claude-org--session-put session-key :native-session-id nil))
+      (claude-org--session-put session-key :native-session-id nil))
+    ;; Clear org property
+    (when buf
+      (with-current-buffer buf
+        (org-with-wide-buffer
+         (goto-char (point-min))
+         (catch 'done
+           (let ((sdd-id (when (string-match "::\\(.+\\)$" session-key)
+                           (match-string 1 session-key))))
+             (when sdd-id
+               (while (re-search-forward
+                       (format ":CLAUDE_SESSION_ID:[ \t]+%s" (regexp-quote sdd-id))
+                       nil t)
+                 (org-back-to-heading t)
+                 (org-delete-property claude-org-native-session-id-property)
+                 (throw 'done t))))))))))
+
+(defun claude-org--native-on-exit-vterm (buf event)
+  "Handle vterm process exit for native Claude terminal.
+BUF is the vterm buffer, EVENT is the exit event string.
+When the process exits abnormally and --resume was used,
+clears the stale session ID and offers to retry without resume."
+  (when (and buf (buffer-live-p buf))
+    (let ((resumed (buffer-local-value 'claude-org--native-resumed-p buf))
+          (sk (buffer-local-value 'claude-org--native-session-key buf))
+          (org-path (buffer-local-value 'claude-org--native-org-file buf)))
+      (when (and resumed
+                 (string-match-p "abnormally\\|code 1" event))
+        ;; Clear the stale session ID
+        (claude-org--native-clear-session-id sk org-path)
+        (message "Claude: Stale session cleared. Re-open terminal to start fresh.")))))
+
+(defun claude-org--native-on-exit-eat (process)
+  "Handle eat process exit for native Claude terminal.
+PROCESS is the eat process that exited.
+When the process exits abnormally and --resume was used,
+clears the stale session ID and offers to retry without resume."
+  (let* ((buf (process-buffer process))
+         (status (process-exit-status process)))
+    (when (and buf (buffer-live-p buf))
+      (let ((resumed (buffer-local-value 'claude-org--native-resumed-p buf))
+            (sk (buffer-local-value 'claude-org--native-session-key buf))
+            (org-path (buffer-local-value 'claude-org--native-org-file buf)))
+        (when (and resumed (not (zerop status)))
+          (claude-org--native-clear-session-id sk org-path)
+          (message "Claude: Stale session cleared. Re-open terminal to start fresh."))))))
+#+END_SRC
+
+** Prompt Sending
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-prompt-ready-p (buf)
+  "Return non-nil if BUF shows a fresh Claude CLI prompt (❯) near the end."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (save-excursion
+        (goto-char (max (point-min) (- (point-max) 500)))
+        (search-forward "❯" nil t)))))
+
+(defun claude-org--native-wait-for-ready (buf)
+  "Wait until BUF shows a fresh Claude CLI prompt.
+Signals error if timeout is reached."
+  (let ((deadline (+ (float-time) claude-org-native-prompt-timeout)))
+    (while (and (not (claude-org--native-prompt-ready-p buf))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.2))
+    (unless (claude-org--native-prompt-ready-p buf)
+      (error "Claude CLI did not become ready within %d seconds"
+             claude-org-native-prompt-timeout))))
+
+(defun claude-org--native-schedule-enter (buf send-fn)
+  "Schedule SEND-FN to run in BUF after `claude-org-native-input-delay'.
+Cancels any pending enter-key timer for BUF first (prevents double-enter
+on rapid successive calls)."
+  (when (buffer-live-p buf)
+    (let ((existing (buffer-local-value 'claude-org--native-pending-timer buf)))
+      (when (timerp existing)
+        (cancel-timer existing))))
+  ;; lexical-let required: dynamic binding won't capture buf/send-fn in timer
+  (lexical-let ((buf buf) (send-fn send-fn))
+    (let ((timer (run-at-time claude-org-native-input-delay nil
+                   (lambda ()
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (setq claude-org--native-pending-timer nil)
+                         (funcall send-fn)))))))
+      (with-current-buffer buf
+        (setq claude-org--native-pending-timer timer)))))
+
+(defun claude-org--native-send-prompt (buf prompt)
+  "Send PROMPT to the native terminal BUF using bracketed paste.
+Waits for the CLI prompt, then pastes PROMPT and sends Enter.
+Dispatches on `claude-org--native-type' buffer-local (set at creation)."
+  (unless (claude-org--native-buffer-alive-p buf)
+    (error "Native terminal buffer is not alive"))
+  (claude-org--native-wait-for-ready buf)
+  (with-current-buffer buf
+    (let ((type claude-org--native-type))
+      (cond
+       ((eq type 'vterm)
+        (vterm-send-string prompt t)
+        (claude-org--native-schedule-enter buf #'vterm-send-return))
+       ((eq type 'eat)
+        (let ((terminal eat-terminal))
+          (eat-term-send-string terminal
+            (concat "\e[200~" prompt "\e[201~"))
+          ;; lexical-let needed to capture terminal for the timer callback
+          (lexical-let ((terminal terminal))
+            (claude-org--native-schedule-enter buf
+              (lambda () (eat-term-send-string terminal "\r"))))))
+       (t (error "Native buffer has unknown terminal type: %S" type))))))
+
+(defun claude-org--native-loop-send (session-key buf prompt iteration max)
+  "Send loop iteration PROMPT to native terminal buffer BUF.
+SESSION-KEY identifies the org session.
+ITERATION is the current loop number, MAX is total iterations."
+  (when (claude-org--native-buffer-alive-p buf)
+    (claude-org--native-send-prompt buf prompt)
+    (message "Sent loop iteration %d/%d to native terminal" iteration max)))
+#+END_SRC
+
+** Minor Mode
+
+#+BEGIN_SRC elisp
+(defvar claude-org-native-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-q") #'claude-org-native-kill)
+    (define-key map (kbd "C-c C-r") #'claude-org-native-refresh)
+    map)
+  "Keymap for `claude-org-native-mode'.")
+
+(define-minor-mode claude-org-native-mode
+  "Minor mode for native Claude Code terminal buffers.
+Provides keybindings for managing the terminal.
+
+Key bindings:
+  \\[claude-org-native-kill]     Kill this terminal
+  \\[claude-org-native-refresh]  Refresh (relaunch with updated system prompt)
+
+\\{claude-org-native-mode-map}"
+  :lighter " ClaudeNative"
+  :keymap claude-org-native-mode-map)
+
+(defun claude-org-native-kill ()
+  "Kill the current native Claude terminal buffer."
+  (interactive)
+  (when (yes-or-no-p "Kill native Claude terminal? ")
+    ;; Suppress Emacs's own process-buffer prompt to avoid double-confirm
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer (current-buffer)))))
+
+(defun claude-org-native-refresh ()
+  "Refresh native terminal: kill and relaunch with updated system prompt.
+Must be called from within a native terminal buffer."
+  (interactive)
+  (message "To refresh: C-c C-q to kill, then C-c C-c or M-x claude-org-open-native-terminal in the org file."))
+#+END_SRC
+
+** Sending Special Keys
+
+Interactive commands to send keys that Emacs/evil intercept before they
+reach the terminal process.  Each dispatches on =claude-org--native-type=
+(vterm vs eat).
+
+#+BEGIN_SRC elisp
+(defun claude-org-native--send-key (key &optional meta)
+  "Send KEY string to the current native terminal buffer.
+Dispatches on `claude-org--native-type' (vterm or eat).
+When META is non-nil, send with Meta modifier (vterm only)."
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-send-key key nil meta))
+   ((eq claude-org--native-type 'eat)
+    (eat-term-send-string eat-terminal
+                          (if meta (concat "\e" key) key)))
+   (t (error "Unknown native terminal type: %S" claude-org--native-type))))
+
+(defun claude-org-native-send-escape ()
+  "Send Escape to the Claude CLI.  Cancels current response or rejects a prompt."
+  (interactive)
+  (claude-org-native--send-key "\C-["))
+
+(defun claude-org-native-send-return ()
+  "Send Return to the Claude CLI.  Submits prompt or accepts a confirmation."
+  (interactive)
+  (claude-org-native--send-key "\C-m"))
+
+(defun claude-org-native-send-interrupt ()
+  "Send Ctrl+C (SIGINT) to the Claude CLI.  Hard interrupt."
+  (interactive)
+  (claude-org-native--send-key "\C-c"))
+
+(defun claude-org-native-send-shift-tab ()
+  "Send Shift-Tab to cycle Claude mode (default → accept-edits → plan)."
+  (interactive)
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-send-key "\e[Z" nil nil t))    ; raw escape sequence
+   ((eq claude-org--native-type 'eat)
+    (eat-term-send-string eat-terminal "\e[Z"))))
+
+(defun claude-org-native-send-option (n)
+  "Send option number N (1-3) to the Claude CLI."
+  (interactive "nOption (1-3): ")
+  (let ((text (format "%d\C-m" n)))
+    (cond
+     ((eq claude-org--native-type 'vterm)
+      (vterm-send-string (number-to-string n))
+      (vterm-send-return))
+     ((eq claude-org--native-type 'eat)
+      (eat-term-send-string eat-terminal text)))))
+
+(defun claude-org-native-send-command (cmd)
+  "Send CMD string to the Claude CLI followed by Return."
+  (interactive "sCommand: ")
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-send-string cmd t)       ; t = bracketed paste
+    (vterm-send-return))
+   ((eq claude-org--native-type 'eat)
+    (eat-term-send-string eat-terminal
+                          (concat "\e[200~" cmd "\e[201~\r")))))
+
+(defun claude-org-native-send-slash (slash-cmd)
+  "Send a /command to the Claude CLI.
+SLASH-CMD should NOT include the leading slash."
+  (interactive "sSlash command (without /): ")
+  (claude-org-native-send-command (concat "/" slash-cmd)))
+
+(defun claude-org-native-toggle-copy-mode ()
+  "Toggle copy/selection mode in the native terminal."
+  (interactive)
+  (cond
+   ((eq claude-org--native-type 'vterm)
+    (vterm-copy-mode (if vterm-copy-mode -1 1)))
+   ((eq claude-org--native-type 'eat)
+    ;; Toggle between semi-char and emacs mode
+    (if (eq eat--semi-char-mode t)
+        (eat-emacs-mode)
+      (eat-semi-char-mode)))))
+#+END_SRC
+
+** Command Menu
+
+A transient menu providing quick access to all native terminal actions.
+Accessible via =C-c C-/= in the terminal buffer, mirroring the main
+=claude-org-menu= binding.
+
+#+BEGIN_SRC elisp
+(transient-define-prefix claude-org-native-menu ()
+  "Claude native terminal command menu."
+  ["Claude Native Terminal"
+   ["Quick Actions"
+    ("e" "Escape (cancel)" claude-org-native-send-escape)
+    ("RET" "Return (accept)" claude-org-native-send-return)
+    ("C" "Ctrl+C (interrupt)" claude-org-native-send-interrupt)
+    ("M" "Cycle mode (S-Tab)" claude-org-native-send-shift-tab)
+    ("t" "Toggle copy mode" claude-org-native-toggle-copy-mode)]
+   ["Respond"
+    ("1" "Send \"1\"" (lambda () (interactive) (claude-org-native-send-option 1)))
+    ("2" "Send \"2\"" (lambda () (interactive) (claude-org-native-send-option 2)))
+    ("3" "Send \"3\"" (lambda () (interactive) (claude-org-native-send-option 3)))]
+   ["Slash Commands"
+    ("/h" "/help"    (lambda () (interactive) (claude-org-native-send-command "/help")))
+    ("/c" "/clear"   (lambda () (interactive) (claude-org-native-send-command "/clear")))
+    ("/C" "/compact" (lambda () (interactive) (claude-org-native-send-command "/compact")))
+    ("/m" "/model"   (lambda () (interactive) (claude-org-native-send-command "/model")))
+    ("/s" "/status"  (lambda () (interactive) (claude-org-native-send-command "/status")))
+    ("/$" "/cost"    (lambda () (interactive) (claude-org-native-send-command "/cost")))]
+   ["Terminal"
+    (":" "Send command" claude-org-native-send-command)
+    ("S" "Slash command" claude-org-native-send-slash)
+    ("r" "Refresh" claude-org-native-refresh)
+    ("q" "Kill" claude-org-native-kill)]])
+#+END_SRC
+
+** Native Keymap (updated)
+
+#+BEGIN_SRC elisp
+;; Add menu and escape binding to the native mode keymap
+(define-key claude-org-native-mode-map (kbd "C-c C-/") #'claude-org-native-menu)
+(define-key claude-org-native-mode-map (kbd "C-c /")   #'claude-org-native-menu)
+#+END_SRC
+
+** Buffer-local Keymap Setup
+
+When the native terminal is created, we augment the local keymap to
+remap =C-g= → send Escape (following claude-code.el pattern).
+This lets users press =C-g= to cancel Claude responses even with evil mode.
+
+#+BEGIN_SRC elisp
+(defun claude-org--native-setup-local-keymap ()
+  "Set up buffer-local key overrides for the native Claude terminal.
+Must be called after vterm-mode or eat-mode has established `current-local-map'.
+Adds C-g → send Escape, which works even in evil normal state."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map (current-local-map))
+    (define-key map (kbd "C-g") #'claude-org-native-send-escape)
+    (use-local-map map))
+  ;; Also restore after exiting vterm-copy-mode (vterm resets the keymap)
+  (when (eq claude-org--native-type 'vterm)
+    (add-hook 'vterm-copy-mode-hook
+              (lambda ()
+                (unless vterm-copy-mode
+                  (claude-org--native-setup-local-keymap)))
+              nil t)))
+#+END_SRC
+
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-org-native)
+#+END_SRC
