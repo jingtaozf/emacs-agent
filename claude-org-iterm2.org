@@ -838,14 +838,22 @@ Sends Escape to the TUI. The Stop hook will fire and set-ready."
 (defun claude-org-iterm2--permission-needed (sdd-session-id tool-name)
   "Handle notification that SDD-SESSION-ID needs permission for TOOL-NAME.
 Called by the PreToolUse hook via MCP. Registers the pending permission,
-brings Emacs to foreground, and sends macOS notification."
+focuses the iTerm2 tab, brings both iTerm2 and Emacs to foreground
+\(works across multiple monitors), bounces Emacs dock icon, and sends
+macOS notification."
   ;; Register pending permission
   (puthash sdd-session-id tool-name claude-agent--pending-permissions)
 
-  ;; Bring Emacs to foreground
+  ;; 1. Focus the correct iTerm2 tab (select the tab, no app activation yet)
+  (claude-org-iterm2--focus-by-sdd-session sdd-session-id)
+
+  ;; 2. Activate iTerm2 app (brings its window to foreground on its monitor)
+  (claude-org-iterm2--activate-app "iTerm2")
+
+  ;; 3. Activate Emacs (brings its window to foreground on its monitor)
   (claude-org-iterm2--activate-emacs)
 
-  ;; macOS notification
+  ;; 4. macOS notification
   (claude-org--notify
    "Claude: Permission Needed"
    (format "%s needs approval for %s"
@@ -853,7 +861,7 @@ brings Emacs to foreground, and sends macOS notification."
            tool-name)
    claude-org-notify-sound)
 
-  ;; Force immediate mode-line update
+  ;; 5. Force immediate mode-line update
   (claude-agent--update-activity-string)
   "ok")
 
@@ -864,13 +872,22 @@ Called by the PostToolUse hook via MCP, or by mode-line click. Idempotent."
   (claude-agent--update-activity-string)
   "ok")
 
-(defun claude-org-iterm2--activate-emacs ()
-  "Bring Emacs to the foreground on macOS."
+(defun claude-org-iterm2--activate-app (app-name)
+  "Bring APP-NAME to the foreground on macOS via AppleScript."
   (when (eq system-type 'darwin)
-    (start-process "activate-emacs" nil
+    (start-process (format "activate-%s" (downcase app-name)) nil
                    "osascript" "-e"
-                   "tell application \"Emacs\" to activate"))
-  (raise-frame))
+                   (format "tell application \"%s\" to activate" app-name))))
+
+(defun claude-org-iterm2--activate-emacs ()
+  "Bring Emacs to the foreground on macOS and bounce dock icon."
+  (when (eq system-type 'darwin)
+    (claude-org-iterm2--activate-app "Emacs"))
+  (raise-frame)
+  ;; Bounce dock icon if Emacs is not focused (NSInformationalRequest)
+  (when (and (display-graphic-p)
+             (not (frame-focus-state (selected-frame))))
+    (x-focus-frame nil)))
 
 (defun claude-org-iterm2--focus-by-sdd-session (sdd-session-id)
   "Focus the iTerm2 tab associated with SDD-SESSION-ID."
