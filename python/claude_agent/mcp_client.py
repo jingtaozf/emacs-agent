@@ -9,6 +9,23 @@ import urllib.request
 import urllib.error
 
 
+class McpElispError(Exception):
+    """Raised when Emacs reports an error in elisp evaluation."""
+    pass
+
+
+class McpConnectionError(Exception):
+    """Raised when connection to Emacs MCP server fails."""
+    pass
+
+
+_id_counter = __import__('itertools').count(1)
+
+
+def _get_next_id() -> int:
+    return next(_id_counter)
+
+
 class McpClient:
     """Synchronous MCP client for evalElisp calls."""
 
@@ -32,7 +49,7 @@ class McpClient:
         """
         payload = json.dumps({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": _get_next_id(),
             "method": "tools/call",
             "params": {
                 "name": "evalElisp",
@@ -47,13 +64,15 @@ class McpClient:
         try:
             resp = urllib.request.urlopen(req, timeout=self.read_timeout)
             body = resp.read().decode()
-        except (urllib.error.URLError, OSError, TimeoutError):
-            return None
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise McpConnectionError(f"Connection failed: {exc}") from exc
 
         try:
             outer = json.loads(body)
             text = outer["result"]["content"][0]["text"]
             inner = json.loads(text)
+            if not inner.get("success", True):
+                raise McpElispError(inner.get("error", "Emacs returned success=false"))
             result = inner.get("result")
             if result is None:
                 return None
@@ -67,5 +86,8 @@ class McpClient:
 
     def ping(self) -> bool:
         """Check MCP connectivity by evaluating (+ 1 1)."""
-        result = self.eval_elisp("(+ 1 1)")
-        return result == "2"
+        try:
+            result = self.eval_elisp("(+ 1 1)")
+            return result == "2"
+        except (McpConnectionError, McpElispError):
+            return False

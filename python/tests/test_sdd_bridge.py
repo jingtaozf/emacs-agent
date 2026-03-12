@@ -7,6 +7,8 @@ import pytest
 
 from unittest.mock import MagicMock
 
+from claude_agent.mcp_client import McpConnectionError
+
 from claude_agent.sdd_bridge import (
     _escape_elisp_string,
     _extract_full_response,
@@ -320,7 +322,7 @@ class TestHandlePermission:
     def test_ask_even_on_mcp_failure(self, capsys):
         """Permission decision is printed even if MCP call fails."""
         mcp = MagicMock()
-        mcp.eval_elisp.side_effect = ConnectionError("unreachable")
+        mcp.eval_elisp.side_effect = McpConnectionError("unreachable")
         handle_permission(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
         output = json.loads(capsys.readouterr().out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
@@ -338,5 +340,5 @@ class TestHandlePermissionClear:
 
     def test_swallows_mcp_errors(self):
         mcp = MagicMock()
-        mcp.eval_elisp.side_effect = ConnectionError("gone")
+        mcp.eval_elisp.side_effect = McpConnectionError("gone")
         handle_permission_clear(mcp, {}, "/tmp/f.org", "sid")  # should not raise

@@ -5,10 +5,13 @@ Required env vars: SDD_ORG_FILE, SDD_SESSION_ID, EMACS_MCP_URL
 """
 
 import json
+import logging
 import os
 import sys
 
-from claude_agent.mcp_client import McpClient
+from claude_agent.mcp_client import McpClient, McpConnectionError, McpElispError
+
+logger = logging.getLogger(__name__)
 
 STATUS_DIR = "/tmp/claude-agent-status"
 
@@ -41,10 +44,13 @@ def _read_custom_id(session_id: str) -> str | None:
 
 def _notify_query_completed(mcp: McpClient, session_id: str) -> None:
     """Unregister query from Emacs active-queries (mode-line + *Claude Queries*)."""
-    mcp.eval_elisp(
-        f'(claude-org-iterm2--query-completed '
-        f'"{_escape_elisp_string(session_id)}")'
-    )
+    try:
+        mcp.eval_elisp(
+            f'(claude-org-iterm2--query-completed '
+            f'"{_escape_elisp_string(session_id)}")'
+        )
+    except (McpConnectionError, McpElispError):
+        logger.warning("Failed to notify query completed for %s", session_id)
 
 
 def _read_request_id(session_id: str) -> str | None:
@@ -93,43 +99,56 @@ def handle_prompt(
     """Handle UserPromptSubmit hook event."""
     write_status(session_id, "busy")
 
-    prompt = input_data.get("prompt", "")
-    if not prompt:
-        write_status(session_id, "ready")
-        return
-
-    # Skip system-injected messages — these are not human prompts
-    if prompt.lstrip().startswith("<"):
-        write_status(session_id, "ready")
-        return
-
-    save_sexp = _build_save_cli_session_sexp(
-        org_file, session_id, input_data.get("session_id", "")
-    )
-
-    # Check from-emacs flag
-    from_emacs_flag = os.path.join(STATUS_DIR, f"{session_id}.from-emacs")
-    if os.path.exists(from_emacs_flag):
-        os.remove(from_emacs_flag)
-        if save_sexp:
-            mcp.eval_elisp(save_sexp)
-    else:
-        escaped_prompt = _escape_elisp_string(prompt)
-        elisp = (
-            f'(claude-org-sdd-bridge-insert-prompt '
-            f'"{_escape_elisp_string(org_file)}" '
-            f'"{_escape_elisp_string(session_id)}" '
-            f'"{escaped_prompt}")'
-        )
-        result = mcp.eval_elisp(elisp)
-        if result is None:
-            write_status(session_id, "ready")
+    try:
+        prompt = input_data.get("prompt", "")
+        if not prompt:
             return
-        # Save instruction CUSTOM_ID for response correlation
-        if result:
-            _write_custom_id(session_id, result)
-        if save_sexp:
-            mcp.eval_elisp(save_sexp)
+
+        # Skip system-injected messages — these are not human prompts
+        if prompt.lstrip().startswith("<"):
+            return
+
+        save_sexp = _build_save_cli_session_sexp(
+            org_file, session_id, input_data.get("session_id", "")
+        )
+
+        # Check from-emacs flag
+        from_emacs_flag = os.path.join(STATUS_DIR, f"{session_id}.from-emacs")
+        try:
+            os.remove(from_emacs_flag)
+        except FileNotFoundError:
+            # No flag — prompt was typed in terminal, insert into org
+            escaped_prompt = _escape_elisp_string(prompt)
+            elisp = (
+                f'(claude-org-sdd-bridge-insert-prompt '
+                f'"{_escape_elisp_string(org_file)}" '
+                f'"{_escape_elisp_string(session_id)}" '
+                f'"{escaped_prompt}")'
+            )
+            try:
+                result = mcp.eval_elisp(elisp)
+            except (McpConnectionError, McpElispError):
+                logger.warning("Failed to insert prompt for %s", session_id)
+                return
+            if result is None:
+                return
+            # Save instruction CUSTOM_ID for response correlation
+            if result:
+                _write_custom_id(session_id, result)
+            if save_sexp:
+                try:
+                    mcp.eval_elisp(save_sexp)
+                except (McpConnectionError, McpElispError):
+                    pass
+        else:
+            # Flag existed and was removed — prompt came from Emacs
+            if save_sexp:
+                try:
+                    mcp.eval_elisp(save_sexp)
+                except (McpConnectionError, McpElispError):
+                    pass
+    finally:
+        write_status(session_id, "ready")
 
 
 def handle_response(
@@ -181,9 +200,12 @@ def handle_response(
         f'(claude-org--current-session-key) nil '
         f"'completed)))"
     )
-    mcp.eval_elisp(elisp)
+    try:
+        mcp.eval_elisp(elisp)
+    except (McpConnectionError, McpElispError):
+        logger.warning("Failed to insert response for %s", session_id)
 
-    # Mark query completed AFTER response insertion succeeds
+    # Mark query completed AFTER response insertion attempt
     _notify_query_completed(mcp, session_id)
 
 
@@ -203,6 +225,7 @@ def _extract_full_response(transcript_path: str) -> str:
             try:
                 entries.append(json.loads(line))
             except json.JSONDecodeError:
+                logger.warning("Skipping malformed JSONL line in transcript")
                 continue
 
     if not entries:
@@ -223,7 +246,10 @@ def _extract_full_response(transcript_path: str) -> str:
     for entry in entries[start:]:
         if entry.get("type") != "assistant":
             continue
-        content = entry.get("message", {}).get("content", [])
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content", [])
         has_tool_use = any(p.get("type") == "tool_use" for p in content)
         if has_tool_use:
             continue
@@ -292,7 +318,10 @@ def _handle_todo_tool(
         f"'{elisp_todos} "
         f'"{_escape_elisp_string(custom_id)}")'
     )
-    mcp.eval_elisp(elisp)
+    try:
+        mcp.eval_elisp(elisp)
+    except (McpConnectionError, McpElispError):
+        logger.warning("Failed to update todos for %s", session_id)
 
 
 # Tools that require user interaction — notify Emacs and return "ask"
@@ -320,7 +349,7 @@ def handle_permission(
                 f'"{_escape_elisp_string(session_id)}" '
                 f'"{_escape_elisp_string(tool_name)}")'
             )
-        except Exception:
+        except (McpConnectionError, McpElispError):
             pass
 
         # Return "ask" so the terminal prompt appears
@@ -344,7 +373,7 @@ def handle_permission_clear(
             f'(claude-org-iterm2--permission-resolved '
             f'"{_escape_elisp_string(session_id)}")'
         )
-    except Exception:
+    except (McpConnectionError, McpElispError):
         pass
 
 

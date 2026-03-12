@@ -976,14 +976,17 @@ phases will compose them into the main process-state.
   (ready nil)       ; Boolean ready state
   (closed nil))     ; Boolean closed state
 
-(defvar claude-agent--active-states nil
-  "List of active process states for cleanup.")
 #+END_SRC
 
 *** Unified Lifecycle Registry
 
 Single registry struct consolidating all global tracking tables.
 Per-process cleanup via =claude-agent-registry-cleanup-process= — never =clrhash=.
+
+All process-tracking state lives in =claude-agent--registry=.  The standalone
+variables =claude-agent--active-states=, =claude-agent--pending-background-tasks=,
+and =claude-agent--pending-control-requests= are backward-compatible aliases
+that share the same underlying data with the registry struct.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent--registry
@@ -999,6 +1002,48 @@ Per-process cleanup via =claude-agent-registry-cleanup-process= — never =clrha
 
 (defvar claude-agent--registry (claude-agent--make-registry)
   "Singleton lifecycle registry instance.")
+
+;;;; Registry Accessors
+;; Thin defsubst accessors — all reads/writes go through the registry struct.
+
+(defsubst claude-agent-registry-active-states ()
+  "Return active states list from the unified registry."
+  (claude-agent--registry-active-states claude-agent--registry))
+
+(defsubst claude-agent-registry-pending-background-tasks ()
+  "Return pending background tasks hash table from the unified registry."
+  (claude-agent--registry-background-tasks claude-agent--registry))
+
+(defsubst claude-agent-registry-pending-control-requests ()
+  "Return pending control requests hash table from the unified registry."
+  (claude-agent--registry-control-requests claude-agent--registry))
+
+;;;; Standalone Variable Aliases
+;; These exist for backward compatibility with tests and callers that
+;; reference the standalone variables directly.  They are NOT independent
+;; storage — they point into the registry struct fields.
+
+;; For the list-typed active-states, we keep a defvar in sync with the
+;; registry via explicit setq at every mutation site.
+(defvar claude-agent--active-states nil
+  "Backward-compatible alias into `claude-agent--registry' active-states.
+Kept in sync with the registry at every mutation site.")
+;; Initialize from registry
+(setq claude-agent--active-states
+      (claude-agent--registry-active-states claude-agent--registry))
+
+;; For hash-table fields, the standalone vars hold the SAME hash-table
+;; object that lives in the registry struct.  Mutations via
+;; puthash/remhash/clrhash are visible through both names.
+(defvar claude-agent--pending-background-tasks
+  (claude-agent--registry-background-tasks claude-agent--registry)
+  "Backward-compatible alias into `claude-agent--registry' background-tasks.
+Same hash-table object — mutations are visible through both names.")
+
+(defvar claude-agent--pending-control-requests
+  (claude-agent--registry-control-requests claude-agent--registry)
+  "Backward-compatible alias into `claude-agent--registry' control-requests.
+Same hash-table object — mutations are visible through both names.")
 
 (defun claude-agent--remove-hash-entries-by-value (table value)
   "Remove all entries from TABLE whose value equals VALUE.
@@ -1016,10 +1061,14 @@ Also unregisters from `claude-agent--active-queries' to ensure the
 *Claude Queries* buffer and mode-line reflect the terminal state."
   (let* ((req-id (claude-agent--process-state-request-id state))
          (reg claude-agent--registry))
-    ;; Remove from active-states list
+    ;; Remove from active-states list (registry is canonical; sync alias)
     (setf (claude-agent--registry-active-states reg)
           (delq state (claude-agent--registry-active-states reg)))
+    (setq claude-agent--active-states
+          (claude-agent--registry-active-states reg))
     ;; Remove owned entries from all registry tables
+    ;; (background-tasks and control-requests share the same hash-table
+    ;; objects as the standalone vars — no separate sync needed)
     (when req-id
       (claude-agent--remove-hash-entries-by-value
        (claude-agent--registry-background-tasks reg) req-id)
@@ -1074,8 +1123,8 @@ This is useful for cleanup after tests or when processes are stuck.
 Returns the number of processes killed."
   (interactive)
   (let ((killed 0))
-    ;; Kill via active-states tracking
-    (dolist (state claude-agent--active-states)
+    ;; Kill via active-states tracking (read from registry)
+    (dolist (state (claude-agent-registry-active-states))
       (when-let ((process (claude-agent--process-state-process state)))
         (when (process-live-p process)
           (claude-agent--kill-process-tree process)
@@ -1087,7 +1136,8 @@ Returns the number of processes killed."
                    (claude-agent--kill-process-tree process)
                    (cl-incf killed))))
              claude-agent--active-queries)
-    ;; Clear state tracking
+    ;; Clear state tracking (registry + alias)
+    (setf (claude-agent--registry-active-states claude-agent--registry) nil)
     (setq claude-agent--active-states nil)
     (clrhash claude-agent--active-queries)
     (when (called-interactively-p 'any)
@@ -1596,10 +1646,12 @@ Kills orphaned children, removes from active-states, unregisters
 query, clears Docker mappings, and kills output buffer."
   ;; Kill any orphaned child processes (delegate to existing helper)
   (claude-agent--kill-child-processes (process-id process))
-  ;; Remove from active states
+  ;; Remove from active states (registry is canonical; sync alias)
+  (setf (claude-agent--registry-active-states claude-agent--registry)
+        (delq state (claude-agent--registry-active-states claude-agent--registry)))
   (setq claude-agent--active-states
-        (delq state claude-agent--active-states))
-  ;; Per-process cleanup and unregister (single req-id extraction)
+        (claude-agent--registry-active-states claude-agent--registry))
+  ;; Per-process cleanup via registry (same hash-table objects as standalone vars)
   (when-let* ((req-id (claude-agent--process-state-request-id state)))
     (claude-agent--cleanup-process-entries req-id)
     (claude-agent--unregister-query req-id))
@@ -1864,10 +1916,10 @@ Two types of background tasks exist:
 Both must be tracked to prevent premature stdin close.
 
 #+BEGIN_SRC elisp
-(defvar claude-agent--pending-background-tasks (make-hash-table :test 'equal)
-  "Hash table of task-id -> owner-request-id for pending background tasks.
-Tracks both Task subagents (agentId) and Bash background tasks (backgroundTaskId).
-Values are the owning process's request-id for per-process cleanup.")
+;; `claude-agent--pending-background-tasks' is defined as an alias into the
+;; unified registry in the "Standalone Variable Aliases" section above.
+;; All mutations via puthash/remhash/clrhash on the standalone var go to
+;; the same hash-table object that lives in the registry struct.
 
 (defun claude-agent--background-task-tracker (_tool-use-id _result _is-error
                                               tool-use-result state)
@@ -1925,10 +1977,10 @@ requests (can_use_tool) and expects control_responses. If stdin is closed
 before all control_responses are sent, the CLI will exit unexpectedly.
 
 #+BEGIN_SRC elisp
-(defvar claude-agent--pending-control-requests (make-hash-table :test 'equal)
-  "Hash table of control-request-id -> owner-request-id for pending control requests.
-Tracks control_requests that need control_responses before stdin can be closed.
-Values are the owning process's request-id for per-process cleanup.")
+;; `claude-agent--pending-control-requests' is defined as an alias into the
+;; unified registry in the "Standalone Variable Aliases" section above.
+;; All mutations via puthash/remhash/clrhash on the standalone var go to
+;; the same hash-table object that lives in the registry struct.
 
 (defun claude-agent--track-control-request (request-id &optional owner-request-id)
   "Track REQUEST-ID as pending a response.
@@ -2169,7 +2221,11 @@ Returns a process state object."
                                                    args default-directory env-vars))
       ;; Streaming mode: Send initialization and prompt via stdin
       (claude-agent--streaming-init process state prompt)
-      (push state claude-agent--active-states)
+      ;; Register in registry (canonical) and sync alias
+      (setf (claude-agent--registry-active-states claude-agent--registry)
+            (cons state (claude-agent--registry-active-states claude-agent--registry)))
+      (setq claude-agent--active-states
+            (claude-agent--registry-active-states claude-agent--registry))
       state)))
 #+END_SRC
 
@@ -2274,13 +2330,13 @@ and auto-starts Docker container when needed."
                                      session-key source-buffer query-context
                                      source-location-fn source-location-args
                                      cli-path path-mappings project-root
-                                     org-section)
+                                     context-label)
   "Send a one-shot query to Claude.
 
 PROMPT is the query string to send.
 
 OPTIONS is an optional plist created with `claude-agent-options'.
-ORG-SECTION is the name of the org section/story for display in permission prompts.
+CONTEXT-LABEL is the name of the org section/story for display in permission prompts.
 
 ON-MESSAGE is called with each message as it arrives.
   Function signature: (lambda (message) ...)
@@ -2377,11 +2433,11 @@ Docker example:
                     :query-context query-context
                     :source-location-fn source-location-fn
                     :source-location-args source-location-args)))
-        ;; Store org-section on the process for permission callbacks
-        (when (and state org-section)
+        ;; Store context-label on the process for permission callbacks
+        (when (and state context-label)
           (let ((process (claude-agent--process-state-process state)))
             (when process
-              (process-put process :org-section org-section))))
+              (process-put process :context-label context-label))))
         state))))
 
 #+END_SRC
@@ -2804,9 +2860,9 @@ Tracks pending requests to prevent premature stdin close."
           (let* ((tool-name (plist-get request-data :tool_name))
                  (tool-input (plist-get request-data :input))
                  (session-id (process-get process :session-id))
-                 (org-section (process-get process :org-section))
+                 (context-label (process-get process :context-label))
                  (context (list :session-id session-id
-                               :org-section org-section
+                               :context-label context-label
                                :suggestions (plist-get request-data :permission_suggestions))))
             (claude-agent--debug-log "Running permission functions for %s (id=%s)"
                                      tool-name request-id)
@@ -2934,16 +2990,18 @@ outdated structure, or queries that have exceeded timeout."
         (when timed-out-keys
           (claude-agent--debug-log "Cleaned up %d timed-out queries" (length timed-out-keys)))
         ;; Also clean up active-states list (may accumulate dead entries)
-        (let ((initial-count (length claude-agent--active-states)))
-          (setq claude-agent--active-states
-                (cl-remove-if
-                 (lambda (state)
-                   (or (not (claude-agent--process-state-p state))
-                       (claude-agent--process-state-closed state)
-                       (let ((proc (claude-agent--process-state-process state)))
-                         (and proc (not (process-live-p proc))))))
-                 claude-agent--active-states))
-          (let ((removed (- initial-count (length claude-agent--active-states))))
+        (let* ((current (claude-agent-registry-active-states))
+               (initial-count (length current))
+               (cleaned (cl-remove-if
+                         (lambda (state)
+                           (or (not (claude-agent--process-state-p state))
+                               (claude-agent--process-state-closed state)
+                               (let ((proc (claude-agent--process-state-process state)))
+                                 (and proc (not (process-live-p proc))))))
+                         current)))
+          (setf (claude-agent--registry-active-states claude-agent--registry) cleaned)
+          (setq claude-agent--active-states cleaned)
+          (let ((removed (- initial-count (length cleaned))))
             (when (> removed 0)
               (claude-agent--debug-log "Cleaned up %d stale states" removed)))))
     (error (message "claude-agent: error in stale query cleanup: %S" err))))
@@ -3922,6 +3980,13 @@ Response text comes via CLI Stop hook (not TUI scraping)."
     (if (fboundp 'eat-term-live-p)
         (eat-term-live-p terminal)
       t)))
+
+(defun claude-agent-build-cli-switches (options)
+  "Build CLI switches from OPTIONS plist for terminal mode.
+Public wrapper around the backend implementation.
+Does NOT include --output-format, --input-format, --print, or --verbose
+since those are for the JSON streaming backend."
+  (claude-agent-claude-backend--build-switches options))
 
 (defun claude-agent-claude-backend--build-switches (options)
   "Build CLI switches from OPTIONS plist for interactive terminal mode.

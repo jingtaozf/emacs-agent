@@ -2,7 +2,7 @@
 
 import pytest
 
-from claude_agent.mcp_client import McpClient
+from claude_agent.mcp_client import McpClient, McpConnectionError, McpElispError
 
 
 class TestMcpClientUnit:
@@ -10,8 +10,12 @@ class TestMcpClientUnit:
 
     def test_connection_refused(self):
         client = McpClient(url="http://127.0.0.1:1/mcp", connect_timeout=0.5)
+        with pytest.raises(McpConnectionError):
+            client.eval_elisp("(+ 1 1)")
+
+    def test_ping_returns_false_on_connection_error(self):
+        client = McpClient(url="http://127.0.0.1:1/mcp", connect_timeout=0.5)
         assert client.ping() is False
-        assert client.eval_elisp("(+ 1 1)") is None
 
 
 class TestMcpClientIntegration:

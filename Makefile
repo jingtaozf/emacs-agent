@@ -278,11 +278,16 @@ test-agent-unit:
 	$(BATCH) $(LOAD_PATH) \
 		--eval "(require 'literate-elisp)" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-agent-unit.el \
 		-l tests/test-claude-agent-refactor-phase3.el \
 		-l tests/test-claude-agent-json-protocol.el \
 		-l tests/test-claude-agent-state-management.el \
 		-l tests/test-claude-agent-background-tasks.el \
+		-l tests/test-claude-agent-chat.el \
+		-l tests/test-claude-agent-error-injection.el \
+		-l tests/test-claude-agent-sentinel.el \
+		-l tests/test-json-parser-property.el \
 		-f ert-run-tests-batch-and-exit
 # TDD stubs (tests written before implementation):
 #   -l tests/test-claude-agent-input-validation.el

@@ -246,13 +246,15 @@ Org headings in response content are shifted to become subsections."
 (defun claude-org-sdd-bridge-save-cli-session (org-file session-id cli-session-id)
   "Save CLI-SESSION-ID as a property on the SDD section for SESSION-ID in ORG-FILE.
 This allows resuming the same Claude CLI session on next launch.
-Does not call `save-buffer' — callers should save if needed."
+Saves silently to persist immediately."
   (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
         (widen)
         (claude-org-sdd-bridge--goto-session session-id)
         (org-set-property claude-org-cli-session-property cli-session-id)
+        (let ((inhibit-message t))
+          (save-buffer))
         cli-session-id))))
 
 (defun claude-org-sdd-bridge-get-cli-session (org-file session-id)
@@ -562,10 +564,11 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
     (condition-case err
         (progn
           (emacs-mcp-server-start)
-          (sleep-for 1)
-          (if (emacs-mcp-server-running-p)
-              (message "Started Emacs MCP server for SDD bridge")
-            (message "WARNING: MCP server didn't start — SDD bridge will be limited")))
+          (run-at-time 1 nil
+                       (lambda ()
+                         (if (emacs-mcp-server-running-p)
+                             (message "Started Emacs MCP server for SDD bridge")
+                           (message "WARNING: MCP server didn't start — SDD bridge will be limited")))))
       (error (message "WARNING: MCP server start failed: %s" err))))
   (let* ((saved-id (claude-org-iterm2--find-session-property "ITERM2_SESSION_ID"))
          (title (claude-org-iterm2--tab-title))
@@ -704,16 +707,19 @@ When loop state is active, schedules the next iteration."
         (when state
           (setf (claude-agent--process-state-closed state) t)
           (claude-agent--unregister-query req-id)))))
-  ;; Check loop continuation
-  (let ((session-key (gethash sdd-session-id claude-org-iterm2--sdd-to-session-key)))
+  ;; Check loop continuation (read before cleanup)
+  (let ((session-key (gethash sdd-session-id claude-org-iterm2--sdd-to-session-key))
+        (iterm2-id (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)))
+    ;; Clean up lookup tables
+    (remhash sdd-session-id claude-org-iterm2--sdd-to-iterm2)
+    (remhash sdd-session-id claude-org-iterm2--sdd-to-session-key)
     (when session-key
       (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
             (loop-max (or (claude-org--session-get session-key :loop-max) 1)))
         (if (< loop-current loop-max)
             ;; More iterations — schedule next
             (let ((interval (or (claude-org--session-get session-key :loop-interval) 0))
-                  (prompt (claude-org--session-get session-key :original-prompt))
-                  (iterm2-id (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)))
+                  (prompt (claude-org--session-get session-key :original-prompt)))
               (claude-org--session-put session-key :loop-current (1+ loop-current))
               (if (> interval 0)
                   (run-at-time interval nil
@@ -841,12 +847,20 @@ Sends Escape to the TUI. The Stop hook will fire and set-ready."
 
 (defun claude-org-iterm2--permission-needed (sdd-session-id tool-name)
   "Handle notification that SDD-SESSION-ID needs permission for TOOL-NAME.
-Called by the PreToolUse hook via MCP. Registers the pending permission,
+Called by the PreToolUse hook via MCP. Registers a pending alert,
 focuses the iTerm2 tab, brings both iTerm2 and Emacs to foreground
 \(works across multiple monitors), bounces Emacs dock icon, and sends
 macOS notification."
-  ;; Register pending permission
-  (puthash sdd-session-id tool-name claude-agent--pending-permissions)
+  ;; Register pending alert
+  (claude-agent-add-alert
+   (intern sdd-session-id)
+   :label (claude-agent--permission-label sdd-session-id)
+   :tooltip (format "Permission needed: %s\nClick to focus iTerm2" tool-name)
+   :face '(:foreground "orange" :weight bold)
+   :action (lexical-let ((sid sdd-session-id))
+             (lambda ()
+               (claude-agent-remove-alert (intern sid))
+               (claude-org-iterm2--focus-by-sdd-session sid))))
 
   ;; 1. Focus the correct iTerm2 tab (select the tab, no app activation yet)
   (claude-org-iterm2--focus-by-sdd-session sdd-session-id)
@@ -872,8 +886,7 @@ macOS notification."
 (defun claude-org-iterm2--permission-resolved (sdd-session-id)
   "Clear pending permission for SDD-SESSION-ID.
 Called by the PostToolUse hook via MCP, or by mode-line click. Idempotent."
-  (remhash sdd-session-id claude-agent--pending-permissions)
-  (claude-agent--update-activity-string)
+  (claude-agent-remove-alert (intern sdd-session-id))
   "ok")
 
 (defun claude-org-iterm2--activate-app (app-name)

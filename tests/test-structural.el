@@ -451,6 +451,13 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-get-system-reminder"
     "claude-agent-ide-context"
     "claude-agent-build-system-reminder"
+    ;; claude-agent: alerts (mode-line)
+    "claude-agent-add-alert"
+    "claude-agent-remove-alert"
+    ;; claude-agent: CLI switches (public wrapper)
+    "claude-agent-build-cli-switches"
+    ;; claude-agent: path mappings (per-process Docker support)
+    "claude-agent-active-path-mappings"
     ;; claude-agent: verbose/debug
     "claude-agent-get-verbose-buffer"
     "claude-agent-show-session-verbose"

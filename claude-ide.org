@@ -212,6 +212,7 @@ The MCP response should be a list of content objects."
   originating-buffer                    ; Buffer where session was started (for claude-code.el integration)
   originating-tab                       ; Tab name where session was started (if tab-bar-mode is active)
   originating-frame                     ; Frame where session was started
+  ping-timer                            ; Per-session timer for keepalive pings
   )
 #+END_SRC
 
@@ -419,7 +420,7 @@ Claude process running outside Emacs.")
   "Timer for debouncing selection updates.")
 
 (defvar claude-ide--ping-timer nil
-  "Timer for sending periodic keepalive pings.")
+  "Legacy global ping timer (deprecated — use per-session ping-timer slot).")
 
 (defvar claude-ide--external-tools nil
   "List of external tool definitions registered by other packages.
@@ -511,21 +512,28 @@ Searches all sessions for the deferred response."
    "notifications/tools/list_changed"))
 
 (defun claude-ide--start-ping-timer (session)
-  "Start periodic ping timer for SESSION."
-  (claude-ide--stop-ping-timer) ; Stop any existing timer
+  "Start periodic ping timer for SESSION.
+Stores the timer in the session's ping-timer slot."
+  (claude-ide--stop-ping-timer session) ; Stop any existing timer for this session
   (lexical-let ((session session))
-    (setq claude-ide--ping-timer
+    (setf (claude-ide--session-ping-timer session)
           (run-with-timer 30 30 ; Start after 30s, repeat every 30s
                           (lambda ()
                             (when-let ((client (claude-ide--session-client session)))
                               (when (websocket-openp client)
                                 (claude-ide--ping client))))))))
 
-(defun claude-ide--stop-ping-timer ()
-  "Stop the ping timer."
-  (when claude-ide--ping-timer
-    (cancel-timer claude-ide--ping-timer)
-    (setq claude-ide--ping-timer nil)))
+(defun claude-ide--stop-ping-timer (&optional session)
+  "Stop the ping timer for SESSION, or the global timer if SESSION is nil."
+  (if session
+      (let ((timer (claude-ide--session-ping-timer session)))
+        (when timer
+          (cancel-timer timer)
+          (setf (claude-ide--session-ping-timer session) nil)))
+    ;; Legacy global timer cleanup
+    (when claude-ide--ping-timer
+      (cancel-timer claude-ide--ping-timer)
+      (setq claude-ide--ping-timer nil))))
 
 (defun claude-ide--get-session (key)
   "Get the Claude IDE session for KEY, or nil if not found."
@@ -738,6 +746,8 @@ sessions. KEY is the session identifier."
             (server (claude-ide--session-server session))
             (port (claude-ide--session-port session)))
       (progn
+        ;; Stop per-session ping timer
+        (claude-ide--stop-ping-timer session)
         ;; Remove lockfile before closing server
         (claude-ide--remove-lockfile port)
         ;; Close the server
