@@ -39,6 +39,14 @@ def _read_custom_id(session_id: str) -> str | None:
         return None
 
 
+def _notify_query_completed(mcp: McpClient, session_id: str) -> None:
+    """Unregister query from Emacs active-queries (mode-line + *Claude Queries*)."""
+    mcp.eval_elisp(
+        f'(claude-org-iterm2--query-completed '
+        f'"{_escape_elisp_string(session_id)}")'
+    )
+
+
 def _read_request_id(session_id: str) -> str | None:
     """Read the active-query request-id written by Emacs, or None."""
     path = os.path.join(STATUS_DIR, f"{session_id}.request-id")
@@ -57,6 +65,8 @@ def _escape_elisp_string(s: str) -> str:
         .replace('"', '\\"')
         .replace("\n", "\\n")
         .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace("\x00", "")  # strip null bytes - invalid in elisp strings
     )
 
 
@@ -85,10 +95,12 @@ def handle_prompt(
 
     prompt = input_data.get("prompt", "")
     if not prompt:
+        write_status(session_id, "ready")
         return
 
     # Skip system-injected messages — these are not human prompts
     if prompt.lstrip().startswith("<"):
+        write_status(session_id, "ready")
         return
 
     save_sexp = _build_save_cli_session_sexp(
@@ -110,6 +122,9 @@ def handle_prompt(
             f'"{escaped_prompt}")'
         )
         result = mcp.eval_elisp(elisp)
+        if result is None:
+            write_status(session_id, "ready")
+            return
         # Save instruction CUSTOM_ID for response correlation
         if result:
             _write_custom_id(session_id, result)
@@ -126,12 +141,6 @@ def handle_response(
     """Handle Stop hook event."""
     write_status(session_id, "ready")
 
-    # Unregister from Emacs active-queries (mode-line + *Claude Queries* buffer)
-    mcp.eval_elisp(
-        f'(claude-org-iterm2--query-completed '
-        f'"{_escape_elisp_string(session_id)}")'
-    )
-
     # Extract full response from transcript (skips intermediate tool-use turns)
     response = ""
     transcript_path = input_data.get("transcript_path", "")
@@ -143,6 +152,8 @@ def handle_response(
         response = input_data.get("last_assistant_message", "")
 
     if not response:
+        # No response to insert — still mark query completed
+        _notify_query_completed(mcp, session_id)
         return
 
     save_sexp = _build_save_cli_session_sexp(
@@ -151,7 +162,9 @@ def handle_response(
 
     custom_id = _read_custom_id(session_id)
     if not custom_id:
-        return  # No instruction to attach response to
+        # No instruction to attach response to — still mark query completed
+        _notify_query_completed(mcp, session_id)
+        return
 
     elisp = (
         f'(progn '
@@ -169,6 +182,9 @@ def handle_response(
         f"'completed)))"
     )
     mcp.eval_elisp(elisp)
+
+    # Mark query completed AFTER response insertion succeeds
+    _notify_query_completed(mcp, session_id)
 
 
 def _extract_full_response(transcript_path: str) -> str:

@@ -463,25 +463,32 @@ HANDLER should be a function that takes (params session) and returns MCP result.
 (defun claude-ide--complete-deferred-response (unique-key result)
   "Complete a deferred response for UNIQUE-KEY with RESULT.
 Searches all sessions for the deferred response."
-  (let ((completed nil)
-        (sessions-checked 0))
+  (let ((found-client nil)
+        (found-request-id nil)
+        (found-deferred-responses nil))
+    ;; Search phase: find the matching session without modifying anything
     (maphash (lambda (_key session)
-               (setq sessions-checked (1+ sessions-checked))
-               (unless completed
+               (unless found-request-id
                  (let* ((deferred-responses (claude-ide--session-deferred-responses session))
                         (request-id (gethash unique-key deferred-responses)))
                    (when request-id
-                     ;; Found the deferred response
-                     (let ((client (claude-ide--session-client session)))
-                       (if client
-                           (progn
-                             ;; Send the response - wrap in content field like normal responses
-                             (claude-ide--send-response client request-id `((content . ,result)))
-                             ;; Remove from deferred responses
-                             (remhash unique-key deferred-responses)
-                             (setq completed t))
-                         (error "No client found for session")))))))
-             claude-ide--sessions)))
+                     (setq found-request-id request-id)
+                     (setq found-deferred-responses deferred-responses)
+                     (setq found-client (claude-ide--session-client session))))))
+             claude-ide--sessions)
+    ;; Action phase: modify state and send response after maphash completes
+    (cond
+     ((and found-request-id found-client)
+      (claude-ide--send-response found-client found-request-id `((content . ,result)))
+      (remhash unique-key found-deferred-responses))
+     (found-request-id
+      ;; Found the deferred response but no client — clean up and warn
+      (remhash unique-key found-deferred-responses)
+      (message "claude-ide: No client found for deferred response %s (unique-key: %s)"
+               found-request-id unique-key))
+     (t
+      (message "claude-ide: No session found for deferred response (unique-key: %s)"
+               unique-key)))))
 
 (defun claude-ide--cleanup-diff (tab-name session)
   "Clean up diff session for TAB-NAME in SESSION."

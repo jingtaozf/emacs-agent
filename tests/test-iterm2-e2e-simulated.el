@@ -701,8 +701,8 @@ REGRESSION: Path resolved from load-file-name which differs per install."
 ;;; sdd-bridge.sh Status File Integration (real shell script)
 ;;; ============================================================================
 
-(ert-deftest test-iterm2-sdd-bridge-prompt-writes-busy ()
-  "sdd-bridge prompt event writes 'busy' to status file."
+(ert-deftest test-iterm2-sdd-bridge-prompt-resets-on-mcp-failure ()
+  "sdd-bridge prompt resets status to 'ready' when MCP is unreachable."
   :tags '(:unit :iterm2 :e2e)
   (let* ((test-id (format "test-bridge-%d" (random 100000)))
          (status-dir "/tmp/claude-agent-status")
@@ -717,7 +717,8 @@ REGRESSION: Path resolved from load-file-name which differs per install."
                    test-id project-dir)
            nil nil nil)
           (should (file-exists-p status-file))
-          (should (equal "busy"
+          ;; When MCP is unreachable, status resets to "ready" (not stuck "busy")
+          (should (equal "ready"
                          (string-trim (with-temp-buffer
                                         (insert-file-contents status-file)
                                         (buffer-string))))))

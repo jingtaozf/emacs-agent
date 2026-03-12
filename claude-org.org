@@ -4098,8 +4098,15 @@ INTERVAL is delay between iterations (for display).
 Creates a proper response section with :QUERY_ID: property at the correct
 position (after the previous iteration's response section, found via query-id
 lookup).  This ensures tokens are routed to the new section, not the old one."
+  (cl-block claude-org--execute-loop-iteration
   ;; Clear loop timer reference — timer has fired (F22)
   (claude-org--session-put session-key :loop-timer nil)
+  ;; Guard: skip iteration if session was cancelled or errored
+  (let ((exec-status (claude-org--get-exec-status-for-session session-key)))
+    (when (member exec-status '("cancelled" "error"))
+      (message "Claude loop: skipping iteration %d — session %s is %s"
+               iteration session-key exec-status)
+      (cl-return-from claude-org--execute-loop-iteration nil)))
   ;; Get buffer from session marker (needed when called via run-at-time)
   (let ((marker (claude-org--session-get session-key :marker)))
     (when (and marker (marker-buffer marker))
@@ -4138,7 +4145,7 @@ lookup).  This ensures tokens are routed to the new section, not the old one."
                                 :loop-max max
                                 :custom-id custom-id))))
               ;; Send request (uses continue-conversation for context)
-              (claude-org--send-request prompt query-ctx session-key))))))))
+              (claude-org--send-request prompt query-ctx session-key)))))))))
 
 (defun claude-org--free-marker (session-key)
   "Free marker for SESSION-KEY to prevent memory leak.
@@ -4257,40 +4264,11 @@ iteration (including across run-at-time delays for :interval)."
 ** Error Handling
 
 #+BEGIN_SRC elisp
-(defun claude-org--extract-error-message (error)
-  "Extract human-readable message from ERROR.
-ERROR can be (symbol :message ...) plist, a string, or other."
-  (cond
-   ;; CLI error: (claude-agent-cli-error :message "..." ...) - plist starts at cdr
-   ((and (listp error) (symbolp (car error)) (plist-get (cdr error) :message))
-    (plist-get (cdr error) :message))
-   ;; Plain plist with :message
-   ((and (listp error) (plist-get error :message))
-    (plist-get error :message))
-   ;; String error
-   ((stringp error) error)
-   ;; Symbol error (e.g., 'error)
-   ((symbolp error) (symbol-name error))
-   ;; List with error symbol and details: (error "message" ...)
-   ((and (listp error) (eq (car error) 'error) (stringp (cadr error)))
-    (cadr error))
-   ;; Any list - try to extract meaningful string
-   ((listp error)
-    (let ((str (format "%S" error)))
-      (if (> (length str) 200)
-          (concat (substring str 0 197) "...")
-        str)))
-   ;; Fallback: convert to string representation
-   (t (let ((str (format "%S" error)))
-        (if (> (length str) 200)
-            (concat (substring str 0 197) "...")
-          str)))))
-
 (defun claude-org--handle-error (session-key error)
   "Handle error ERROR for SESSION-KEY.
 Attempts session recovery if error indicates expired session or context too long.
 If already recovering and another error occurs, give up and show error to user."
-  (let ((error-msg (claude-org--extract-error-message error))
+  (let ((error-msg (claude-agent--extract-error-message error))
         (is-recovering (claude-org--session-get session-key :recovering))
         (backend (claude-org--session-get session-key :backend)))
     (cond
@@ -4649,9 +4627,12 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
                (substring-no-properties (org-get-heading t t t t))))))
       ;; Build callbacks with query-id validation via guarded helper
       (let* ((query-id (claude-org--session-get session-key :query-id))
-             (mk (lambda (handler)
-                   (claude-org--make-guarded-callback
-                    source-buf session-key query-id handler)))
+             (mk (lexical-let ((source-buf source-buf)
+                                (session-key session-key)
+                                (query-id query-id))
+                   (lambda (handler)
+                     (claude-org--make-guarded-callback
+                      source-buf session-key query-id handler))))
              (callbacks
               (list
                :on-token    (funcall mk #'claude-org--handle-token-v2)

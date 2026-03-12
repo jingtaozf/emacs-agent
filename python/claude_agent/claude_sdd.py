@@ -284,9 +284,10 @@ def main() -> None:
     result = subprocess.run(args)
 
     # Primary cleanup: stop IDE server when Claude Code exits
+    # Unregister first to prevent atexit double-call if cleanup_ide_server raises
     if mcp_ok and session_id:
-        cleanup_ide_server(mcp, session_id)
         atexit.unregister(cleanup_ide_server)
+        cleanup_ide_server(mcp, session_id)
 
     sys.exit(result.returncode)
 

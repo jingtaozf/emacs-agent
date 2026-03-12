@@ -1507,30 +1507,32 @@ subprocess. It accumulates data and triggers JSON processing.
   "Process filter function for PROCESS.
 OUTPUT is the data received from the process.
 Uses `process-get' to retrieve state instead of closures (for dynamic binding compat)."
-  (let ((state (process-get process 'claude-agent-state)))
-    (when (and state (claude-agent--process-state-ready state))
-      ;; Log stdout to verbose buffer for debugging
-      (when-let ((session-key (claude-agent--process-state-session-key state)))
-        (claude-agent--verbose-insert session-key
-                                      (format "<<< STDOUT: %s" output)))
-      (let* ((json-buf (or (claude-agent--process-state-json-buffer state) ""))
-             (new-buf (concat json-buf output)))
-        (if (> (length new-buf) claude-agent-max-json-buffer-size)
-            ;; Buffer overflow — clear buffer, signal error, kill process
-            (progn
-              ;; Clear buffer FIRST to prevent sentinel from re-parsing garbage
-              (setf (claude-agent--process-state-json-buffer state) "")
-              (let ((err-cb (claude-agent--process-state-error-callback state)))
-                (when err-cb
-                  (funcall err-cb
-                           (list :error
-                                 (format "JSON buffer overflow: %d bytes exceeds %d byte limit"
-                                         (length new-buf)
-                                         claude-agent-max-json-buffer-size)))))
-              (when (process-live-p process)
-                (delete-process process)))
-          (setf (claude-agent--process-state-json-buffer state) new-buf)
-          (claude-agent--process-json-buffer process))))))
+  (condition-case err
+      (let ((state (process-get process 'claude-agent-state)))
+        (when (and state (claude-agent--process-state-ready state))
+          ;; Log stdout to verbose buffer for debugging
+          (when-let ((session-key (claude-agent--process-state-session-key state)))
+            (claude-agent--verbose-insert session-key
+                                          (format "<<< STDOUT: %s" output)))
+          (let* ((json-buf (or (claude-agent--process-state-json-buffer state) ""))
+                 (new-buf (concat json-buf output)))
+            (if (> (length new-buf) claude-agent-max-json-buffer-size)
+                ;; Buffer overflow — clear buffer, signal error, kill process
+                (progn
+                  ;; Clear buffer FIRST to prevent sentinel from re-parsing garbage
+                  (setf (claude-agent--process-state-json-buffer state) "")
+                  (let ((err-cb (claude-agent--process-state-error-callback state)))
+                    (when err-cb
+                      (funcall err-cb
+                               (list :error
+                                     (format "JSON buffer overflow: %d bytes exceeds %d byte limit"
+                                             (length new-buf)
+                                             claude-agent-max-json-buffer-size)))))
+                  (when (process-live-p process)
+                    (delete-process process)))
+              (setf (claude-agent--process-state-json-buffer state) new-buf)
+              (claude-agent--process-json-buffer process)))))
+    (error (message "claude-agent: error in process filter: %S" err))))
 #+END_SRC
 
 *** Process Sentinel
@@ -1577,6 +1579,9 @@ then resumes the session."
                                   (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
   (claude-agent--insert-recovery-message state event)
   (claude-agent--kill-child-processes (process-id process))
+  ;; Clear Docker path mappings if this process owned them
+  (when (claude-agent--process-state-docker-mode state)
+    (setq emacs-mcp-server-path-mappings nil))
   ;; Registry-aware cleanup (removes from active-states, queries, etc.)
   (claude-agent-registry-cleanup-process state)
   ;; Kill output buffer after registry cleanup
@@ -1610,52 +1615,61 @@ query, clears Docker mappings, and kills output buffer."
 EVENT is the process event string.
 Delegates to sub-handlers for normal exit, abnormal exit (recovery),
 and cleanup."
-  (let ((state (process-get process 'claude-agent-state)))
-    (claude-agent--debug-log "Process event: %s" (string-trim event))
-    (when state
-      ;; Always log process exit to verbose buffer for diagnostics
-      (when-let ((session-key (claude-agent--process-state-session-key state)))
-        (claude-agent--verbose-insert session-key
-                                      (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
-                                              (string-trim event)
-                                              (hash-table-count claude-agent--pending-background-tasks)
-                                              (hash-table-count claude-agent--pending-control-requests))))
-      (setf (claude-agent--process-state-closed state) t)
-      (setf (claude-agent--process-state-ready state) nil)
-      ;; Process any remaining JSON in buffer
-      (claude-agent--process-json-buffer process)
-      ;; Handle any remaining content without trailing newline
-      (let ((remaining (claude-agent--process-state-json-buffer state)))
-        (when (and remaining (not (string-empty-p (string-trim remaining))))
-          (let ((trimmed (string-trim remaining))
-                (error-callback (claude-agent--process-state-error-callback state))
-                (session-key (claude-agent--process-state-session-key state)))
-            (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
-            (let ((parsed (claude-agent--try-parse-json trimmed)))
-              (if parsed
-                  (let ((msg-type (plist-get parsed :type)))
-                    (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
-                    (if (equal msg-type "control_request")
-                        (progn
+  (condition-case err
+      (let ((state (process-get process 'claude-agent-state)))
+        (claude-agent--debug-log "Process event: %s" (string-trim event))
+        (when state
+          ;; Always log process exit to verbose buffer for diagnostics
+          (when-let ((session-key (claude-agent--process-state-session-key state)))
+            (claude-agent--verbose-insert session-key
+                                          (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
+                                                  (string-trim event)
+                                                  (hash-table-count claude-agent--pending-background-tasks)
+                                                  (hash-table-count claude-agent--pending-control-requests))))
+          (setf (claude-agent--process-state-closed state) t)
+          (setf (claude-agent--process-state-ready state) nil)
+          ;; Process any remaining JSON in buffer
+          (claude-agent--process-json-buffer process)
+          ;; Handle any remaining content without trailing newline
+          (let ((remaining (claude-agent--process-state-json-buffer state)))
+            (when (and remaining (not (string-empty-p (string-trim remaining))))
+              (let ((trimmed (string-trim remaining))
+                    (error-callback (claude-agent--process-state-error-callback state))
+                    (session-key (claude-agent--process-state-session-key state)))
+                (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
+                (let ((parsed (claude-agent--try-parse-json trimmed)))
+                  (if parsed
+                      (let ((msg-type (plist-get parsed :type)))
+                        (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
+                        (if (equal msg-type "control_request")
+                            (progn
+                              (when session-key
+                                (claude-agent--verbose-insert
+                                 session-key
+                                 (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
+                              (message "Claude: control_request received but CLI died before we could respond"))
                           (when session-key
                             (claude-agent--verbose-insert
                              session-key
-                             (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
-                          (message "Claude: control_request received but CLI died before we could respond"))
-                      (when session-key
-                        (claude-agent--verbose-insert
-                         session-key
-                         (format ">>> INFO: Final message without newline: %s" msg-type)))))
-                (when error-callback
-                  (funcall error-callback
-                           (list 'claude-agent-cli-error
-                                 :message trimmed
-                                 :original-error nil))))))))
-      ;; Dispatch to normal or abnormal exit handler
-      (if (claude-agent--is-abnormal-exit-p event state)
-          (claude-agent--sentinel-handle-abnormal-exit process state event)
-        (claude-agent--sentinel-handle-normal-exit state event)
-        (claude-agent--sentinel-cleanup process state)))))
+                             (format ">>> INFO: Final message without newline: %s" msg-type)))))
+                    (when error-callback
+                      (funcall error-callback
+                               (list 'claude-agent-cli-error
+                                     :message trimmed
+                                     :original-error nil))))))))
+          ;; Dispatch to normal or abnormal exit handler
+          (if (claude-agent--is-abnormal-exit-p event state)
+              (claude-agent--sentinel-handle-abnormal-exit process state event)
+            (claude-agent--sentinel-handle-normal-exit state event)
+            (claude-agent--sentinel-cleanup process state))))
+    (error
+     (message "claude-agent: error in process sentinel: %S" err)
+     ;; Attempt minimal cleanup to prevent permanent state leaks
+     (condition-case nil
+         (let ((state (process-get process 'claude-agent-state)))
+           (when state
+             (claude-agent-registry-cleanup-process state)))
+       (error nil)))))
 #+END_SRC
 
 *** Session Recovery
@@ -2426,8 +2440,16 @@ ERROR can be (symbol :message ...) plist, a string, or other."
     (plist-get error :message))
    ;; String error
    ((stringp error) error)
-   ;; Fall back to prin1-to-string
-   (t (prin1-to-string error))))
+   ;; Symbol error (e.g., 'error)
+   ((symbolp error) (symbol-name error))
+   ;; List with error symbol and details: (error "message" ...)
+   ((and (listp error) (eq (car error) 'error) (stringp (cadr error)))
+    (cadr error))
+   ;; Fallback: convert to string, truncate if too long
+   (t (let ((str (format "%S" error)))
+        (if (> (length str) 200)
+            (concat (substring str 0 197) "...")
+          str)))))
 
 (defun claude-agent-format-elapsed-time (start-time &optional format-style)
   "Format elapsed time since START-TIME as human-readable string.
@@ -2873,49 +2895,58 @@ Uses `claude-agent-query-timeout' to determine staleness."
   "Remove stale entries from active-queries hash table and active-states list.
 Called after code reload to clean up entries with dead processes,
 outdated structure, or queries that have exceeded timeout."
-  (let ((stale-keys '())
-        (timed-out-keys '()))
-    (maphash
-     (lambda (key state)
-       (cond
-        ;; Invalid state, dead process, or closed
-        ((or (not (claude-agent--process-state-p state))
-             (and (claude-agent--process-state-process state)
-                  (not (process-live-p
-                        (claude-agent--process-state-process state))))
-             (claude-agent--process-state-closed state))
-         (push key stale-keys))
-        ;; Timed out - kill process and mark for removal
-        ((claude-agent--query-timed-out-p state)
-         (let ((proc (claude-agent--process-state-process state)))
-           (when (and proc (process-live-p proc))
-             (claude-agent--debug-log "Killing timed-out query: %s (age: %.0fs)"
-                                      key
-                                      (- (float-time)
-                                         (claude-agent--process-state-start-time state)))
-             (delete-process proc)))
-         (push key timed-out-keys))))
-     claude-agent--active-queries)
-    ;; Remove all stale and timed-out entries from hash table
-    (dolist (key (append stale-keys timed-out-keys))
-      (remhash key claude-agent--active-queries))
-    (when stale-keys
-      (claude-agent--debug-log "Cleaned up %d stale queries" (length stale-keys)))
-    (when timed-out-keys
-      (claude-agent--debug-log "Cleaned up %d timed-out queries" (length timed-out-keys))))
-  ;; Also clean up active-states list (may accumulate dead entries)
-  (let ((initial-count (length claude-agent--active-states)))
-    (setq claude-agent--active-states
-          (cl-remove-if
-           (lambda (state)
-             (or (not (claude-agent--process-state-p state))
-                 (claude-agent--process-state-closed state)
-                 (let ((proc (claude-agent--process-state-process state)))
-                   (and proc (not (process-live-p proc))))))
-           claude-agent--active-states))
-    (let ((removed (- initial-count (length claude-agent--active-states))))
-      (when (> removed 0)
-        (claude-agent--debug-log "Cleaned up %d stale states" removed)))))
+  (condition-case err
+      (let ((stale-keys '())
+            (timed-out-keys '())
+            (procs-to-kill '()))
+        ;; Phase 1: Collect keys and processes (no mutation inside maphash)
+        (maphash
+         (lambda (key state)
+           (cond
+            ;; Invalid state, dead process, or closed
+            ((or (not (claude-agent--process-state-p state))
+                 (and (claude-agent--process-state-process state)
+                      (not (process-live-p
+                            (claude-agent--process-state-process state))))
+                 (claude-agent--process-state-closed state))
+             (push key stale-keys))
+            ;; Timed out - collect process for killing after maphash
+            ((claude-agent--query-timed-out-p state)
+             (let ((proc (claude-agent--process-state-process state)))
+               (when (and proc (process-live-p proc))
+                 (claude-agent--debug-log "Killing timed-out query: %s (age: %.0fs)"
+                                          key
+                                          (- (float-time)
+                                             (claude-agent--process-state-start-time state)))
+                 (push proc procs-to-kill)))
+             (push key timed-out-keys))))
+         claude-agent--active-queries)
+        ;; Phase 2: Kill processes outside maphash
+        (dolist (proc procs-to-kill)
+          (condition-case nil
+              (delete-process proc)
+            (error nil)))
+        ;; Phase 3: Remove stale and timed-out entries
+        (dolist (key (append stale-keys timed-out-keys))
+          (remhash key claude-agent--active-queries))
+        (when stale-keys
+          (claude-agent--debug-log "Cleaned up %d stale queries" (length stale-keys)))
+        (when timed-out-keys
+          (claude-agent--debug-log "Cleaned up %d timed-out queries" (length timed-out-keys)))
+        ;; Also clean up active-states list (may accumulate dead entries)
+        (let ((initial-count (length claude-agent--active-states)))
+          (setq claude-agent--active-states
+                (cl-remove-if
+                 (lambda (state)
+                   (or (not (claude-agent--process-state-p state))
+                       (claude-agent--process-state-closed state)
+                       (let ((proc (claude-agent--process-state-process state)))
+                         (and proc (not (process-live-p proc))))))
+                 claude-agent--active-states))
+          (let ((removed (- initial-count (length claude-agent--active-states))))
+            (when (> removed 0)
+              (claude-agent--debug-log "Cleaned up %d stale states" removed)))))
+    (error (message "claude-agent: error in stale query cleanup: %S" err))))
 
 ;; Run cleanup on load
 (claude-agent--cleanup-stale-queries)
