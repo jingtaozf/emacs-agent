@@ -2068,61 +2068,50 @@ Set to nil to disable automatic stdin close (for debugging)."
   :group 'claude-agent)
 
 (defun claude-agent--maybe-close-stdin (process parsed)
-  "Close stdin if PARSED is a result message and no pending work.
+  "Close stdin when PARSED is a result message.
 PROCESS is the CLI process.
+Delegates to `claude-agent--schedule-stdin-close' which retries
+if control requests are still pending.
 
-Checks for both:
-1. Pending background tasks owned by THIS process (not stale tasks from dead processes)
-2. Pending control requests awaiting responses (permissions, hooks)
+Background tasks are NOT checked — the CLI waits for all background
+agents internally before emitting the result message.  By the time
+we receive result, all agent output has already been streamed.
 
-This function schedules stdin closure with a small delay to ensure:
-1. The current process filter completes processing
-2. Any pending MCP control requests/responses finish
-3. Hook callbacks have time to execute
-
-The delay is controlled by `claude-agent-stdin-close-delay'."
+The delay between retries uses `claude-agent-stdin-close-delay'."
   (when (equal (plist-get parsed :type) "result")
-    (let* ((state (and process (processp process)
-                      (process-get process 'claude-agent-state)))
-           (owner-req-id (and state
-                              (claude-agent--process-state-request-id state))))
-      (cond
-       ;; Check for pending background tasks owned by THIS process
-       ;; When owner-req-id is nil (no state), skip — don't let stale global tasks block
-       ((and owner-req-id
-             (claude-agent--has-pending-background-tasks-p owner-req-id))
-        (claude-agent--debug-log "Result received, background tasks pending for %s"
-                                 owner-req-id))
-       ;; Check for pending control requests awaiting responses
-       ((claude-agent--has-pending-control-requests-p)
-        (claude-agent--debug-log "Result received, %d control requests pending response"
-                                 (hash-table-count claude-agent--pending-control-requests)))
-       ;; No pending work - schedule stdin close
-       (t
-        (let ((delay claude-agent-stdin-close-delay))
-          (unless delay
-            (claude-agent--debug-log "Result received, stdin auto-close disabled"))
-          (when delay
-            (claude-agent--debug-log "Result received, scheduling stdin close in %.1fs" delay)
-            (if (zerop delay)
-              ;; Immediate close (original behavior)
-              (when (process-live-p process)
-                (process-send-eof process))
-            ;; Delayed close - let filter complete and MCP settle
-            ;; Use lexical-let to capture process (literate-elisp ignores lexical-binding: t)
-            (lexical-let ((proc process)
-                          (req-id owner-req-id))
-              (run-at-time
-               delay nil
-               (lambda ()
-                 ;; Re-check for pending work before closing
-                 ;; When req-id is nil, skip background task check (no owner to match)
-                 (when (and (process-live-p proc)
-                            (not (and req-id
-                                      (claude-agent--has-pending-background-tasks-p req-id)))
-                            (not (claude-agent--has-pending-control-requests-p)))
-                   (claude-agent--debug-log "Closing stdin after delay")
-                   (process-send-eof proc)))))))))))))
+    (if (not claude-agent-stdin-close-delay)
+        (claude-agent--debug-log "Result received, stdin auto-close disabled")
+      (claude-agent--debug-log "Result received, scheduling stdin close")
+      (claude-agent--schedule-stdin-close process 0))))
+
+(defun claude-agent--schedule-stdin-close (process attempt)
+  "Try to close PROCESS stdin.  Retry if control requests are pending.
+ATTEMPT is the current retry count (0-based).
+Retries up to 50 times (5 seconds) then force-closes to prevent hang."
+  (let ((max-attempts 50)
+        (delay (or claude-agent-stdin-close-delay 0.1)))
+    (cond
+     ;; Process already dead — nothing to do
+     ((not (process-live-p process)) nil)
+     ;; No pending control requests — close now
+     ((not (claude-agent--has-pending-control-requests-p))
+      (claude-agent--debug-log "Closing stdin (attempt %d)" attempt)
+      (process-send-eof process))
+     ;; Max attempts reached — force close to prevent infinite hang
+     ((>= attempt max-attempts)
+      (claude-agent--debug-log "Force-closing stdin after %d retries, %d control requests still pending"
+                               attempt (hash-table-count claude-agent--pending-control-requests))
+      (process-send-eof process))
+     ;; Retry after delay
+     (t
+      (claude-agent--debug-log "Control requests pending (%d), retry %d/%d"
+                               (hash-table-count claude-agent--pending-control-requests)
+                               attempt max-attempts)
+      (lexical-let ((proc process)
+                    (next-attempt (1+ attempt)))
+        (run-at-time delay nil
+                     (lambda ()
+                       (claude-agent--schedule-stdin-close proc next-attempt))))))))
 #+END_SRC
 
 *** Process Creation

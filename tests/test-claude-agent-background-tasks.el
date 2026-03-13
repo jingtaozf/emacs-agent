@@ -180,19 +180,21 @@ Uses actual event data from verbose buffer."
    nil)
   (should (= 0 (hash-table-count claude-agent--pending-background-tasks))))
 
-(ert-deftest test-stdin-not-closed-with-pending-bash ()
-  "Test stdin not closed when Bash background task is pending.
-This is the critical fix - Bash tasks must prevent early exit."
+(ert-deftest test-stdin-closed-despite-pending-bash ()
+  "Test stdin IS closed even when Bash background task is pending.
+The CLI waits for background agents internally before emitting result.
+By the time we receive result, all agent output is already streamed."
   (clrhash claude-agent--pending-background-tasks)
   ;; Launch Bash background task
   (claude-agent--background-task-tracker
    "toolu_bg" nil nil
    '(:stdout "" :stderr "" :backgroundTaskId "b8406fe")
    nil)
-  ;; Result message arrives - stdin should NOT close
-  (test-bg--with-mock-stdin
-    (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
-    (should-not closed)))
+  ;; Result message arrives - stdin SHOULD close (CLI handles agents internally)
+  (let ((claude-agent-stdin-close-delay 0))
+    (test-bg--with-mock-stdin
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
+      (should closed))))
 
 ;;; Test: Has Pending Background Tasks
 
@@ -210,12 +212,15 @@ This is the critical fix - Bash tasks must prevent early exit."
 ;;; Test: Maybe Close Stdin
 
 (ert-deftest test-maybe-close-stdin-with-pending ()
-  "Test stdin not closed when background tasks pending."
+  "Test stdin IS closed even when background tasks are pending.
+Background tasks no longer block stdin close — the CLI waits for all
+agents internally before emitting the result message."
   (clrhash claude-agent--pending-background-tasks)
   (puthash "task1" t claude-agent--pending-background-tasks)
-  (test-bg--with-mock-stdin
-    (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
-    (should-not closed)))
+  (let ((claude-agent-stdin-close-delay 0))
+    (test-bg--with-mock-stdin
+      (claude-agent--maybe-close-stdin 'mock-process '(:type "result"))
+      (should closed))))
 
 (ert-deftest test-maybe-close-stdin-no-pending ()
   "Test stdin closed when no background tasks pending."
@@ -232,6 +237,36 @@ This is the critical fix - Bash tasks must prevent early exit."
     (claude-agent--maybe-close-stdin 'mock-process '(:type "assistant"))
     (claude-agent--maybe-close-stdin 'mock-process '(:type "user"))
     (should-not closed)))
+
+(ert-deftest test-schedule-stdin-close-force-after-max-attempts ()
+  "Test force-close after max retry attempts with pending control requests."
+  (let ((closed nil)
+        (claude-agent-stdin-close-delay 0))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t)))
+              ((symbol-function 'claude-agent--has-pending-control-requests-p) (lambda () t)))
+      ;; At max attempts, should force-close despite pending requests
+      (claude-agent--schedule-stdin-close 'mock-process 50)
+      (should closed))))
+
+(ert-deftest test-schedule-stdin-close-immediate-when-clear ()
+  "Test immediate close when no control requests are pending."
+  (let ((closed nil)
+        (claude-agent-stdin-close-delay 0))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t)))
+              ((symbol-function 'claude-agent--has-pending-control-requests-p) (lambda () nil)))
+      (claude-agent--schedule-stdin-close 'mock-process 0)
+      (should closed))))
+
+(ert-deftest test-schedule-stdin-close-noop-when-dead ()
+  "Test no-op when process is already dead."
+  (let ((closed nil)
+        (claude-agent-stdin-close-delay 0))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) nil))
+              ((symbol-function 'process-send-eof) (lambda (_) (setq closed t))))
+      (claude-agent--schedule-stdin-close 'mock-process 0)
+      (should-not closed))))
 
 ;;; Test: Dispatch Functions
 

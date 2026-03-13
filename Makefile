@@ -361,6 +361,8 @@ test-org-unit:
 		-l tests/test-mcp-http.el \
 		-l tests/test-claude-org-cleanup.el \
 		-l tests/test-claude-org-cleanup-r2.el \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
+		-l tests/test-terminal-prompt-parity.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mcp-unit

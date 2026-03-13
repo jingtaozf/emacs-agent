@@ -7,3 +7,5 @@
 | 2026-03-06 | Terminal SDD Bridge | draft |
 | 2026-03-08 | iTerm2 Mode-Line and Query Manager | implemented |
 | 2026-03-12 | Codebase Review — Architecture, Quality, and Harness | proposed |
+| 2026-03-12 | Terminal-Typed Prompt Feature Parity | proposed |
+| 2026-03-13 | JSON Stream Backend — Business Logic and Redesign | draft |

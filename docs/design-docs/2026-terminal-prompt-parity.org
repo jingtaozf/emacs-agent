@@ -1,0 +1,232 @@
+#+TITLE: Design: Terminal-Typed Prompt Feature Parity
+#+DATE: [2026-03-12]
+#+STATUS: proposed
+
+* Problem
+
+When a user types a prompt directly in the Claude Code terminal (not via Emacs
+=C-c C-c= on an AI block), the SDD bridge creates the org structure correctly
+(Instruction heading + =#+begin_src ai= block + Response section), but the
+prompt is invisible to many Emacs-side features that rely on the full
+=claude-org-execute= lifecycle.
+
+Specifically, terminal-typed prompts lack:
+
+1. *Block history recording* — =claude-org-execute-hook= never fires, so
+   =claude-org--record-block-execution= never runs.  "Jump to AI block"
+   (=claude-org-jump-to-ai-block=) does not show these prompts.
+
+2. *Session state population* — =claude-org--execute-core= populates ~12
+   session fields (=:query-id=, =:marker=, =:section-level=, =:start-time=,
+   =:busy=, =:block-id=, etc.).  None of these are set for terminal prompts.
+
+3. *Exec-status and spinner* — No visual =EXEC_STATUS= property or spinner
+   animation while a terminal query is running.
+
+4. *Telemetry persistence* — No =:DURATION=, =:TOOL_COUNT=, or token usage
+   properties are written to the Response heading.
+
+5. *Completion status update* — =claude-org--update-block-status= fires on
+   =claude-org-complete-hook= but finds no =:block-id= in the session, so the
+   block history entry (if it existed) would never transition to =completed=.
+
+The root cause: =claude-org-sdd-bridge-insert-prompt= creates the org structure
+but never calls into the =claude-org-execute= machinery.
+
+* Goals
+
+- Terminal-typed prompts appear in "Jump to AI block" (=claude-org-jump-to-ai-block=)
+- Terminal-typed prompts show exec-status/spinner while running
+- Completion updates the block history entry to =completed=
+- Zero changes to the Python SDD bridge — all fixes are Emacs-side
+- Minimal changes to existing functions — compose, don't rewrite
+
+* Non-Goals
+
+- Full telemetry parity (token counts, cost) — the Stop hook doesn't carry this data
+- Real-time streaming into org — terminal prompts are batch-inserted by design
+- Changing the Python bridge protocol or hook JSON format
+
+* Current Data Flow (Terminal Path)
+
+#+begin_example
+Terminal User types prompt
+  → Claude CLI fires UserPromptSubmit hook
+    → Python sdd_bridge.py handle_prompt()
+      → MCP: claude-org-sdd-bridge-insert-prompt  ← creates org structure
+      → MCP: returns CUSTOM_ID
+    → Python saves CUSTOM_ID to status file
+
+Claude responds, CLI fires Stop hook
+  → Python sdd_bridge.py handle_response()
+    → MCP: claude-org-sdd-bridge-insert-response  ← inserts response text
+    → MCP: (run-hook-with-args 'claude-org-complete-hook ...)
+    → MCP: claude-org-iterm2--query-completed     ← unregisters active query
+#+end_example
+
+The gap: =claude-org-sdd-bridge-insert-prompt= calls
+=claude-org-iterm2--register-query= (which adds to =claude-agent--active-queries=
+for mode-line/query-manager), but never fires =claude-org-execute-hook= (which
+records block history) or populates the session state that =handle-complete=
+depends on.
+
+* Design
+
+** Strategy: Fire execute-hook inside =claude-org-sdd-bridge-insert-prompt=
+
+After the org structure is created and point is at the new AI block,
+=insert-prompt= already has everything =claude-org--record-block-execution=
+needs:
+
+1. Point inside the AI block (just created)
+2. =session-key= (derivable from buffer + CUSTOM_ID)
+3. Valid =CUSTOM_ID= on the instruction heading (just generated)
+
+The fix is to fire =claude-org-execute-hook= at the end of =insert-prompt=,
+after the org structure exists but before returning to Python.
+
+** Changes
+
+*** 1. Fire execute-hook in =claude-org-sdd-bridge-insert-prompt=
+
+After the heading/block insertion and =register-query= call, add:
+
+#+begin_src elisp
+;; Record in block history (enables "Jump to AI block" for terminal prompts)
+(let ((session-key (claude-org--current-session-key)))
+  (when session-key
+    (run-hook-with-args 'claude-org-execute-hook session-key prompt nil)
+    ;; Store block-id in session for completion status update
+    (let ((block-id (claude-org--session-get session-key :block-id)))
+      (when block-id
+        ;; Also set :busy so mode-line shows activity
+        (claude-org--session-put session-key :busy t)))))
+#+end_src
+
+This reuses the existing hook machinery — =claude-org--record-block-execution=
+runs, pushes a history entry with the =CUSTOM_ID=, and stores =:block-id= in
+the session state.
+
+*** 2. Set exec-status on the instruction heading
+
+After recording, set the visual status property:
+
+#+begin_src elisp
+(claude-org--set-exec-status "executing")
+#+end_src
+
+This gives the user a visible indicator in the org buffer that the terminal
+query is running.
+
+*** 3. Ensure completion updates work
+
+The =claude-org-complete-hook= is already fired by Python
+=handle_response= via MCP:
+
+#+begin_src python
+# Already in sdd_bridge.py handle_response():
+f'(run-hook-with-args \'claude-org-complete-hook '
+f'(claude-org--current-session-key) nil \'completed)'
+#+end_src
+
+The hook calls =claude-org--update-block-status=, which reads =:block-id= from
+the session state.  After change #1 above, =:block-id= is now populated, so
+the history entry transitions from =in-progress= to =completed=.
+
+Similarly, =claude-org--set-exec-status "completed"= should run in the
+completion path.  The SDD bridge already calls =handle-complete= indirectly
+via the complete-hook — but we should verify that =set-exec-status= is called.
+
+*** 4. Clear :busy on completion
+
+In =claude-org-iterm2--query-completed=, add:
+
+#+begin_src elisp
+(when session-key
+  (claude-org--session-put session-key :busy nil)
+  (claude-org--set-exec-status "completed"))
+#+end_src
+
+This clears the visual indicator and busy flag when the terminal query finishes.
+
+** What This Enables
+
+| Feature | Before | After |
+|---------|--------|-------|
+| "Jump to AI block" shows terminal prompts | NO | YES |
+| Block history persistence (across restarts) | NO | YES |
+| Exec-status property on heading | NO | YES |
+| Spinner while running | NO (would need timer) | Partial (status only) |
+| Completion status in block history | NO | YES |
+| Active query in mode-line/Queries buffer | YES (already works) | YES |
+
+** What Doesn't Change
+
+- =claude-org-history.org= — no modifications needed (hooks already handle it)
+- =python/claude_agent/sdd_bridge.py= — no modifications needed
+- =claude-org-execute= — no modifications needed
+- History persistence format — same =(block-id . plist)= alist
+- The Python bridge protocol or hook JSON format
+- JSON stream backend behavior (unaffected)
+
+** What's Intentionally NOT Added
+
+- *Spinner animation*: Would require starting a timer in =insert-prompt= that
+  ticks until completion.  Exec-status property is sufficient for visual
+  feedback.  The spinner can be added later if desired.
+
+- *Telemetry (duration, token counts)*: The Stop hook JSON contains
+  =duration_ms= and =usage= data, but the Python bridge currently doesn't pass
+  this to Emacs.  Adding telemetry requires extending the MCP call in
+  =handle_response= to include these fields.  This is a separate, additive
+  enhancement.
+
+- *Session state population (=:query-id=, =:marker=, etc.)*: These fields are
+  used by the JSON stream backend for mid-stream response insertion and
+  are not relevant for the terminal batch-insert path.  Only =:block-id= and
+  =:busy= are needed for feature parity.
+
+* Implementation Order
+
+1. Add =claude-org-execute-hook= + =set-exec-status= to =insert-prompt=
+2. Add =:busy= clear + =set-exec-status "completed"= to =query-completed=
+3. Reload elisp, test with terminal prompt
+4. Verify "Jump to AI block" shows terminal-typed prompts
+5. Verify history persists across Emacs restarts
+
+* Testing
+
+** Unit test: block history recorded for terminal prompt
+
+Simulate calling =claude-org-sdd-bridge-insert-prompt= in a test org buffer
+and verify that =claude-org--block-history= has an entry with the correct
+=CUSTOM_ID=.
+
+** Unit test: completion updates block status
+
+After inserting a prompt (which records history), fire
+=claude-org-complete-hook= and verify the history entry's =:status= is
+=completed=.
+
+** Manual E2E test
+
+1. Open an SDD org file in Emacs
+2. Launch =claude-sdd= in a terminal for the same session
+3. Type a prompt directly in the terminal
+4. Wait for response
+5. In Emacs: =M-x claude-org-jump-to-ai-block= — the terminal prompt should
+   appear in the list
+6. Verify the Instruction heading shows =EXEC_STATUS: completed=
+
+* Relationship to Other Design Docs
+
+- *Block History for All Backends* (=2026-block-history-all-backends.org=):
+  That design moved =execute-hook= from =execute-core= to =claude-org-execute=
+  so iTerm2/native backends record history when the user presses =C-c C-c=.
+  This design extends the same pattern to cover prompts that bypass
+  =claude-org-execute= entirely (typed directly in the terminal).
+
+- *Terminal SDD Bridge* (=2026-terminal-sdd-bridge.org=):
+  The bridge design focused on org structure creation (prompt/response
+  insertion).  This design adds the missing lifecycle integration (history,
+  status, completion).

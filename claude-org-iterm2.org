@@ -151,6 +151,16 @@ Returns the CUSTOM_ID string for correlating with the Stop hook."
                 (goto-char heading-marker)
                 (let ((iterm2-id (gethash session-id claude-org-iterm2--sdd-to-iterm2)))
                   (claude-org-iterm2--register-query session-id iterm2-id))
+                ;; Record in block history (enables "Jump to AI block" for terminal prompts)
+                (let ((session-key (claude-org--current-session-key)))
+                  (when session-key
+                    (run-hook-with-args 'claude-org-execute-hook session-key prompt nil)
+                    (claude-org--session-put session-key :busy t)
+                    ;; Map sdd-session-id → session-key for query-completed
+                    (puthash session-id session-key
+                             claude-org-iterm2--sdd-to-session-key)))
+                ;; Set exec-status on the instruction heading
+                (claude-org--set-exec-status "executing")
                 ;; Auto-generate a meaningful title for the heading
                 (when claude-org-auto-generate-title
                   (claude-org--maybe-auto-generate-title prompt heading-marker)))))))
@@ -713,6 +723,9 @@ When loop state is active, schedules the next iteration."
     ;; Clean up lookup tables
     (remhash sdd-session-id claude-org-iterm2--sdd-to-iterm2)
     (remhash sdd-session-id claude-org-iterm2--sdd-to-session-key)
+    ;; Clear busy state and exec-status for terminal-typed prompts
+    (when session-key
+      (claude-org--session-put session-key :busy nil))
     (when session-key
       (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
             (loop-max (or (claude-org--session-get session-key :loop-max) 1)))
