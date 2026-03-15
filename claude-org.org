@@ -1944,7 +1944,8 @@ LOOP-INFO is (ITERATION . MAX) for loop iterations, or nil.
 
 Returns the position where content should be inserted (after properties)."
   (claude-agent-with-span "create-response-section"
-      (list :query-id query-id :query-type (symbol-name query-type)) nil
+      (list :query-id query-id :query-type (symbol-name query-type)
+            :section-level (when (boundp 'section-level) section-level)) nil
   (let* ((section-level (claude-org--effective-section-level session-key))
          ;; Response should be at SAME level as instruction (sibling), not child
          ;; section-level is the instruction heading level, so use it directly
@@ -2762,7 +2763,8 @@ Uses `claude-org-title-backend' to select the generation backend."
       (lexical-let ((marker heading-marker)
                     (ctx trace-ctx))
         (let ((on-title (lambda (title)
-                          (claude-agent-with-span "auto-title-complete" nil ctx
+                          (claude-agent-with-span "auto-title-complete"
+    (list :output title) ctx
                             (claude-org--replace-heading-at-marker marker title))))
               (on-error (lambda (err)
                           (message "Auto-title generation failed: %s" err)
@@ -4237,7 +4239,17 @@ When the loop continues, :busy and :marker are kept alive for the next
 iteration (including across run-at-time delays for :interval)."
   (let ((trace-ctx (claude-org--session-get session-key :trace-ctx)))
   (claude-agent-with-span "handle-complete"
-      (list :custom-id (claude-org--session-get session-key :custom-id)) trace-ctx
+      (list :custom-id (claude-org--session-get session-key :custom-id)
+            :result (if result "error" "ok")
+            :error-message (when (and result (plist-get (cdr result) :message))
+                             (plist-get (cdr result) :message))
+            :tool-call-count (claude-org--session-get session-key :tool-call-count)
+            :duration-sec (when (claude-org--session-get session-key :start-time)
+                            (format "%.1f" (- (float-time)
+                                              (claude-org--session-get session-key :start-time))))
+            :loop-current (claude-org--session-get session-key :loop-current)
+            :loop-max (claude-org--session-get session-key :loop-max))
+      trace-ctx
   (claude-org--stop-spinner session-key)
   ;; Add newline after response using query-id lookup (marker-free)
   (let ((query-id (claude-org--session-get session-key :query-id)))
@@ -4366,7 +4378,9 @@ HEADING-MARKER is an optional marker for auto-title generation.
 Sets session state, creates response section, starts spinner,
 sends request, and runs hooks.  Returns nil."
   (claude-agent-with-span "execute-core"
-      (list :custom-id custom-id :loop-max loop-max)
+      (list :custom-id custom-id :loop-max loop-max
+            :input content
+            :session-id (ignore-errors (claude-org--get-session-id)))
     nil
   (let ((loop-max (or loop-max 1))
         (loop-interval (or loop-interval 0)))
@@ -4432,7 +4446,8 @@ If the session is busy, queues the block for execution when current query comple
   (claude-agent-with-trace "execute-ai-block"
       (list :oi-kind "CHAIN"
             :session-id (ignore-errors (claude-org--get-session-id))
-            :custom-id (ignore-errors (claude-org--find-instruction-custom-id)))
+            :custom-id (ignore-errors (claude-org--find-instruction-custom-id))
+            :backend (or (claude-org--get-org-property "CLAUDE_BACKEND" t) "json-stream"))
   (cl-block claude-org-execute
   (unless (claude-org--in-ai-block-p)
     (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
@@ -4612,7 +4627,9 @@ CALLBACKS is a plist of :on-token, :on-message, :on-error, :on-complete.
 PROPS are keyword args passed through to `claude-agent-backend-query'.
 SESSION-KEY is automatically injected into PROPS.
 Stores the resulting backend and query handle in the session."
-  (claude-agent-with-span "dispatch-query" nil nil
+  (claude-agent-with-span "dispatch-query"
+      (list :input full-prompt
+            :session-key session-key) nil
   (let* ((props (plist-put props :session-key session-key))
          (options (plist-get props :options))
          (backend (or (claude-org--session-get session-key :backend)

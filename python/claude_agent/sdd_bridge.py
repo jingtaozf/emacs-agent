@@ -200,7 +200,9 @@ def handle_prompt(
         with _span(
             "handle-prompt",
             **_span_attrs(session_id, custom_id,
-                          **{"from.emacs": flag_exists, "prompt.length": len(prompt)}),
+                          **{"from.emacs": flag_exists, "prompt.length": len(prompt),
+                             "input.value": prompt[:2000],
+                             "input.mime_type": "text/plain"}),
         ) as span:
             save_sexp = _build_save_cli_session_sexp(
                 org_file, session_id, input_data.get("session_id", "")
@@ -258,7 +260,10 @@ def handle_response(
 
     custom_id = _read_custom_id(session_id)
 
-    with _span("handle-response", **_span_attrs(session_id, custom_id)) as span:
+    with _span("handle-response", **_span_attrs(
+            session_id, custom_id,
+            **{"transcript.path": input_data.get("transcript_path", "")},
+    )) as span:
         # Extract full response from transcript (skips intermediate tool-use turns)
         response = ""
         transcript_path = input_data.get("transcript_path", "")
@@ -271,6 +276,8 @@ def handle_response(
 
         if span:
             span.set_attribute("response.length", len(response) if response else 0)
+            span.set_attribute("output.value", (response or "")[:2000])
+            span.set_attribute("output.mime_type", "text/plain")
 
         if not response:
             # No response to insert — still mark query completed
@@ -361,10 +368,14 @@ def _extract_full_response(transcript_path: str) -> str:
                     if text:
                         texts.append(text)
 
+        result = "\n\n".join(texts)
         if span:
             span.set_attribute("text_blocks.count", len(texts))
+            span.set_attribute("transcript.entries", len(entries))
+            span.set_attribute("output.value", result[:2000])
+            span.set_attribute("output.mime_type", "text/plain")
 
-        return "\n\n".join(texts)
+        return result
 
 
 def _format_todos_as_elisp(todos: list[dict]) -> str:
@@ -397,7 +408,11 @@ def handle_tool(
     tool_input = input_data.get("tool_input", {})
 
     custom_id = _read_custom_id(session_id)
-    with _span("handle-tool", **_span_attrs(session_id, custom_id, **{"tool.name": tool_name})):
+    with _span("handle-tool", **_span_attrs(
+            session_id, custom_id,
+            **{"tool.name": tool_name,
+               "input.value": json.dumps(tool_input, default=str)[:1000],
+               "input.mime_type": "application/json"})):
         if tool_name == "TodoWrite":
             _handle_todo_tool(mcp, tool_input, org_file, session_id, custom_id)
 
@@ -448,8 +463,14 @@ def handle_permission(
     """
     tool_name = input_data.get("tool_name", "unknown")
 
+    tool_input = input_data.get("tool_input", {})
     custom_id = _read_custom_id(session_id)
-    with _span("handle-permission", **_span_attrs(session_id, custom_id, **{"tool.name": tool_name})):
+    with _span("handle-permission", **_span_attrs(
+            session_id, custom_id,
+            **{"tool.name": tool_name,
+               "tool.is_interactive": tool_name in _INTERACTIVE_TOOLS,
+               "input.value": json.dumps(tool_input, default=str)[:1000],
+               "input.mime_type": "application/json"})):
         if tool_name in _INTERACTIVE_TOOLS:
             # Notify Emacs (best-effort)
             try:
@@ -478,7 +499,10 @@ def handle_permission_clear(
     session_id: str,
 ) -> None:
     """Handle PostToolUse hook — clear pending permission in Emacs."""
-    with _span("handle-permission-clear", **{"session.id": session_id}):
+    tool_name = input_data.get("tool_name", "unknown")
+    with _span("handle-permission-clear", **{
+            "session.id": session_id,
+            "tool.name": tool_name}):
         try:
             _mcp_eval_with_trace(
                 mcp,
@@ -521,7 +545,11 @@ def main() -> None:
 
     # Determine root vs child based on trace context existence
     custom_id = _read_custom_id(session_id)
-    root_attrs = _span_attrs(session_id, custom_id, event=event, **{"org.file": org_file})
+    root_attrs = _span_attrs(
+        session_id, custom_id, event=event,
+        **{"org.file": org_file,
+           "input.has_data": bool(input_text.strip()),
+           "mcp.url": mcp_url})
 
     if ctx is None:
         # No Emacs parent — WE are the root (Flow B: direct mode)
