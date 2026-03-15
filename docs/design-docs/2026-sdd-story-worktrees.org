@@ -1,0 +1,270 @@
+#+TITLE: SDD Story Worktrees
+#+DATE: 2026-03-15
+#+STATUS: draft
+
+* Goals
+
+- Each SDD story runs in its own git worktree (isolated branch)
+- Stories develop in parallel without interfering with each other
+- Merging back to master is a deliberate manual step after story is ready
+- The cmux backend launches Claude Code inside the worktree directory
+- Emacs org notebook stays in the main worktree (not copied per story)
+
+* Non-Goals
+
+- Automated merge (user decides when/how to merge)
+- CI/CD integration (stories are local development, CI runs on pushed branches)
+- Submodule support (this repo has none)
+- Multi-machine worktree sync
+
+* Background
+
+** Current State
+
+SDD stories currently all work on the =master= branch. Multiple stories
+run sequentially or overlap, with all code changes landing directly on
+master. This causes:
+
+1. Unfinished story code blocks other stories
+2. Hard to revert a single story's changes
+3. No isolation — one story's broken code affects all others
+4. =git stash= / =git checkout= disrupts the working state
+
+** Industry Patterns
+
+Research identified three established patterns:
+
+| Pattern | Tool | Mechanism | Scale |
+|---------+------+-----------+-------|
+| Superpowers | obra/superpowers | =.worktrees/= + skill lifecycle | 1 agent |
+| Claude Squad | smtg-ai/claude-squad | tmux + git worktree per pane | 3-8 agents |
+| Ralph Method | frankbria/ralph-claude-code | autonomous loop per worktree | 1-50 agents |
+
+All three use the same primitive: =git worktree add=.
+
+** Claude Code Integration
+
+Claude Code has no =--worktree= flag. The mechanism is simply =cwd=:
+
+#+begin_example
+# CLI
+cd .worktrees/feature-x && claude
+
+# Python SDK
+ClaudeAgentOptions(cwd="/path/to/.worktrees/feature-x")
+
+# Emacs (cmux backend)
+# Pass worktree path as the project-root to build-launch-command
+#+end_example
+
+Claude Code works correctly inside a git worktree — it respects =cwd=,
+reads =CLAUDE.md= from the worktree root, and scopes file access to it.
+
+* Technical Design
+
+** Directory Layout
+
+#+begin_example
+claude-agent/                    # main worktree (master branch)
+├── .worktrees/                  # git-ignored container
+│   ├── sdd-tracing/             # worktree for "unified tracing" story
+│   │   ├── claude-agent.org     # story's code changes
+│   │   ├── python/              # story's Python changes
+│   │   └── ...                  # full repo checkout on story branch
+│   ├── sdd-cmux-backend/        # worktree for "cmux backend" story
+│   └── sdd-vterm/               # worktree for "vterm" story
+├── claude-agent.org             # master branch code
+├── docs/                        # shared docs (also in worktrees)
+└── CLAUDE.md                    # shared context
+#+end_example
+
+** Worktree Lifecycle
+
+*** Create (story start)
+
+#+begin_src bash
+# 1. Ensure .worktrees/ exists and is git-ignored
+mkdir -p .worktrees
+git check-ignore -q .worktrees || echo ".worktrees/" >> .gitignore
+
+# 2. Create worktree with story branch
+STORY="sdd-unified-tracing"
+git worktree add .worktrees/$STORY -b $STORY
+
+# 3. Verify clean baseline
+cd .worktrees/$STORY && make test-smoke
+#+end_src
+
+*** Work (story execution)
+
+The cmux backend launches Claude Code inside the worktree:
+
+#+begin_example
+# claude_sdd.py receives the worktree path as cwd
+cd /path/to/.worktrees/sdd-unified-tracing
+claude --print --output-format stream-json ...
+#+end_example
+
+The org notebook stays in the MAIN worktree. Only code files live in
+the story worktree. This means:
+
+- Emacs org buffer: =~/xjt-doc/claude/claude-agent-dev.org= (unchanged)
+- Claude Code sandbox: =.worktrees/sdd-unified-tracing/= (isolated)
+- =PROJECT_ROOT=: points to the worktree, not main
+
+*** Merge (story complete)
+
+Manual merge after story passes review:
+
+#+begin_src bash
+# Option A: squash merge (recommended for AI-generated branches)
+git checkout master
+git merge --squash .worktrees/sdd-unified-tracing
+git commit -m "feat: unified tracing for single root span"
+make check  # verify on merged result
+
+# Option B: merge commit (preserves story history)
+git merge --no-ff sdd-unified-tracing
+
+# Option C: rebase (clean linear history)
+git rebase master sdd-unified-tracing
+git checkout master
+git merge --ff-only sdd-unified-tracing
+#+end_src
+
+*** Cleanup (after merge)
+
+#+begin_src bash
+git worktree remove .worktrees/sdd-unified-tracing
+git branch -d sdd-unified-tracing
+#+end_src
+
+** Emacs Integration
+
+*** Session Heading Property
+
+Each SDD story heading gets a =WORKTREE_PATH= property:
+
+#+begin_example
+,** unified tracing
+:PROPERTIES:
+:CLAUDE_SESSION_ID: sdd-20260315-131223
+:CLAUDE_BACKEND: cmux
+:WORKTREE_PATH: .worktrees/sdd-unified-tracing
+:END:
+#+end_example
+
+*** Modified cmux Launch
+
+=claude-org-cmux--build-launch-command= uses =WORKTREE_PATH= as the
+project root when launching Claude Code:
+
+#+begin_src elisp
+(let* ((worktree (claude-org-cmux--find-session-property "WORKTREE_PATH"))
+       (project-root (if worktree
+                         (expand-file-name worktree
+                           (claude-org--get-project-root))
+                       (claude-org--get-project-root))))
+  ;; Launch Claude Code in worktree directory
+  (claude-org-cmux--call "new-workspace"
+    "--cwd" project-root
+    "--command" launch-cmd))
+#+end_src
+
+*** Magit Worktree Integration
+
+Magit has built-in worktree support (3.x+):
+
+| Key | Command | Action |
+|-----+---------+--------|
+| =W c= | =magit-worktree-add= | Create worktree + branch |
+| =W g= | =magit-worktree-status= | Open magit for a worktree |
+| =W d= | =magit-worktree-delete= | Remove worktree |
+
+*** Jump-to-Worktree Command
+
+A transient menu entry for switching to a story's worktree:
+
+#+begin_src elisp
+(defun claude-org-worktree-open ()
+  "Open the worktree for the current SDD story in a new frame."
+  (interactive)
+  (let ((wt (org-entry-get nil "WORKTREE_PATH" t)))
+    (unless wt (user-error "No WORKTREE_PATH property found"))
+    (let ((path (expand-file-name wt (claude-org--get-project-root))))
+      (unless (file-directory-p path)
+        (user-error "Worktree not found: %s" path))
+      (magit-status path))))
+#+end_src
+
+** What Changes vs Current Flow
+
+| Aspect | Current | With Worktrees |
+|--------+---------+----------------|
+| Code isolation | All on master | Per-story branch |
+| =PROJECT_ROOT= | Repo root | Worktree path |
+| Claude Code =cwd= | Repo root | Worktree path |
+| Org notebook | In main worktree | In main worktree (unchanged) |
+| =docs/= files | Shared on master | Per-story branch (may diverge) |
+| Merge | Implicit (all on master) | Explicit (manual merge) |
+| Revert a story | =git revert= (messy) | =git branch -D= (clean) |
+
+** Concerns and Mitigations
+
+*** docs/ divergence
+
+Each worktree has its own copy of =docs/=. If two stories edit the
+same doc file, merge conflicts arise.
+
+*Mitigation*: Design docs are story-specific (=2026-slug.org=) so
+conflicts are rare. Cross-story specs in =docs/product-specs/= need
+manual coordination.
+
+*** Org notebook not in worktree
+
+The org notebook (=claude-agent-dev.org=) is in the HOST filesystem,
+not in the repo. It doesn't move with worktrees. This is correct —
+the notebook is the conversation log, not source code.
+
+*** Stale worktrees
+
+Long-lived worktrees drift from master. Periodic rebase keeps them
+current:
+
+#+begin_src bash
+cd .worktrees/sdd-unified-tracing
+git fetch origin
+git rebase origin/master
+#+end_src
+
+*** MCP server shared across worktrees
+
+The Emacs MCP server is a single process. When Claude Code in different
+worktrees calls =evalElisp=, they share the same Emacs state. This is
+fine — the MCP server operates on the org buffer (in main worktree)
+and doesn't need worktree isolation.
+
+* Features
+
+** TODO Add =.worktrees/= to =.gitignore= if missing
+** TODO Add =WORKTREE_PATH= property support to cmux launch
+** TODO Create =claude-org-worktree-create= command
+  - Prompts for story name
+  - Runs =git worktree add=
+  - Sets =WORKTREE_PATH= property on current heading
+** TODO Create =claude-org-worktree-open= command (magit integration)
+** TODO Create =claude-org-worktree-merge= command
+  - Offers: squash / merge / rebase / keep / discard
+  - Runs tests after merge
+  - Cleans up worktree on success
+** TODO Update cmux =build-launch-command= to use worktree path
+** TODO Add worktree status to mode-line or header-line
+** TODO Document workflow in README
+
+* References
+
+- [[file:../../reference/superpowers/skills/using-git-worktrees/SKILL.md][Superpowers: using-git-worktrees]]
+- [[file:../../reference/superpowers/skills/finishing-a-development-branch/SKILL.md][Superpowers: finishing-a-development-branch]]
+- [[https://github.com/smtg-ai/claude-squad][Claude Squad]] (5.1K stars) — tmux + worktrees for parallel agents
+- [[https://ghuntley.com/ralph/][Ralph Method]] — autonomous loop per worktree
+- [[file:../../docs/ralph-architecture.org][Ralph Architecture Research]]

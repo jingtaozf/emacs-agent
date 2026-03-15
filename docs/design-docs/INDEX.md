@@ -13,3 +13,4 @@
 | 2026-03-13 | Unified Tracing — Cross-Process Observability | proposed |
 | 2026-03-15 | Single Root Span Per AI Block Execution | proposed |
 | 2026-03-15 | Terminal Backends: cmux & iTerm2 | implemented |
+| 2026-03-15 | SDD Story Worktrees | draft |

@@ -204,8 +204,35 @@ Returns the position, or LIMIT if none found."
         (org-back-to-heading t)
         (point)))))
 
+(defun claude-org-sdd-bridge--find-next-instruction-heading (instr-level tag workflow-end)
+  "Find the next instruction heading (with TAG) at INSTR-LEVEL before WORKFLOW-END.
+Skips response headings (:ai_output:). Returns position, or WORKFLOW-END."
+  (save-excursion
+    (forward-line 1)
+    (let ((pattern (format "^\\*\\{%d\\} +.+:%s:" instr-level tag)))
+      (if (re-search-forward pattern workflow-end t)
+          (line-beginning-position)
+        workflow-end))))
+
+(defun claude-org-sdd-bridge--find-existing-response (instr-pos instr-level next-instr-pos)
+  "Find existing Response heading for instruction at INSTR-POS.
+Searches between INSTR-POS and NEXT-INSTR-POS for a heading at INSTR-LEVEL
+with :ai_output: tag.  Returns (BEG . END) of the response subtree, or nil."
+  (save-excursion
+    (goto-char instr-pos)
+    (forward-line 1)
+    (let ((pattern (format "^\\*\\{%d\\} +.+:ai_output:" instr-level)))
+      (when (re-search-forward pattern next-instr-pos t)
+        (let ((beg (line-beginning-position)))
+          ;; Find end of response subtree (next same-level heading or next-instr-pos)
+          (let ((end (claude-org-sdd-bridge--find-next-sibling-heading
+                      instr-level next-instr-pos)))
+            (cons beg end)))))))
+
 (defun claude-org-sdd-bridge-insert-response (org-file session-id response instr-custom-id)
   "Insert RESPONSE after the Instruction with INSTR-CUSTOM-ID in ORG-FILE.
+If a Response section already exists for this instruction, appends to it.
+Otherwise creates a new Response section.
 Org headings in response content are shifted to become subsections."
   (claude-agent-with-span "sdd-insert-response"
       (list :session-id session-id :custom-id instr-custom-id
@@ -226,31 +253,36 @@ Org headings in response content are shifted to become subsections."
           (unless instr-pos
             (error "Instruction %s not found under Workflow for session %s"
                    instr-custom-id session-id))
-          ;; Count which instruction this is among siblings
+          ;; Count which instruction this is among siblings (1-indexed)
           (save-excursion
-            (let ((found nil))
-              (while (and (not found)
-                          (re-search-forward
-                           (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
-                           workflow-end t))
-                (setq response-num (1+ response-num))
-                (when (= (line-beginning-position) instr-pos)
-                  (setq found t)))))
-          ;; Insert after the instruction's subtree
+            (while (and (re-search-forward
+                         (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
+                         workflow-end t)
+                        (<= (line-beginning-position) instr-pos))
+              (setq response-num (1+ response-num))))
+          ;; Find the next instruction heading (skip responses)
           (goto-char instr-pos)
-          (let ((insert-pos (claude-org-sdd-bridge--find-next-sibling-heading
-                             instr-level workflow-end))
-                (timestamp (format-time-string "%Y-%m-%d %H:%M")))
-            (goto-char insert-pos)
-            (unless (bolp) (insert "\n"))
-            (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
-              (insert "\n"))
-            (insert (format "%s Response %d (%s) :ai_output:\n"
-                            stars response-num timestamp))
-            (insert ":PROPERTIES:\n")
-            (insert (format ":QUERY_TYPE: terminal\n"))
-            (insert ":END:\n\n")
-            (insert (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n")))))
+          (let* ((next-instr-pos (claude-org-sdd-bridge--find-next-instruction-heading
+                                  instr-level claude-org-heading-tag workflow-end))
+                 (existing (claude-org-sdd-bridge--find-existing-response
+                            instr-pos instr-level next-instr-pos)))
+            (if existing
+                ;; Append to existing response section (before its end)
+                (let ((response-end (cdr existing)))
+                  (goto-char response-end)
+                  ;; Back up to insert before the next heading, after existing content
+                  (unless (bolp) (insert "\n"))
+                  (insert "\n" (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n"))
+              ;; Create new response section — insert just before the next instruction
+              (let ((timestamp (format-time-string "%Y-%m-%d %H:%M")))
+                (goto-char next-instr-pos)
+                (unless (bolp) (insert "\n"))
+                (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
+                  (insert "\n"))
+                (insert (format "%s Response %d (%s) :ai_output:\n"
+                                stars response-num timestamp))
+                (insert ":PROPERTIES:\n:QUERY_TYPE: terminal\n:END:\n\n")
+                (insert (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n")))))))
     (save-buffer)
     (format "Inserted Response (%d chars)" (length response)))))
 #+END_SRC
