@@ -1,0 +1,698 @@
+#+TITLE: Claude Org cmux Backend
+#+PROPERTY: literate-load yes
+
+* Claude Org cmux
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+cmux backend for claude-org.
+Sends prompts to Claude Code running in cmux terminal via Unix socket API.
+Responses come back via SDD bridge hooks (same mechanism as iTerm2).
+Part of claude-org; loaded after claude-org.org.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'json)
+#+END_SRC
+
+* Configuration
+
+#+BEGIN_SRC elisp
+(defcustom claude-org-cmux-socket-path nil
+  "Explicit cmux Unix socket path.
+When nil, cmux CLI auto-detects the socket."
+  :type '(choice (const nil) string)
+  :group 'claude-org)
+
+(defcustom claude-org-cmux-launch-command 'claude-sdd
+  "How to launch Claude Code in cmux.
+  `claude-sdd' - Use the SDD bridge script (default)
+  `claude'     - Use bare claude CLI
+  A string     - Custom shell command."
+  :type '(choice (const claude-sdd) (const claude) string)
+  :group 'claude-org)
+
+(defcustom claude-org-cmux-extra-args nil
+  "Extra CLI arguments for Claude Code in cmux.
+List of strings appended to the launch command."
+  :type '(repeat string)
+  :group 'claude-org)
+
+(defcustom claude-org-cmux-sdd-script
+  (let* ((pkg-dir (file-name-directory
+                   (or load-file-name buffer-file-name "")))
+         (uv-cmd (format "uv run --project %s claude-sdd"
+                         (expand-file-name "python" pkg-dir))))
+    uv-cmd)
+  "Command to launch the claude-sdd launcher.
+Used when `claude-org-cmux-launch-command' is `claude-sdd'.
+Defaults to `uv run --project <pkg>/python claude-sdd'."
+  :type 'string
+  :group 'claude-org)
+#+END_SRC
+
+* Internal State
+
+#+BEGIN_SRC elisp
+(defvar claude-org-cmux--sdd-to-session-key (make-hash-table :test 'equal)
+  "Map SDD session ID → org session-key for cmux queries.")
+
+(defvar claude-org-cmux--sdd-to-surface (make-hash-table :test 'equal)
+  "Map SDD session ID → cmux surface ID.")
+#+END_SRC
+
+* Navigation Helpers
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--goto-session-heading ()
+  "Move point to the nearest ancestor heading with CLAUDE_SESSION_ID.
+Starts at current heading, walks up. Returns the session ID string.
+Caller should wrap in `save-excursion' / `save-restriction' as needed."
+  (widen)
+  (condition-case nil (org-back-to-heading t) (error nil))
+  (or (org-entry-get nil "CLAUDE_SESSION_ID")
+      (let ((found nil))
+        (while (and (not found) (org-up-heading-safe))
+          (setq found (org-entry-get nil "CLAUDE_SESSION_ID")))
+        found)
+      (error "No CLAUDE_SESSION_ID found in current scope")))
+
+(defun claude-org-cmux--find-session-property (prop)
+  "Find PROP in the SDD session scope, like iTerm2 backend does.
+Searches up from point for org property PROP.
+Returns the value string, or nil if not found."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (org-entry-get nil prop t))))
+#+END_SRC
+
+* CLI Gateway
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--call (subcommand &rest args)
+  "Call cmux CLI with SUBCOMMAND and ARGS. Return stdout string.
+If ARGS contains :stdin KEY, that value is piped as stdin."
+  (claude-agent-with-span "cmux-call"
+      (list :span-kind "CLIENT" :subcommand subcommand) nil
+  (let* ((stdin-text nil)
+         (cli-args nil))
+    ;; Separate :stdin from positional args
+    (while args
+      (if (eq (car args) :stdin)
+          (progn
+            (setq stdin-text (cadr args))
+            (setq args (cddr args)))
+        (push (car args) cli-args)
+        (setq args (cdr args))))
+    (setq cli-args (nreverse cli-args))
+    (let* ((socket-args (when claude-org-cmux-socket-path
+                          (list "--socket" claude-org-cmux-socket-path)))
+           (flat-args (append socket-args (cons subcommand (flatten-tree cli-args))))
+           (stderr-file (make-temp-file "cmux-stderr-"))
+           (buf (generate-new-buffer " *cmux-cli*"))
+           (stdin-file (when stdin-text
+                         (let ((f (make-temp-file "cmux-stdin-")))
+                           (with-temp-file f (insert stdin-text))
+                           f)))
+           (exit-code (apply #'call-process
+                             "cmux" stdin-file
+                             (list buf stderr-file) nil
+                             flat-args)))
+      (unwind-protect
+          (with-current-buffer buf
+            (if (= exit-code 0)
+                (string-trim (buffer-string))
+              (let ((stderr (string-trim
+                             (with-temp-buffer
+                               (insert-file-contents stderr-file)
+                               (buffer-string)))))
+                (error "cmux %s failed (exit %d): %s"
+                       subcommand exit-code stderr))))
+        (kill-buffer buf)
+        (when stdin-file (delete-file stdin-file t))
+        (delete-file stderr-file t))))))
+#+END_SRC
+
+* Wait for Ready
+
+#+BEGIN_SRC elisp
+(defcustom claude-org-cmux-ready-timeout 30
+  "Max seconds to wait for Claude Code to become ready in cmux."
+  :type 'integer
+  :group 'claude-org)
+
+(defun claude-org-cmux--wait-for-ready (surface-id)
+  "Block until Claude Code TUI is ready in SURFACE-ID.
+Polls `capture-pane' every second, looking for INSERT mode indicator.
+Returns t when ready, signals error on timeout."
+  (let ((deadline (+ (float-time) claude-org-cmux-ready-timeout))
+        (ready nil))
+    (while (and (not ready) (< (float-time) deadline))
+      (condition-case nil
+          (let ((screen (claude-org-cmux--call "capture-pane"
+                          "--surface" surface-id)))
+            (when (string-match-p "-- INSERT --\\|-- insert --\\|type a message" screen)
+              (setq ready t)))
+        (error nil))
+      (unless ready (sleep-for 1)))
+    (unless ready
+      (error "Timeout: Claude Code not ready in cmux after %ds"
+             claude-org-cmux-ready-timeout))
+    t))
+#+END_SRC
+
+* Send Text Helper
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--ensure-insert-mode (surface-id)
+  "Ensure Claude Code TUI is in INSERT mode in SURFACE-ID.
+If not already in INSERT mode, sends `i` to enter it and waits briefly."
+  (let ((screen (condition-case nil
+                    (claude-org-cmux--call "capture-pane" "--surface" surface-id)
+                  (error ""))))
+    (unless (string-match-p "-- INSERT --\\|-- insert --" screen)
+      ;; Send 'i' to enter INSERT mode (like vim)
+      (claude-org-cmux--call "send" "--surface" surface-id "i")
+      (sleep-for 0.3))))
+
+(defun claude-org-cmux--send-text (surface-id text)
+  "Send TEXT to cmux SURFACE-ID.
+Strips Emacs text properties to prevent #(...) leaking into terminal.
+Ensures Claude Code TUI is in INSERT mode before sending.
+Uses `send --surface` which reliably targets a specific surface.
+Note: `paste-buffer --surface` has a cmux bug (\"Surface is not a terminal\")
+so we avoid it and use `send` directly. For very large text (>100KB),
+we select the workspace first and use paste-buffer without --surface."
+  (let ((clean-text (substring-no-properties text)))
+    ;; Ensure INSERT mode before sending text
+    (claude-org-cmux--ensure-insert-mode surface-id)
+    (if (< (length clean-text) 100000)
+        ;; Direct send — works reliably with --surface targeting
+        (claude-org-cmux--call "send" "--surface" surface-id clean-text)
+      ;; Large text: select workspace first, then paste without --surface
+      ;; (paste-buffer --surface is broken in cmux)
+      (let ((ws-id (claude-org-cmux--find-session-property "CMUX_WORKSPACE_ID")))
+        (when ws-id
+          (claude-org-cmux--call "select-workspace" "--workspace" ws-id))
+        (claude-org-cmux--call "set-buffer" "--name" "emacs-prompt" clean-text)
+        (claude-org-cmux--call "paste-buffer" "--name" "emacs-prompt")))
+    ;; Send Enter to submit the prompt
+    (claude-org-cmux--call "send-key" "--surface" surface-id "enter")))
+#+END_SRC
+
+* Tab Title
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--tab-title ()
+  "Generate cmux workspace title for current SDD session.
+Format: HEADING [SDD-SESSION-ID] — unique across org files."
+  (save-excursion
+    (save-restriction
+      (let ((sdd-id (claude-org-cmux--goto-session-heading)))
+        (format "%s [%s]"
+                (truncate-string-to-width
+                 (or (org-get-heading t t t t) "untitled") 40)
+                (or sdd-id "no-session"))))))
+#+END_SRC
+
+* Launch Command
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--build-launch-command (org-file sdd-session-id project-root)
+  "Build the shell command to launch Claude Code in cmux.
+ORG-FILE is the org notebook path, SDD-SESSION-ID the session,
+PROJECT-ROOT the working directory."
+  (ignore project-root)
+  (let* ((prop-args (claude-org-cmux--find-session-property "CLAUDE_EXTRA_ARGS"))
+         (all-extra (append claude-org-cmux-extra-args
+                            (when prop-args (split-string prop-args))))
+         (extra (mapconcat #'shell-quote-argument all-extra " ")))
+    (cond
+     ;; claude-sdd: passes org-file and session-id
+     ((eq claude-org-cmux-launch-command 'claude-sdd)
+      (let* ((sdd-script claude-org-cmux-sdd-script)
+             (cli-session
+              (claude-org-cmux--find-session-property "CLAUDE_CLI_SESSION"))
+             (parts (list sdd-script
+                          (shell-quote-argument (or org-file ""))
+                          (shell-quote-argument (or sdd-session-id "")))))
+        (when cli-session
+          (setq parts (append parts
+                              (list "--"
+                                    "--resume"
+                                    (shell-quote-argument cli-session)))))
+        (when (and extra (not (string-empty-p extra)))
+          (unless cli-session
+            (setq parts (append parts (list "--"))))
+          (setq parts (append parts (list extra))))
+        (mapconcat #'identity parts " ")))
+     ;; bare claude
+     ((eq claude-org-cmux-launch-command 'claude)
+      (let* ((system-prompt
+              (condition-case nil
+                  (claude-org-sdd-bridge-system-prompt org-file sdd-session-id)
+                (error "")))
+             (sp-file (make-temp-file "claude-sp-"))
+             (cli-session
+              (condition-case nil
+                  (claude-org-sdd-bridge-get-cli-session org-file sdd-session-id)
+                (error nil)))
+             (parts (list "claude")))
+        (with-temp-file sp-file (insert (or system-prompt "")))
+        (push (format "--system-prompt \"$(cat %s)\"" (shell-quote-argument sp-file))
+              parts)
+        (when cli-session
+          (push (format "--resume %s" (shell-quote-argument cli-session)) parts))
+        (when (and extra (not (string-empty-p extra)))
+          (push extra parts))
+        (mapconcat #'identity (nreverse parts) " ")))
+     ;; Custom string command
+     ((stringp claude-org-cmux-launch-command)
+      (if (and extra (not (string-empty-p extra)))
+          (concat claude-org-cmux-launch-command " " extra)
+        claude-org-cmux-launch-command))
+     (t (error "Invalid claude-org-cmux-launch-command: %S"
+               claude-org-cmux-launch-command)))))
+#+END_SRC
+
+* Session Management
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--parse-surface-ref (output)
+  "Extract a surface ref (e.g. \"surface:1\") from cmux OUTPUT.
+Handles three formats:
+  - JSON with .focused.surface_ref key (from identify)
+  - \"OK workspace:N\" (from new-workspace)
+  - Plain \"surface:N\" string
+Returns the surface ref string, or OUTPUT unchanged as fallback."
+  (cond
+   ;; JSON: extract focused.surface_ref
+   ((string-prefix-p "{" (string-trim output))
+    (condition-case nil
+        (let* ((json (json-read-from-string output))
+               (focused (cdr (assq 'focused json)))
+               (ref (cdr (assq 'surface_ref focused))))
+          (or ref output))
+      (error output)))
+   ;; "OK workspace:N" → extract workspace ref
+   ((string-match "OK \\(workspace:[^ \t\n]+\\)" output)
+    (match-string 1 output))
+   ;; "* surface:N ..." from list-pane-surfaces
+   ((string-match "\\(surface:[^ \t\n]+\\)" output)
+    (match-string 1 output))
+   ;; Already a clean ref
+   (t output)))
+
+(defun claude-org-cmux--get-workspace-surface (workspace-ref)
+  "Get the surface ref for WORKSPACE-REF via list-pane-surfaces.
+Returns a clean surface ref like \"surface:1\"."
+  (let ((output (claude-org-cmux--call
+                 "list-pane-surfaces" "--workspace" workspace-ref)))
+    (if (string-match "\\(surface:[^ \t\n]+\\)" output)
+        (match-string 1 output)
+      (error "No surface found in workspace %s" workspace-ref))))
+
+(defun claude-org-cmux--ensure-session ()
+  "Ensure a cmux workspace/surface exists for the current SDD story.
+Returns the cmux surface ref (e.g. \"surface:1\").
+Launches if needed, reuses by saved ref.
+Auto-starts the Emacs MCP server if not running."
+  (claude-agent-with-span "cmux-ensure-session" nil nil
+  ;; Best-effort MCP server auto-start
+  (when (and (fboundp 'emacs-mcp-server-running-p)
+             (not (emacs-mcp-server-running-p))
+             (fboundp 'emacs-mcp-server-start))
+    (condition-case err
+        (progn
+          (emacs-mcp-server-start)
+          (run-at-time 1 nil
+                       (lambda ()
+                         (if (emacs-mcp-server-running-p)
+                             (message "Started Emacs MCP server for SDD bridge")
+                           (message "WARNING: MCP server didn't start")))))
+      (error (message "WARNING: MCP server start failed: %s" err))))
+  (let* ((saved-id (claude-org-cmux--find-session-property "CMUX_SURFACE_ID"))
+         (title (claude-org-cmux--tab-title))
+         (sdd-session-id
+          (claude-org-cmux--find-session-property "CLAUDE_SESSION_ID"))
+         (project-root (or (claude-org--get-project-root) default-directory)))
+    ;; Ensure IDE server is running
+    (when (and sdd-session-id (fboundp 'claude-org-iterm2--ensure-ide-server))
+      (claude-org-iterm2--ensure-ide-server project-root sdd-session-id))
+    ;; Check if saved surface is alive (saved-id is a clean ref like "surface:1")
+    (if (and saved-id
+             (condition-case nil
+                 (let ((result (claude-org-cmux--call "capture-pane"
+                                 "--surface" saved-id)))
+                   (not (string-empty-p result)))
+               (error nil)))
+        saved-id
+      ;; Launch new workspace with Claude Code
+      (unless sdd-session-id
+        (user-error "No CLAUDE_SESSION_ID found. Create an SDD section first"))
+      (let* ((org-file (buffer-file-name))
+             (launch-cmd (claude-org-cmux--build-launch-command
+                          org-file sdd-session-id project-root))
+             ;; Create new workspace with launch command
+             ;; Returns "OK workspace:N"
+             ;; If all tabs are closed, cmux reports "TabManager not available"
+             ;; — create a new window first, then retry
+             (result (condition-case err
+                         (claude-org-cmux--call
+                          "new-workspace"
+                          "--cwd" project-root
+                          "--command" launch-cmd)
+                       (error
+                        (if (string-match-p "TabManager" (error-message-string err))
+                            (progn
+                              (claude-org-cmux--call "new-window")
+                              (sleep-for 0.5)
+                              (claude-org-cmux--call
+                               "new-workspace"
+                               "--cwd" project-root
+                               "--command" launch-cmd))
+                          (signal (car err) (cdr err))))))
+             ;; Parse workspace ref, then get its surface ref
+             (workspace-ref (claude-org-cmux--parse-surface-ref result))
+             (surface-id (if (string-prefix-p "workspace:" workspace-ref)
+                             (claude-org-cmux--get-workspace-surface workspace-ref)
+                           workspace-ref)))
+          ;; Save clean refs as org properties (single-line!)
+          (save-excursion
+            (save-restriction
+              (claude-org-cmux--goto-session-heading)
+              (org-set-property "CMUX_SURFACE_ID" surface-id)
+              (when (string-prefix-p "workspace:" workspace-ref)
+                (org-set-property "CMUX_WORKSPACE_ID" workspace-ref))))
+          ;; Store mappings
+          (when sdd-session-id
+            (claude-org--session-put
+             (claude-org--current-session-key)
+             :cmux-surface surface-id)
+            (puthash sdd-session-id surface-id
+                     claude-org-cmux--sdd-to-surface)
+            (puthash sdd-session-id (claude-org--current-session-key)
+                     claude-org-cmux--sdd-to-session-key))
+          (save-buffer)
+          (message "Claude Code in cmux (surface: %s) — waiting for TUI..." surface-id)
+          ;; Wait for Claude Code TUI to be ready before returning
+          (claude-org-cmux--wait-for-ready surface-id)
+          (message "Claude Code ready in cmux (surface: %s)" surface-id)
+          surface-id)))))
+#+END_SRC
+
+* Status Detection
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--read-hook-status (sdd-session-id)
+  "Read Claude Code status from hook-written file. Fast, no API call."
+  (let ((file (expand-file-name (or sdd-session-id "unknown")
+                                "/tmp/claude-agent-status")))
+    (if (file-exists-p file)
+        (string-trim (with-temp-buffer
+                       (insert-file-contents file)
+                       (buffer-string)))
+      "unknown")))
+
+(defun claude-org-cmux--get-status (sdd-session-id surface-id)
+  "Get Claude Code status.
+SDD-SESSION-ID keys the hook file; SURFACE-ID keys the cmux API."
+  (let ((hook-status (claude-org-cmux--read-hook-status sdd-session-id)))
+    (if (member hook-status '("ready" "busy"))
+        hook-status
+      ;; Fallback: read screen content from cmux
+      (condition-case nil
+          (let ((screen (claude-org-cmux--call "capture-pane"
+                          "--surface" surface-id)))
+            (cond
+             ((string-match-p "-- INSERT --\\|type a message" screen) "ready")
+             ((string-match-p "Tool:\\|Thinking" screen) "busy")
+             ((string-empty-p screen) "dead")
+             (t "unknown")))
+        (error "dead")))))
+#+END_SRC
+
+* Query Registration
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--save-request-id (sdd-session-id request-id)
+  "Save REQUEST-ID to status file for SDD-SESSION-ID."
+  (let ((dir "/tmp/claude-agent-status"))
+    (make-directory dir t)
+    (with-temp-file (expand-file-name
+                     (concat sdd-session-id ".request-id") dir)
+      (insert request-id))))
+
+(defun claude-org-cmux--read-request-id (sdd-session-id)
+  "Read the request-id for SDD-SESSION-ID, or nil if not set."
+  (let ((path (expand-file-name
+               (concat sdd-session-id ".request-id")
+               "/tmp/claude-agent-status")))
+    (when (file-exists-p path)
+      (let ((val (string-trim (with-temp-buffer
+                                (insert-file-contents path)
+                                (buffer-string)))))
+        (unless (string-empty-p val) val)))))
+
+(defun claude-org-cmux--register-query (sdd-session-id surface-id)
+  "Register the current AI block as an active query.
+SDD-SESSION-ID is the SDD session, SURFACE-ID is the cmux surface."
+  (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
+         (heading (org-get-heading t t t t))
+         (instr-num (when (and heading
+                               (string-match "\\bInstruction \\([0-9]+\\)" heading))
+                      (string-to-number (match-string 1 heading))))
+         (req-id (claude-agent--generate-request-id))
+         (ctx (claude-agent-make-query-context
+               :instruction-num instr-num
+               :custom-id custom-id))
+         (state (claude-agent--make-process-state
+                 :request-id req-id
+                 :start-time (float-time)
+                 :source-buffer (current-buffer)
+                 :query-context ctx
+                 :source-location-fn (when custom-id #'claude-org-goto-custom-id)
+                 :source-location-args (when custom-id (list custom-id)))))
+    (claude-agent--register-query req-id state)
+    (claude-org-cmux--save-request-id sdd-session-id req-id)))
+
+(defun claude-org-cmux--query-completed (sdd-session-id)
+  "Mark the cmux query for SDD-SESSION-ID as completed.
+Unregisters from `claude-agent--active-queries'.
+When loop state is active, schedules the next iteration."
+  (let* ((session-key (gethash sdd-session-id claude-org-cmux--sdd-to-session-key))
+         (trace-ctx (when session-key
+                      (claude-org--session-get session-key :trace-ctx))))
+    (claude-agent-with-span "cmux-query-completed"
+        (list :session-id sdd-session-id) trace-ctx
+    (let ((req-id (claude-org-cmux--read-request-id sdd-session-id)))
+      (when req-id
+        (let ((state (claude-agent--get-active-query req-id)))
+          (when state
+            (setf (claude-agent--process-state-closed state) t)
+            (claude-agent--unregister-query req-id)))))
+    ;; Check loop continuation
+    (let ((surface-id (gethash sdd-session-id claude-org-cmux--sdd-to-surface)))
+      ;; Clean up lookup tables
+      (remhash sdd-session-id claude-org-cmux--sdd-to-surface)
+      (remhash sdd-session-id claude-org-cmux--sdd-to-session-key)
+      ;; Clear busy state
+      (when session-key
+        (claude-org--session-put session-key :busy nil))
+      (when session-key
+        (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
+              (loop-max (or (claude-org--session-get session-key :loop-max) 1)))
+          (if (< loop-current loop-max)
+              ;; More iterations — schedule next
+              (let ((interval (or (claude-org--session-get session-key :loop-interval) 0))
+                    (prompt (claude-org--session-get session-key :original-prompt)))
+                (claude-org--session-put session-key :loop-current (1+ loop-current))
+                (if (> interval 0)
+                    (run-at-time interval nil
+                                 #'claude-org-cmux--loop-send
+                                 sdd-session-id surface-id prompt session-key)
+                  (claude-org-cmux--loop-send sdd-session-id surface-id prompt session-key)))
+            ;; Loop complete — cleanup
+            (claude-org--session-put session-key :loop-max nil)
+            (claude-org--session-put session-key :loop-current nil))))))))
+#+END_SRC
+
+* Loop Support
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--loop-send (sdd-session-id surface-id prompt session-key)
+  "Send next loop iteration PROMPT to cmux.
+SDD-SESSION-ID and SURFACE-ID identify the session."
+  (claude-agent-with-span "cmux-loop-send"
+      (list :session-id sdd-session-id) nil
+  (let ((org-buf (claude-org--session-get session-key :loop-org-buffer))
+        (marker (claude-org--session-get session-key :loop-block-marker)))
+    (when (and org-buf (buffer-live-p org-buf) marker (marker-buffer marker))
+      (with-current-buffer org-buf
+        (save-excursion
+          (goto-char marker)
+          (when sdd-session-id
+            (claude-org-cmux--write-from-emacs-flag sdd-session-id))
+          (save-excursion
+            (org-back-to-heading t)
+            (when sdd-session-id
+              (claude-org-cmux--register-query sdd-session-id surface-id)))))))
+  (claude-org-cmux--send-text surface-id prompt)
+  (let ((current (claude-org--session-get session-key :loop-current))
+        (max (claude-org--session-get session-key :loop-max)))
+    (message "Sent loop iteration %d/%d to cmux (%d chars)"
+             current max (length prompt)))))
+#+END_SRC
+
+* Execution
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--write-from-emacs-flag (sdd-session-id)
+  "Write flag file indicating the next prompt was sent from Emacs.
+sdd-bridge.sh checks this to skip duplicate instruction insertion."
+  (let ((dir "/tmp/claude-agent-status"))
+    (make-directory dir t)
+    (with-temp-file (expand-file-name
+                     (concat sdd-session-id ".from-emacs") dir)
+      (insert "1"))
+    (let ((custom-id (org-entry-get nil "CUSTOM_ID")))
+      (when custom-id
+        (with-temp-file (expand-file-name
+                         (concat sdd-session-id ".custom-id") dir)
+          (insert custom-id))))))
+
+(defun claude-org-cmux--execute-ai-block ()
+  "Execute current AI block via cmux backend.
+Ensures session exists, checks readiness, sends prompt.
+Registers in `claude-agent--active-queries' for mode-line."
+  (let* ((element (org-element-at-point))
+         (prompt (when (and (eq (org-element-type element) 'src-block)
+                            (string= (org-element-property :language element) "ai"))
+                   (substring-no-properties
+                    (string-trim (org-element-property :value element))))))
+    (unless prompt
+      (user-error "Point is not inside a #+begin_src ai block"))
+    (let* ((surface-id (claude-org-cmux--ensure-session))
+           (sdd-session-id
+            (claude-org-cmux--find-session-property "CLAUDE_SESSION_ID"))
+           (status (claude-org-cmux--get-status sdd-session-id surface-id)))
+      (when (string= status "busy")
+        (user-error "Claude Code busy (status: %s). Cancel first?" status))
+      ;; Store ROOT trace context BEFORE entering child span,
+      ;; so async callbacks (cmux-query-completed) join at the root level
+      (let ((session-key (claude-org--current-session-key)))
+        (when session-key
+          (claude-org--session-put session-key :trace-ctx (claude-agent-trace-context))))
+      (claude-agent-with-span "cmux-execute"
+          (list :session-id sdd-session-id) nil
+      ;; Store sdd→session-key mapping
+      (when sdd-session-id
+        (puthash sdd-session-id (claude-org--current-session-key)
+                 claude-org-cmux--sdd-to-session-key))
+      ;; Save org buffer + marker for loop-send
+      (claude-org--session-put (claude-org--current-session-key)
+                               :loop-org-buffer (current-buffer))
+      (claude-org--session-put (claude-org--current-session-key)
+                               :loop-block-marker (copy-marker (point)))
+      ;; Register in active-queries BEFORE writing from-emacs flag
+      ;; (avoids TOCTOU race: hook could fire before request-id is written)
+      (save-excursion
+        (org-back-to-heading t)
+        (when sdd-session-id
+          (claude-org-cmux--register-query sdd-session-id surface-id)))
+      ;; Write from-emacs flag BEFORE sending
+      (when sdd-session-id
+        (claude-org-cmux--write-from-emacs-flag sdd-session-id))
+      ;; Send prompt via cmux
+      (claude-org-cmux--send-text surface-id prompt)
+      ;; Optional: update sidebar status
+      (condition-case nil
+          (claude-org-cmux--call "set-status" "agent" "Running query...")
+        (error nil))
+      (message "Sent to cmux (%d chars)" (length prompt))))))
+#+END_SRC
+
+* User Commands
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--activate-app ()
+  "Bring cmux to the foreground on macOS."
+  (when (eq system-type 'darwin)
+    ;; Tell cmux to mark itself as active
+    (condition-case nil
+        (claude-org-cmux--call "set-app-focus" "active")
+      (error nil))
+    ;; Also use AppleScript to raise the window
+    (start-process "activate-cmux" nil
+                   "osascript" "-e"
+                   "tell application \"cmux\" to activate")))
+
+(defun claude-org-cmux-open-tab ()
+  "Open (or focus) the cmux workspace for this SDD session.
+Launches Claude Code if no matching workspace exists."
+  (interactive)
+  (claude-org-cmux--ensure-session)
+  (let ((workspace-id (claude-org-cmux--find-session-property "CMUX_WORKSPACE_ID"))
+        (surface-id (claude-org-cmux--find-session-property "CMUX_SURFACE_ID")))
+    (cond
+     (workspace-id
+      (claude-org-cmux--call "select-workspace" "--workspace" workspace-id)
+      (claude-org-cmux--activate-app)
+      (message "cmux workspace focused (%s)" workspace-id))
+     (surface-id
+      (claude-org-cmux--activate-app)
+      (message "cmux surface: %s (focused app)" surface-id))
+     (t (user-error "No cmux session for this story")))))
+
+(defun claude-org-cmux-cancel ()
+  "Cancel the current Claude Code instruction in cmux.
+Sends Escape to the terminal."
+  (interactive)
+  (let ((surface-id (claude-org-cmux--find-session-property "CMUX_SURFACE_ID")))
+    (unless surface-id
+      (user-error "No cmux session for this story"))
+    (claude-org-cmux--call "send-key" "--surface" surface-id "escape")
+    (message "Cancel sent to Claude Code (waiting for hook...)")))
+#+END_SRC
+
+* Sidebar Feedback
+
+cmux-specific rich feedback that iTerm2 cannot provide.
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux-set-status (key value)
+  "Set sidebar status KEY to VALUE for current workspace."
+  (condition-case nil
+      (claude-org-cmux--call "set-status" key value)
+    (error nil)))
+
+(defun claude-org-cmux-clear-status (key)
+  "Clear sidebar status KEY for current workspace."
+  (condition-case nil
+      (claude-org-cmux--call "clear-status" key)
+    (error nil)))
+
+(defun claude-org-cmux-set-progress (value &optional label)
+  "Set progress bar to VALUE (0.0-1.0) with optional LABEL."
+  (condition-case nil
+      (if label
+          (claude-org-cmux--call "set-progress" value "--label" label)
+        (claude-org-cmux--call "set-progress" value))
+    (error nil)))
+
+(defun claude-org-cmux-notify (title body)
+  "Send notification with TITLE and BODY via cmux."
+  (condition-case nil
+      (claude-org-cmux--call "notify" "--title" title "--body" body)
+    (error nil)))
+#+END_SRC
+
+* Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-org-cmux)
+#+END_SRC

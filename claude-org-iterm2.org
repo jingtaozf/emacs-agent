@@ -111,6 +111,8 @@ Navigates to the SDD section and reuses existing prompt-building logic."
   "Insert PROMPT as a new AI block in the SDD Workflow for SESSION-ID in ORG-FILE.
 Creates a new Instruction N subsection under the Workflow heading.
 Returns the CUSTOM_ID string for correlating with the Stop hook."
+  (claude-agent-with-span "sdd-insert-prompt"
+      (list :session-id session-id) nil
   (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
     (let ((custom-id nil))
       (save-excursion
@@ -165,7 +167,7 @@ Returns the CUSTOM_ID string for correlating with the Stop hook."
                 (when claude-org-auto-generate-title
                   (claude-org--maybe-auto-generate-title prompt heading-marker)))))))
       (save-buffer)
-      custom-id)))
+      custom-id))))
 #+END_SRC
 
 ** Response Insertion
@@ -205,6 +207,8 @@ Returns the position, or LIMIT if none found."
 (defun claude-org-sdd-bridge-insert-response (org-file session-id response instr-custom-id)
   "Insert RESPONSE after the Instruction with INSTR-CUSTOM-ID in ORG-FILE.
 Org headings in response content are shifted to become subsections."
+  (claude-agent-with-span "sdd-insert-response"
+      (list :session-id session-id :custom-id instr-custom-id) nil
   (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
@@ -247,7 +251,7 @@ Org headings in response content are shifted to become subsections."
             (insert ":END:\n\n")
             (insert (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n")))))
     (save-buffer)
-    (format "Inserted Response (%d chars)" (length response))))
+    (format "Inserted Response (%d chars)" (length response)))))
 #+END_SRC
 
 ** CLI Session Persistence
@@ -447,6 +451,8 @@ the current heading before `org-up-heading-safe' to avoid skipping it."
   "Call iterm2-ctl.py SUBCOMMAND with ARGS. Return stdout string.
 If ARGS contains :stdin KEY, that value is written to a temp file
 and used as stdin for the process (avoids ARG_MAX for large prompts)."
+  (claude-agent-with-span "iterm2-call"
+      (list :span-kind "CLIENT" :subcommand subcommand) nil
   (let* ((stdin-text nil)
          (cli-args nil))
     ;; Separate :stdin from positional args
@@ -483,7 +489,7 @@ and used as stdin for the process (avoids ARG_MAX for large prompts)."
                        subcommand exit-code stderr))))
         (kill-buffer buf)
         (when stdin-file (delete-file stdin-file t))
-        (delete-file stderr-file t)))))
+        (delete-file stderr-file t))))))
 
 (defun claude-org-iterm2--tab-title ()
   "Generate iTerm2 tab title for current SDD session.
@@ -567,6 +573,7 @@ PROJECT-ROOT the working directory."
   "Ensure an iTerm2 session exists for the current SDD story.
 Returns the iTerm2 session UUID. Launches if needed, reuses by title.
 Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
+  (claude-agent-with-span "iterm2-ensure-session" nil nil
   ;; Best-effort MCP server auto-start (claude-sdd degrades gracefully without it)
   (when (and (fboundp 'emacs-mcp-server-running-p)
              (not (emacs-mcp-server-running-p))
@@ -628,7 +635,7 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
                          claude-org-iterm2--sdd-to-session-key))
               (save-buffer)
               (message "Claude Code in iTerm2 (session: %s)" result)
-              result)))))
+              result))))))
 
 (defun claude-org-iterm2--read-hook-status (sdd-session-id)
   "Read Claude Code status from hook-written file. Fast, no API call."
@@ -711,6 +718,11 @@ SDD-SESSION-ID is the SDD session, ITERM2-ID is the iTerm2 pane UUID."
 Unregisters from `claude-agent--active-queries' so the mode-line
 and *Claude Queries* buffer update automatically.
 When loop state is active, schedules the next iteration."
+  (let* ((session-key-for-trace (gethash sdd-session-id claude-org-iterm2--sdd-to-session-key))
+         (trace-ctx (when session-key-for-trace
+                      (claude-org--session-get session-key-for-trace :trace-ctx))))
+  (claude-agent-with-span "iterm2-query-completed"
+      (list :session-id sdd-session-id) trace-ctx
   (let ((req-id (claude-org-iterm2--read-request-id sdd-session-id)))
     (when req-id
       (let ((state (claude-agent--get-active-query req-id)))
@@ -741,7 +753,7 @@ When loop state is active, schedules the next iteration."
                 (claude-org-iterm2--loop-send sdd-session-id iterm2-id prompt session-key)))
           ;; Loop complete — cleanup
           (claude-org--session-put session-key :loop-max nil)
-          (claude-org--session-put session-key :loop-current nil))))))
+          (claude-org--session-put session-key :loop-current nil))))))))
 
 
 (defun claude-org-iterm2--loop-send (sdd-session-id iterm2-id prompt session-key)
@@ -749,6 +761,8 @@ When loop state is active, schedules the next iteration."
 SDD-SESSION-ID and ITERM2-ID identify the session.
 SESSION-KEY is the org session for loop state.
 Navigates to saved org buffer/marker for org-context-dependent calls."
+  (claude-agent-with-span "iterm2-loop-send"
+      (list :session-id sdd-session-id) nil
   (let ((org-buf (claude-org--session-get session-key :loop-org-buffer))
         (marker (claude-org--session-get session-key :loop-block-marker)))
     ;; write-from-emacs-flag and register-query need org buffer context
@@ -766,7 +780,7 @@ Navigates to saved org buffer/marker for org-context-dependent calls."
   (let ((current (claude-org--session-get session-key :loop-current))
         (max (claude-org--session-get session-key :loop-max)))
     (message "Sent loop iteration %d/%d to iTerm2 (%d chars)"
-             current max (length prompt))))
+             current max (length prompt)))))
 #+END_SRC
 
 ** Execution
@@ -805,10 +819,16 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
            (status (claude-org-iterm2--get-status sdd-session-id iterm2-id)))
       (when (string= status "busy")
         (user-error "Claude Code busy (status: %s). Cancel first?" status))
+      (claude-agent-with-span "iterm2-execute"
+          (list :session-id sdd-session-id) nil
       ;; Ensure sdd→session-key mapping for loop dispatch from query-completed
       (when sdd-session-id
         (puthash sdd-session-id (claude-org--current-session-key)
                  claude-org-iterm2--sdd-to-session-key))
+      ;; Store trace context for async callbacks (query-completed)
+      (let ((session-key (claude-org--current-session-key)))
+        (when session-key
+          (claude-org--session-put session-key :trace-ctx (claude-agent-trace-context))))
       ;; Save org buffer + marker for loop-send (timer callbacks need context)
       (claude-org--session-put (claude-org--current-session-key)
                                :loop-org-buffer (current-buffer))
@@ -823,7 +843,7 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
         (when sdd-session-id
           (claude-org-iterm2--register-query sdd-session-id iterm2-id)))
       (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
-      (message "Sent to iTerm2 (%d chars)" (length prompt)))))
+      (message "Sent to iTerm2 (%d chars)" (length prompt))))))
 #+END_SRC
 
 ** User Commands

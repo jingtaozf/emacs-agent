@@ -1303,5 +1303,112 @@ Claude Code to connect to the wrong IDE server."
             (should (file-exists-p other))))
       (delete-directory lock-dir t))))
 
+;;; ============================================================================
+;;; From-Emacs Response Round-Trip
+;;; ============================================================================
+
+(ert-deftest test-iterm2-from-emacs-writes-custom-id-file ()
+  "execute-ai-block from Emacs must write custom-id file for response correlation.
+REGRESSION: After execute-ai-block, the Stop hook (handle_response in Python)
+reads the custom-id file to know which instruction to attach the response to.
+If the file is missing, the response is silently dropped."
+  :tags '(:unit :iterm2 :e2e :regression)
+  (let ((test-iterm2--mock-call-log nil)
+        (tmp-file (make-temp-file "iterm2-cidfile-" nil ".org"))
+        (custom-id-file (expand-file-name
+                         "sdd-resp-test.custom-id"
+                         "/tmp/claude-agent-status"))
+        (flag-file (expand-file-name
+                    "sdd-resp-test.from-emacs"
+                    "/tmp/claude-agent-status")))
+    (unwind-protect
+        (progn
+          ;; Clean up any stale files
+          (when (file-exists-p custom-id-file) (delete-file custom-id-file))
+          (when (file-exists-p flag-file) (delete-file flag-file))
+          (with-temp-file tmp-file
+            (insert test-iterm2--org-content-with-workflow))
+          (with-current-buffer (find-file-noselect tmp-file)
+            (goto-char (point-min))
+            (cl-letf (((symbol-function 'claude-org-iterm2--call)
+                       #'test-iterm2--mock-call)
+                      ;; Disable auto-title to avoid async timers
+                      ((symbol-value 'claude-org-auto-generate-title) nil))
+              (unwind-protect
+                  (progn
+                    ;; Execute AI block from Emacs
+                    (re-search-forward "What is 2")
+                    (claude-org-iterm2--execute-ai-block)
+                    ;; Custom-id file must exist
+                    (should (file-exists-p custom-id-file))
+                    ;; Custom-id must match the instruction's CUSTOM_ID
+                    (let ((written-id (with-temp-buffer
+                                        (insert-file-contents custom-id-file)
+                                        (string-trim (buffer-string)))))
+                      (should (string= "sdd-resp-test-instr-1" written-id))))
+                (set-buffer-modified-p nil)
+                (kill-buffer (current-buffer))))))
+      (when (file-exists-p tmp-file) (delete-file tmp-file))
+      (when (file-exists-p custom-id-file) (delete-file custom-id-file))
+      (when (file-exists-p flag-file) (delete-file flag-file)))))
+
+(ert-deftest test-iterm2-from-emacs-full-response-roundtrip ()
+  "Full from-Emacs round-trip: execute → write custom-id → insert response.
+REGRESSION: Response not appearing in org buffer after iTerm2 execution.
+This test simulates exactly what the Python bridge does: reads custom-id
+from file, then calls insert-response with it."
+  :tags '(:unit :iterm2 :e2e :regression)
+  (let ((test-iterm2--mock-call-log nil)
+        (tmp-file (make-temp-file "iterm2-roundtrip-" nil ".org"))
+        (custom-id-file (expand-file-name
+                         "sdd-resp-test.custom-id"
+                         "/tmp/claude-agent-status"))
+        (flag-file (expand-file-name
+                    "sdd-resp-test.from-emacs"
+                    "/tmp/claude-agent-status")))
+    (unwind-protect
+        (progn
+          ;; Clean up stale files
+          (when (file-exists-p custom-id-file) (delete-file custom-id-file))
+          (when (file-exists-p flag-file) (delete-file flag-file))
+          (with-temp-file tmp-file
+            (insert test-iterm2--org-content-with-workflow))
+          (with-current-buffer (find-file-noselect tmp-file)
+            (goto-char (point-min))
+            (cl-letf (((symbol-function 'claude-org-iterm2--call)
+                       #'test-iterm2--mock-call)
+                      ;; Disable auto-title to avoid async timers
+                      ((symbol-value 'claude-org-auto-generate-title) nil))
+              (unwind-protect
+                  (progn
+                    ;; 1. Execute from Emacs (writes flag + custom-id)
+                    (re-search-forward "What is 2")
+                    (claude-org-iterm2--execute-ai-block)
+
+                    ;; 2. Simulate Python bridge reading custom-id from file
+                    ;;    (exactly what _read_custom_id does)
+                    (let ((custom-id (when (file-exists-p custom-id-file)
+                                       (with-temp-buffer
+                                         (insert-file-contents custom-id-file)
+                                         (let ((v (string-trim (buffer-string))))
+                                           (if (string= v "") nil v))))))
+                      (should custom-id)
+
+                      ;; 3. Simulate Python bridge calling insert-response
+                      ;;    (exactly what handle_response does via MCP)
+                      (claude-org-sdd-bridge-insert-response
+                       tmp-file "sdd-resp-test"
+                       "The answer is 4." custom-id)
+
+                      ;; 4. Verify response appears in buffer
+                      (goto-char (point-min))
+                      (should (re-search-forward "Response 1" nil t))
+                      (should (re-search-forward "The answer is 4\\." nil t))))
+                (set-buffer-modified-p nil)
+                (kill-buffer (current-buffer))))))
+      (when (file-exists-p tmp-file) (delete-file tmp-file))
+      (when (file-exists-p custom-id-file) (delete-file custom-id-file))
+      (when (file-exists-p flag-file) (delete-file flag-file)))))
+
 (provide 'test-iterm2-e2e-simulated)
 ;;; test-iterm2-e2e-simulated.el ends here

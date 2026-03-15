@@ -1,0 +1,322 @@
+#+TITLE: Design: Single Root Span Per AI Block Execution
+#+DATE: [2026-03-15]
+#+STATUS: proposed
+
+* Problem Statement
+
+Currently, traces are fragmented depending on the entry point:
+
+- *Emacs-initiated* (C-c C-c): Emacs creates a root trace, Python sdd_bridge
+  creates separate root spans (or children if traceparent file exists)
+- *Claude Code direct* (iTerm2/terminal): Python sdd_bridge creates per-event
+  root spans with no shared trace — each hook event (prompt, response, tool,
+  permission) is an isolated trace
+
+This means:
+1. Phoenix shows multiple disconnected traces for a single AI block execution
+2. In direct mode, Emacs MCP callbacks (insert response, save session) are
+   not connected to the Python trace that triggered them
+3. No single trace tree shows the complete lifecycle of one AI interaction
+
+* Design Goals
+
+1. *One root span per AI block* — regardless of whether execution starts from
+   Emacs or Claude Code directly
+2. *Correct parent-child relationships* — the initiator is always the root,
+   downstream processes are children
+3. *Bidirectional context propagation* — Emacs → Python (via traceparent file)
+   AND Python → Emacs (via MCP call arguments)
+4. *Distinguishable spans* — OI kinds clearly identify which side produced
+   each span (CHAIN for orchestration, TOOL for execution)
+
+* Two Execution Flows
+
+** Flow A — Emacs-Initiated (C-c C-c in AI block)
+
+Emacs is the orchestrator. It creates the root trace and writes the
+traceparent file. Python reads it and creates child spans.
+
+#+begin_example
+execute-ai-block (ROOT, SERVER, CHAIN)              ← Emacs
+├── execute-core (INTERNAL, CHAIN)                   ← Emacs
+│   ├── build-system-prompt (INTERNAL, CHAIN)        ← Emacs
+│   ├── dispatch-query (INTERNAL, CHAIN)             ← Emacs
+│   │   └── send-request (CLIENT, CHAIN)             ← Emacs (spawns CLI)
+│   │       └── start-process (CLIENT, CHAIN)        ← Emacs
+│   └── ...
+├── sdd-bridge-prompt (CONSUMER, TOOL)               ← Python (reads traceparent → child)
+│   └── handle-prompt (INTERNAL, TOOL)               ← Python
+│       └── [MCP → Emacs: save-cli-session]          ← Emacs (child of Python span)
+├── sdd-bridge-response (CONSUMER, TOOL)             ← Python (reads traceparent → child)
+│   ├── extract-full-response (INTERNAL, TOOL)       ← Python
+│   └── handle-response (INTERNAL, TOOL)             ← Python
+│       └── [MCP → Emacs: insert-response]           ← Emacs (child of Python span)
+├── sdd-bridge-permission (CONSUMER, TOOL)           ← Python
+│   └── handle-permission (INTERNAL, TOOL)           ← Python
+│       └── [MCP → Emacs: notify-permission]         ← Emacs (child of Python span)
+└── handle-complete (INTERNAL, CHAIN)                ← Emacs
+    └── auto-title-complete (INTERNAL, CHAIN)        ← Emacs (async, captured ctx)
+#+end_example
+
+Context flow: Emacs writes traceparent → Python reads it → Python passes
+trace context in MCP calls → Emacs creates child spans under Python parent.
+
+** Flow B — Claude Code Direct (iTerm2/terminal)
+
+Python sdd_bridge is the entry point. The first hook event (=prompt=) creates
+the root trace and writes the traceparent file. Subsequent events and Emacs
+MCP callbacks are all children.
+
+#+begin_example
+sdd-bridge-prompt (ROOT, SERVER, CHAIN)              ← Python (no traceparent → creates root, WRITES traceparent)
+├── handle-prompt (INTERNAL, TOOL)                   ← Python
+│   └── [MCP → Emacs: save-cli-session]              ← Emacs (child of Python span)
+│       └── sdd-insert-prompt (INTERNAL, CHAIN)      ← Emacs
+├── sdd-bridge-tool (CONSUMER, TOOL)                 ← Python (reads traceparent → child)
+│   └── handle-tool (INTERNAL, TOOL)                 ← Python
+├── sdd-bridge-response (CONSUMER, TOOL)             ← Python (reads traceparent → child)
+│   ├── extract-full-response (INTERNAL, TOOL)       ← Python
+│   └── handle-response (INTERNAL, TOOL)             ← Python
+│       └── [MCP → Emacs: insert-response]           ← Emacs (child of Python span)
+│           └── sdd-insert-response (INTERNAL, CHAIN)← Emacs
+├── sdd-bridge-permission (CONSUMER, TOOL)           ← Python (reads traceparent → child)
+│   └── handle-permission (INTERNAL, TOOL)           ← Python
+│       └── [MCP → Emacs: notify-permission]         ← Emacs (child of Python span)
+└── sdd-bridge-permission-clear (CONSUMER, TOOL)     ← Python
+    └── handle-permission-clear (INTERNAL, TOOL)     ← Python
+#+end_example
+
+Context flow: Python generates trace-id, writes traceparent → subsequent
+Python events read it → Python passes trace context in MCP calls → Emacs
+creates child spans under Python parent.
+
+* OI Kind Convention
+
+| Side   | Role                        | OTel Kind | OI Kind | Rationale                              |
+|--------+-----------------------------+-----------+---------+----------------------------------------|
+| Emacs  | Root orchestrator           | SERVER    | CHAIN   | Entry point, orchestrates AI workflow  |
+| Emacs  | Internal processing         | INTERNAL  | CHAIN   | Sub-steps within Emacs orchestration   |
+| Emacs  | Calling CLI/external        | CLIENT    | CHAIN   | Outbound call to external process      |
+| Python | Root (direct mode)          | SERVER    | CHAIN   | Entry point when no Emacs parent       |
+| Python | Hook event (from Emacs)     | CONSUMER  | TOOL    | Processing work dispatched from Emacs  |
+| Python | Hook event (first, direct)  | SERVER    | CHAIN   | First event = root in direct mode      |
+| Python | Internal processing         | INTERNAL  | TOOL    | Sub-work within a hook handler         |
+
+Key distinction: Emacs spans are =CHAIN= (orchestration), Python spans are
+=TOOL= (execution) — except when Python IS the root orchestrator (direct mode),
+where the root span is =CHAIN=.
+
+* Implementation Changes
+
+** 1. Python: =otel_setup.py= — Add =write_trace_context()=
+
+Mirror of Emacs =claude-agent-trace--write-context=. Used by sdd_bridge
+when it is the root (no existing traceparent).
+
+#+begin_src python
+def write_trace_context(session_id: str, trace_id: str, span_id: str) -> None:
+    """Write W3C traceparent file for cross-process propagation."""
+    os.makedirs(STATUS_DIR, exist_ok=True)
+    traceparent = f"00-{trace_id}-{span_id}-01"
+    # Per-session file
+    path = os.path.join(STATUS_DIR, f"{session_id}.trace-context")
+    with open(path, "w") as f:
+        f.write(traceparent)
+    # Generic file for tools that don't use session-id
+    with open(os.path.join(STATUS_DIR, "traceparent"), "w") as f:
+        f.write(traceparent)
+#+end_src
+
+** 2. Python: =sdd_bridge.py= — Root-or-child logic in =main()=
+
+When =read_trace_context()= returns None, sdd_bridge creates a new trace
+and writes the traceparent file so subsequent events join the same trace.
+
+#+begin_src python
+# In main():
+ctx = read_trace_context(session_id) if read_trace_context else None
+
+if ctx is None:
+    # No Emacs parent — WE are the root
+    root_kind = SpanKind.SERVER
+    root_oi_kind = "CHAIN"
+else:
+    # Emacs parent exists — we're a child
+    root_kind = SpanKind.CONSUMER
+    root_oi_kind = "TOOL"
+
+root_attrs[_OI_KIND_ATTR] = root_oi_kind
+
+with tracer.start_as_current_span(
+    f"sdd-bridge-{event}", context=ctx,
+    kind=root_kind, attributes=root_attrs
+) as root_span:
+    if ctx is None:
+        # Write context so subsequent hook events join this trace
+        span_ctx = root_span.get_span_context()
+        write_trace_context(
+            session_id,
+            format(span_ctx.trace_id, '032x'),
+            format(span_ctx.span_id, '016x'),
+        )
+    # ... dispatch event handlers ...
+#+end_src
+
+** 3. Python: Pass trace context in MCP calls
+
+When Python calls =mcp.eval_elisp()=, it needs to pass the current trace
+context so Emacs can create child spans under the Python span.
+
+Option A — Traceparent in MCP call arguments:
+
+#+begin_src python
+def _mcp_eval_with_trace(mcp, elisp, session_id):
+    """Eval elisp via MCP, passing trace context for child span creation."""
+    span = trace.get_current_span()
+    ctx = span.get_span_context()
+    traceparent = f"00-{ctx.trace_id:032x}-{ctx.span_id:016x}-01"
+    # Wrap the elisp to set trace context before execution
+    wrapped = (
+        f'(let ((claude-agent-trace--current-context '
+        f'(cons "{ctx.trace_id:032x}" "{ctx.span_id:016x}")))'
+        f' {elisp})'
+    )
+    return mcp.eval_elisp(wrapped)
+#+end_src
+
+Option B — Read traceparent file in Emacs MCP handlers:
+
+Simpler but less precise — Emacs reads the session's traceparent file to
+get the trace-id, but the parent span-id points to the root, not the
+specific Python span that triggered the MCP call.
+
+#+begin_src elisp
+(defun claude-agent-trace--read-context (session-id)
+  "Read trace context from traceparent file written by Python.
+Returns (TRACE-ID . SPAN-ID) or nil."
+  (let ((file (expand-file-name
+               (concat session-id ".trace-context")
+               claude-agent-trace-context-dir)))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (let ((parts (split-string (buffer-string) "-")))
+          (when (= (length parts) 4)
+            (cons (nth 1 parts) (nth 2 parts))))))))
+#+end_src
+
+*Recommendation*: Option A gives precise parent-child relationships (each
+MCP callback is a child of the specific Python span that called it). Option B
+is simpler but creates less precise trees. Start with Option A.
+
+** 4. Emacs: MCP handlers read trace context
+
+For Emacs functions called by Python via MCP (=sdd-insert-prompt=,
+=sdd-insert-response=, =iterm2-query-completed=), wrap them in
+=claude-agent-with-span= using the trace context passed from Python.
+
+With Option A, the =claude-agent-trace--current-context= is already set by
+the wrapping =let= form, so existing =claude-agent-with-span= calls in those
+functions will automatically become children of the Python span.
+
+No code changes needed in Emacs MCP handlers — the context propagation
+happens transparently via the wrapped elisp.
+
+** 5. No changes needed
+
+- =otel_bridge.py= — already handles SpanKind and OI kinds correctly
+- =claude-agent-trace.org= macros — already read =claude-agent-trace--current-context=
+- Existing Emacs =with-span= calls — already use dynamic binding
+
+* Trace Context Flow Diagram
+
+#+begin_example
+Flow A (Emacs-initiated):
+
+  Emacs                          Python sdd_bridge
+  ─────                          ─────────────────
+  with-trace creates root
+  │
+  ├─ writes traceparent file ──→ reads traceparent
+  │                              │
+  │                              ├─ creates child span
+  │                              │
+  │                              ├─ MCP call ──→ Emacs MCP handler
+  │                              │   (passes traceparent   │
+  │                              │    in wrapped elisp)    ├─ with-span (child of Python)
+  │                              │                         │
+  │                              │               ←─────────┘
+  │                              │
+  └──────────────────────────────┘
+
+
+Flow B (Claude Code direct):
+
+  Python sdd_bridge              Emacs
+  ─────────────────              ─────
+  prompt event: no traceparent
+  │
+  ├─ creates ROOT span
+  │
+  ├─ writes traceparent file
+  │
+  ├─ MCP call ──────────────────→ Emacs MCP handler
+  │   (passes traceparent          │
+  │    in wrapped elisp)           ├─ with-span (child of Python)
+  │                                │
+  │               ←────────────────┘
+  │
+  response event: reads traceparent
+  │
+  ├─ creates child span
+  │
+  ├─ MCP call ──────────────────→ Emacs MCP handler
+  │   (passes traceparent          │
+  │    in wrapped elisp)           ├─ with-span (child of Python)
+  │                                │
+  └───────────────←────────────────┘
+#+end_example
+
+* Verification
+
+After implementation, verify with Phoenix REST API:
+
+#+begin_src shell
+# 1. Clear existing data
+# 2. Execute AI block from Emacs (Flow A)
+curl -s 'http://localhost:6006/v1/projects/emacs-agent/spans?limit=50' | \
+  python3 -c "import sys,json; d=json.load(sys.stdin)
+for s in d['data']:
+  parent = s.get('parent_id') or 'ROOT'
+  print(f\"{s['span_kind']:6} {s['name']:30} parent={parent}\")"
+
+# Expected: single trace tree, all spans share same trace_id
+# Emacs spans: CHAIN kind
+# Python spans: TOOL kind (except root in Flow B: CHAIN)
+
+# 3. Execute from Claude Code directly (Flow B)
+# Expected: Python prompt event is ROOT/CHAIN
+# All subsequent events and Emacs MCP callbacks are children
+#+end_src
+
+* Implementation Order
+
+| Step | Change                                | Effort |
+|------+---------------------------------------+--------|
+|    1 | =otel_setup.py=: add =write_trace_context()= | 15 min |
+|    2 | =sdd_bridge.py=: root-or-child logic  | 30 min |
+|    3 | =sdd_bridge.py=: =_mcp_eval_with_trace()= wrapper | 30 min |
+|    4 | Tests: Python unit tests              | 30 min |
+|    5 | E2E: verify both flows via Phoenix    | 30 min |
+
+Total: ~2.5h
+
+* Open Questions
+
+1. Should we clean up old traceparent files? They persist across sessions.
+   A cron job or startup cleanup could remove files older than 24h.
+2. Should =_mcp_eval_with_trace= be used for ALL =mcp.eval_elisp()= calls,
+   or only the ones where Emacs has =with-span= wrappers?
+3. For Flow A, should the Emacs root span remain open until the response is
+   fully inserted? Currently it ends when =execute-ai-block= returns, but
+   the response arrives asynchronously via Python hooks.

@@ -1,0 +1,184 @@
+#+TITLE: Research: Slack Bot for AI Agent
+#+DATE: 2026-03-13
+#+STATUS: complete
+
+* Overview
+
+Research into building a Slack bot that enables an AI agent (Claude Code) to:
+1. Receive notifications of new Slack messages
+2. Read and understand message content
+3. Respond in two modes: (a) draft-and-confirm, (b) auto-reply with disclaimers
+
+* Slack Bot Architecture Options
+
+** Socket Mode vs Events API vs RTM
+
+| Approach | Public URL? | Scale | Best For |
+|----------+------------+-------+----------|
+| Socket Mode (WebSocket) | No | Max 10 connections | Internal bots, local dev, behind firewalls |
+| Events API (HTTP) | Yes | Horizontal, stateless | Production, Marketplace apps |
+| RTM API | No | Poor | DEPRECATED -- do not use |
+
+*Recommendation*: Socket Mode for this use case. No public URL needed, works behind
+firewalls, perfect for a locally-running Claude Code session.
+
+** Slack Bolt SDK (Python)
+
+- Latest: v1.27.0 (November 2025)
+- Python 3.7+
+- Install: =pip install slack-bolt=
+- Supports both sync and async patterns
+- Built-in retry handling for rate limits (HTTP 429)
+- Socket Mode adapter: =slack_bolt.adapter.socket_mode.SocketModeHandler=
+
+** Required OAuth Scopes
+
+| Scope | Purpose |
+|-------+---------|
+| =chat:write= | Post messages |
+| =chat:write.customize= | Custom bot name/icon per message |
+| =channels:history= | Read public channel messages |
+| =channels:read= | List public channels |
+| =groups:history= | Read private channel messages |
+| =im:history= | Read DM messages |
+| =im:write= | Open DM conversations |
+| =app_mentions:read= | Receive @mention events |
+| =users:read= | Get user profile info |
+
+** Event Subscriptions
+
+| Event | Trigger |
+|-------+---------|
+| =message.channels= | Messages in public channels |
+| =message.groups= | Messages in private channels |
+| =message.im= | Direct messages to bot |
+| =app_mention= | @mention of the bot |
+
+** Rate Limits
+
+| Context | Limit |
+|---------+-------|
+| =chat.postMessage= | ~1 msg/sec/channel |
+| Events API delivery | 30,000 events/workspace/app/hour |
+| Most read methods | ~20/min |
+
+* Existing Slack Integration in Codebase
+
+** Current Implementation
+
+The project already has a *read-only* Slack integration:
+
+- *Skill*: =skills/slack/SKILL.md= (6.3 KB)
+- *Backend*: =scripts/slack_reader.py= (443 lines)
+- *Token storage*: =~/.local/certs/slack_user_oauth_token.txt= or =slack_token.txt=
+
+Features: list channels, read history, search messages, fetch threads, multiple output
+formats (text, org, JSON). Uses =slack-sdk= =WebClient=.
+
+** Gap Analysis
+
+| Capability | Current | Needed |
+|------------+---------+--------|
+| Read messages | Yes | Yes |
+| Search messages | Yes | Yes |
+| Post messages | No | Yes |
+| Real-time events | No | Yes |
+| Bot identity | No | Yes |
+| Interactive buttons | No | Yes |
+| Thread replies | Read only | Read + Write |
+
+* Existing Open-Source Projects
+
+** mpociot/claude-code-slack-bot
+Node.js process wrapping Claude Code SDK. Receives Slack events via Socket Mode,
+invokes Claude Code, posts responses. Pattern: Slack as the UI for Claude Code.
+
+** chenhg5/cc-connect
+Go binary bridging multiple chat platforms to multiple AI agents.
+Supports Slack via Socket Mode, multi-bot relay.
+
+** tomeraitz/claude-slack-bridge
+Docker container providing MCP tools. OS-level sleep until Slack reply arrives.
+Enables mid-task two-way conversation between Claude Code and human in Slack.
+
+** Official Slack MCP Server
+=@modelcontextprotocol/server-slack= launched Feb 2026. Also hosted at
+=mcp.slack.com/mcp= with OAuth 2.0. Install via =claude plugin install slack=.
+
+** korotovsky/slack-mcp-server
+Community, most feature-rich: 15 tools. Supports stdio/SSE/HTTP transports.
+Stealth mode, DMs, unread aggregation.
+
+* Claude Code Integration -- Push vs Pull Problem
+
+Claude Code is *pull-only* -- MCP servers cannot push events into conversations.
+
+Current solutions:
+1. *Wrapper bot*: External process drives Claude SDK (mpociot pattern)
+2. *Blocking MCP tool*: Tool that OS-level sleeps until Slack reply arrives
+3. *Proposed*: =claude inject= IPC mechanism (GitHub issue #24947) -- not yet implemented
+4. *Proposed*: Programmatic stdin (issue #15553) -- not yet implemented
+
+Most viable approach: A *standalone Python daemon* using Slack Bolt + Socket Mode.
+Daemon receives Slack events, decides on action, invokes Claude API/SDK.
+
+* AI Response Patterns
+
+** Human-in-the-Loop (Draft & Confirm)
+
+- Approve/Reject buttons in Slack (Block Kit =actions= block)
+- Selective gating by risk level -- low-risk auto-send, high-risk require approval
+- LangGraph provides =interrupt()= for pausing mid-execution
+
+** Auto-Reply with Disclaimers
+
+Slack official guidance:
+- Add disclaimer in =context= block: "AI-generated response. May contain inaccuracies."
+- Cite sources inline with link formatting
+- Use =feedback_buttons= Block Kit element (Oct 2025)
+- Use streaming APIs (=chat.startStream=, =chat.appendStream=, =chat.stopStream=)
+- Never process messages from other LLMs (prevent recursive loops)
+
+** Confidence Scoring
+
+| Method | Complexity | Quality |
+|--------+-----------+---------|
+| Verbalized confidence (prompt self-assess) | Low | Moderate |
+| Linguistic signal analysis (hedging words) | Low | Low |
+| Sampling-based (multiple responses) | High | High |
+| RAG retrieval confidence | Medium | Good |
+
+Practical recommendation: Verbalized confidence + retrieval confidence as composite
+indicator (green/yellow/red badge).
+
+* Security & Governance
+
+** Content Marking
+- Slack recommends =context= block with disclaimer text
+- New Block Kit elements (Oct 2025): =feedback_buttons=, =icon_button=, =context_actions=
+- Always provide =text= alongside =blocks= for accessibility
+
+** Sensitive Data
+- Principle of least privilege -- bot only accesses needed channels
+- Org Owners can restrict AI access to specific channels
+- Slack prohibits using collected data to train LLMs
+
+** Audit Logging
+- Log every AI query/response pair with user, channel, timestamp, confidence
+- Slack Audit Logs API (Enterprise Grid only) for org-level tracking
+
+** Opt-In Channels
+- Allowlist/blocklist configuration per channel
+- Bot must be explicitly invited (=/invite @botname=)
+- Default to disabled/allowlist-only policy
+
+* Key Sources
+
+- [[https://docs.slack.dev/ai/ai-apps-best-practices/][Slack AI Apps Best Practices]]
+- [[https://docs.slack.dev/tools/bolt-python/concepts/socket-mode/][Bolt Python Socket Mode]]
+- [[https://docs.slack.dev/apis/events-api/comparing-http-socket-mode/][HTTP vs Socket Mode Comparison]]
+- [[https://docs.slack.dev/ai/slack-mcp-server/][Slack MCP Server Docs]]
+- [[https://github.com/mpociot/claude-code-slack-bot][mpociot/claude-code-slack-bot]]
+- [[https://github.com/korotovsky/slack-mcp-server][korotovsky/slack-mcp-server]]
+- [[https://slack.dev/data-security-best-practices-for-agentic-slack-apps/][Data Security for Agentic Slack Apps]]
+- [[https://docs.slack.dev/changelog/2025/10/7/chat-streaming/][AI Streaming & Feedback Features]]

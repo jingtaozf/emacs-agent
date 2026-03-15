@@ -227,6 +227,10 @@ Response will appear here after pressing C-c C-c inside the ai block.
 
 ;; Forward declarations for extracted backends (loaded after claude-org.org)
 (declare-function claude-org-iterm2--execute-ai-block "claude-org-iterm2" ())
+(declare-function claude-org-iterm2-open-tab "claude-org-iterm2" ())
+(declare-function claude-org-cmux--execute-ai-block "claude-org-cmux" ())
+(declare-function claude-org-cmux-open-tab "claude-org-cmux" ())
+(defvar claude-org-cmux--sdd-to-session-key)
 (declare-function claude-org-open-native-terminal "claude-org-native" ())
 (declare-function claude-org--native-buffer-alive-p "claude-org-native" (buf))
 (declare-function claude-org--native-send-prompt "claude-org-native" (buf prompt))
@@ -1121,6 +1125,7 @@ If CLAUDE_SESSION_ID is defined in a section, narrows to that subtree.
 Otherwise, collects from the entire file.
 Skips sections tagged with :ARCHIVE: for better performance with large files.
 Returns list of (question . response) pairs for recovery."
+  (claude-agent-with-span "collect-session-context" nil nil
   (let ((conversations '())
         (scope (claude-org--get-session-scope)))
     (save-excursion
@@ -1152,7 +1157,7 @@ Returns list of (question . response) pairs for recovery."
             (unless (re-search-forward "^\\*+ " nil t)
               (goto-char (point-max)))
             (beginning-of-line)))))
-    conversations))
+    conversations)))
 
 (defun claude-org--build-recovery-prompt (context original-prompt)
   "Build recovery prompt with CONTEXT history and ORIGINAL-PROMPT."
@@ -1183,6 +1188,10 @@ Uses query-id based recovery:
 
 Recovery is limited to `claude-org-max-recovery-attempts' consecutive
 attempts.  The counter resets on each new query."
+  (claude-agent-with-span "recover-session"
+      (list :custom-id (claude-org--session-get session-key :custom-id)
+            :reason (format "%s" reason))
+    nil
   ;; Guard: check recovery count against limit
   (let ((count (or (claude-org--session-get session-key :recovery-count) 0)))
     (if (>= count claude-org-max-recovery-attempts)
@@ -1234,7 +1243,7 @@ attempts.  The counter resets on each new query."
               ;; Clear recovering flag - the new query-id protects us now
               (claude-org--session-put session-key :recovering nil)
               ;; Send recovery request with new query-id already in session
-              (claude-org--send-request recovery-prompt nil session-key))))))))
+              (claude-org--send-request recovery-prompt nil session-key)))))))))
 #+END_SRC
 
 * Environment Variable Loading
@@ -1679,6 +1688,7 @@ Combines:
 3. Behavior prompts from tags and header arguments
 4. Line width instruction based on `claude-org-line-width'
 5. Elisp reload instruction"
+  (claude-agent-with-span "build-system-prompt" nil nil
   (let ((file-prompts (claude-org--load-system-prompts))
         (org-prompts (claude-org--collect-system-prompts))
         (behavior-prompt (claude-org--build-behavior-prompt))
@@ -1690,7 +1700,7 @@ Combines:
     (let ((parts (append file-prompts
                          (delq nil (list org-prompts behavior-prompt line-width-hint elisp-hint)))))
       (when parts
-        (string-join parts "\n\n")))))
+        (string-join parts "\n\n"))))))
 #+END_SRC
 
 * Process Management
@@ -1932,6 +1942,8 @@ For recovery queries, PARENT-QUERY-ID and RECOVERY-REASON should be provided.
 LOOP-INFO is (ITERATION . MAX) for loop iterations, or nil.
 
 Returns the position where content should be inserted (after properties)."
+  (claude-agent-with-span "create-response-section"
+      (list :query-id query-id :query-type (symbol-name query-type)) nil
   (let* ((section-level (claude-org--effective-section-level session-key))
          ;; Response should be at SAME level as instruction (sibling), not child
          ;; section-level is the instruction heading level, so use it directly
@@ -1977,7 +1989,7 @@ Returns the position where content should be inserted (after properties)."
       ;; Reset content flag so first-token newline stripping works
       (claude-org--session-put session-key :response-has-content nil)
       ;; Return current position (where content will be inserted)
-      (point))))
+      (point)))))
 #+END_SRC
 
 *** Query-ID Based Response Lookup
@@ -2724,16 +2736,18 @@ ON-ERROR is called with an error message string."
                    max-chars
                    (truncate-string-to-width query 500))
            (lambda (_inst content)
-             (if (string= content copilot-chat--magic)
-                 ;; Response complete
-                 (unless fired
-                   (setq fired t)
-                   (let ((title (claude-org--clean-title accumulated max-chars)))
-                     (if title
-                         (funcall on-title-cb title)
-                       (funcall on-error-cb "Copilot returned empty title"))))
-               ;; Accumulate streamed tokens
-               (setq accumulated (concat accumulated content))))
+             (condition-case err
+                 (if (string= content copilot-chat--magic)
+                     ;; Response complete
+                     (unless fired
+                       (setq fired t)
+                       (let ((title (claude-org--clean-title accumulated max-chars)))
+                         (if title
+                             (funcall on-title-cb title)
+                           (funcall on-error-cb "Copilot returned empty title"))))
+                   ;; Accumulate streamed tokens
+                   (setq accumulated (concat accumulated content)))
+               (error (funcall on-error-cb (error-message-string err)))))
            t)))  ; out-of-context = t
     (error
      (funcall on-error (error-message-string err)))))
@@ -2743,25 +2757,28 @@ ON-ERROR is called with an error message string."
 Only runs if `claude-org-auto-generate-title' is non-nil.
 Uses `claude-org-title-backend' to select the generation backend."
   (when claude-org-auto-generate-title
-    (lexical-let ((marker heading-marker))
-      (let ((on-title (lambda (title)
-                        (claude-org--replace-heading-at-marker marker title)))
-            (on-error (lambda (err)
-                        (message "Auto-title generation failed: %s" err)
-                        (when (markerp marker)
-                          (set-marker marker nil)))))
-        (pcase claude-org-title-backend
-          ('copilot
-           (claude-org--generate-title-via-copilot query on-title on-error))
-          ('claude
-           (claude-agent-generate-title
-            `((user . ,query))
-            :on-title on-title
-            :on-error on-error))
-          (_
-           (message "Unknown title backend: %s" claude-org-title-backend)
-           (when (markerp marker)
-             (set-marker marker nil))))))))
+    (let ((trace-ctx (claude-agent-trace-context)))
+      (lexical-let ((marker heading-marker)
+                    (ctx trace-ctx))
+        (let ((on-title (lambda (title)
+                          (claude-agent-with-span "auto-title-complete" nil ctx
+                            (claude-org--replace-heading-at-marker marker title))))
+              (on-error (lambda (err)
+                          (message "Auto-title generation failed: %s" err)
+                          (when (markerp marker)
+                            (set-marker marker nil)))))
+          (pcase claude-org-title-backend
+            ('copilot
+             (claude-org--generate-title-via-copilot query on-title on-error))
+            ('claude
+             (claude-agent-generate-title
+              `((user . ,query))
+              :on-title on-title
+              :on-error on-error))
+            (_
+             (message "Unknown title backend: %s" claude-org-title-backend)
+             (when (markerp marker)
+               (set-marker marker nil)))))))))
 #+END_SRC
 
 * Block Insertion
@@ -4206,6 +4223,9 @@ IMPORTANT: Loop continuation check must happen BEFORE freeing the marker,
 because execute-loop-iteration needs the marker to find the buffer.
 When the loop continues, :busy and :marker are kept alive for the next
 iteration (including across run-at-time delays for :interval)."
+  (let ((trace-ctx (claude-org--session-get session-key :trace-ctx)))
+  (claude-agent-with-span "handle-complete"
+      (list :custom-id (claude-org--session-get session-key :custom-id)) trace-ctx
   (claude-org--stop-spinner session-key)
   ;; Add newline after response using query-id lookup (marker-free)
   (let ((query-id (claude-org--session-get session-key :query-id)))
@@ -4247,7 +4267,7 @@ iteration (including across run-at-time delays for :interval)."
             (claude-org--execute-queued-block session-key next-block)
           ;; Truly done - unregister from active queries so mode-line and
           ;; *Claude Queries* buffer reflect completion immediately
-          (claude-org--unregister-active-query session-key))))))
+          (claude-org--unregister-active-query session-key))))))))
 #+END_SRC
 
 ** Error Handling
@@ -4333,6 +4353,9 @@ HEADING-MARKER is an optional marker for auto-title generation.
 
 Sets session state, creates response section, starts spinner,
 sends request, and runs hooks.  Returns nil."
+  (claude-agent-with-span "execute-core"
+      (list :custom-id custom-id :loop-max loop-max)
+    nil
   (let ((loop-max (or loop-max 1))
         (loop-interval (or loop-interval 0)))
     (claude-org--set-exec-status "executing")
@@ -4376,7 +4399,7 @@ sends request, and runs hooks.  Returns nil."
                               :custom-id custom-id))))
             (claude-org--send-request content query-ctx session-key))
           ;; Run post-execution hook
-          (run-hook-with-args 'claude-org-execute-after-hook session-key content nil))))))
+          (run-hook-with-args 'claude-org-execute-after-hook session-key content nil)))))))
 
 (defun claude-org-execute ()
   "Execute the AI query at point.
@@ -4394,6 +4417,10 @@ headings matching `claude-org-auto-title-heading-pattern' (see `claude-org-title
 
 If the session is busy, queues the block for execution when current query completes."
   (interactive)
+  (claude-agent-with-trace "execute-ai-block"
+      (list :oi-kind "CHAIN"
+            :session-id (ignore-errors (claude-org--get-session-id))
+            :custom-id (ignore-errors (claude-org--find-instruction-custom-id)))
   (cl-block claude-org-execute
   (unless (claude-org--in-ai-block-p)
     (user-error "Not inside an ai block. Use #+begin_src ai ... #+end_src"))
@@ -4441,6 +4468,11 @@ If the session is busy, queues the block for execution when current query comple
                         "iterm2")
       (claude-org-iterm2--execute-ai-block)
       (cl-return-from claude-org-execute nil))
+    ;; cmux backend: send prompt to cmux terminal
+    (when (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
+                        "cmux")
+      (claude-org-cmux--execute-ai-block)
+      (cl-return-from claude-org-execute nil))
     ;; Native mode: open terminal and paste prompt, skip org capture
     (when (or (claude-org--session-get session-key :native-mode)
               (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
@@ -4486,7 +4518,7 @@ If the session is busy, queues the block for execution when current query comple
     (claude-org--execute-core session-key content section-level custom-id
                               :loop-max loop-max
                               :loop-interval loop-interval
-                              :heading-marker heading-marker))))
+                              :heading-marker heading-marker)))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -4568,6 +4600,7 @@ CALLBACKS is a plist of :on-token, :on-message, :on-error, :on-complete.
 PROPS are keyword args passed through to `claude-agent-backend-query'.
 SESSION-KEY is automatically injected into PROPS.
 Stores the resulting backend and query handle in the session."
+  (claude-agent-with-span "dispatch-query" nil nil
   (let* ((props (plist-put props :session-key session-key))
          (options (plist-get props :options))
          (backend (or (claude-org--session-get session-key :backend)
@@ -4580,7 +4613,7 @@ Stores the resulting backend and query handle in the session."
     (claude-org--session-put session-key :query-handle handle)
     ;; Update persistent client activity if applicable
     (when (claude-agent-backend-supports-p backend :persistent-client)
-      (claude-org--update-persistent-client-activity session-key))))
+      (claude-org--update-persistent-client-activity session-key)))))
 
 (defun claude-org--send-request (prompt &optional query-context session-key-override)
   "Send PROMPT to Claude via claude-agent.
@@ -4591,6 +4624,12 @@ current buffer position. Essential for loop iterations where cursor may have mov
 When Docker mode is active (CLAUDE_CODE_PATH contains 'docker'), this function
 passes :cli-path and :path-mappings to claude-agent-query for automatic path
 translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
+  (claude-agent-with-span "send-request"
+      (list :span-kind "CLIENT"
+            :custom-id (when query-context
+                          (claude-agent-query-context-custom-id query-context))
+            :input prompt)
+    nil
   (let* ((session-key (or session-key-override (claude-org--current-session-key)))
          (sdk-uuid (claude-org--get-sdk-uuid))
          (project-root (claude-org--get-project-root))
@@ -4606,6 +4645,8 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
          ;; Capture source context for session manager display
          (source-buf (current-buffer))
          (custom-id (when query-context (claude-agent-query-context-custom-id query-context))))
+    ;; Store trace context for async callbacks
+    (claude-org--session-put session-key :trace-ctx (claude-agent-trace-context))
     ;; Get session heading name for permission prompts
     ;; Need to position at heading first since we might be inside a src block
     (let ((org-section-name
@@ -4638,11 +4679,15 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
           :cli-path cli-path
           :path-mappings path-mappings
           :project-root project-root
-          :context-label org-section-name)))))
+          :context-label org-section-name))))))
 
 (defun claude-org--execute-queued-block (session-key block-info)
   "Execute a queued BLOCK-INFO for SESSION-KEY.
 BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
+  (claude-agent-with-trace "execute-queued-block"
+      (list :span-kind "CONSUMER" :oi-kind "CHAIN"
+            :session-id (ignore-errors (claude-org--get-session-id))
+            :custom-id (plist-get block-info :custom-id))
   (cl-block claude-org--execute-queued-block
   (let ((custom-id (plist-get block-info :custom-id))
         (content (plist-get block-info :content))
@@ -4670,7 +4715,7 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
                                   :loop-interval loop-interval
                                   :heading-marker heading-marker)))
     ;; Free original marker
-    (set-marker orig-marker nil))))
+    (set-marker orig-marker nil)))))
 #+END_SRC
 
 * Header Line
@@ -4888,6 +4933,8 @@ Assembles components from dedicated badge functions."
   "Cancel the current session's active query, stop any loop, and clear queue.
 Uses centralized `claude-org--cleanup-session' for complete cleanup (F19)."
   (interactive)
+  (claude-agent-with-span "cancel"
+      (list :custom-id (ignore-errors (claude-org--find-instruction-custom-id))) nil
   (let* ((session-key (claude-org--current-session-key))
          (backend (claude-org--session-get session-key :backend))
          (query-handle (claude-org--session-get session-key :query-handle))
@@ -4926,7 +4973,7 @@ Uses centralized `claude-org--cleanup-session' for complete cleanup (F19)."
           (if (> queue-count 0)
               (message "Query cancelled, cleared %d queued block(s)" queue-count)
             (message "Query cancelled")))
-      (message "No active query to cancel"))))
+      (message "No active query to cancel")))))
 
 (defun claude-org-cancel-all ()
   "Cancel all active queries in this buffer and clear all queues.
@@ -5029,6 +5076,46 @@ the eat terminal buffer), then falls back to the session's verbose buffer."
 Transient provides a visual command menu with temporary keybindings.
 Built into Emacs since v28, or install via =M-x package-install RET transient RET=.
 
+*** Unified Terminal Query Completed
+
+Dispatcher called by sdd_bridge.py when a query finishes. Routes to
+the correct backend's =--query-completed= function based on =CLAUDE_BACKEND=.
+
+#+BEGIN_SRC elisp
+(defun claude-org--terminal-query-completed (sdd-session-id)
+  "Dispatch query-completed to the correct terminal backend.
+SDD-SESSION-ID identifies the session whose query just finished.
+Checks CLAUDE_BACKEND org property to route to cmux or iTerm2."
+  (cond
+   ((and (fboundp 'claude-org-cmux--query-completed)
+         (gethash sdd-session-id claude-org-cmux--sdd-to-session-key))
+    (claude-org-cmux--query-completed sdd-session-id))
+   ((fboundp 'claude-org-iterm2--query-completed)
+    (claude-org-iterm2--query-completed sdd-session-id))
+   (t (message "claude-org: no terminal backend loaded for query-completed"))))
+#+END_SRC
+
+*** Unified Terminal Tab
+
+Opens the terminal tab for the current session, dispatching to the
+appropriate backend (iTerm2 or cmux) based on the =CLAUDE_BACKEND= property.
+
+#+BEGIN_SRC elisp
+(defun claude-org-open-terminal-tab ()
+  "Open the terminal tab for this session based on the configured backend.
+Dispatches to iTerm2 or cmux depending on the CLAUDE_BACKEND org property.
+If no terminal backend is configured, shows an informative message."
+  (interactive)
+  (let ((backend (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))))
+    (cond
+     ((string-equal backend "iterm2")
+      (claude-org-iterm2-open-tab))
+     ((string-equal backend "cmux")
+      (claude-org-cmux-open-tab))
+     (t
+      (user-error "No terminal backend configured. Set CLAUDE_BACKEND to \"iterm2\" or \"cmux\"")))))
+#+END_SRC
+
 *** Transient Prefix
 
 #+BEGIN_SRC elisp
@@ -5057,10 +5144,12 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
     ("m" "Query manager" claude-agent-list-queries)
     ("p" "Permission mode" claude-org-switch-permission-mode)
     ("T" "Native terminal" claude-org-open-native-terminal)
-    ("I" "iTerm2 tab" claude-org-iterm2-open-tab)
+    ("I" "Terminal tab" claude-org-open-terminal-tab)
     ("A" "Archive workflow" claude-org-sdd-archive-workflow)
     ("D" "Disconnect session" claude-org-disconnect-session)
     ("X" "Disconnect all" claude-org-disconnect-all-sessions)]
+   ["Trace"
+    ("o" "Open Phoenix UI" claude-agent-trace-open-phoenix)]
    ["" ("q" "Quit" transient-quit-one)]])
 #+END_SRC
 

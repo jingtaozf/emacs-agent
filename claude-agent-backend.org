@@ -30,6 +30,9 @@ backend protocol abstractions, and concrete backend implementations.
 ;; Forward declarations for cross-module dependencies
 (declare-function claude-agent--run-permission-functions "claude-agent-permission")
 (defvar claude-agent-permission-functions)
+
+;; Tracing support — requires claude-agent-trace.org loaded before this file.
+;; See Makefile load order and ARCHITECTURE.org for module dependencies.
 #+END_SRC
 
 * Shared Utilities
@@ -1596,6 +1599,8 @@ Calls the complete callback with nil for successful exit, or with
 an error plist for abnormal exit codes.
 Skips the complete callback entirely if the query was cancelled,
 since the cancel path already handled cleanup."
+  (claude-agent-with-span "sentinel-normal-exit"
+      (list :event event) nil
   ;; When a query is cancelled, claude-org-cancel (or cancel-query) already
   ;; cleans up the session state (frees marker, sets status, stops spinner).
   ;; Calling complete-callback here would cause duplicate cleanup and fire
@@ -1618,12 +1623,15 @@ since the cancel path already handled cleanup."
         (when complete-cb
           (funcall complete-cb
                    (list 'claude-agent-process-error
-                         :message (format "Process event: %s" event)))))))))
+                         :message (format "Process event: %s" event))))))))))
 
 (defun claude-agent--sentinel-handle-abnormal-exit (process state event)
   "Handle abnormal exit (recovery path) for PROCESS with STATE and EVENT.
 Inserts recovery message, kills orphaned children, does minimal cleanup,
 then resumes the session."
+  (let ((trace-ctx (process-get process 'claude-agent-trace-ctx)))
+  (claude-agent-with-span "sentinel-abnormal-exit"
+      (list :event (string-trim event)) trace-ctx
   (when-let ((session-key (claude-agent--process-state-session-key state)))
     (claude-agent--verbose-insert session-key
                                   (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
@@ -1638,7 +1646,7 @@ then resumes the session."
   (when-let* ((buf (claude-agent--process-state-buffer state)))
     (when (buffer-live-p buf)
       (kill-buffer buf)))
-  (claude-agent--resume-session state))
+  (claude-agent--resume-session state))))
 
 (defun claude-agent--sentinel-cleanup (process state)
   "Clean up after PROCESS exits with STATE.
@@ -1668,7 +1676,10 @@ EVENT is the process event string.
 Delegates to sub-handlers for normal exit, abnormal exit (recovery),
 and cleanup."
   (condition-case err
-      (let ((state (process-get process 'claude-agent-state)))
+      (let* ((state (process-get process 'claude-agent-state))
+             (trace-ctx (process-get process 'claude-agent-trace-ctx)))
+        (claude-agent-with-span "process-sentinel"
+            (list :event (string-trim event)) trace-ctx
         (claude-agent--debug-log "Process event: %s" (string-trim event))
         (when state
           ;; Always log process exit to verbose buffer for diagnostics
@@ -1713,7 +1724,7 @@ and cleanup."
           (if (claude-agent--is-abnormal-exit-p event state)
               (claude-agent--sentinel-handle-abnormal-exit process state event)
             (claude-agent--sentinel-handle-normal-exit state event)
-            (claude-agent--sentinel-cleanup process state))))
+            (claude-agent--sentinel-cleanup process state)))))
     (error
      (message "claude-agent: error in process sentinel: %S" err)
      ;; Attempt minimal cleanup to prevent permanent state leaks
@@ -1771,6 +1782,7 @@ STATE is the process state, EVENT is the exit event."
 (defun claude-agent--resume-session (state)
   "Resume a session after abnormal exit.
 STATE is the previous process state containing session-id and callbacks."
+  (claude-agent-with-span "resume-session" nil nil
   (let* ((session-id (claude-agent--process-state-session-id state))
          (original-options (claude-agent--process-state-options state))
          (session-key (claude-agent--process-state-session-key state))
@@ -1795,7 +1807,7 @@ STATE is the previous process state containing session-id and callbacks."
      :source-buffer (claude-agent--process-state-source-buffer state)
      :query-context (claude-agent--process-state-query-context state)
      :source-location-fn (claude-agent--process-state-source-location-fn state)
-     :source-location-args (claude-agent--process-state-source-location-args state))))
+     :source-location-args (claude-agent--process-state-source-location-args state)))))
 #+END_SRC
 
 *** Pipe Deadlock Prevention
@@ -1884,6 +1896,7 @@ and chunk large messages to prevent pipe buffer blocking."
 (defun claude-agent--streaming-init (process state prompt)
   "Initialize streaming mode for PROCESS with STATE and send PROMPT.
 Sends initialize control request, waits for response, then sends user message."
+  (claude-agent-with-span "streaming-init" nil nil
   (let ((session-key (claude-agent--process-state-session-key state)))
     ;; Step 1: Send initialize control request
     (let ((init-request (list :type "control_request"
@@ -1900,7 +1913,7 @@ Sends initialize control request, waits for response, then sends user message."
       (claude-agent--send-stdin process user-message session-key))
 
     ;; Mark state as ready (we don't wait for init response synchronously)
-    (setf (claude-agent--process-state-ready state) t)))
+    (setf (claude-agent--process-state-ready state) t))))
 #+END_SRC
 
 *** Background Task Tracking
@@ -2140,6 +2153,7 @@ Uses streaming mode by default to enable bidirectional control protocol
 for features like canUseTool permission callback.
 
 Returns a process state object."
+  (claude-agent-with-span "start-process" (list :span-kind "CLIENT") nil
   (let* ((raw-cli-path (or (plist-get options :cli-path)
                            (claude-agent--find-cli)))
          ;; For Docker commands, split into args; for regular paths, expand
@@ -2196,6 +2210,8 @@ Returns a process state object."
       ;; Store state on process for filter/sentinel to access
       ;; (avoids closure issues with dynamic binding)
       (process-put process 'claude-agent-state state)
+      ;; Store trace context for async filter/sentinel access
+      (process-put process 'claude-agent-trace-ctx (claude-agent-trace-context))
       (setf (claude-agent--process-state-process state) process)
       (setf (claude-agent--process-state-buffer state) (process-buffer process))
       ;; Configure I/O for optimal throughput and deadlock prevention
@@ -2215,7 +2231,7 @@ Returns a process state object."
             (cons state (claude-agent--registry-active-states claude-agent--registry)))
       (setq claude-agent--active-states
             (claude-agent--registry-active-states claude-agent--registry))
-      state)))
+      state))))
 #+END_SRC
 
 ** JSON Protocol
@@ -2401,6 +2417,9 @@ Docker example:
    :path-mappings \\='((\"/home/user/project\" . \"/workspace\")))"
   (unless prompt
     (error "Prompt is required"))
+  (claude-agent-with-span "claude-agent-query"
+      (list :span-kind "CLIENT" :session-key session-key
+            :input prompt) nil
   (let* ((prepared (claude-agent--prepare-query-options options cli-path project-root))
          (effective-cli-path (plist-get prepared :cli-path))
          (opts (plist-get prepared :options)))
@@ -2427,7 +2446,7 @@ Docker example:
           (let ((process (claude-agent--process-state-process state)))
             (when process
               (process-put process :context-label context-label))))
-        state))))
+        state)))))
 
 #+END_SRC
 
@@ -2606,6 +2625,7 @@ Example:
   "Connect CLIENT to Claude with optional INITIAL-PROMPT.
 
 Starts the CLI process in streaming mode."
+  (claude-agent-with-span "client-connect" (list :span-kind "CLIENT") nil
   (when (claude-agent-client-connected-p client)
     (error "Client is already connected"))
   (let* ((options (claude-agent-client-options client))
@@ -2629,7 +2649,7 @@ Starts the CLI process in streaming mode."
                                 (when (and result on-err)
                                   (funcall on-err result)))))
     (setf (claude-agent-client-connected-p client) t)
-    client))
+    client)))
 
 (cl-defun claude-agent-client-send (client message &key on-response on-error)
   "Send MESSAGE through CLIENT (legacy - starts new process).
@@ -2673,6 +2693,7 @@ ON-COMPLETE is called when the response completes (overrides client default).
 TOKEN-CALLBACK is called with each text token for streaming display.
 
 Returns non-nil if the message was sent successfully."
+  (claude-agent-with-span "client-send-message" (list :span-kind "CLIENT") nil
   (unless (claude-agent-client-connected-p client)
     (error "Client is not connected"))
   (let* ((state (claude-agent-client-state client))
@@ -2702,7 +2723,7 @@ Returns non-nil if the message was sent successfully."
                               :message (list :role "user"
                                             :content message))))
       (claude-agent--send-stdin process user-message session-key))
-    t))
+    t)))
 
 (defun claude-agent-client-disconnect (client)
   "Disconnect CLIENT from Claude.
@@ -2824,9 +2845,12 @@ REQUEST: Parsed control_request plist
 
 Invokes appropriate Emacs hooks and sends control_response.
 Tracks pending requests to prevent premature stdin close."
-  (let* ((request-id (plist-get request :request_id))
+  (let* ((trace-ctx (process-get process 'claude-agent-trace-ctx))
+         (request-id (plist-get request :request_id))
          (request-data (plist-get request :request))
          (subtype (plist-get request-data :subtype)))
+    (claude-agent-with-span "handle-control-request"
+        (list :subtype subtype) trace-ctx
 
     (claude-agent--debug-log "Control request: %s (id=%s)" subtype request-id)
 
@@ -2873,7 +2897,7 @@ Tracks pending requests to prevent premature stdin close."
        ;; Send error response
        (claude-agent--send-control-response
         process request-id "error"
-        (list :error (error-message-string err)))))))
+        (list :error (error-message-string err))))))))
 #+END_SRC
 
 *** Process Filter Integration
@@ -3007,6 +3031,8 @@ outdated structure, or queries that have exceeded timeout."
 Always marks as closed and cancelled, then unregisters, even if process is dead.
 Sets the cancelled flag to prevent automatic recovery.
 Returns t if found and cancelled, nil if not found."
+  (claude-agent-with-span "cancel-query"
+      (list :request-id request-id) nil
   (let ((state (claude-agent--get-active-query request-id)))
     (when state
       ;; Mark as closed and cancelled to prevent auto-recovery
@@ -3019,7 +3045,7 @@ Returns t if found and cancelled, nil if not found."
       ;; Always unregister from hash table
       (claude-agent--unregister-query request-id)
       (claude-agent--debug-log "Query cancelled: %s" request-id)
-      t)))
+      t))))
 
 (defun claude-agent-cancel-all-queries ()
   "Cancel all active queries."

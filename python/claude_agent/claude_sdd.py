@@ -122,7 +122,7 @@ def fetch_session_metadata(
         '            (save-excursion (save-restriction (widen)'
         f'              (claude-org-sdd-bridge--goto-session "{esc_sid}")'
         '              (substring-no-properties (org-get-heading t t t t)))))))'
-        r'    (format "%s\t%s\n%s" cli-sid story prompt)))'
+        r'    (substring-no-properties (format "%s\t%s\n%s" cli-sid story prompt))))'
     )
     result = mcp.eval_elisp(elisp)
     if not result:

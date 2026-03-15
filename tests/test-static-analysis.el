@@ -211,7 +211,7 @@ ELISP-STRING is the source for re-parsing struct definitions."
       default-directory))
 
 (defvar test-static--source-files
-  '("claude-agent.org" "claude-org.org" "emacs-mcp-server.org")
+  '("claude-agent-trace.org" "claude-agent.org" "claude-org.org" "claude-org-cmux.org" "emacs-mcp-server.org")
   "List of .org source files to analyze.
 Customize this for your project.")
 
@@ -486,6 +486,11 @@ Files with missing optional dependencies are skipped if
     ;; Ensure at least some files loaded
     (should (> loaded 0))))
 
+(defvar test-static--known-forward-declarations
+  '("claude-org-cmux--sdd-to-session-key")
+  "Symbols that appear as forward declarations (defvar without init value)
+in one file and full definitions in another. Excluded from duplicate checks.")
+
 (ert-deftest test-static-no-duplicate-definitions ()
   "Check for duplicate symbol definitions across different files.
 Same-file duplicates are ignored (often example code or intentional redefs)."
@@ -505,6 +510,9 @@ Same-file duplicates are ignored (often example code or intentional redefs)."
             (cond
              ;; Same file duplicate - skip (often intentional)
              ((and existing (string= existing file-short))
+              nil)
+             ;; Known forward declaration - skip
+             ((member name-str test-static--known-forward-declarations)
               nil)
              ;; Cross-file duplicate - record it
              (existing

@@ -1,0 +1,840 @@
+#+TITLE: Design: Unified Tracing — OpenTelemetry-Native Cross-Process Observability
+#+DATE: [2026-03-13]
+#+STATUS: proposed
+
+* Problem Statement
+
+When an AI block execution fails silently (e.g., response not appearing in
+the org buffer), there is no way to trace what happened across the three
+process boundaries:
+
+| Process | Language | Current Logging |
+|---------+----------+-----------------|
+| Emacs | Elisp | =claude-agent--debug-log= → =*Messages*= (when debug=t) |
+| SDD Bridge | Python | =logging.warning= → stderr (invisible) |
+| Claude CLI | N/A | Internal hooks, no user access |
+
+*Example failure* (2026-03-13): AI block executed, "Sent to iTerm2" logged,
+but response never appeared. No trace of what the Python bridge did, whether
+the Stop hook fired, or what elisp was evaluated.
+
+** Current ID Landscape
+
+The system has 10 distinct ID namespaces that are not correlated:
+
+| ID | Scope | Created by | Example |
+|----+-------+------------+---------|
+| session-key | Emacs session | =claude-agent--make-session-key= | =/path/file.org::sdd-20260212-135618= |
+| request-id | Single query | =claude-agent--generate-request-id= | =req-42-1709299815= |
+| sdd-session-id | SDD story | org property | =sdd-20260212-135618= |
+| CUSTOM_ID | Org heading | =generate-instruction-custom-id= | =mega-code-dev-instr-5-sdd-...-141402= |
+| block-id | Block history | =record-block-execution= | =block-135618-141402-143025= |
+| sdk-uuid | Claude CLI | CLI =system= message | =abc123-uuid= |
+| iterm2-id | iTerm2 tab | =iterm2-ctl launch= | =MOCK-UUID-1234-5678= |
+| query-id | Response section | =generate-query-id= | =20260204-103025-a7f3= |
+| control-req-id | Permission round-trip | CLI =control_request= | (integer from CLI) |
+| cli-session | CLI resume | org property | UUID from Claude CLI |
+
+*Missing*: A single =trace-id= that ties all these together for one execution.
+
+* Design Goals
+
+1. *OpenTelemetry-native* — All spans follow OTel protocol, compatible with
+   any OTLP collector (Phoenix, Jaeger, Grafana Tempo)
+2. *One trace per execution* — =C-c C-c= on an AI block creates a trace-id
+   that follows the entire lifecycle (Emacs → Python → Claude CLI → Python → Emacs)
+3. *Cross-process correlation* — Python bridge and Emacs share the same trace-id
+   via W3C Trace Context propagation
+4. *Lispy Emacs interface* — =claude-agent-with-trace= / =claude-agent-with-span=
+   macros that feel natural in elisp, delegating OTel protocol to Python
+5. *Arize Phoenix as default collector* — Local UI for trace visualization,
+   MCP server for AI agent queries, SQLite storage for persistence
+6. *Queryable by existing IDs* — Filter traces by =custom-id=, =session-id=,
+   or =sdd-session-id= using span attributes
+
+* Architecture
+
+** Overview
+
+#+begin_example
+┌──────────────────────────────────────────────────┐
+│ Emacs                                             │
+│                                                   │
+│ (claude-agent-with-trace "execute-ai-block"       │
+│     '(:session-id "sdd-..." :custom-id "instr-5") │
+│   (claude-agent-with-span "write-flag" nil        │
+│     ...)                                          │
+│   (claude-agent-with-span "register-query" nil    │
+│     ...))                                         │
+│                                                   │
+│  Macros send HTTP POST to otel_bridge.py          │
+│  via request.el (same pattern as literate-org)    │
+└──────────────┬───────────────────────────────────┘
+               │ HTTP POST (localhost:7331)
+               ▼
+┌──────────────────────────────────────────────────┐
+│ python/claude_agent/otel_bridge.py (Flask :7331)  │
+│                                                   │
+│ POST /otel/span/start — create OTel span          │
+│ POST /otel/span/end   — end span, auto-export     │
+│ GET  /otel/status      — health check             │
+│                                                   │
+│ SimpleSpanProcessor auto-exports on span.end()     │
+│ No manual flush needed — OTel SDK handles it       │
+└──────────────┬───────────────────────────────────┘
+               │ OTLP HTTP exporter
+               ▼
+┌──────────────────────────────────────────────────┐
+│ Arize Phoenix (default local collector)           │
+│                                                   │
+│ OTLP HTTP receiver on :6006/v1/traces             │
+│ Web UI at http://localhost:6006                    │
+│ SQLite storage at ~/.phoenix/                      │
+│ MCP server for AI agent trace queries              │
+└──────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────┐
+│ python/claude_agent/sdd_bridge.py                 │
+│                                                   │
+│ Uses opentelemetry-sdk directly (same exporter)    │
+│ Reads trace-id from .trace-context file            │
+│ All spans share the same trace as Emacs            │
+└──────────────┬───────────────────────────────────┘
+               │ same OTLP HTTP exporter
+               ▼
+          (same Phoenix instance)
+#+end_example
+
+** Component Roles
+
+| Component | Role | Reused Library |
+|-----------+------+----------------|
+| Emacs macros | Lispy span creation, ID generation | =request.el= |
+| =otel_bridge.py= | HTTP→OTel span bridge (Flask, ~120 lines) | =opentelemetry-sdk=, =flask= |
+| =sdd_bridge.py= | Python-side spans (existing file) | =opentelemetry-sdk= |
+| Arize Phoenix | Collector + UI + MCP query server | =arize-phoenix= |
+| =.trace-context= file | Cross-process trace-id propagation | W3C Trace Context format |
+
+** Trace Context (W3C)
+
+Trace context follows the W3C Trace Context specification:
+
+#+begin_example
+traceparent: 00-{trace-id}-{span-id}-{flags}
+
+trace-id:  32-char lowercase hex (16 bytes)
+span-id:   16-char lowercase hex (8 bytes)
+flags:     "01" = sampled
+
+Example: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+#+end_example
+
+** Span Hierarchy
+
+#+begin_example
+[trace: 4bf92f...4736]
+├─ [span: execute-ai-block]          (Emacs → otel_bridge)
+│  ├─ [span: write-from-emacs-flag]  (Emacs → otel_bridge)
+│  ├─ [span: register-query]         (Emacs → otel_bridge)
+│  └─ [span: auto-generate-title]    (Emacs → otel_bridge, async)
+├─ [span: handle-prompt]             (Python, direct OTel SDK)
+│  └─ [span: mcp-eval-elisp]         (Python)
+├─ [span: handle-response]           (Python, direct OTel SDK)
+│  ├─ [span: extract-full-response]  (Python)
+│  ├─ [span: mcp-insert-response]    (Python)
+│  └─ [span: query-completed]        (Python)
+└─ [span: process-sentinel]          (Emacs, for json-stream backend)
+#+end_example
+
+All spans from both Emacs and Python share the same =trace-id= and appear
+as a single tree in Phoenix's trace waterfall view.
+
+* Emacs Lisp Interface
+
+** Macros
+
+#+begin_src elisp
+;;; ── Start a new trace (root span) ──
+;;; Creates a new trace-id, starts root span, ends it in unwind-protect.
+;;; When root span ends, otel_bridge's SimpleSpanProcessor auto-exports.
+(claude-agent-with-trace "execute-ai-block"
+    '(:session-id "sdd-20260313" :custom-id "instr-5-sdd-...")
+  (claude-agent-with-span "write-from-emacs-flag" nil
+    (claude-org-iterm2--write-from-emacs-flag ...))
+  (claude-agent-with-span "register-query"
+      '(:request-id "req-42-1710000000")
+    (claude-agent--register-query ...)))
+
+;;; ── Async spans: capture context before the callback ──
+(let ((trace-ctx (claude-agent-trace-context)))
+  (run-at-time 0 nil
+    (lambda ()
+      (claude-agent-with-span "auto-title" nil trace-ctx
+        (generate-title ...)))))
+#+end_src
+
+** Macro Implementations
+
+#+begin_src elisp
+(defvar claude-agent-trace-enabled t
+  "When non-nil, emit trace spans to the OTel bridge.")
+
+(defvar claude-agent-trace--current-context nil
+  "Dynamic binding for current trace context: (trace-id . parent-span-id).")
+
+(defcustom claude-agent-trace-bridge-url "http://localhost:7331/"
+  "URL of the OTel bridge HTTP server."
+  :type 'string)
+
+(defun claude-agent-trace--generate-trace-id ()
+  "Generate a 32-char hex trace ID (W3C format)."
+  (format "%08x%08x%08x%08x"
+          (random (ash 1 32)) (random (ash 1 32))
+          (random (ash 1 32)) (random (ash 1 32))))
+
+(defun claude-agent-trace--generate-span-id ()
+  "Generate a 16-char hex span ID (W3C format)."
+  (format "%08x%08x"
+          (random (ash 1 32)) (random (ash 1 32))))
+
+(defun claude-agent-trace-context ()
+  "Capture the current trace context for use in async callbacks.
+Must be called BEFORE the callback lambda is created, because
+dynamic binding is not captured by closures."
+  (cons (car claude-agent-trace--current-context)
+        (cdr claude-agent-trace--current-context)))
+
+(defun claude-agent-trace--request (path data)
+  "Send an async HTTP POST to the OTel bridge at PATH with DATA alist.
+Fire-and-forget — does not block. Uses request.el (same as literate-org)."
+  (when claude-agent-trace-enabled
+    (let ((request-backend 'url-retrieve))
+      (request (concat claude-agent-trace-bridge-url "otel/" path)
+        :type "POST"
+        :headers '(("Content-Type" . "application/json"))
+        :data (encode-coding-string (json-encode data) 'utf-8 t)
+        :sync nil  ;; async — fire-and-forget
+        :silent t
+        :error (cl-function
+                (lambda (&rest _)
+                  ;; Bridge not running — silently ignore
+                  nil))))))
+
+(defun claude-agent-trace-connect ()
+  "Check that the OTel bridge server is running."
+  (interactive)
+  (let ((request-backend 'url-retrieve)
+        (resp nil))
+    (request (concat claude-agent-trace-bridge-url "otel/status")
+      :type "GET"
+      :parser 'json-read
+      :sync t
+      :success (cl-function
+                (lambda (&key data &allow-other-keys)
+                  (setq resp data)))
+      :error (cl-function
+              (lambda (&rest _)
+                (user-error "OTel bridge not running at %s"
+                            claude-agent-trace-bridge-url))))
+    (message "OTel bridge: %s" (alist-get 'status resp))))
+
+(defmacro claude-agent-with-trace (name attrs &rest body)
+  "Execute BODY within a new trace root span named NAME.
+ATTRS is a plist of span attributes. Creates a new trace-id.
+When the root span ends, OTel SDK auto-exports — no flush needed."
+  (declare (indent 2) (debug t))
+  (let ((trace-id-sym (make-symbol "trace-id"))
+        (span-id-sym (make-symbol "span-id"))
+        (attrs-sym (make-symbol "attrs"))
+        (start-sym (make-symbol "start-ns")))
+    `(if (not claude-agent-trace-enabled)
+         (progn ,@body)
+       (let* ((,attrs-sym ,attrs)
+              (,trace-id-sym (claude-agent-trace--generate-trace-id))
+              (,span-id-sym (claude-agent-trace--generate-span-id))
+              (,start-sym (truncate (* (float-time) 1e9)))
+              (claude-agent-trace--current-context
+               (cons ,trace-id-sym ,span-id-sym)))
+         ;; Write trace-context file for Python cross-process propagation
+         (claude-agent-trace--write-context
+          ,trace-id-sym ,span-id-sym
+          (plist-get ,attrs-sym :session-id))
+         ;; Start root span via HTTP
+         (claude-agent-trace--request
+          "span/start"
+          (list (cons 'trace_id ,trace-id-sym)
+                (cons 'span_id ,span-id-sym)
+                (cons 'name ,name)
+                (cons 'attrs ,attrs-sym)
+                (cons 'start_time_ns ,start-sym)))
+         (condition-case err
+             (prog1 (progn ,@body)
+               (claude-agent-trace--request
+                "span/end"
+                (list (cons 'span_id ,span-id-sym)
+                      (cons 'status "ok")
+                      (cons 'end_time_ns (truncate (* (float-time) 1e9))))))
+           (error
+            (claude-agent-trace--request
+             "span/end"
+             (list (cons 'span_id ,span-id-sym)
+                   (cons 'status "error")
+                   (cons 'error_message (error-message-string err))
+                   (cons 'end_time_ns (truncate (* (float-time) 1e9)))))
+            (signal (car err) (cdr err))))))))
+
+(defmacro claude-agent-with-span (name attrs &optional trace-ctx &rest body)
+  "Execute BODY within a child span named NAME under the current trace.
+ATTRS is a plist of span attributes.
+TRACE-CTX is an optional explicit context (for async callbacks).
+If nil, uses the dynamically-bound current context."
+  (declare (indent 2) (debug t))
+  (let ((span-id-sym (make-symbol "span-id"))
+        (ctx-sym (make-symbol "ctx"))
+        (attrs-sym (make-symbol "attrs"))
+        (start-sym (make-symbol "start-ns")))
+    `(if (not claude-agent-trace-enabled)
+         (progn ,@body)
+       (let* ((,attrs-sym ,attrs)
+              (,ctx-sym (or ,trace-ctx claude-agent-trace--current-context))
+              (,span-id-sym (claude-agent-trace--generate-span-id))
+              (,start-sym (truncate (* (float-time) 1e9)))
+              (claude-agent-trace--current-context
+               (cons (car ,ctx-sym) ,span-id-sym)))
+         (claude-agent-trace--request
+          "span/start"
+          (list (cons 'trace_id (car ,ctx-sym))
+                (cons 'span_id ,span-id-sym)
+                (cons 'parent_span_id (cdr ,ctx-sym))
+                (cons 'name ,name)
+                (cons 'attrs ,attrs-sym)
+                (cons 'start_time_ns ,start-sym)))
+         (condition-case err
+             (prog1 (progn ,@body)
+               (claude-agent-trace--request
+                "span/end"
+                (list (cons 'span_id ,span-id-sym)
+                      (cons 'status "ok")
+                      (cons 'end_time_ns (truncate (* (float-time) 1e9))))))
+           (error
+            (claude-agent-trace--request
+             "span/end"
+             (list (cons 'span_id ,span-id-sym)
+                   (cons 'status "error")
+                   (cons 'error_message (error-message-string err))
+                   (cons 'end_time_ns (truncate (* (float-time) 1e9)))))
+            (signal (car err) (cdr err))))))))
+#+end_src
+
+** Cross-Process Context Propagation
+
+Emacs writes a =.trace-context= file with the standard =traceparent= format
+so the Python SDD bridge can join the same trace:
+
+#+begin_src elisp
+(defun claude-agent-trace--write-context (trace-id span-id session-id)
+  "Write W3C traceparent to the status directory for Python to read."
+  (when (and trace-id session-id)
+    (let* ((dir "/tmp/claude-agent-status")
+           (file (expand-file-name
+                  (concat session-id ".trace-context") dir))
+           (traceparent (format "00-%s-%s-01" trace-id span-id)))
+      (make-directory dir t)
+      (let ((coding-system-for-write 'utf-8))
+        (write-region traceparent nil file nil 'silent)))))
+#+end_src
+
+** Server Lifecycle
+
+The OTel bridge server is started externally, same as the literate-org server:
+
+#+begin_src shell
+# Start the OTel bridge server (in a terminal or tmux)
+make otel-server
+
+# Or directly:
+cd python && python -m claude_agent.otel_bridge
+#+end_src
+
+From Emacs, verify connection:
+
+#+begin_src elisp
+;; Check that the bridge is running
+(claude-agent-trace-connect)
+;; → "OTel bridge: ok"
+#+end_src
+
+No Emacs process management needed — the server is a standalone process.
+
+** Integration Points
+
+Instrument these functions:
+
+| Function | File | Span Name |
+|----------+------+-----------|
+| =claude-org-execute= | claude-org.org | =execute-ai-block= (root trace) |
+| =claude-org-iterm2--execute-ai-block= | claude-org-iterm2.org | =iterm2-send= |
+| =claude-org-sdd-bridge-insert-prompt= | claude-org-iterm2.org | =insert-prompt= |
+| =claude-org-sdd-bridge-insert-response= | claude-org-iterm2.org | =insert-response= |
+| =claude-org-iterm2--query-completed= | claude-org-iterm2.org | =query-completed= |
+| =claude-agent-query= | claude-agent-backend.org | =json-stream-query= (root trace) |
+| =claude-agent--process-sentinel= | claude-agent-backend.org | =process-sentinel= |
+| =claude-org--maybe-auto-generate-title= | claude-org.org | =auto-generate-title= |
+
+* Python OTel Bridge Server
+
+** HTTP API
+
+| Method | Path | Request Body | Response |
+|--------+------+--------------+----------|
+| POST | =/otel/span/start= | ={ trace_id, span_id, parent_span_id?, name, attrs?, start_time_ns }= | ={"status": "ok"}= |
+| POST | =/otel/span/end= | ={ span_id, status, error_message?, end_time_ns }= | ={"status": "ok"}= |
+| GET | =/otel/status= | — | ={"status": "ok"}= |
+
+** Example Requests
+
+#+begin_src
+POST /otel/span/start
+{"trace_id":"4bf92f35...","span_id":"00f067aa...","name":"execute-ai-block",
+ "attrs":{"session.id":"sdd-20260313","custom.id":"instr-5"},
+ "start_time_ns":1710000000000000000}
+
+POST /otel/span/start
+{"trace_id":"4bf92f35...","span_id":"deadbeef...","parent_span_id":"00f067aa...",
+ "name":"write-flag","start_time_ns":1710000000100000000}
+
+POST /otel/span/end
+{"span_id":"deadbeef...","status":"ok","end_time_ns":1710000000103000000}
+
+POST /otel/span/end
+{"span_id":"00f067aa...","status":"error","error_message":"wrong-type-argument listp",
+ "end_time_ns":1710000002000000000}
+#+end_src
+
+** Implementation (=python/claude_agent/otel_bridge.py=)
+
+#+begin_src python
+"""OTel bridge — Flask HTTP server that creates real OTel spans.
+
+Same pattern as literate-org's literate_python/server.py.
+Started externally (make otel-server), Emacs connects via HTTP.
+SimpleSpanProcessor auto-exports each span on end() — no flush needed.
+"""
+import os
+
+from flask import Flask, request, jsonify
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.trace import SpanContext, TraceFlags, NonRecordingSpan, SpanKind
+from opentelemetry.trace.status import Status, StatusCode
+
+app = Flask(__name__)
+
+# ── OTel Setup ──
+
+PHOENIX_ENDPOINT = os.environ.get(
+    "CLAUDE_OTEL_ENDPOINT", "http://localhost:6006/v1/traces"
+)
+
+def _create_exporter():
+    """Create the configured span exporter."""
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        return OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
+    except ImportError:
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+        return ConsoleSpanExporter()
+
+resource = Resource.create({"service.name": "claude-agent-emacs"})
+provider = TracerProvider(resource=resource)
+provider.add_span_processor(SimpleSpanProcessor(_create_exporter()))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("claude.agent.emacs", "0.1.0")
+
+# Active spans: span_id (hex string) → OTel Span object
+spans: dict[str, trace.Span] = {}
+
+
+# ── Routes ──
+
+@app.route("/otel/status", methods=["GET"])
+def status():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/otel/span/start", methods=["POST"])
+def span_start():
+    data = request.get_json()
+    trace_id = int(data["trace_id"], 16)
+    span_id_hex = data["span_id"]
+    parent_span_id = data.get("parent_span_id")
+    name = data["name"]
+    start_ns = data.get("start_time_ns")
+    attrs = data.get("attrs") or {}
+
+    # Build parent context
+    if parent_span_id:
+        parent_ctx = SpanContext(
+            trace_id=trace_id,
+            span_id=int(parent_span_id, 16),
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+        ctx = trace.set_span_in_context(NonRecordingSpan(parent_ctx))
+    else:
+        # Root span — set trace-id via context
+        root_ctx = SpanContext(
+            trace_id=trace_id,
+            span_id=int("0000000000000000", 16),
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+        ctx = trace.set_span_in_context(NonRecordingSpan(root_ctx))
+
+    span = tracer.start_span(
+        name=name,
+        context=ctx,
+        kind=SpanKind.INTERNAL,
+        start_time=start_ns,
+        attributes={
+            k.replace("-", "."): v
+            for k, v in attrs.items()
+            if v is not None
+        } if attrs else None,
+    )
+    spans[span_id_hex] = span
+    return jsonify({"status": "ok"})
+
+
+@app.route("/otel/span/end", methods=["POST"])
+def span_end():
+    data = request.get_json()
+    span_id_hex = data["span_id"]
+    span = spans.pop(span_id_hex, None)
+    if span is None:
+        return jsonify({"status": "not_found"}), 404
+
+    status_str = data.get("status", "ok")
+    end_ns = data.get("end_time_ns")
+
+    if status_str == "error":
+        error_msg = data.get("error_message", "unknown error")
+        span.set_status(Status(StatusCode.ERROR, error_msg))
+        span.set_attribute("error.message", error_msg)
+    else:
+        span.set_status(Status(StatusCode.OK))
+
+    # span.end() triggers SimpleSpanProcessor.on_end()
+    # which calls exporter.export() — auto-export to Phoenix
+    span.end(end_time=end_ns)
+    return jsonify({"status": "ok"})
+
+
+# ── Entry point ──
+
+def run_server():
+    host = os.environ.get("CLAUDE_OTEL_HOST", "127.0.0.1")
+    port = int(os.environ.get("CLAUDE_OTEL_PORT", "7331"))
+    app.run(host=host, port=port, debug=False, use_reloader=False)
+
+
+if __name__ == "__main__":
+    run_server()
+#+end_src
+
+* Python SDD Bridge Integration
+
+The SDD bridge (=sdd_bridge.py=) uses =opentelemetry-sdk= directly — it does
+NOT go through =otel_bridge.py= since it is already a Python process.
+
+** Shared OTel Setup (=python/claude_agent/otel_setup.py=)
+
+#+begin_src python
+"""Shared OTel configuration for all Python components."""
+import os
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.trace import SpanContext, TraceFlags, NonRecordingSpan
+
+PHOENIX_ENDPOINT = os.environ.get(
+    "CLAUDE_OTEL_ENDPOINT", "http://localhost:6006/v1/traces"
+)
+STATUS_DIR = "/tmp/claude-agent-status"
+
+def setup_tracer(service_name: str) -> trace.Tracer:
+    """Initialize OTel with SimpleSpanProcessor (auto-exports on span end)."""
+    resource = Resource.create({"service.name": service_name})
+    provider = TracerProvider(resource=resource)
+
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        exporter = OTLPSpanExporter(endpoint=PHOENIX_ENDPOINT)
+    except ImportError:
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+        exporter = ConsoleSpanExporter()
+
+    # SimpleSpanProcessor: exports synchronously on each span.end()
+    # Critical for short-lived hook processes that exit before batch flush
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    return trace.get_tracer(service_name)
+
+
+def read_trace_context(session_id: str):
+    """Read W3C traceparent from file, return OTel context or None."""
+    path = os.path.join(STATUS_DIR, f"{session_id}.trace-context")
+    try:
+        with open(path) as f:
+            tp = f.read().strip()
+        # Parse: 00-{trace_id}-{span_id}-{flags}
+        parts = tp.split("-")
+        if len(parts) != 4:
+            return None
+        trace_id = int(parts[1], 16)
+        span_id = int(parts[2], 16)
+        parent_ctx = SpanContext(
+            trace_id=trace_id,
+            span_id=span_id,
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+        return trace.set_span_in_context(NonRecordingSpan(parent_ctx))
+    except (FileNotFoundError, ValueError, IndexError):
+        return None
+#+end_src
+
+** Instrumented SDD Bridge
+
+#+begin_src python
+# In sdd_bridge.py — add OTel spans to existing functions
+
+from claude_agent.otel_setup import setup_tracer, read_trace_context
+
+tracer = setup_tracer("claude-agent-sdd-bridge")
+
+def handle_response(mcp, input_data, org_file, session_id):
+    ctx = read_trace_context(session_id)
+
+    with tracer.start_as_current_span(
+        "handle-response", context=ctx,
+        attributes={"session.id": session_id}
+    ):
+        write_status(session_id, "ready")
+
+        with tracer.start_as_current_span("extract-response"):
+            response = _extract_full_response(...)
+
+        if not response:
+            trace.get_current_span().add_event(
+                "response-empty", {"fallback": "last_assistant_message"})
+            return
+
+        custom_id = _read_custom_id(session_id)
+        with tracer.start_as_current_span(
+            "mcp-insert-response",
+            attributes={
+                "custom.id": custom_id or "",
+                "response.length": len(response),
+            }
+        ):
+            mcp.eval_elisp(elisp)
+#+end_src
+
+* Arize Phoenix Setup
+
+** Installation
+
+#+begin_src shell
+pip install arize-phoenix opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+#+end_src
+
+** Starting Phoenix
+
+#+begin_src shell
+# Start Phoenix as a local collector + UI
+python -m phoenix.server.main serve
+
+# Phoenix exposes:
+#   http://localhost:6006          — Web UI (trace waterfall, span details)
+#   http://localhost:6006/v1/traces — OTLP HTTP receiver
+#   gRPC :4317                     — OTLP gRPC receiver
+#
+# Storage: SQLite at ~/.phoenix/ (persists across restarts)
+#+end_src
+
+** Phoenix MCP Server
+
+Phoenix provides an MCP server for AI agents to query traces:
+
+#+begin_src shell
+# Start Phoenix MCP server
+python -m phoenix.server.mcp
+#+end_src
+
+Add to Claude Code's MCP config (=~/.claude/mcp.json=):
+
+#+begin_src json
+{
+  "mcpServers": {
+    "phoenix": {
+      "command": "python",
+      "args": ["-m", "phoenix.server.mcp"]
+    }
+  }
+}
+#+end_src
+
+This gives Claude access to tools like:
+- =get_traces= — query traces by time range, filters
+- =get_spans= — retrieve spans for a trace
+- =search_traces= — full-text search across span attributes
+
+*Example AI agent query*: "Show me all spans for session sdd-20260313
+where status is error" → Phoenix MCP returns the matching spans.
+
+** Emacs Integration
+
+#+begin_src elisp
+(defcustom claude-agent-trace-phoenix-url "http://localhost:6006"
+  "URL of the local Arize Phoenix instance."
+  :type 'string)
+
+(defun claude-agent-trace-open-phoenix ()
+  "Open Phoenix UI in browser for the current trace."
+  (interactive)
+  (browse-url claude-agent-trace-phoenix-url))
+#+end_src
+
+* Trace Lifecycle
+
+** Normal Execution (iTerm2 Backend, from Emacs)
+
+#+begin_example
+1. C-c C-c on AI block
+   → claude-org-execute wraps body in (claude-agent-with-trace ...)
+   → Generates trace-id, sends start_span to otel_bridge
+   → Writes .trace-context file (traceparent format) for Python
+
+2. execute-ai-block (child spans via claude-agent-with-span)
+   → write-from-emacs-flag span
+   → register-query span
+   → auto-generate-title span (async, captures trace-ctx)
+   → iterm2-ctl send
+
+3. Python handle_prompt (UserPromptSubmit hook)
+   → Reads .trace-context → gets parent trace-id
+   → Creates child span under same trace via OTel SDK
+   → from-emacs flag exists → skip insert-prompt
+   → span.end() → SimpleSpanProcessor → auto-export to Phoenix
+
+4. Python handle_response (Stop hook)
+   → Same trace-id from .trace-context
+   → extract-full-response span
+   → mcp-insert-response span
+   → query-completed span
+   → All auto-exported to Phoenix on span.end()
+
+5. Emacs root span ends
+   → otel_bridge receives end_span for root
+   → span.end() → auto-export to Phoenix
+   → Full trace tree visible in Phoenix UI
+#+end_example
+
+** Failure Diagnosis (via Phoenix UI)
+
+The 2026-03-13 failure would show in Phoenix's waterfall view:
+
+#+begin_example
+execute-ai-block      ████████████████████████████  2345ms  OK
+├─ write-from-emacs   █                               3ms  OK
+├─ register-query     █                               1ms  OK
+├─ auto-generate-title █████                         45ms  ERROR
+│                      → wrong-type-argument listp
+│
+│  ── gap: Claude working ──
+│
+handle-response       ████                          230ms  ERROR
+├─ extract-response   █                              12ms  OK
+└─ mcp-insert-response                                     ERROR
+                       → McpConnectionError: timeout
+                         ^^^^^ ROOT CAUSE VISIBLE
+#+end_example
+
+Without tracing, we only saw "Sent to iTerm2" in =*Messages*=.
+
+** Querying via Phoenix MCP
+
+An AI agent can ask:
+
+#+begin_example
+Agent: "What went wrong with the last AI block execution?"
+       → Phoenix MCP: search_traces(attributes={"session.id": "sdd-20260313"})
+       → Returns span tree showing McpConnectionError on mcp-insert-response
+       → Agent: "The response was extracted successfully but MCP insert failed
+                 with a connection timeout. The Python bridge couldn't reach
+                 Emacs's MCP server."
+#+end_example
+
+* Exporter Configuration
+
+The exporter is controlled by the =CLAUDE_OTEL_ENDPOINT= environment variable.
+Both =otel_bridge.py= and =sdd_bridge.py= share the same configuration via
+=otel_setup.py=.
+
+| Scenario | =CLAUDE_OTEL_ENDPOINT= | What Happens |
+|----------+------------------------+--------------|
+| Default (Phoenix) | =http://localhost:6006/v1/traces= | Spans go to local Phoenix |
+| Remote collector | =https://otel.example.com/v1/traces= | Spans go to remote OTLP |
+| No Phoenix running | (default) | Export fails silently; no crash |
+
+When Phoenix is not running, the OTLP HTTP exporter will fail to connect.
+=SimpleSpanProcessor= handles this gracefully — the span is dropped but the
+application is not affected.
+
+* Dependencies
+
+** Python (add to =pyproject.toml=)
+
+#+begin_src toml
+[project.optional-dependencies]
+tracing = [
+    "flask>=3.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
+]
+phoenix = [
+    "arize-phoenix>=4.0",
+]
+#+end_src
+
+** Emacs
+
+- =request.el= — HTTP client (same dependency as literate-org)
+- =json-serialize= (built-in since Emacs 27)
+
+* Implementation Plan
+
+| Phase | What | Effort |
+|-------+------+--------|
+| Phase 1 | Emacs macros + =otel_bridge.py= + =otel_setup.py= | 4h |
+| Phase 2 | Instrument =sdd_bridge.py= with OTel spans | 2h |
+| Phase 3 | Instrument =claude-org.org= / =claude-agent-backend.org= | 2h |
+| Phase 4 | Phoenix MCP config + Emacs =trace-open-phoenix= | 1h |
+
+Total: ~9h. Phase 1 gives immediate value — every execution appears in Phoenix.
+
+* Open Questions
+
+1. Should we also trace MCP server requests (=emacs-mcp-server.org=)?
+2. Should =otel_bridge.py= auto-start with Emacs or be started manually?
+3. Should we add a =claude-agent-trace-setup= command that installs Phoenix
+   and configures the MCP server in one step?

@@ -13,6 +13,7 @@ from claude_agent.sdd_bridge import (
     _escape_elisp_string,
     _extract_full_response,
     _format_todos_as_elisp,
+    _mcp_eval_with_trace,
     _read_custom_id,
     _read_request_id,
     _write_custom_id,
@@ -79,7 +80,7 @@ class TestHandleResponseQueryCompleted:
             "sid",
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        assert any("claude-org-iterm2--query-completed" in c for c in calls)
+        assert any("claude-org--terminal-query-completed" in c for c in calls)
 
     def test_query_completed_called_even_without_response(self, tmp_path, monkeypatch):
         """query-completed fires even when there's no response text."""
@@ -92,7 +93,7 @@ class TestHandleResponseQueryCompleted:
             "sid",
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        assert any("claude-org-iterm2--query-completed" in c for c in calls)
+        assert any("claude-org--terminal-query-completed" in c for c in calls)
 
 
 class TestEscapeElispString:
@@ -342,3 +343,46 @@ class TestHandlePermissionClear:
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = McpConnectionError("gone")
         handle_permission_clear(mcp, {}, "/tmp/f.org", "sid")  # should not raise
+
+
+class TestMcpEvalWithTrace:
+    """Tests for _mcp_eval_with_trace wrapper."""
+
+    def test_passes_elisp_without_active_span(self):
+        """Without an active span, calls eval_elisp with original elisp."""
+        mcp = MagicMock()
+        mcp.eval_elisp.return_value = "result"
+        result = _mcp_eval_with_trace(mcp, '(+ 1 2)')
+        assert result == "result"
+        call_arg = mcp.eval_elisp.call_args[0][0]
+        # No active span → no wrapping (INVALID_SPAN has is_valid=False)
+        assert "(+ 1 2)" in call_arg
+
+    def test_wraps_elisp_with_active_span(self, monkeypatch):
+        """With a valid active span, wraps elisp in let-binding."""
+        mock_ctx = MagicMock()
+        mock_ctx.is_valid = True
+        mock_ctx.trace_id = 0xAABBCCDDEEFF0011AABBCCDDEEFF0011
+        mock_ctx.span_id = 0x1122334455667788
+
+        mock_span = MagicMock()
+        mock_span.get_span_context.return_value = mock_ctx
+
+        import claude_agent.sdd_bridge as bridge
+        monkeypatch.setattr(bridge.otel_trace, "get_current_span", lambda: mock_span)
+
+        mcp = MagicMock()
+        mcp.eval_elisp.return_value = "ok"
+        _mcp_eval_with_trace(mcp, '(my-func)')
+        call_arg = mcp.eval_elisp.call_args[0][0]
+        assert "claude-agent-trace--current-context" in call_arg
+        assert "aabbccddeeff0011aabbccddeeff0011" in call_arg
+        assert "1122334455667788" in call_arg
+        assert "(my-func)" in call_arg
+
+    def test_propagates_mcp_errors(self):
+        """McpConnectionError propagates to caller."""
+        mcp = MagicMock()
+        mcp.eval_elisp.side_effect = McpConnectionError("timeout")
+        with pytest.raises(McpConnectionError):
+            _mcp_eval_with_trace(mcp, '(fail)')

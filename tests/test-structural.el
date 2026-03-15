@@ -571,9 +571,18 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-native-send-shift-tab"
     "claude-org-native-send-slash"
     "claude-org-native-toggle-copy-mode"
+    ;; claude-org: unified terminal tab
+    "claude-org-open-terminal-tab"
     ;; claude-org: iTerm2 backend
     "claude-org-iterm2-open-tab"
     "claude-org-iterm2-cancel"
+    ;; claude-org: cmux backend
+    "claude-org-cmux-cancel"
+    "claude-org-cmux-clear-status"
+    "claude-org-cmux-notify"
+    "claude-org-cmux-open-tab"
+    "claude-org-cmux-set-progress"
+    "claude-org-cmux-set-status"
     ;; claude-org: SDD bridge (terminal workflow)
     "claude-org-sdd-archive-workflow"
     "claude-org-sdd-bridge-get-cli-session"
@@ -607,6 +616,14 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-ide-start-server-in-directory"
     "claude-ide-stop-all-servers"
     "claude-ide-stop-server"
+    ;; claude-agent-trace: OTel tracing
+    "claude-agent-trace-context"
+    "claude-agent-trace-connect"
+    "claude-agent-trace-stop-bridge"
+    "claude-agent-trace-stop-phoenix"
+    "claude-agent-trace-open-phoenix"
+    "claude-agent-with-trace"
+    "claude-agent-with-span"
     ;; emacs-mcp-server public API
     "emacs-mcp-server-start"
     "emacs-mcp-server-stop"

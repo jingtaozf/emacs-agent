@@ -1,0 +1,452 @@
+#+TITLE: Claude Agent Trace — OpenTelemetry Tracing for Emacs
+#+PROPERTY: literate-load yes
+
+Lightweight OTel tracing for the claude-agent SDK.
+Sends spans to a local Flask bridge which forwards them to an OTel collector.
+
+* Dependencies
+
+#+BEGIN_SRC elisp
+;;; claude-agent-trace.el --- OpenTelemetry tracing for claude-agent -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024-2025 Jingtao Xu
+
+;;; Commentary:
+
+;; Provides OpenTelemetry tracing primitives for the claude-agent SDK.
+;; Spans are sent to a local Flask bridge via async HTTP POST.
+;; No external Emacs packages required — uses built-in url-retrieve.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'url)
+(require 'json)
+#+END_SRC
+
+* Variables and Customization
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-trace-enabled t
+  "When non-nil, tracing is active and spans are sent to the bridge.")
+
+(defvar claude-agent-trace--current-context nil
+  "Dynamic binding for the current trace context.
+A cons cell (TRACE-ID . SPAN-ID) representing the active span.")
+
+(defcustom claude-agent-trace-bridge-url "http://localhost:7331/"
+  "Base URL of the OTel bridge Flask server."
+  :type 'string
+  :group 'claude-agent)
+
+(defcustom claude-agent-trace-phoenix-url "http://localhost:6006"
+  "URL of the Arize Phoenix collector UI."
+  :type 'string
+  :group 'claude-agent)
+
+(defcustom claude-agent-trace-context-dir
+  "/tmp/claude-agent-status/"
+  "Directory where traceparent context files are written.
+Must match STATUS_DIR in Python otel_setup.py for cross-process propagation."
+  :type 'directory
+  :group 'claude-agent)
+#+END_SRC
+
+* ID Generation
+
+#+BEGIN_SRC elisp
+(defun claude-agent-trace--generate-trace-id ()
+  "Generate a 32-character hex trace ID."
+  (format "%08x%08x%08x%08x"
+          (random (expt 2 32))
+          (random (expt 2 32))
+          (random (expt 2 32))
+          (random (expt 2 32))))
+
+(defun claude-agent-trace--generate-span-id ()
+  "Generate a 16-character hex span ID."
+  (format "%08x%08x"
+          (random (expt 2 32))
+          (random (expt 2 32))))
+#+END_SRC
+
+* Context
+
+#+BEGIN_SRC elisp
+(defun claude-agent-trace-context ()
+  "Capture and return the current trace context as (TRACE-ID . SPAN-ID).
+Use this to pass context across async boundaries."
+  (when claude-agent-trace--current-context
+    (cons (car claude-agent-trace--current-context)
+          (cdr claude-agent-trace--current-context))))
+#+END_SRC
+
+* HTTP Communication
+
+#+BEGIN_SRC elisp
+(defun claude-agent-trace--request (path data)
+  "Send async HTTP POST to OTel bridge at PATH with DATA.
+Auto-starts the bridge if needed. Fire-and-forget — errors are silently ignored."
+  (when claude-agent-trace-enabled
+    (claude-agent-trace--ensure-bridge)
+    (let ((url-request-method "POST")
+          (url-request-extra-headers '(("Content-Type" . "application/json")))
+          (url-request-data (encode-coding-string (json-serialize data) 'utf-8 t)))
+      (url-retrieve
+       (concat claude-agent-trace-bridge-url "otel/" path)
+       (lambda (_status) (kill-buffer (current-buffer)))
+       nil t))))
+
+(defun claude-agent-trace-connect ()
+  "Check connectivity to the OTel bridge (synchronous health check)."
+  (interactive)
+  (let ((url-request-method "GET"))
+    (with-current-buffer
+        (url-retrieve-synchronously
+         (concat claude-agent-trace-bridge-url "health"))
+      (goto-char (point-min))
+      (if (re-search-forward "^HTTP/.* 200" nil t)
+          (message "OTel bridge is reachable at %s" claude-agent-trace-bridge-url)
+        (message "OTel bridge NOT reachable at %s" claude-agent-trace-bridge-url))
+      (kill-buffer (current-buffer)))))
+#+END_SRC
+
+* Span Data Builders
+
+#+BEGIN_SRC elisp
+(defun claude-agent-trace--build-start-data (base-alist attrs default-kind)
+  "Build span/start request data from BASE-ALIST and ATTRS plist.
+DEFAULT-KIND is used when :span-kind is not in ATTRS.
+Extracts :span-kind, :oi-kind, :input from ATTRS."
+  (let ((data (append base-alist
+                      (list (cons 'kind (or (plist-get attrs :span-kind) default-kind))
+                            (cons 'attrs attrs)))))
+    (when (plist-get attrs :oi-kind)
+      (setq data (append data (list (cons 'openinference_kind (plist-get attrs :oi-kind))))))
+    (when (plist-get attrs :input)
+      (setq data (append data (list (cons 'input (plist-get attrs :input))))))
+    data))
+
+(defun claude-agent-trace--build-end-data (span-id status error-msg attrs &optional result)
+  "Build span/end request data.
+SPAN-ID identifies the span. STATUS is \"ok\" or \"error\".
+ERROR-MSG is the error message (when status is \"error\").
+ATTRS plist may contain :output for Phoenix display.
+RESULT is the body's return value, used as output when :output is not set."
+  (let ((data (list (cons 'span_id span-id)
+                    (cons 'status status)
+                    (cons 'end_time_ns (truncate (* (float-time) 1e9))))))
+    (when error-msg
+      (setq data (append data (list (cons 'error_message error-msg)))))
+    (let ((output (or (plist-get attrs :output)
+                      (and (stringp result) result))))
+      (when output
+        (setq data (append data (list (cons 'output output))))))
+    data))
+#+END_SRC
+
+* Macros
+
+** Root Trace Span
+
+#+BEGIN_SRC elisp
+(defmacro claude-agent-with-trace (name attrs &rest body)
+  "Execute BODY within a new trace root span named NAME.
+ATTRS is a plist of span attributes. Creates a new trace-id.
+Special attrs keys:
+  :span-kind   - OTel SpanKind (default \"SERVER\")
+  :oi-kind     - OpenInference kind for Phoenix (e.g. \"CHAIN\", \"TOOL\")
+  :input       - Input value shown in Phoenix UI"
+  (declare (indent 2) (debug t))
+  (let ((trace-id-sym (make-symbol "trace-id"))
+        (span-id-sym (make-symbol "span-id"))
+        (attrs-sym (make-symbol "attrs"))
+        (result-sym (make-symbol "result"))
+        (start-sym (make-symbol "start-ns")))
+    `(if (not claude-agent-trace-enabled)
+         (progn ,@body)
+       (let* ((,attrs-sym ,attrs)
+              (,trace-id-sym (claude-agent-trace--generate-trace-id))
+              (,span-id-sym (claude-agent-trace--generate-span-id))
+              (,start-sym (truncate (* (float-time) 1e9)))
+              (claude-agent-trace--current-context
+               (cons ,trace-id-sym ,span-id-sym)))
+         (claude-agent-trace--write-context
+          ,trace-id-sym ,span-id-sym
+          (plist-get ,attrs-sym :session-id)
+          (plist-get ,attrs-sym :custom-id))
+         (claude-agent-trace--request
+          "span/start"
+          (claude-agent-trace--build-start-data
+           (list (cons 'trace_id ,trace-id-sym)
+                 (cons 'span_id ,span-id-sym)
+                 (cons 'name ,name)
+                 (cons 'start_time_ns ,start-sym))
+           ,attrs-sym "SERVER"))
+         (condition-case err
+             (let ((,result-sym (progn ,@body)))
+               (claude-agent-trace--request
+                "span/end"
+                (claude-agent-trace--build-end-data
+                 ,span-id-sym "ok" nil ,attrs-sym ,result-sym))
+               ,result-sym)
+           (error
+            (claude-agent-trace--request
+             "span/end"
+             (claude-agent-trace--build-end-data
+              ,span-id-sym "error" (error-message-string err) ,attrs-sym))
+            (signal (car err) (cdr err))))))))
+#+END_SRC
+
+** Child Span
+
+#+BEGIN_SRC elisp
+(defmacro claude-agent-with-span (name attrs &optional trace-ctx &rest body)
+  "Execute BODY within a child span under the current trace.
+NAME is the span name, ATTRS is a plist of attributes.
+Special attrs keys:
+  :span-kind   - OTel SpanKind (default \"INTERNAL\")
+  :oi-kind     - OpenInference kind for Phoenix (e.g. \"CHAIN\", \"TOOL\")
+  :input       - Input value shown in Phoenix UI
+  :output      - Output value shown in Phoenix UI (set before body runs)
+TRACE-CTX is an optional explicit context (TRACE-ID . SPAN-ID) for async use.
+If nil, uses the dynamically bound `claude-agent-trace--current-context'."
+  (declare (indent 2) (debug t))
+  (let ((span-id-sym (make-symbol "span-id"))
+        (ctx-sym (make-symbol "ctx"))
+        (attrs-sym (make-symbol "attrs"))
+        (result-sym (make-symbol "result"))
+        (start-sym (make-symbol "start-ns")))
+    `(if (not claude-agent-trace-enabled)
+         (progn ,@body)
+       (let* ((,attrs-sym ,attrs)
+              (,ctx-sym (or ,trace-ctx claude-agent-trace--current-context))
+              (,span-id-sym (claude-agent-trace--generate-span-id))
+              (,start-sym (truncate (* (float-time) 1e9)))
+              (claude-agent-trace--current-context
+               (cons (car ,ctx-sym) ,span-id-sym)))
+         (claude-agent-trace--request
+          "span/start"
+          (claude-agent-trace--build-start-data
+           (list (cons 'trace_id (car ,ctx-sym))
+                 (cons 'span_id ,span-id-sym)
+                 (cons 'parent_span_id (cdr ,ctx-sym))
+                 (cons 'name ,name)
+                 (cons 'start_time_ns ,start-sym))
+           ,attrs-sym "INTERNAL"))
+         (condition-case err
+             (let ((,result-sym (progn ,@body)))
+               (claude-agent-trace--request
+                "span/end"
+                (claude-agent-trace--build-end-data
+                 ,span-id-sym "ok" nil ,attrs-sym ,result-sym))
+               ,result-sym)
+           (error
+            (claude-agent-trace--request
+             "span/end"
+             (claude-agent-trace--build-end-data
+              ,span-id-sym "error" (error-message-string err) ,attrs-sym))
+            (signal (car err) (cdr err))))))))
+#+END_SRC
+
+* Cross-Process Context
+
+#+BEGIN_SRC elisp
+(defun claude-agent-trace--collect-ancestor-session-ids ()
+  "Collect all distinct CLAUDE_SESSION_ID values up the heading tree.
+Returns a list of session-id strings, from current heading upward."
+  (ignore-errors
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((ids '())
+              (seen (make-hash-table :test 'equal)))
+          ;; First: current heading's own property (no inheritance)
+          (condition-case nil
+              (progn
+                (org-back-to-heading t)
+                (let ((id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+                  (when (and id (not (gethash id seen)))
+                    (puthash id t seen)
+                    (push id ids))))
+            (error nil))
+          ;; Walk up parent headings
+          (condition-case nil
+              (while (org-up-heading-safe)
+                (let ((id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+                  (when (and id (not (gethash id seen)))
+                    (puthash id t seen)
+                    (push id ids))))
+            (error nil))
+          ;; Also check file-level #+PROPERTY
+          (goto-char (point-min))
+          (let ((file-id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+            (when (and file-id (not (gethash file-id seen)))
+              (push file-id ids)))
+          (nreverse ids))))))
+
+(defun claude-agent-trace--write-context (trace-id span-id &optional session-id custom-id)
+  "Write W3C traceparent file for cross-process propagation.
+TRACE-ID and SPAN-ID form the traceparent header value.
+Writes to ALL ancestor CLAUDE_SESSION_ID keys so that Python hooks
+(which use the terminal's SDD_SESSION_ID) can always find the context."
+  (when claude-agent-trace-enabled
+    (let ((dir claude-agent-trace-context-dir))
+      (unless (file-directory-p dir)
+        (make-directory dir t))
+      (let ((traceparent (format "00-%s-%s-01" trace-id span-id)))
+        ;; Write per-session file
+        (when session-id
+          (with-temp-file (expand-file-name
+                           (concat session-id ".trace-context") dir)
+            (insert traceparent)))
+        ;; Write per-block file for custom-id based trace lookup
+        (when custom-id
+          (with-temp-file (expand-file-name
+                           (concat custom-id ".trace-context") dir)
+            (insert traceparent)))
+        ;; Write to ALL ancestor session IDs for cross-process correlation
+        ;; This ensures the terminal's SDD_SESSION_ID (from any ancestor heading)
+        ;; has a matching traceparent file
+        (dolist (ancestor-id (claude-agent-trace--collect-ancestor-session-ids))
+          (unless (equal ancestor-id session-id)  ; avoid duplicate write
+            (with-temp-file (expand-file-name
+                             (concat ancestor-id ".trace-context") dir)
+              (insert traceparent))))))))
+#+END_SRC
+
+* Server Lifecycle
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-trace--bridge-process nil
+  "Process object for the OTel bridge Flask server.")
+
+(defvar claude-agent-trace--phoenix-process nil
+  "Process object for the Arize Phoenix collector.")
+
+(defun claude-agent-trace--python-dir ()
+  "Return the python/ directory under the claude-agent project root."
+  (expand-file-name "python" (file-name-directory
+                               (or load-file-name
+                                   (locate-library "claude-agent-trace")
+                                   (car (cl-find-if
+                                         (lambda (entry)
+                                           (member '(provide . claude-agent-trace)
+                                                   (cdr entry)))
+                                         load-history))
+                                   default-directory))))
+
+(defun claude-agent-trace--process-alive-p (proc)
+  "Return non-nil if PROC is a live process."
+  (and proc (process-live-p proc)))
+
+(defun claude-agent-trace--ensure-bridge ()
+  "Ensure the OTel bridge is running. Auto-starts if needed.
+Returns non-nil if bridge is running, nil on failure (silently)."
+  (when claude-agent-trace-enabled
+    (if (claude-agent-trace--process-alive-p claude-agent-trace--bridge-process)
+        t
+      (condition-case err
+          (let ((default-directory (claude-agent-trace--python-dir)))
+            (setq claude-agent-trace--bridge-process
+                  (start-process "otel-bridge" "*otel-bridge*"
+                                 "uv" "run" "--extra" "tracing"
+                                 "python" "-m" "claude_agent.otel_bridge"))
+            t)
+        (error
+         (message "OTel bridge failed to start: %s" (error-message-string err))
+         nil)))))
+
+(defun claude-agent-trace--ensure-phoenix ()
+  "Ensure Phoenix collector is running. Auto-starts if needed.
+Returns non-nil if Phoenix is running, nil on failure (silently)."
+  (if (claude-agent-trace--process-alive-p claude-agent-trace--phoenix-process)
+      t
+    (condition-case err
+        (let ((default-directory (claude-agent-trace--python-dir)))
+          (setq claude-agent-trace--phoenix-process
+                (start-process "phoenix" "*phoenix*"
+                               "uv" "run" "--extra" "phoenix"
+                               "python" "-m" "phoenix.server.main" "serve"))
+          t)
+      (error
+       (message "Phoenix failed to start: %s" (error-message-string err))
+       nil))))
+
+(defun claude-agent-trace-stop-bridge ()
+  "Stop the OTel bridge server."
+  (interactive)
+  (when (claude-agent-trace--process-alive-p claude-agent-trace--bridge-process)
+    (kill-process claude-agent-trace--bridge-process))
+  (setq claude-agent-trace--bridge-process nil))
+
+(defun claude-agent-trace-stop-phoenix ()
+  "Stop the Phoenix collector."
+  (interactive)
+  (when (claude-agent-trace--process-alive-p claude-agent-trace--phoenix-process)
+    (kill-process claude-agent-trace--phoenix-process))
+  (setq claude-agent-trace--phoenix-process nil))
+
+(defun claude-agent-trace--wait-for-url (url callback &optional max-retries)
+  "Poll URL until it returns HTTP 200, then call CALLBACK.
+Retries up to MAX-RETRIES times (default 30) with 1-second intervals.
+On timeout, reports error via `message'.
+Uses named functions with timer args to avoid closure issues."
+  (let ((timer (timer-create)))
+    (timer-set-time timer (current-time) 1)
+    (timer-set-function
+     timer
+     #'claude-agent-trace--wait-for-url-tick
+     (list timer url callback (or max-retries 30)))
+    (timer-activate timer)))
+
+(defun claude-agent-trace--wait-for-url-tick (timer url callback retries-left)
+  "Timer tick for `claude-agent-trace--wait-for-url'.
+TIMER is the timer object. URL is polled. CALLBACK called on success.
+RETRIES-LEFT counts remaining attempts."
+  (if (<= retries-left 0)
+      (progn
+        (cancel-timer timer)
+        (message "Timed out waiting for %s" url))
+    ;; Update retries for next tick
+    (timer-set-function timer #'claude-agent-trace--wait-for-url-tick
+                        (list timer url callback (1- retries-left)))
+    (condition-case nil
+        (let ((url-request-method "GET"))
+          (url-retrieve
+           url
+           (apply-partially #'claude-agent-trace--wait-for-url-handler timer callback)
+           nil t))
+      (error nil))))
+
+(defun claude-agent-trace--wait-for-url-handler (timer callback status)
+  "Handle HTTP response for URL readiness check.
+TIMER is cancelled on success. CALLBACK is called on success.
+STATUS is the url-retrieve status plist."
+  (if (plist-get status :error)
+      (kill-buffer (current-buffer))
+    (cancel-timer timer)
+    (kill-buffer (current-buffer))
+    (funcall callback)))
+
+(defun claude-agent-trace-open-phoenix ()
+  "Open Phoenix UI in browser. Auto-starts Phoenix and bridge if needed.
+Waits for Phoenix to be ready before opening the browser."
+  (interactive)
+  (claude-agent-trace--ensure-phoenix)
+  (claude-agent-trace--ensure-bridge)
+  (message "Starting trace services...")
+  (claude-agent-trace--wait-for-url
+   (concat claude-agent-trace-phoenix-url "/")
+   (lambda ()
+     (message "Phoenix is ready.")
+     (browse-url claude-agent-trace-phoenix-url))
+   60))
+#+END_SRC
+
+* Package Footer
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-trace)
+;;; claude-agent-trace.el ends here
+#+END_SRC

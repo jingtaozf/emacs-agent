@@ -9,3 +9,7 @@
 | 2026-03-12 | Codebase Review — Architecture, Quality, and Harness | proposed |
 | 2026-03-12 | Terminal-Typed Prompt Feature Parity | proposed |
 | 2026-03-13 | JSON Stream Backend — Business Logic and Redesign | draft |
+| 2026-03-13 | Slack Bot for AI Agent | draft |
+| 2026-03-13 | Unified Tracing — Cross-Process Observability | proposed |
+| 2026-03-15 | Single Root Span Per AI Block Execution | proposed |
+| 2026-03-15 | cmux Support Backend | implemented |

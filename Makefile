@@ -5,7 +5,7 @@ EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch
 
 # Source files
-SOURCES = claude-agent.org claude-org.org
+SOURCES = claude-agent.org claude-org.org claude-agent-trace.org
 
 # Test files
 # Note: actual test loading is in target recipes below, not this variable
@@ -20,6 +20,17 @@ WEB_SERVER_DIR ?= $(HOME)/.emacs.d/straight/build/web-server
 COMPANY_DIR ?= $(HOME)/.emacs.d/straight/build/company
 WEBSOCKET_DIR ?= $(HOME)/.emacs.d/straight/build/websocket
 LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR)
+
+# Common literate-elisp load sequences (DRY — used by all test targets)
+# Load order: trace → agent (includes backend) → mcp → org
+LOAD_LITERATE = --eval "(require 'literate-elisp)"
+LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
+LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")"
+LOAD_MCP = --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
+LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/claude-org.org\")"
+# Presets for common combinations
+LOAD_AGENT_ONLY = $(LOAD_LITERATE) $(LOAD_AGENT)
+LOAD_ALL = $(LOAD_LITERATE) $(LOAD_AGENT) $(LOAD_MCP) $(LOAD_ORG)
 
 .PHONY: all
 all: compile test-unit
@@ -84,7 +95,7 @@ help:
 compile:
 	@echo "Compiling literate org files..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
+		$(LOAD_LITERATE) \
 		--eval "(literate-elisp-tangle-file \"claude-agent.org\")" \
 		--eval "(literate-elisp-tangle-file \"claude-org.org\")" \
 		--eval "(byte-compile-file \"claude-code.el\")" \
@@ -102,6 +113,7 @@ reload:
 	@echo "Reloading org files requires running Emacs session"
 	@echo "In Emacs, run: M-x eval-expression RET"
 	@echo "  (progn"
+	@echo "    (literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
 	@echo "    (literate-elisp-load \"$(PWD)/claude-agent.org\")"
 	@echo "    (literate-elisp-load \"$(PWD)/claude-org.org\"))"
 
@@ -125,30 +137,34 @@ test: test-unit test-integration
 test-smoke:
 	@echo "Running smoke tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		-L tests/support \
 		-l tests/support/test-helpers.el \
 		-l tests/test-agent-workflow.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :smoke))"
 
-# Unit test targets are independent — use 'make -j3 test-unit' for parallel (4.5s vs 13s)
+# Unit test targets are independent — use 'make -j4 test-unit' for parallel
 .PHONY: test-unit
-test-unit: test-agent-unit test-org-unit test-backend-unit test-native
+test-unit: test-agent-unit test-org-unit test-backend-unit test-native test-cmux
 
 .PHONY: test-native
 test-native:
 	@echo "Running native terminal unit tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-native.org\")" \
 		-l tests/test-claude-org-native.el \
 		-l tests/test-iterm2-e2e-simulated.el \
+		-f ert-run-tests-batch-and-exit
+
+.PHONY: test-cmux
+test-cmux:
+	@echo "Running cmux backend E2E tests..."
+	$(BATCH) $(LOAD_PATH) \
+		$(LOAD_ALL) \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
+		-l tests/test-cmux-e2e-simulated.el \
 		-f ert-run-tests-batch-and-exit
 
 # Convenience target: run unit tests in parallel automatically
@@ -196,10 +212,7 @@ endif
 _run-sharded-tests-parallel:
 	@seq 0 $$(($(TOTAL_SHARDS) - 1)) | $(PARALLEL) -j$(TOTAL_SHARDS) --group --tag \
 		'$(BATCH) $(LOAD_PATH) \
-			--eval "(require '\''literate-elisp)" \
-			--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-			--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-			--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+			$(LOAD_ALL) \
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-claude-agent-integration.el \
@@ -217,10 +230,7 @@ _run-sharded-tests-bash:
 	@echo "Starting $(TOTAL_SHARDS) test shards..."
 	@for i in $$(seq 0 $$(($(TOTAL_SHARDS) - 1))); do \
 		( $(BATCH) $(LOAD_PATH) \
-			--eval "(require 'literate-elisp)" \
-			--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-			--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-			--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+			$(LOAD_ALL) \
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-claude-agent-integration.el \
@@ -276,8 +286,7 @@ test-logs:
 test-agent-unit:
 	@echo "Running claude-agent unit tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		$(LOAD_AGENT_ONLY) \
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-agent-unit.el \
 		-l tests/test-claude-agent-refactor-phase3.el \
@@ -296,8 +305,7 @@ test-agent-unit:
 test-backend-unit:
 	@echo "Running backend protocol unit tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		$(LOAD_AGENT_ONLY) \
 		-l tests/test-claude-agent-backend.el \
 		-l tests/test-claude-agent-backend-protocol.el \
 		-l tests/test-claude-agent-claude-backend.el \
@@ -308,9 +316,8 @@ test-backend-unit:
 test-backend-integration:
 	@echo "Running backend integration tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_ORG) \
 		-l tests/test-claude-agent-claude-backend-integration.el \
 		-f ert-run-tests-batch-and-exit
 
@@ -318,10 +325,7 @@ test-backend-integration:
 test-org-unit:
 	@echo "Running claude-org unit tests..."
 	$(BATCH) $(LOAD_PATH) -L tests/support \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		-l tests/support/test-helpers.el \
 		-l tests/test-claude-org-unit.el \
 		-l tests/test-claude-org-refine.el \
@@ -369,8 +373,8 @@ test-org-unit:
 test-mcp-unit:
 	@echo "Running MCP server unit tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		$(LOAD_LITERATE) \
+		$(LOAD_MCP) \
 		-l tests/test-mcp-protocol.el \
 		-l tests/test-mcp-lifecycle.el \
 		-l tests/test-mcp-eval-handler.el \
@@ -384,8 +388,7 @@ test-mock: test-agent-mock test-org-mock
 test-agent-mock:
 	@echo "Running claude-agent mock CLI tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		$(LOAD_AGENT_ONLY) \
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-agent-mock.el \
 		-f ert-run-tests-batch-and-exit
@@ -394,10 +397,7 @@ test-agent-mock:
 test-org-mock:
 	@echo "Running claude-org mock CLI tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-org-mock.el \
 		-f ert-run-tests-batch-and-exit
@@ -406,8 +406,7 @@ test-org-mock:
 test-agent-integration:
 	@echo "Running claude-agent integration tests (requires API key)..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+		$(LOAD_AGENT_ONLY) \
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-agent-integration.el \
 		-f ert-run-tests-batch-and-exit
@@ -417,10 +416,7 @@ test-org-integration:
 	@echo "Running claude-org integration tests (requires API key)..."
 	@echo "Note: These tests use the fixture at tests/fixtures/test-session.org"
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
 		-l tests/test-claude-org-integration.el \
 		-l tests/test-claude-org-cancel-active-queries.el \
@@ -432,9 +428,8 @@ test-org-integration:
 test-permissions:
 	@echo "Running permission functions tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_ORG) \
 		-l tests/test-claude-agent-permissions.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :permissions))"
 
@@ -442,9 +437,8 @@ test-permissions:
 test-org-permissions:
 	@echo "Running org file protection permission tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_ORG) \
 		-l tests/test-claude-agent-permissions.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
 
@@ -456,8 +450,8 @@ test-org-permissions:
 test-mcp-mode-line:
 	@echo "Running MCP mode-line spinner tests..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
+		$(LOAD_LITERATE) \
+		$(LOAD_MCP) \
 		-l tests/test-mcp-mode-line.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :mcp-mode-line))"
 
@@ -465,10 +459,7 @@ test-mcp-mode-line:
 test-docker:
 	@echo "Running Docker unit tests (path translation, etc.)..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		-l tests/test-docker-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(and (tag :docker) (not (tag :sandbox))))"
 
@@ -478,10 +469,7 @@ test-docker-sandbox:
 	@echo "Prerequisites: make docker-up && make docker-auth"
 	@echo ""
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		-l tests/test-docker-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :sandbox))"
 
@@ -527,11 +515,9 @@ docker-status:
 test-readme-smoke:
 	@echo "Running README smoke tests (no API calls)..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
+		$(LOAD_LITERATE) \
 		--eval "(setq literate-elisp-test-p t)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_AGENT) $(LOAD_MCP) $(LOAD_ORG) \
 		--eval "(literate-elisp-load \"$(PWD)/README.org\")" \
 		--eval "(ert-run-tests-batch-and-exit '(tag :readme-smoke))"
 
@@ -539,11 +525,9 @@ test-readme-smoke:
 test-readme:
 	@echo "Running full README tutorial tests (requires Claude API)..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
+		$(LOAD_LITERATE) \
 		--eval "(setq literate-elisp-test-p t)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_AGENT) $(LOAD_MCP) $(LOAD_ORG) \
 		--eval "(literate-elisp-load \"$(PWD)/README.org\")" \
 		--eval "(ert-run-tests-batch-and-exit '(tag :readme))"
 
@@ -552,9 +536,7 @@ test-readme:
 test-interactive:
 	@echo "Opening test runner in Emacs..."
 	$(EMACS) -Q $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org.org\")" \
+		$(LOAD_ALL) \
 		-l tests/test-claude-agent-unit.el \
 		-l tests/test-claude-org-unit.el \
 		--eval "(ert t)"
@@ -572,9 +554,19 @@ coverage:
 lint:
 	@echo "Running static analysis..."
 	$(BATCH) $(LOAD_PATH) \
-		--eval "(require 'literate-elisp)" \
+		$(LOAD_LITERATE) \
 		-l tests/test-static-analysis.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :static))"
+
+# OTel trace tests
+.PHONY: test-otel
+test-otel:
+	@echo "Running OTel trace unit tests..."
+	$(BATCH) $(LOAD_PATH) \
+		$(LOAD_LITERATE) \
+		$(LOAD_TRACE) \
+		-l tests/test-otel-trace.el \
+		-f ert-run-tests-batch-and-exit
 
 # Python package tests
 .PHONY: test-python
@@ -623,6 +615,23 @@ EMACS_MCP_PORT ?= 9999
 test-sdd-bridge:
 	@echo "Running SDD Bridge E2E tests (MCP port $(EMACS_MCP_PORT))..."
 	bash tests/test-sdd-bridge-e2e.sh $(EMACS_MCP_PORT)
+
+# OTel server targets
+.PHONY: otel-server
+otel-server:
+	@echo "Starting OTel bridge server on port 7331..."
+	cd python && uv run --extra tracing python -m claude_agent.otel_bridge
+
+.PHONY: phoenix-start
+phoenix-start:
+	@echo "Starting Arize Phoenix..."
+	cd python && uv run --extra phoenix python -m phoenix.server.main serve &
+	@echo "Phoenix UI at http://localhost:6006"
+
+.PHONY: phoenix-stop
+phoenix-stop:
+	@echo "Stopping Arize Phoenix..."
+	@pkill -f "phoenix.server.main serve" 2>/dev/null || echo "Phoenix not running"
 
 # Quick development cycle
 .PHONY: dev

@@ -1,0 +1,346 @@
+#+TITLE: cmux Support Backend
+#+DATE: 2026-03-15
+#+STATUS: implemented
+
+* Overview
+
+Add cmux as an alternative terminal backend to claude-agent, alongside the
+existing iTerm2 backend. cmux is a native macOS terminal (Swift/AppKit) built
+on Ghostty's rendering engine, purpose-built for AI coding agent workflows.
+
+cmux offers a Unix domain socket API (JSON-RPC v2) that is significantly
+simpler and more reliable than iTerm2's AppleScript/Python bridge approach.
+This design doc covers the motivation, architecture, and implementation plan.
+
+*Repository*: [[https://github.com/manaflow-ai/cmux][manaflow-ai/cmux]]
+
+* Goals
+
+- Implement =claude-agent-cmux-backend= following the 8-generic backend protocol
+- Provide feature parity with iTerm2 backend (launch, send, cancel, status, read, focus, close)
+- Leverage cmux-specific features: notification rings, sidebar metadata, progress indicators
+- Use cmux's Unix domain socket API directly from Elisp (no Python bridge needed)
+- Integrate with SDD bridge for org-mode response insertion
+
+* Non-Goals
+
+- Replacing iTerm2 backend (cmux is an alternative, not a replacement)
+- Browser automation features (cmux has a built-in scriptable browser, but out of scope)
+- Supporting Linux/Windows (cmux is macOS-only, same as iTerm2)
+- Implementing cmux installation/setup automation
+
+* Part 1: Why cmux Over iTerm2
+
+** Advantages
+
+| Aspect | iTerm2 | cmux | Improvement |
+|--------+--------+------+-------------|
+| IPC Protocol | AppleScript + Python pyobjc | Unix socket (JSON-RPC v2) | No Python dependency, faster |
+| Agent Support | None (bolted on) | First-class (notifications, hooks) | Native integration |
+| Status Detection | Screen scraping for TUI patterns | =read-screen= + structured state | More reliable |
+| Prompt Sending | Bracketed paste via Python | =send= / =send-surface= CLI | Simpler, no ARG_MAX issues |
+| Screen Reading | Python API via pyobjc | =read-screen= CLI command | Direct, no bridge |
+| Notifications | OS-level only | In-app rings + panel + sidebar | Richer agent UX |
+| Progress | Not supported | =set-progress=, =set-status=, =log= | Real-time feedback |
+| Tab Metadata | Title only | Git branch, PR, ports, status | More context |
+| Session Identity | UUID from Python API | =CMUX_SURFACE_ID= env var | Auto-set in terminals |
+
+** Key Differentiators
+
+1. *No Python bridge required* — cmux CLI communicates via Unix socket directly.
+   The iTerm2 backend requires =iterm2_ctl.py= (200+ lines) as a gateway because
+   iTerm2's API is Python-only (pyobjc). cmux's CLI is a native Swift binary.
+
+2. *Reliable state detection* — iTerm2 state detection relies on screen scraping
+   for Claude TUI indicators (box-drawing chars, "Tool:" text). cmux can provide
+   structured state via its API.
+
+3. *Rich agent feedback* — cmux's sidebar shows status, progress, and log entries
+   per-pane. The agent can report "Analyzing codebase..." with a progress bar
+   directly in the terminal sidebar.
+
+4. *Notification rings* — When Claude needs attention (permission prompt, completion),
+   cmux shows visual rings around the pane and tab. No OS notification fatigue.
+
+* Part 2: Architecture
+
+** Backend Protocol Compliance
+
+The cmux backend implements the 8 required generics from =claude-agent-backend.org=:
+
+| Generic | cmux Implementation |
+|---------+---------------------|
+| =backend-query= | Send prompt via =cmux send=, track active query |
+| =backend-cancel= | Send Escape via =cmux send-key escape= |
+| =backend-cleanup= | Close surface via =cmux close-surface= |
+| =backend-active-p= | Check =cmux read-screen= for busy indicators |
+| =backend-session-id= | Return =CMUX_SURFACE_ID= |
+| =backend-send-input= | Send via =cmux send-surface= |
+| =backend-supports-p= | Advertise =:streaming-tokens :interactive-input= |
+| =backend-classify-error= | Map socket errors to standard categories |
+
+** Communication Layer
+
+#+begin_example
+┌─────────────┐     subprocess      ┌──────────┐    unix socket    ┌──────┐
+│ claude-agent │ ──────────────────► │ cmux CLI │ ────────────────► │ cmux │
+│   (Elisp)   │  cmux send "prompt" │ (Swift)  │   JSON-RPC v2    │ app  │
+└─────────────┘                     └──────────┘                   └──────┘
+#+end_example
+
+Unlike iTerm2 which needs a long-running Python process, cmux CLI is a
+lightweight native binary invoked per-command. Each call:
+1. Connects to Unix socket (=/tmp/cmux.sock= or =CMUX_SOCKET_PATH=)
+2. Sends JSON-RPC request
+3. Receives response
+4. Exits
+
+** Elisp Gateway Function
+
+The core gateway replaces =claude-org-iterm2--call= with a simpler function:
+
+#+begin_src elisp
+(defun claude-org-cmux--call (subcommand &rest args)
+  "Call cmux CLI with SUBCOMMAND and ARGS.
+Return stdout as string, signal error on failure."
+  (let* ((cmd (append (list "cmux" subcommand) args))
+         (result (apply #'claude-agent--call-process cmd)))
+    (if (zerop (car result))
+        (string-trim (cadr result))
+      (error "cmux %s failed: %s" subcommand (caddr result)))))
+#+end_src
+
+No temp files needed (unlike iTerm2's ARG_MAX workaround) — cmux handles
+large inputs via stdin natively.
+
+** Command Mapping (iTerm2 → cmux)
+
+| iTerm2 (iterm2_ctl.py) | cmux CLI | Notes |
+|-------------------------+----------+-------|
+| =launch --title --cwd --launch-cmd= | =cmux new-surface= + =cmux send= | Create surface, run command |
+| =send --session= (stdin) | =cmux send-surface ID "text"= | Direct surface targeting |
+| =cancel --session= | =cmux send-key escape= | Simpler, no state check |
+| =status --session= | =cmux read-screen= + parse | Same screen-scraping approach |
+| =read --session= | =cmux read-screen= | Direct equivalent |
+| =focus --session= | =cmux focus-surface ID= | Direct equivalent |
+| =close --session= | =cmux close-surface ID= | Direct equivalent |
+| =list= | =cmux list-surfaces= | Direct equivalent |
+
+* Part 3: Implementation Design
+
+** Module Structure
+
+New file: =claude-org-cmux.org= (literate elisp, ~300 lines estimated)
+
+Sections:
+1. *Dependencies* — require =claude-agent-backend=, =claude-org=
+2. *Struct Definition* — =claude-agent-cmux-backend= inheriting base
+3. *CLI Gateway* — =claude-org-cmux--call= function
+4. *Session Management* — Surface creation, tracking, org property storage
+5. *Query Execution* — Send prompt, register active query
+6. *State Detection* — Read screen, detect Claude state
+7. *Rich Feedback* — Notification rings, sidebar status, progress
+8. *SDD Bridge Integration* — Hook into response insertion flow
+9. *Backend Generic Implementations* — All 8 methods
+
+** Data Structure
+
+#+begin_src elisp
+(cl-defstruct (claude-agent-cmux-backend
+               (:include claude-agent-backend (type :cmux))
+               (:constructor claude-agent-cmux-backend--create)
+               (:copier nil))
+  "Cmux terminal backend."
+  (surface-id nil :documentation "CMUX_SURFACE_ID for target pane")
+  (workspace-id nil :documentation "CMUX_WORKSPACE_ID")
+  (session-key nil :documentation "SDD session key"))
+#+end_src
+
+** Session Lifecycle
+
+#+begin_example
+1. User triggers C-c C-c on AI block
+2. claude-org-cmux--ensure-session:
+   a. Check org property CMUX_SURFACE_ID
+   b. If exists, verify via `cmux list-surfaces` → ping
+   c. If dead or missing:
+      - `cmux new-surface` → get surface-id
+      - `cmux send-surface ID "claude --resume SESSION ..."` → launch Claude
+      - Store CMUX_SURFACE_ID as org property
+3. Send prompt via `cmux send-surface ID "prompt"`
+4. Register in claude-agent--active-queries
+5. Update sidebar: `cmux set-status "task" "Running query..."`
+6. On completion (via SDD bridge hook):
+   - `cmux notify --title "Done" --body "Query completed"`
+   - `cmux clear-progress`
+   - Unregister from active-queries
+#+end_example
+
+** Rich Feedback Integration
+
+cmux provides sidebar metadata that iTerm2 lacks. We can show:
+
+#+begin_src elisp
+;; During query execution
+(claude-org-cmux--call "set-progress" "0.5")
+(claude-org-cmux--call "set-status" "agent" "Analyzing codebase...")
+(claude-org-cmux--call "log" "progress" "Reading 42 files...")
+
+;; On completion
+(claude-org-cmux--call "notify" "--title" "Claude" "--body" "Query complete")
+(claude-org-cmux--call "clear-progress")
+(claude-org-cmux--call "clear-status" "agent")
+#+end_src
+
+** State Detection
+
+Reuse iTerm2's proven screen-scraping approach for Claude TUI state:
+
+#+begin_src elisp
+(defun claude-org-cmux--detect-state (surface-id)
+  "Detect Claude Code state in SURFACE-ID.
+Returns \"ready\", \"busy\", or \"dead\"."
+  (let ((screen (claude-org-cmux--call "read-screen")))
+    (cond
+     ((string-match-p "type a message" screen) "ready")
+     ((string-match-p "-- insert --" screen) "ready")
+     ((string-match-p "Tool:" screen) "busy")
+     ((string-match-p "╭\\|╰\\|│" screen) "busy")
+     (t "dead"))))
+#+end_src
+
+** Socket Path Resolution
+
+cmux resolves sockets in priority order. We respect this:
+
+#+begin_src elisp
+(defcustom claude-org-cmux-socket-path nil
+  "Explicit cmux socket path. Nil = auto-detect."
+  :type '(choice (const nil) string)
+  :group 'claude-org)
+
+(defun claude-org-cmux--socket-args ()
+  "Return socket args for cmux CLI, or nil for auto-detect."
+  (when claude-org-cmux-socket-path
+    (list "--socket" claude-org-cmux-socket-path)))
+#+end_src
+
+* Part 4: Configuration
+
+** User-Facing Customization
+
+#+begin_src elisp
+(defcustom claude-org-terminal-backend 'iterm2
+  "Terminal backend for AI block execution.
+Choices: `iterm2' or `cmux'."
+  :type '(choice (const iterm2) (const cmux))
+  :group 'claude-org)
+#+end_src
+
+** Backend Selection
+
+#+begin_src elisp
+(defun claude-org--terminal-execute ()
+  "Execute AI block with configured terminal backend."
+  (pcase claude-org-terminal-backend
+    ('iterm2 (claude-org-iterm2--execute-ai-block))
+    ('cmux   (claude-org-cmux--execute-ai-block))
+    (_       (error "Unknown terminal backend: %s" claude-org-terminal-backend))))
+#+end_src
+
+** cmux Prerequisites Check
+
+#+begin_src elisp
+(defun claude-org-cmux--check-prerequisites ()
+  "Verify cmux CLI is available and app is running."
+  (unless (executable-find "cmux")
+    (error "cmux CLI not found. Run: sudo ln -sf \
+\"/Applications/cmux.app/Contents/Resources/bin/cmux\" /usr/local/bin/cmux"))
+  (unless (zerop (car (claude-agent--call-process "cmux" "ping")))
+    (error "cmux is not running. Please start cmux.app first")))
+#+end_src
+
+* Part 5: Implementation Notes
+
+** Architecture Decision: Special-Case Dispatch (not cl-defstruct backend)
+
+During implementation, we discovered that the iTerm2 backend does NOT use
+the 8-generic =cl-defstruct= backend protocol. Instead, it's a *special-case
+early return* in =claude-org-execute()=. The cmux backend follows this same
+pattern for consistency:
+
+#+begin_src elisp
+;; In claude-org-execute():
+(when (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
+                    "cmux")
+  (claude-org-cmux--execute-ai-block)
+  (cl-return-from claude-org-execute nil))
+#+end_src
+
+This means the original design's =cl-defstruct= with 8 generics was replaced
+by the proven iTerm2 pattern: property-based dispatch → early return.
+
+** Socket Access Mode
+
+cmux defaults to =cmuxOnly= socket mode — only processes started *inside* cmux
+can connect. For Emacs (external process), users must either:
+1. Start Emacs from within cmux, or
+2. Set =CMUX_SOCKET_MODE=allowAll= in cmux settings
+
+** Screen Reading
+
+The design doc proposed =read-screen=, but the actual cmux CLI uses
+=capture-pane= (tmux-compatible command). State detection uses:
+
+#+begin_src elisp
+;; Ready: "-- INSERT --" or "type a message"
+;; Busy:  "Tool:" or "Thinking"
+;; Dead:  empty screen or connection error
+#+end_src
+
+** Files Created
+
+| File | Lines | Purpose |
+|------+-------+---------|
+| =claude-org-cmux.org= | ~350 | Backend implementation (literate elisp) |
+| =tests/test-cmux-e2e-simulated.el= | ~450 | 24 E2E tests (mock gateway only) |
+| =tests/fixtures/cmux/e2e/*.txt= | 5 files | Screen capture fixtures |
+
+** Makefile Integration
+
+Added =test-cmux= target and included it in =test-unit= dependencies.
+
+* Part 6: Migration Path
+
+Users select cmux via =CLAUDE_BACKEND= org property (per-file or per-section):
+
+#+begin_example
+,* My Story
+:PROPERTIES:
+:CLAUDE_BACKEND: cmux
+:CLAUDE_SESSION_ID: my-session-001
+:END:
+#+end_example
+
+Existing iTerm2 sessions are unaffected. The backends are independent and
+can coexist — different org files/sections can use different backends.
+
+* Appendix: cmux CLI Reference (Key Commands)
+
+| Command | Purpose |
+|---------+---------|
+| =cmux ping= | Check if cmux is running |
+| =cmux list-surfaces= | List all terminal panes |
+| =cmux new-surface= | Create new terminal pane |
+| =cmux send TEXT= | Send text to focused terminal |
+| =cmux send-surface ID TEXT= | Send text to specific pane |
+| =cmux send-key KEY= | Send special key (enter, escape, tab) |
+| =cmux read-screen= | Read terminal screen content |
+| =cmux focus-surface ID= | Focus a specific pane |
+| =cmux close-surface ID= | Close a pane |
+| =cmux notify --title T --body B= | Show notification |
+| =cmux set-status KEY VALUE= | Set sidebar metadata |
+| =cmux set-progress FLOAT= | Set progress bar (0.0-1.0) |
+| =cmux log LEVEL TEXT= | Log to sidebar |
+| =cmux identify= | Show current context IDs |
+| =cmux capabilities= | List available methods |
