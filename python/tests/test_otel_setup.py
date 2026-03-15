@@ -89,19 +89,32 @@ class TestReadTraceContext:
         result = otel_setup.read_trace_context("sess-123")
         assert result is not None
 
-    def test_uses_newest_trace_context_file(self, tmp_path, otel_setup, monkeypatch):
-        """Always uses the newest .trace-context file regardless of session ID."""
+    def test_falls_back_to_newest_when_session_missing(self, tmp_path, otel_setup, monkeypatch):
+        """Falls back to newest .trace-context when session-specific not found."""
         import time
         monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
-        # Write an older file
         old = tmp_path / "old-session.trace-context"
         old.write_text("00-" + "a" * 32 + "-" + "a" * 16 + "-01")
         time.sleep(0.05)
-        # Write a newer file
         new = tmp_path / "new-session.trace-context"
         new.write_text("00-" + "b" * 32 + "-" + "b" * 16 + "-01")
-        # Should pick newest file even with non-matching session ID
-        result = otel_setup.read_trace_context("any-session")
+        # Non-matching session ID → falls back to newest file
+        result = otel_setup.read_trace_context("missing-session")
+        assert result is not None
+
+    def test_prefers_session_specific_over_newest(self, tmp_path, otel_setup, monkeypatch):
+        """Session-specific file takes priority over newer files."""
+        import time
+        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
+        # Write session-specific file first (older)
+        session = tmp_path / "my-sess.trace-context"
+        session.write_text("00-" + "a" * 32 + "-" + "a" * 16 + "-01")
+        time.sleep(0.05)
+        # Write a newer file for different session
+        other = tmp_path / "other-sess.trace-context"
+        other.write_text("00-" + "b" * 32 + "-" + "b" * 16 + "-01")
+        # Session-specific should be used (even though older)
+        result = otel_setup.read_trace_context("my-sess")
         assert result is not None
 
     def test_ignores_non_trace_context_files(self, tmp_path, otel_setup, monkeypatch):

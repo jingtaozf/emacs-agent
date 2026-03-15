@@ -146,22 +146,25 @@ def _mcp_eval_with_trace(mcp: McpClient, elisp: str) -> str | None:
     return mcp.eval_elisp(wrapped)
 
 
-def _check_any_recent_from_emacs_flag(max_age_sec: float = 10.0):
-    """Check if ANY .from-emacs flag was written recently.
+_process_start_time = __import__("time").time()
+
+
+def _check_any_recent_from_emacs_flag():
+    """Check if ANY .from-emacs flag was written after this process started.
 
     Returns (True, path) if found, (False, "") otherwise.
     Handles the session ID mismatch where Emacs writes the flag keyed by
     a per-heading session ID but the terminal uses a different SDD_SESSION_ID.
-    """
-    import time
 
-    now = time.time()
+    Uses process start time (not a fixed window) to avoid consuming flags
+    from unrelated executions that happened before this hook was triggered.
+    """
     try:
         for f in os.listdir(STATUS_DIR):
             if f.endswith(".from-emacs"):
                 path = os.path.join(STATUS_DIR, f)
                 try:
-                    if now - os.path.getmtime(path) < max_age_sec:
+                    if os.path.getmtime(path) >= _process_start_time:
                         return True, path
                 except OSError:
                     continue

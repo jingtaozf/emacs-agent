@@ -64,14 +64,19 @@ def _parse_traceparent(path: str):
 def read_trace_context(session_id: str):
     """Read W3C traceparent from file, return OTel context or None.
 
-    Uses the most recently written .trace-context file in the status
-    directory.  This is robust because:
-    - Emacs writes the traceparent just before sending the command
-    - Python hooks fire shortly after, so the newest file is from
-      the current execution
-    - Avoids cross-contamination from stale session-specific files
-      (e.g., Python's own prior root span context)
+    Tries session-specific file first. Falls back to the most recently
+    written .trace-context file, which handles the case where Emacs
+    writes under a per-heading session ID that differs from the
+    terminal's SDD_SESSION_ID.
     """
+    # Direct match — fast path
+    ctx = _parse_traceparent(
+        os.path.join(STATUS_DIR, f"{session_id}.trace-context")
+    )
+    if ctx is not None:
+        return ctx
+
+    # Fallback: newest .trace-context file (handles session ID mismatch)
     try:
         candidates = []
         for f in os.listdir(STATUS_DIR):
