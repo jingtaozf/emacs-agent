@@ -45,6 +45,22 @@ Context:
 Note: If there are pre-commit hooks configured, please wait for them to complete
 before considering the commit successful. If hooks fail, fix the issues and retry.
 
+")
+ ("Enter Worktree" . "Please enter a worktree for this story.
+All code changes should happen in the worktree.
+")
+ ("Exit Worktree (keep)" . "Please exit the worktree and keep it.
+I'll review and merge manually.
+")
+ ("Exit Worktree (remove)" . "Please exit the worktree and remove it — discard all changes.
+")
+ ("Merge Worktree" . "Please merge the worktree branch into master:
+1. Exit the worktree if still inside
+2. git checkout master
+3. git merge --squash <branch-name>
+4. Run make check
+5. If tests pass, commit with a descriptive message
+6. Clean up: git worktree remove .claude/worktrees/<name> && git branch -d <branch>
 "))
 
 ;;; claude-org-templates.el ends here
