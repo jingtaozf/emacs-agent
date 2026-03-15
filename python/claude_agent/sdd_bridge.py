@@ -146,6 +146,30 @@ def _mcp_eval_with_trace(mcp: McpClient, elisp: str) -> str | None:
     return mcp.eval_elisp(wrapped)
 
 
+def _check_any_recent_from_emacs_flag(max_age_sec: float = 10.0):
+    """Check if ANY .from-emacs flag was written recently.
+
+    Returns (True, path) if found, (False, "") otherwise.
+    Handles the session ID mismatch where Emacs writes the flag keyed by
+    a per-heading session ID but the terminal uses a different SDD_SESSION_ID.
+    """
+    import time
+
+    now = time.time()
+    try:
+        for f in os.listdir(STATUS_DIR):
+            if f.endswith(".from-emacs"):
+                path = os.path.join(STATUS_DIR, f)
+                try:
+                    if now - os.path.getmtime(path) < max_age_sec:
+                        return True, path
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return False, ""
+
+
 def handle_prompt(
     mcp: McpClient,
     input_data: dict,
@@ -164,9 +188,13 @@ def handle_prompt(
         if prompt.lstrip().startswith("<"):
             return
 
-        # Check from-emacs flag before span so we can report it
+        # Check from-emacs flag — try session-specific first, then any recent flag.
+        # Emacs writes the flag keyed by per-heading session ID, which may differ
+        # from the terminal's SDD_SESSION_ID. Checking any recent flag handles this.
         from_emacs_flag = os.path.join(STATUS_DIR, f"{session_id}.from-emacs")
         flag_exists = os.path.exists(from_emacs_flag)
+        if not flag_exists:
+            flag_exists, from_emacs_flag = _check_any_recent_from_emacs_flag()
 
         custom_id = _read_custom_id(session_id)
         with _span(

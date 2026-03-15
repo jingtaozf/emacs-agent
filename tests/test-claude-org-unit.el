@@ -134,7 +134,7 @@
     (should (equal "uuid-file-123" (claude-org--get-sdk-uuid)))
     ;; Should be in file header as #+PROPERTY
     (goto-char (point-min))
-    (should (re-search-forward "^#\\+PROPERTY:[ \t]+CLAUDE_SDK_UUID[ \t]+uuid-file-123" nil t))
+    (should (re-search-forward "^#\\+PROPERTY:[ \t]+CLAUDE_CLI_SESSION[ \t]+uuid-file-123" nil t))
     ;; Clear UUID
     (claude-org--clear-sdk-uuid)
     (should-not (claude-org--get-sdk-uuid))))
@@ -158,7 +158,7 @@
     ;; Should be in property drawer
     (goto-char (point-min))
     (re-search-forward "^\\* Section 1")
-    (should (equal "uuid-section-123" (org-entry-get nil "CLAUDE_SDK_UUID")))
+    (should (equal "uuid-section-123" (org-entry-get nil "CLAUDE_CLI_SESSION")))
     ;; Clear UUID
     (claude-org--clear-sdk-uuid)
     (should-not (claude-org--get-sdk-uuid))))

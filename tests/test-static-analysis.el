@@ -318,6 +318,8 @@ Returns list of warning/error messages."
     ;; Cross-module references (loaded at runtime)
     "emacs-mcp-server-running-p" "emacs-mcp-server-start" "emacs-mcp-server-port"
     "claude-org--insert-block-menu-dynamic"
+    ;; SDD bridge functions (defined in claude-org-iterm2.org, used by claude-org-cmux.org)
+    "claude-org-sdd-bridge-system-prompt" "claude-org-sdd-bridge-get-cli-session"
     ;; Emacs version-specific functions
     "parse-iso8601-time-string"
     ;; Struct accessors referenced before struct is parsed

@@ -777,7 +777,7 @@ configuration. Using constants ensures consistency across the codebase.
 | Property | Purpose |
 |----------+---------|
 | =CLAUDE_PERMISSION_MODE= | Tool permission level (readonly/accept-edits/plan/bypass) |
-| =CLAUDE_SDK_UUID= | Session identifier for =--resume= |
+| =CLAUDE_CLI_SESSION= | Session identifier for =--resume= (all backends) |
 | =CLAUDE_SETTING_SOURCES= | Comma-separated list of setting sources |
 | =CLAUDE_CODE_PATH= | Claude CLI command/path (e.g. =docker compose exec claude claude=) |
 | =CLAUDE_CONTAINER_PATH= | Container path for Docker mapping (e.g. =/workspace=). Uses PROJECT_ROOT as host path. |
@@ -787,8 +787,9 @@ configuration. Using constants ensures consistency across the codebase.
 (defconst claude-org-permission-property "CLAUDE_PERMISSION_MODE"
   "Org property name for permission mode.")
 
-(defconst claude-org-sdk-uuid-property "CLAUDE_SDK_UUID"
-  "Org property name for SDK session UUID (used for --resume).")
+(defconst claude-org-sdk-uuid-property "CLAUDE_CLI_SESSION"
+  "Org property name for CLI session UUID (used for --resume).
+Unified property shared by json-stream and terminal backends.")
 
 (defconst claude-org-native-session-id-property "CLAUDE_NATIVE_SESSION_ID"
   "Org property for native terminal CLI session ID (used for --resume).
@@ -3280,6 +3281,15 @@ SESSION-ID is accepted for API compatibility but not stored in the index."
                         name))
         (write-region (point-min) (point-max) index-file nil 'silent)))))
 
+(defcustom claude-org-sdd-default-backend "cmux"
+  "Default CLAUDE_BACKEND value for new SDD sections.
+Inserted as a property when creating SDD structures via `claude-org-insert-sdd'.
+Set to nil to omit the property (uses whatever backend the file/section inherits)."
+  :type '(choice (const :tag "cmux" "cmux")
+                 (const :tag "iTerm2" "iterm2")
+                 (const :tag "None (inherit)" nil))
+  :group 'claude-org)
+
 (defun claude-org-insert-sdd ()
   "Insert an SDD (Spec-Driven Development) structure.
 Creates two notebook sections:
@@ -3311,6 +3321,8 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id name file-base) "\n")
     (insert ":CLAUDE_SESSION_ID: " session-id "\n")
+    (when claude-org-sdd-default-backend
+      (insert ":CLAUDE_BACKEND: " claude-org-sdd-default-backend "\n"))
     (insert ":END:\n\n")
 
     ;; 1. Insert System Prompt section for AI guidance
