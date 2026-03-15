@@ -139,12 +139,25 @@ def fetch_session_metadata(
     return cli_session, story_name, system_prompt
 
 
+def _normalize_name(name: str) -> str:
+    """Normalize a story name to a valid symbol name for --name flag.
+
+    Lowercases, replaces non-alphanumeric with hyphens, collapses runs,
+    strips leading/trailing hyphens.
+    """
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower())
+    return slug.strip("-")
+
+
 def build_claude_args(
     plugin_dir: str,
     mcp_url: str,
     system_prompt: str,
     cli_session: str,
     extra_args: list[str],
+    story_name: str = "",
 ) -> list[str]:
     """Build the claude CLI argument list."""
     args = ["claude"]
@@ -156,6 +169,10 @@ def build_claude_args(
         f'{{"mcpServers":{{"emacs":{{"type":"http","url":"{mcp_url}"}}}}}}'
     )
     args.extend(["--mcp-config", mcp_config])
+
+    # Set session name from SDD story name
+    if story_name:
+        args.extend(["--name", _normalize_name(story_name)])
 
     if _is_valid_session(system_prompt):
         args.extend(["--system-prompt", system_prompt])
@@ -247,7 +264,10 @@ def main() -> None:
     sys.stdout.flush()
 
     # Build and exec claude
-    args = build_claude_args(plugin_dir, mcp_url, system_prompt, cli_session, extra_args)
+    args = build_claude_args(
+        plugin_dir, mcp_url, system_prompt, cli_session, extra_args,
+        story_name=story_name or "",
+    )
 
     if _is_valid_session(cli_session):
         print(f"Resuming Claude CLI session: {cli_session}")
