@@ -102,6 +102,11 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 - Use `make test` or `make test-unit` in terminal instead
 - Mock CLI tests use `MOCK_SCENARIO` env var for fixture selection
 
+### CI Monitoring
+- After every `git push`, monitor GitHub Actions in a background agent
+  until the workflow passes (use `gh run list` / `gh run watch`)
+- If CI fails, fix the issue and push again
+
 ### Error Handling
 - Process filters must never signal errors (kills the process)
 - Use `condition-case` in all callbacks
