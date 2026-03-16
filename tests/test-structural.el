@@ -579,7 +579,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-org: cmux backend
     "claude-org-cmux-cancel"
     "claude-org-cmux-clear-status"
-    "claude-org-cmux-focus-terminal"
     "claude-org-cmux-notify"
     "claude-org-cmux-open-tab"
     "claude-org-cmux-set-progress"

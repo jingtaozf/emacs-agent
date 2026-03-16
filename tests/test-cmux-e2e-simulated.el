@@ -753,38 +753,6 @@ the same session."
 ;;; Tests: Focus Terminal (P1)
 ;;; ============================================================================
 
-(defvar test-cmux--org-content-with-workspace
-  "* Test Story
-:PROPERTIES:
-:CLAUDE_SESSION_ID: test-cmux-session-focus
-:CMUX_SURFACE_ID: surface:focus-1
-:CMUX_WORKSPACE_ID: workspace:focus-99
-:CUSTOM_ID: test-cmux-story-focus
-:END:
-
-** Instruction 1
-:PROPERTIES:
-:CUSTOM_ID: test-cmux-focus-instr
-:END:
-
-#+begin_src ai
-focus test
-#+end_src
-"
-  "Org content with both CMUX_SURFACE_ID and CMUX_WORKSPACE_ID.")
-
-(ert-deftest test-cmux-focus-terminal ()
-  "Focus terminal calls select-workspace with the correct workspace ID."
-  :tags '(:unit :stable)
-  (test-cmux--with-mock
-    (test-cmux--with-org-buffer test-cmux--org-content-with-workspace
-      (goto-char (point-min))
-      (re-search-forward "focus test")
-      (claude-org-cmux-focus-terminal)
-      (let ((calls (test-cmux--mock-calls-for "select-workspace")))
-        (should calls)
-        (should (member "workspace:focus-99" (cdar calls)))))))
-
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
