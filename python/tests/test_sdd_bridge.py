@@ -300,7 +300,7 @@ class TestHandlePermission:
         mcp = MagicMock()
         handle_permission(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
         call_arg = mcp.eval_elisp.call_args[0][0]
-        assert "claude-org-iterm2--permission-needed" in call_arg
+        assert "claude-org--terminal-permission-needed" in call_arg
         assert "AskUserQuestion" in call_arg
         output = json.loads(capsys.readouterr().out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
@@ -336,7 +336,7 @@ class TestHandlePermissionClear:
         mcp = MagicMock()
         handle_permission_clear(mcp, {"tool_name": "Bash"}, "/tmp/f.org", "sid")
         call_arg = mcp.eval_elisp.call_args[0][0]
-        assert "claude-org-iterm2--permission-resolved" in call_arg
+        assert "claude-org--terminal-permission-resolved" in call_arg
         assert "sid" in call_arg
 
     def test_swallows_mcp_errors(self):

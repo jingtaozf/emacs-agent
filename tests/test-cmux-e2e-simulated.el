@@ -21,6 +21,7 @@
   (require 'literate-elisp)
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
   (literate-elisp-load (expand-file-name "claude-org.org" project-root))
+  (literate-elisp-load (expand-file-name "claude-org-iterm2.org" project-root))
   (literate-elisp-load (expand-file-name "claude-org-cmux.org" project-root)))
 
 (defvar test-cmux--project-root
@@ -651,6 +652,133 @@ the same session."
     (goto-char (point-min))
     (re-search-forward "Query B")
     (should-not (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
+
+;;; ============================================================================
+;;; Tests: Permission Routing (P0 fix)
+;;; ============================================================================
+
+(ert-deftest test-cmux-permission-needed-calls-select-workspace ()
+  "claude-org-cmux--permission-needed focuses the cmux workspace."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    ;; Register a session mapping so the dispatcher finds cmux
+    (puthash "sdd-perm-test" "mock-session-key"
+             claude-org-cmux--sdd-to-session-key)
+    (puthash "sdd-perm-test" "mock-ws-id"
+             claude-org-cmux--sdd-to-workspace)
+    (unwind-protect
+        (progn
+          (claude-org-cmux--permission-needed "sdd-perm-test" "Bash")
+          ;; Should have called select-workspace to focus the terminal
+          (let ((calls (test-cmux--mock-calls-for "select-workspace")))
+            (should calls)
+            (should (member "mock-ws-id" (cdar calls))))
+          ;; Should be registered in pending permissions
+          (should (gethash "sdd-perm-test" claude-agent--pending-permissions)))
+      ;; Cleanup
+      (remhash "sdd-perm-test" claude-org-cmux--sdd-to-session-key)
+      (remhash "sdd-perm-test" claude-org-cmux--sdd-to-workspace)
+      (remhash "sdd-perm-test" claude-agent--pending-permissions))))
+
+(ert-deftest test-cmux-permission-resolved-clears-state ()
+  "claude-org-cmux--permission-resolved clears pending permission."
+  :tags '(:unit :stable)
+  (puthash "sdd-resolve-test" "Bash" claude-agent--pending-permissions)
+  (unwind-protect
+      (progn
+        (claude-org-cmux--permission-resolved "sdd-resolve-test")
+        (should-not (gethash "sdd-resolve-test" claude-agent--pending-permissions)))
+    (remhash "sdd-resolve-test" claude-agent--pending-permissions)))
+
+(ert-deftest test-cmux-terminal-permission-routes-to-cmux ()
+  "Terminal permission dispatcher routes cmux sessions to cmux handler."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (puthash "sdd-route-test" "mock-key"
+             claude-org-cmux--sdd-to-session-key)
+    (puthash "sdd-route-test" "mock-ws"
+             claude-org-cmux--sdd-to-workspace)
+    (unwind-protect
+        (progn
+          (claude-org--terminal-permission-needed "sdd-route-test" "Edit")
+          ;; Should have used cmux path (select-workspace called)
+          (should (test-cmux--mock-calls-for "select-workspace")))
+      (remhash "sdd-route-test" claude-org-cmux--sdd-to-session-key)
+      (remhash "sdd-route-test" claude-org-cmux--sdd-to-workspace)
+      (remhash "sdd-route-test" claude-agent--pending-permissions))))
+
+;;; ============================================================================
+;;; Tests: Session Recovery (P1)
+;;; ============================================================================
+
+(ert-deftest test-cmux-recover-session-from-org-buffer ()
+  "Session recovery finds CMUX_SURFACE_ID from org buffer properties."
+  :tags '(:unit :stable)
+  ;; Use file-backed buffer with claude-org-mode (recovery checks this)
+  (let ((file (make-temp-file "test-recover-" nil ".org")))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (with-current-buffer buf
+            (org-mode)
+            (let ((claude-org-auto-start-mcp-server nil))
+              (claude-org-mode 1))
+            (insert test-cmux--org-content-with-surface)
+            (save-buffer))
+          ;; Clear hash tables to simulate Emacs restart
+          (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-session-key)
+          (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-surface)
+          ;; Try recovery
+          (let ((result (claude-org-cmux--recover-session "test-cmux-session-003")))
+            (should result)
+            (should (gethash "test-cmux-session-003" claude-org-cmux--sdd-to-session-key))
+            (should (equal "surface:existing-123"
+                           (gethash "test-cmux-session-003" claude-org-cmux--sdd-to-surface))))
+          ;; Cleanup
+          (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-session-key)
+          (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-surface)
+          (kill-buffer buf))
+      (delete-file file))))
+
+(ert-deftest test-cmux-recover-session-not-found ()
+  "Session recovery returns nil for unknown session IDs."
+  :tags '(:unit :stable)
+  (should-not (claude-org-cmux--recover-session "nonexistent-session-999")))
+
+;;; ============================================================================
+;;; Tests: Focus Terminal (P1)
+;;; ============================================================================
+
+(defvar test-cmux--org-content-with-workspace
+  "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-focus
+:CMUX_SURFACE_ID: surface:focus-1
+:CMUX_WORKSPACE_ID: workspace:focus-99
+:CUSTOM_ID: test-cmux-story-focus
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-focus-instr
+:END:
+
+#+begin_src ai
+focus test
+#+end_src
+"
+  "Org content with both CMUX_SURFACE_ID and CMUX_WORKSPACE_ID.")
+
+(ert-deftest test-cmux-focus-terminal ()
+  "Focus terminal calls select-workspace with the correct workspace ID."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-with-workspace
+      (goto-char (point-min))
+      (re-search-forward "focus test")
+      (claude-org-cmux-focus-terminal)
+      (let ((calls (test-cmux--mock-calls-for "select-workspace")))
+        (should calls)
+        (should (member "workspace:focus-99" (cdar calls)))))))
 
 (provide 'test-cmux-e2e-simulated)
 

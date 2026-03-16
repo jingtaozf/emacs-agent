@@ -20,6 +20,9 @@ Part of claude-org; loaded after claude-org.org.
 ;; Forward declarations for functions defined in claude-org-iterm2.org
 (declare-function claude-org-sdd-bridge-system-prompt "claude-org-iterm2" (org-file sdd-session-id))
 (declare-function claude-org-sdd-bridge-get-cli-session "claude-org-iterm2" (org-file sdd-session-id))
+(declare-function claude-org-iterm2--permission-needed "claude-org-iterm2" (sdd-session-id tool-name))
+(declare-function claude-org-iterm2--permission-resolved "claude-org-iterm2" (sdd-session-id))
+(declare-function claude-org-iterm2--activate-emacs "claude-org-iterm2" ())
 #+END_SRC
 
 * Configuration
@@ -66,6 +69,13 @@ Defaults to `uv run --project <pkg>/python claude-sdd'."
 
 (defvar claude-org-cmux--sdd-to-surface (make-hash-table :test 'equal)
   "Map SDD session ID → cmux surface ID.")
+
+(defvar claude-org-cmux--sdd-to-workspace (make-hash-table :test 'equal)
+  "Map SDD session ID → cmux workspace ID.")
+
+(defvar claude-agent--pending-permissions (make-hash-table :test 'equal)
+  "Map SDD session ID → tool-name for sessions waiting on permission.
+Shared between cmux and iTerm2 backends for mode-line display.")
 #+END_SRC
 
 * Navigation Helpers
@@ -418,7 +428,10 @@ Auto-starts the Emacs MCP server if not running."
             (puthash sdd-session-id surface-id
                      claude-org-cmux--sdd-to-surface)
             (puthash sdd-session-id (claude-org--current-session-key)
-                     claude-org-cmux--sdd-to-session-key))
+                     claude-org-cmux--sdd-to-session-key)
+            (when (string-prefix-p "workspace:" workspace-ref)
+              (puthash sdd-session-id workspace-ref
+                       claude-org-cmux--sdd-to-workspace)))
           (save-buffer)
           (message "Claude Code in cmux (surface: %s) — waiting for TUI..." surface-id)
           ;; Wait for Claude Code TUI to be ready before returning
@@ -713,6 +726,112 @@ cmux-specific rich feedback that iTerm2 cannot provide.
   (condition-case nil
       (claude-org-cmux--call "notify" "--title" title "--body" body)
     (error nil)))
+#+END_SRC
+
+* Permission Handling
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--permission-needed (sdd-session-id tool-name)
+  "Handle permission notification for a cmux session.
+Focuses the cmux workspace and activates cmux app."
+  ;; Register pending permission
+  (puthash sdd-session-id tool-name claude-agent--pending-permissions)
+  ;; Focus cmux workspace
+  (let ((ws-id (gethash sdd-session-id claude-org-cmux--sdd-to-workspace)))
+    (when ws-id
+      (condition-case nil
+          (claude-org-cmux--call "select-workspace" "--workspace" ws-id)
+        (error nil))))
+  ;; Activate cmux app
+  (when (eq system-type 'darwin)
+    (condition-case nil
+        (start-process "activate-cmux" nil "osascript" "-e"
+                       "tell application \"cmux\" to activate")
+      (error nil)))
+  ;; Bring Emacs to front + macOS notification + mode-line update
+  (condition-case nil (claude-org-iterm2--activate-emacs) (error nil))
+  (condition-case nil
+      (claude-org--notify "Claude: Permission Needed"
+                          (format "%s needs approval for %s"
+                                  sdd-session-id tool-name))
+    (error nil))
+  (condition-case nil (claude-agent--update-activity-string) (error nil))
+  "ok")
+
+(defun claude-org-cmux--permission-resolved (sdd-session-id)
+  "Clear pending permission for a cmux session."
+  (remhash sdd-session-id claude-agent--pending-permissions)
+  (condition-case nil (claude-agent--update-activity-string) (error nil))
+  "ok")
+
+(defun claude-org--terminal-permission-needed (sdd-session-id tool-name)
+  "Route permission notification to the correct backend."
+  (cond
+   ((gethash sdd-session-id claude-org-cmux--sdd-to-session-key)
+    (claude-org-cmux--permission-needed sdd-session-id tool-name))
+   (t
+    (claude-org-iterm2--permission-needed sdd-session-id tool-name))))
+
+(defun claude-org--terminal-permission-resolved (sdd-session-id)
+  "Route permission resolution to the correct backend."
+  (cond
+   ((gethash sdd-session-id claude-org-cmux--sdd-to-session-key)
+    (claude-org-cmux--permission-resolved sdd-session-id))
+   (t
+    (claude-org-iterm2--permission-resolved sdd-session-id))))
+#+END_SRC
+
+* Session Recovery
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--recover-session (sdd-session-id)
+  "Try to recover session mapping by scanning org buffers.
+Called when sdd-session-id is not found in the hash table after Emacs restart.
+Returns the session-key if found, nil otherwise."
+  (cl-block recover
+    (dolist (buf (buffer-list))
+      (when (and (buffer-file-name buf)
+                 (with-current-buffer buf (bound-and-true-p claude-org-mode)))
+        (with-current-buffer buf
+          (save-excursion
+            (save-restriction
+              (widen)
+              (goto-char (point-min))
+              (when (re-search-forward
+                     (format ":CLAUDE_SESSION_ID: %s"
+                             (regexp-quote sdd-session-id))
+                     nil t)
+                (org-back-to-heading t)
+                (let ((surface (org-entry-get nil "CMUX_SURFACE_ID" nil))
+                      (workspace (org-entry-get nil "CMUX_WORKSPACE_ID" nil))
+                      (session-key (claude-org--current-session-key)))
+                  (when (and surface session-key)
+                    (puthash sdd-session-id session-key
+                             claude-org-cmux--sdd-to-session-key)
+                    (puthash sdd-session-id surface
+                             claude-org-cmux--sdd-to-surface)
+                    (when workspace
+                      (puthash sdd-session-id workspace
+                               claude-org-cmux--sdd-to-workspace))
+                    (cl-return-from recover session-key)))))))))))
+#+END_SRC
+
+* Focus Terminal
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux-focus-terminal ()
+  "Focus the cmux workspace for the current SDD story."
+  (interactive)
+  (let ((ws-id (condition-case nil
+                   (claude-org-cmux--find-session-property "CMUX_WORKSPACE_ID")
+                 (error nil))))
+    (unless ws-id (user-error "No cmux workspace for this story"))
+    (claude-org-cmux--call "select-workspace" "--workspace" ws-id)
+    (when (eq system-type 'darwin)
+      (condition-case nil
+          (start-process "focus-cmux" nil "osascript" "-e"
+                         "tell application \"cmux\" to activate")
+        (error nil)))))
 #+END_SRC
 
 * Provide

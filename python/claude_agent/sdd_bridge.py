@@ -479,7 +479,7 @@ def handle_permission(
             try:
                 _mcp_eval_with_trace(
                     mcp,
-                    f'(claude-org-iterm2--permission-needed '
+                    f'(claude-org--terminal-permission-needed '
                     f'"{_escape_elisp_string(session_id)}" '
                     f'"{_escape_elisp_string(tool_name)}")'
                 )
@@ -509,7 +509,7 @@ def handle_permission_clear(
         try:
             _mcp_eval_with_trace(
                 mcp,
-                f'(claude-org-iterm2--permission-resolved '
+                f'(claude-org--terminal-permission-resolved '
                 f'"{_escape_elisp_string(session_id)}")'
             )
         except (McpConnectionError, McpElispError):
