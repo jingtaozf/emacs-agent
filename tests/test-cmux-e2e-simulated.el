@@ -546,6 +546,88 @@ Returns values from BODY. Cleans up buffer afterwards."
       (should (member "--title" (cdar calls)))
       (should (member "Done" (cdar calls))))))
 
+;;; ============================================================================
+;;; Tests: CLI Session Isolation
+;;; ============================================================================
+
+(defvar test-cmux--org-two-stories
+  "* Story A
+:PROPERTIES:
+:CLAUDE_SESSION_ID: sdd-story-a
+:CLAUDE_BACKEND: cmux
+:CUSTOM_ID: test-story-a
+:CLAUDE_CLI_SESSION: uuid-story-a-cli
+:END:
+
+** Instruction 1 :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: test-instr-a1
+:END:
+
+#+begin_src ai
+Query A
+#+end_src
+
+* Story B
+:PROPERTIES:
+:CLAUDE_SESSION_ID: sdd-story-b
+:CLAUDE_BACKEND: cmux
+:CUSTOM_ID: test-story-b
+:END:
+
+** Instruction 1 :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: test-instr-b1
+:END:
+
+#+begin_src ai
+Query B
+#+end_src
+"
+  "Two sibling stories — A has CLI session, B does not.")
+
+(ert-deftest test-cmux-build-launch-no-cli-session ()
+  "build-launch-command does not crash when CLAUDE_CLI_SESSION is missing.
+Regression: the claude-sdd case had no condition-case, causing errors
+for new stories without a saved CLI session."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-two-stories
+    ;; Position at Story B's AI block (no CLAUDE_CLI_SESSION)
+    (goto-char (point-min))
+    (re-search-forward "Query B")
+    (let ((cmd (claude-org-cmux--build-launch-command
+                (buffer-file-name) "sdd-story-b" default-directory)))
+      ;; Should succeed without error
+      (should (stringp cmd))
+      ;; Should NOT contain --resume (Story B has no CLI session)
+      (should-not (string-match-p "--resume" cmd)))))
+
+(ert-deftest test-cmux-build-launch-with-cli-session ()
+  "build-launch-command includes --resume when CLAUDE_CLI_SESSION exists."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-two-stories
+    ;; Position at Story A's AI block (has CLAUDE_CLI_SESSION)
+    (goto-char (point-min))
+    (re-search-forward "Query A")
+    (let ((cmd (claude-org-cmux--build-launch-command
+                (buffer-file-name) "sdd-story-a" default-directory)))
+      (should (stringp cmd))
+      ;; Should contain --resume with Story A's UUID
+      (should (string-match-p "--resume" cmd))
+      (should (string-match-p "uuid-story-a-cli" cmd)))))
+
+(ert-deftest test-cmux-cli-session-no-cross-contamination ()
+  "Story B must not inherit Story A's CLAUDE_CLI_SESSION.
+Regression: sibling stories shared the same CLI session UUID."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-two-stories
+    ;; From Story B's position, CLAUDE_CLI_SESSION should be nil
+    (goto-char (point-min))
+    (re-search-forward "Query B")
+    (should-not (org-entry-get nil "CLAUDE_CLI_SESSION" nil))
+    ;; With inheritance, should STILL be nil (siblings don't inherit)
+    (should-not (org-entry-get nil "CLAUDE_CLI_SESSION" t))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
