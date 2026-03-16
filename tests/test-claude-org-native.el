@@ -249,19 +249,16 @@ Sets up claude-org-mode and ensures cleanup."
 ;;; ============================================================
 
 (ert-deftest test-native-terminal-in-menu ()
-  "claude-org-menu transient should reference the native terminal command.
-Verifies that the symbol claude-org-open-native-terminal appears in the
-transient layout stored on the claude-org-menu symbol."
+  "claude-org-menu transient should reference the unified terminal command.
+The \"I\" Open terminal entry dispatches to native/cmux/iterm2 based on
+CLAUDE_BACKEND. Verifies claude-org-open-terminal-tab is in the layout."
   :tags '(:unit :native :phase-7)
-  ;; Check that the transient layout data references our command.
-  ;; The transient--layout property contains the raw vector/list structure.
   (let ((layout (get 'claude-org-menu 'transient--layout)))
     (should layout)
-    ;; Flatten the layout structure and look for our command symbol
     (let ((found nil))
       (cl-labels ((walk (obj)
                     (cond
-                     ((eq obj 'claude-org-open-native-terminal) (setq found t))
+                     ((eq obj 'claude-org-open-terminal-tab) (setq found t))
                      ((consp obj) (walk (car obj)) (walk (cdr obj)))
                      ((vectorp obj)
                       (cl-loop for elt across obj do (walk elt))))))
