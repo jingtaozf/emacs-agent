@@ -108,35 +108,33 @@ def select_session_interactive(sessions_text: str, org_file: str) -> str:
 
 def fetch_session_metadata(
     mcp: McpClient, org_file: str, session_id: str
-) -> tuple[str, str, str]:
-    """Fetch session metadata (cli_session, story_name, system_prompt)."""
+) -> tuple[str, str]:
+    """Fetch session metadata (story_name, system_prompt) from Emacs.
+
+    State principle: Python is stateless. CLI session (--resume) is decided
+    by Emacs and passed as a CLI arg — NOT read here via MCP.
+    """
     esc_org = _escape_elisp_string(org_file)
     esc_sid = _escape_elisp_string(session_id)
     elisp = (
         '(let ((debug-on-error nil) (debug-on-quit nil))'
         '  (let* ((prompt (claude-org-sdd-bridge-system-prompt '
         f'    "{esc_org}" "{esc_sid}"))'
-        '         (cli-sid (or (claude-org-sdd-bridge-get-cli-session '
-        f'    "{esc_org}" "{esc_sid}") ""))'
         f'         (story (with-current-buffer (claude-org-sdd-bridge--ensure-buffer "{esc_org}")'
         '            (save-excursion (save-restriction (widen)'
         f'              (claude-org-sdd-bridge--goto-session "{esc_sid}")'
         '              (substring-no-properties (org-get-heading t t t t)))))))'
-        r'    (substring-no-properties (format "%s\t%s\n%s" cli-sid story prompt))))'
+        r'    (substring-no-properties (format "%s\n%s" story prompt))))'
     )
     result = mcp.eval_elisp(elisp)
     if not result:
-        return "", "", ""
+        return "", ""
 
     lines = result.split("\n", 1)
-    first_line = lines[0]
+    story_name = lines[0]
     system_prompt = lines[1] if len(lines) > 1 else ""
 
-    parts = first_line.split("\t", 1)
-    cli_session = parts[0] if parts else ""
-    story_name = parts[1] if len(parts) > 1 else ""
-
-    return cli_session, story_name, system_prompt
+    return story_name, system_prompt
 
 
 def _normalize_name(name: str) -> str:
@@ -155,11 +153,14 @@ def build_claude_args(
     plugin_dir: str,
     mcp_url: str,
     system_prompt: str,
-    cli_session: str,
     extra_args: list[str],
     story_name: str = "",
 ) -> list[str]:
-    """Build the claude CLI argument list."""
+    """Build the claude CLI argument list.
+
+    State principle: --resume is decided by Emacs and arrives via extra_args.
+    Python does NOT independently determine whether to resume.
+    """
     args = ["claude"]
 
     # Always include plugin-dir and mcp-config
@@ -177,9 +178,7 @@ def build_claude_args(
     if _is_valid_session(system_prompt):
         args.extend(["--system-prompt", system_prompt])
 
-    if _is_valid_session(cli_session):
-        args.extend(["--resume", cli_session])
-
+    # extra_args may contain --resume <id> from Emacs (state owner)
     args.extend(extra_args)
     args.append("--ide")
     args.append("--chrome")
@@ -228,7 +227,6 @@ def main() -> None:
 
     # MCP-dependent setup
     system_prompt = ""
-    cli_session = ""
     story_name = ""
 
     if mcp_ok:
@@ -240,7 +238,7 @@ def main() -> None:
             session_id = select_session_interactive(sessions, org_file)
 
         print(f"Building session metadata for {session_id}...")
-        cli_session, story_name, system_prompt = fetch_session_metadata(
+        story_name, system_prompt = fetch_session_metadata(
             mcp, org_file, session_id
         )
 
@@ -264,19 +262,19 @@ def main() -> None:
     sys.stdout.flush()
 
     # Build and exec claude
+    # --resume comes via extra_args from Emacs (state owner), not from Python
     args = build_claude_args(
-        plugin_dir, mcp_url, system_prompt, cli_session, extra_args,
+        plugin_dir, mcp_url, system_prompt, extra_args,
         story_name=story_name or "",
     )
-
-    if _is_valid_session(cli_session):
-        print(f"Resuming Claude CLI session: {cli_session}")
 
     print("Starting Claude Code...")
     print(f"  Org file:   {org_file}")
     print(f"  Session ID: {session_id or 'none'}")
     print(f"  Story:      {story_name or 'unknown'}")
     print(f"  MCP bridge: {mcp_ok}")
+    print(f"  Extra args: {extra_args}")
+    print(f"  Final cmd:  {' '.join(args)}")
     print()
 
     # Unset CLAUDECODE to avoid "cannot launch inside another Claude Code session" error

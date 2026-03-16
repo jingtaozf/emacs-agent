@@ -64,7 +64,7 @@ class TestIsValidSession:
 
 class TestBuildClaudeArgs:
     def test_minimal(self):
-        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "", "", [])
+        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "", [])
         assert args[0] == "claude"
         assert "--plugin-dir" in args
         assert "--mcp-config" in args
@@ -72,27 +72,27 @@ class TestBuildClaudeArgs:
         assert "--resume" not in args
 
     def test_with_system_prompt(self):
-        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "You are helpful", "", [])
+        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "You are helpful", [])
         idx = args.index("--system-prompt")
         assert args[idx + 1] == "You are helpful"
 
-    def test_with_resume(self):
-        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "", "cli-123", [])
+    def test_resume_via_extra_args(self):
+        """--resume comes from Emacs via extra_args (state owner principle)."""
+        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "", ["--resume", "cli-123"])
         idx = args.index("--resume")
         assert args[idx + 1] == "cli-123"
 
-    def test_null_resume_ignored(self):
-        assert "--resume" not in build_claude_args("/p", "http://x", "", "null", [])
-
-    def test_nil_resume_ignored(self):
-        assert "--resume" not in build_claude_args("/p", "http://x", "", "nil", [])
+    def test_no_resume_without_extra_args(self):
+        """No --resume when extra_args is empty (new story)."""
+        args = build_claude_args("/p", "http://x", "", [])
+        assert "--resume" not in args
 
     def test_extra_args(self):
-        args = build_claude_args("/p", "http://x", "", "", ["--verbose", "--model", "opus"])
+        args = build_claude_args("/p", "http://x", "", ["--verbose", "--model", "opus"])
         assert "--verbose" in args and "opus" in args
 
     def test_mcp_config_contains_url(self):
-        args = build_claude_args("/p", "http://custom:8080/mcp", "", "", [])
+        args = build_claude_args("/p", "http://custom:8080/mcp", "", [])
         config = json.loads(args[args.index("--mcp-config") + 1])
         assert config["mcpServers"]["emacs"]["url"] == "http://custom:8080/mcp"
 
@@ -102,12 +102,12 @@ class TestBuildClaudeArgsIde:
 
     def test_ide_flag_always_present(self):
         """build_claude_args always includes --ide."""
-        args = build_claude_args("/plugin", "http://mcp", "", "", [])
+        args = build_claude_args("/plugin", "http://mcp", "", [])
         assert "--ide" in args
 
     def test_ide_flag_with_extra_args(self):
         """--ide coexists with extra args."""
-        args = build_claude_args("/plugin", "http://mcp", "", "", ["--verbose"])
+        args = build_claude_args("/plugin", "http://mcp", "", ["--verbose"])
         assert "--ide" in args
         assert "--verbose" in args
 

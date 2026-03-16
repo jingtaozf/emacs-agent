@@ -72,6 +72,17 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 
 ## Rules
 
+### State Ownership: Emacs Stateful, Python Stateless
+- **Emacs owns all state** — org properties, session data, CLI session IDs
+- **Python scripts are stateless functions** — they receive state as parameters
+  (CLI args, env vars) and return results; they do NOT independently read org
+  properties to make decisions
+- Example: `--resume <id>` is decided by Emacs (reads `CLAUDE_CLI_SESSION`
+  property), passed as a CLI arg. Python `claude_sdd.py` just forwards it.
+  Python must NOT call MCP to read the property and decide independently.
+- Example: `SDD_SESSION_ID` env var is set by Emacs, read by Python hooks.
+  Python hooks use it to identify which story they're serving.
+
 ### Code Style
 - Use `defvar` for hooks (not `defcustom`) for existing hooks
 - Use `defcustom` with `:type` keyword for new user-facing options
