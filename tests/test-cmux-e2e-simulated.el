@@ -586,47 +586,71 @@ Query B
 "
   "Two sibling stories — A has CLI session, B does not.")
 
+(defvar test-cmux--org-file-level-cli
+  "#+PROPERTY: CLAUDE_CLI_SESSION stale-file-level-uuid
+* Story C
+:PROPERTIES:
+:CLAUDE_SESSION_ID: sdd-story-c
+:CLAUDE_BACKEND: cmux
+:CUSTOM_ID: test-story-c
+:END:
+
+** Instruction 1 :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: test-instr-c1
+:END:
+
+#+begin_src ai
+Query C
+#+end_src
+"
+  "Story with file-level CLAUDE_CLI_SESSION — the contamination case.")
+
 (ert-deftest test-cmux-build-launch-no-cli-session ()
-  "build-launch-command does not crash when CLAUDE_CLI_SESSION is missing.
-Regression: the claude-sdd case had no condition-case, causing errors
-for new stories without a saved CLI session."
+  "build-launch-command does not crash when CLAUDE_CLI_SESSION is missing."
   :tags '(:unit :stable)
   (test-cmux--with-org-buffer test-cmux--org-two-stories
-    ;; Position at Story B's AI block (no CLAUDE_CLI_SESSION)
     (goto-char (point-min))
     (re-search-forward "Query B")
     (let ((cmd (claude-org-cmux--build-launch-command
                 (buffer-file-name) "sdd-story-b" default-directory)))
-      ;; Should succeed without error
       (should (stringp cmd))
-      ;; Should NOT contain --resume (Story B has no CLI session)
       (should-not (string-match-p "--resume" cmd)))))
 
 (ert-deftest test-cmux-build-launch-with-cli-session ()
-  "build-launch-command includes --resume when CLAUDE_CLI_SESSION exists."
+  "build-launch-command includes --resume when CLAUDE_CLI_SESSION is on the session heading."
   :tags '(:unit :stable)
   (test-cmux--with-org-buffer test-cmux--org-two-stories
-    ;; Position at Story A's AI block (has CLAUDE_CLI_SESSION)
+    ;; Position at Story A's AI block — property is on the parent heading
     (goto-char (point-min))
     (re-search-forward "Query A")
     (let ((cmd (claude-org-cmux--build-launch-command
                 (buffer-file-name) "sdd-story-a" default-directory)))
       (should (stringp cmd))
-      ;; Should contain --resume with Story A's UUID
       (should (string-match-p "--resume" cmd))
       (should (string-match-p "uuid-story-a-cli" cmd)))))
 
+(ert-deftest test-cmux-build-launch-ignores-file-level-cli-session ()
+  "build-launch-command must NOT use file-level #+PROPERTY: CLAUDE_CLI_SESSION.
+Regression: stale file-level property caused all new stories to resume
+the same session."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-file-level-cli
+    (goto-char (point-min))
+    (re-search-forward "Query C")
+    (let ((cmd (claude-org-cmux--build-launch-command
+                (buffer-file-name) "sdd-story-c" default-directory)))
+      (should (stringp cmd))
+      ;; Must NOT contain --resume from the file-level property
+      (should-not (string-match-p "--resume" cmd)))))
+
 (ert-deftest test-cmux-cli-session-no-cross-contamination ()
-  "Story B must not inherit Story A's CLAUDE_CLI_SESSION.
-Regression: sibling stories shared the same CLI session UUID."
+  "Story B must not inherit Story A's CLAUDE_CLI_SESSION."
   :tags '(:unit :stable)
   (test-cmux--with-org-buffer test-cmux--org-two-stories
-    ;; From Story B's position, CLAUDE_CLI_SESSION should be nil
     (goto-char (point-min))
     (re-search-forward "Query B")
-    (should-not (org-entry-get nil "CLAUDE_CLI_SESSION" nil))
-    ;; With inheritance, should STILL be nil (siblings don't inherit)
-    (should-not (org-entry-get nil "CLAUDE_CLI_SESSION" t))))
+    (should-not (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
 
 (provide 'test-cmux-e2e-simulated)
 

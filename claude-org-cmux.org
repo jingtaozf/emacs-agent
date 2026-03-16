@@ -239,14 +239,15 @@ PROJECT-ROOT the working directory."
      ;; claude-sdd: passes org-file and session-id
      ((eq claude-org-cmux-launch-command 'claude-sdd)
       ;; Emacs is the state owner for --resume (reads CLAUDE_CLI_SESSION).
-      ;; Inheritance (t) is safe: it walks UP (parent→child), never across
-      ;; siblings. Cross-contamination was caused by Python reading the
-      ;; property independently (now fixed — Python is stateless).
+      ;; Do NOT use find-session-property (inheritance=t) here — a stale
+      ;; file-level #+PROPERTY: CLAUDE_CLI_SESSION contaminates all stories.
+      ;; Read directly from the session heading (no inheritance).
       (let* ((sdd-script claude-org-cmux-sdd-script)
              (cli-session
-              (condition-case nil
-                  (claude-org-cmux--find-session-property "CLAUDE_CLI_SESSION")
-                (error nil)))
+              (ignore-errors
+                (save-excursion
+                  (claude-org-cmux--goto-session-heading)
+                  (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
              (parts (list sdd-script
                           (shell-quote-argument (or org-file ""))
                           (shell-quote-argument (or sdd-session-id "")))))
