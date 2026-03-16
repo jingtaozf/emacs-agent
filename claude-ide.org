@@ -1866,18 +1866,23 @@ Returns dirty status response."
 
 (defun claude-ide-default-get-open-editors-tool ()
   "Default implementation to get list of currently open file editors.
-Returns MCP-formatted response with editors list."
-  (let ((editors '()))
-    ;; Iterate through all buffers
+Applies the same exclusion filters as the JSON stream IDE context:
+buffer name patterns, mode list, and predicates (including claude-org-mode).
+Returns MCP-formatted response with editors list, capped at 20."
+  (let ((editors '())
+        (count 0))
     (dolist (buffer (buffer-list))
-      (when (buffer-file-name buffer)
+      (when (and (< count 20)
+                 (buffer-file-name buffer)
+                 (not (claude-agent--buffer-excluded-p buffer)))
         (let* ((file-path (buffer-file-name buffer))
                (file-name (file-name-nondirectory file-path))
                (file-uri (concat "file://" file-path)))
           (push `((uri . ,file-uri)
                   (name . ,file-name)
                   (path . ,file-path))
-                editors))))
+                editors)
+          (setq count (1+ count)))))
     ;; Return MCP-formatted response
     (list `((type . "text")
             (text . ,(json-encode `((editors . ,(nreverse editors)))))))))

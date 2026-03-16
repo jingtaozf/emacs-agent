@@ -1079,3 +1079,78 @@ all pending prompts there.
 6. Elisp: query manager enhancement (=⚠ Permission: Bash= per query line)
 7. =make check= — all tests pass
 8. Manual E2E test with real SDD story
+
+* Design: Exclude Notebook Buffers from IDE =getOpenEditors=
+
+** Problem
+
+The IDE protocol's =getOpenEditors= tool (=claude-ide.org=) reports ALL file-visiting
+buffers to Claude Code, including =claude-org-mode= notebook files. These notebook
+files are NOT project source code — they're conversation logs. Including them:
+
+1. Pollutes Claude Code's file context with irrelevant notebook content
+2. May confuse Claude Code into reading/editing the notebook directly
+3. Differs from the JSON stream path, which already excludes these buffers
+
+** Current Behavior: Two Paths, Inconsistent Filtering
+
+| Filter | JSON Stream (system-reminder) | IDE Protocol (getOpenEditors) |
+|--------+-------------------------------+-------------------------------|
+| Non-file buffers | ✅ Filtered | ✅ Filtered |
+| =*Messages*=, =*scratch*= etc. | ✅ Name pattern list | ❌ Not filtered |
+| =special-mode=, =dired-mode= | ✅ Mode exclusion list | ❌ Not filtered |
+| =claude-org-mode= (notebooks) | ✅ Predicate at =claude-org.org:5190= | ❌ Not filtered |
+| Buffer count limit | ✅ Capped at 10 | ❌ No limit |
+
+** Design
+
+Reuse the existing =claude-agent--buffer-excluded-p= function (=claude-agent-ide.org:50=)
+in the =getOpenEditors= handler. This function already implements all three exclusion
+layers (name patterns, mode list, predicates) including the =claude-org-mode= predicate.
+
+*** Change 1: Update =claude-ide-default-get-open-editors-tool=
+
+In =claude-ide.org:1867=, change the buffer filter from just =buffer-file-name= to
+also check =claude-agent--buffer-excluded-p=:
+
+#+begin_src elisp
+(defun claude-ide-default-get-open-editors-tool ()
+  (let ((editors '())
+        (count 0))
+    (dolist (buffer (buffer-list))
+      (when (and (buffer-file-name buffer)
+                 (not (claude-agent--buffer-excluded-p buffer))
+                 (< count 20))  ;; reasonable limit
+        (let* ((file-path (buffer-file-name buffer))
+               (file-name (file-name-nondirectory file-path))
+               (file-uri  (concat "file://" file-path)))
+          (push `((uri  . ,file-uri)
+                  (name . ,file-name)
+                  (path . ,file-path))
+                editors)
+          (cl-incf count))))
+    (list `((type . "text")
+            (text . ,(json-encode `((editors . ,(nreverse editors)))))))))
+#+end_src
+
+*** What Gets Excluded
+
+After this change, =getOpenEditors= will exclude:
+
+- Buffers matching =claude-agent-ide-context-exclude-buffer-names= patterns
+- Buffers with modes in =claude-agent-ide-context-exclude-modes=
+- Buffers where any =claude-agent-ide-context-exclude-predicates= returns non-nil
+  (this includes the =claude-org-mode= predicate registered at =claude-org.org:5190=)
+
+*** No Changes Needed
+
+- The exclusion predicate for =claude-org-mode= is already registered globally
+  by =claude-org--register-exclusion= at load time
+- =claude-agent--buffer-excluded-p= is already defined in =claude-agent-ide.org=
+- No new configuration variables needed
+
+** Features
+
+*** TODO Apply =claude-agent--buffer-excluded-p= filter to =getOpenEditors=
+*** TODO Add buffer count limit (20) to =getOpenEditors=
+*** TODO Add test: =claude-org-mode= buffer excluded from =getOpenEditors= response

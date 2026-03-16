@@ -368,6 +368,7 @@ test-org-unit:
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		-l tests/test-terminal-prompt-parity.el \
 		-l tests/test-sdd-bridge-response.el \
+		-l tests/test-ide-open-editors.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mcp-unit
