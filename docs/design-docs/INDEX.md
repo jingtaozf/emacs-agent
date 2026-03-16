@@ -12,6 +12,5 @@
 | 2026-03-13 | Slack Bot for AI Agent | draft |
 | 2026-03-13 | Unified Tracing — Cross-Process Observability | proposed |
 | 2026-03-15 | Single Root Span Per AI Block Execution | proposed |
-| 2026-03-15 | Terminal Backends: cmux & iTerm2 | implemented |
+| 2026-03-15 | cmux Backend — Architecture, Integration, and Roadmap | Phase 1 implemented |
 | 2026-03-15 | SDD Story Worktrees | draft |
-| 2026-03-16 | Deep cmux Integration — Richer UI and Architecture Fixes | draft |

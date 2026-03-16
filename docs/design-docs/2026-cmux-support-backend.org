@@ -1,341 +1,247 @@
-#+TITLE: Terminal Backends: cmux & iTerm2
-#+DATE: 2026-03-15
-#+STATUS: implemented
+#+TITLE: cmux Backend — Architecture, Integration, and Roadmap
+#+DATE: 2026-03-15 (merged 2026-03-16)
+#+STATUS: implemented (Phase 1); draft (Phases 2–4)
 
 * Overview
 
-claude-agent supports two terminal backends for running Claude Code TUI
-inside a macOS terminal controlled from Emacs org-mode. Both backends share
-the same SDD bridge, query registration, and mode-line infrastructure.
-They differ only in how they control the terminal application.
+claude-agent's cmux backend runs Claude Code TUI inside a cmux workspace
+controlled from Emacs org-mode. cmux is a macOS-native terminal multiplexer
+(Swift + Ghostty) with deep Claude Code integration via a =claude-hook= CLI
+subcommand, a rich sidebar metadata API, and 100+ CLI methods.
 
-| Backend | Terminal App | IPC Mechanism | Module |
-|---------+-------------+---------------+--------|
-| cmux | cmux (Ghostty-based) | Unix socket CLI | =claude-org-cmux.org= |
-| iTerm2 | iTerm2 | Python/AppleScript bridge | =claude-org-iterm2.org= |
+| Aspect | Value |
+|--------+-------|
+| Module | =claude-org-cmux.org= (820 lines) |
+| Backend property | =CLAUDE_BACKEND: cmux= |
+| IPC | Unix socket CLI (V1 text + V2 JSON-RPC) |
+| Shared infrastructure | =sdd_bridge.py=, query registration, mode-line |
+| Research | =docs/research/2026-cmux-codebase-study.org= |
 
-Backend is selected per org section via =CLAUDE_BACKEND= property.
+* Current Implementation (Phase 0 — Implemented)
 
-* Shared Architecture
-
-Both backends follow the same execution flow and share common infrastructure.
-
-** Execution Flow (both backends)
-
-#+begin_example
-1. User presses C-c C-c on #+begin_src ai block
-2. claude-org-execute:
-   a. Read CLAUDE_BACKEND property (inherit=t)
-   b. Fire claude-org-execute-hook (history, jump)
-   c. Auto-generate section title if needed
-   d. Set loop state if applicable
-   e. Dispatch to backend-specific --execute-ai-block
-3. Backend --execute-ai-block:
-   a. Extract prompt from ai block
-   b. Ensure terminal session (create or reuse)
-   c. Check status — error if busy
-   d. Register query in claude-agent--active-queries
-   e. Write from-emacs flag file
-   f. Send prompt to terminal
-4. Claude Code processes prompt, calls SDD bridge hooks
-5. SDD bridge calls back via MCP:
-   - Insert response into org buffer
-   - Call claude-org--terminal-query-completed
-6. Backend --query-completed:
-   - Unregister from active queries
-   - Handle loop continuation if applicable
-#+end_example
-
-** Shared Infrastructure
-
-| Component | Location | Used By |
-|-----------+----------+--------|
-| SDD bridge (Python) | =python/claude_agent/sdd_bridge.py= | Both |
-| Query registration | =claude-agent--register-query= / =--active-queries= | Both |
-| Mode-line display | =claude-agent-activity-mode-line= | Both |
-| Session properties | =CLAUDE_SESSION_ID=, =CLAUDE_CLI_SESSION= | Both |
-| Status files | =/tmp/claude-agent-status/<session-id>.*= | Both |
-| Backend dispatch | =claude-org-execute= early-return pattern | Both |
-| Completion dispatch | =claude-org--terminal-query-completed= | Both |
-| Tracing | =claude-agent-with-span= + =:trace-ctx= | Both |
-| MCP server | =emacs-mcp-server.org= | Both |
-| IDE server | =claude-org-iterm2--ensure-ide-server= | Both (cmux uses =fboundp= guard) |
-
-** SDD Bridge (Backend-Agnostic)
-
-The Python SDD bridge handles Claude Code hook events identically for both
-backends. It runs inside the Claude Code process and calls back to Emacs
-via MCP (=EMACS_MCP_URL= environment variable).
-
-| Hook Event | Bridge Handler | MCP Callback |
-|------------+----------------+--------------|
-| =prompt= | Write "busy" status; detect from-emacs flag | =claude-org-sdd-bridge-insert-prompt= |
-| =response= | Write "ready" status; extract response text | =claude-org-sdd-bridge-insert-response= + =query-completed= |
-| =tool= | Handle TodoWrite | =claude-org-sdd-bridge-update-todos= |
-| =permission= | Permission request | =claude-org-iterm2--permission-needed= (hardcoded) |
-| =permission-clear= | Permission resolved | =claude-org-iterm2--permission-resolved= (hardcoded) |
-
-Status files per session (all under =/tmp/claude-agent-status/=):
-
-| File | Content |
-|------+---------|
-| =<session-id>= | ="ready"= or ="busy"= |
-| =<session-id>.request-id= | Request ID for query tracking |
-| =<session-id>.custom-id= | CUSTOM_ID of active instruction |
-| =<session-id>.from-emacs= | Flag: prompt originated from Emacs |
-
-** Backend Dispatch
-
-=claude-org-execute= reads =CLAUDE_BACKEND= property and early-returns:
-
-#+begin_src elisp
-;; In claude-org-execute():
-(cond
- ((string-equal backend "iterm2")
-  (claude-org-iterm2--execute-ai-block)
-  (cl-return-from claude-org-execute nil))
- ((string-equal backend "cmux")
-  (claude-org-cmux--execute-ai-block)
-  (cl-return-from claude-org-execute nil)))
-;; else: fall through to json-stream/claude-cli backend
-#+end_src
-
-Completion dispatch in =claude-org--terminal-query-completed=:
-- Checks cmux hash table first (=claude-org-cmux--sdd-to-session-key=)
-- Falls through to iTerm2 as default
-
-** Org Properties (Shared)
-
-| Property | Purpose | Both? |
-|----------+---------+-------|
-| =CLAUDE_BACKEND= | Backend selector: =cmux=, =iterm2=, =native= | Shared |
-| =CLAUDE_SESSION_ID= | SDD session identifier (required) | Shared |
-| =CLAUDE_CLI_SESSION= | CLI session UUID for =--resume= | Shared |
-| =CLAUDE_EXTRA_ARGS= | Extra CLI arguments for launch | Shared |
-| =CLAUDE_PERMISSION_MODE= | Tool permission level | Shared |
-
-* cmux Backend
-
-** What is cmux?
-
-cmux is a native macOS terminal (Swift/AppKit) built on Ghostty's GPU
-rendering engine. Purpose-built for AI coding workflows with:
-- Vertical-tab sidebar with workspaces
-- Unix domain socket API (=cmux= CLI binary)
-- Sidebar metadata: status, progress bars, logs
-- Notification rings (in-app, no OS notification fatigue)
-- Built-in scriptable browser
-
-*Repository*: [[https://github.com/manaflow-ai/cmux][manaflow-ai/cmux]]
-
-** Communication Layer
+** Execution Flow
 
 #+begin_example
-┌─────────────┐     call-process     ┌──────────┐    unix socket    ┌──────┐
-│ claude-agent │ ──────────────────► │ cmux CLI │ ────────────────► │ cmux │
-│   (Elisp)   │  cmux send "prompt" │ (Swift)  │   JSON-RPC v2    │ app  │
-└─────────────┘                     └──────────┘                   └──────┘
+1. C-c C-c → claude-org-execute → dispatch to cmux--execute-ai-block
+2. ensure-session: reuse (capture-pane liveness) or create (new-workspace)
+3. build-launch-command: claude-sdd script + optional --resume
+4. wait-for-ready: poll capture-pane for INSERT mode (up to 30s)
+5. write from-emacs flag + custom-id + register query
+6. send-text: ensure INSERT mode → send/paste-buffer → send-key enter
+7. SDD bridge hooks fire (Python → Emacs MCP):
+   - handle_prompt: save CLI session, insert prompt (Flow B)
+   - handle_permission: notify Emacs, return "ask"
+   - handle_response: extract transcript, insert response
+8. terminal-query-completed: unregister query, handle loops
 #+end_example
 
-Each =cmux= CLI call: connect socket → send JSON-RPC → receive response → exit.
-Lightweight per-command subprocess (no long-running bridge process).
-
-** cmux Object Hierarchy
-
-#+begin_example
-Window (macOS app window)
- └── Workspace (sidebar tab — one per SDD story)
-      └── Pane (split region)
-           └── Surface (terminal or browser instance)
-#+end_example
-
-Each SDD story gets its own workspace. The workspace title shows the story name.
-
-** Configuration
-
-| Variable | Default | Purpose |
-|----------+---------+---------|
-| =claude-org-cmux-socket-path= | =nil= (auto-detect) | Explicit socket path |
-| =claude-org-cmux-launch-command= | ='claude-sdd= | Launch mode: =claude-sdd=, =claude=, or string |
-| =claude-org-cmux-extra-args= | =nil= | Extra CLI args for launch command |
-| =claude-org-cmux-sdd-script= | =uv run ...= | Path to SDD launcher script |
-| =claude-org-cmux-ready-timeout= | =30= | Seconds to wait for TUI readiness |
-
-** cmux-Specific Org Properties
-
-| Property | Purpose | Example |
-|----------+---------+---------|
-| =CMUX_SURFACE_ID= | Terminal surface ref (cached) | =surface:28= |
-| =CMUX_WORKSPACE_ID= | Workspace ref (cached) | =workspace:27= |
-
-** Session Lifecycle
-
-#+begin_example
-claude-org-cmux--ensure-session:
-1. Read CMUX_SURFACE_ID from org property
-2. If saved: verify alive via `cmux capture-pane --surface <id>`
-   → Return saved ref if live
-3. If dead or missing:
-   a. Read CLAUDE_SESSION_ID (required)
-   b. Build launch command (with --resume if CLAUDE_CLI_SESSION exists)
-   c. `cmux new-workspace --cwd <root> --command <cmd>`
-      (on TabManager error: `cmux new-window`, retry)
-   d. Parse "OK workspace:N" → get surface via list-pane-surfaces
-   e. `cmux rename-workspace` → set story name as title
-   f. Save CMUX_SURFACE_ID + CMUX_WORKSPACE_ID as org properties
-   g. Wait for TUI ready (poll capture-pane for "-- INSERT --", up to 30s)
-#+end_example
-
-** Prompt Sending
-
-1. Ensure INSERT mode (send ="i"= if not in INSERT mode)
-2. If prompt < 100KB: =cmux send --surface <id> <text>=
-3. If prompt >= 100KB: =cmux set-buffer= + =cmux paste-buffer= (workaround)
-4. Always =cmux send-key --surface <id> enter= to submit
-
-** Status Detection
-
-Two-tier detection:
-1. *Hook status file*: read =/tmp/claude-agent-status/<session-id>= → ="ready"= or ="busy"=
-2. *Screen fallback*: =cmux capture-pane= → pattern match:
-   - ="-- INSERT --"= or ="type a message"= → ready
-   - ="Tool:"= or ="Thinking"= → busy
-   - Empty → dead
-
-** cmux-Exclusive Features
-
-| Feature | API | Purpose |
-|---------+-----+---------|
-| Sidebar status | =cmux set-status agent "Running..."= | Show agent state |
-| Progress bar | =cmux set-progress 0.5= | Visual progress |
-| Notifications | =cmux notify --title T --body B= | In-app alerts |
-| Log entries | =cmux log info "message"= | Sidebar log |
-| Workspace rename | =cmux rename-workspace "story name"= | Meaningful sidebar titles |
-
-* iTerm2 Backend
-
-** Communication Layer
-
-#+begin_example
-┌─────────────┐   call-process   ┌──────────────┐   AppleScript    ┌────────┐
-│ claude-agent │ ──────────────► │ iterm2_ctl.py │ ──────────────► │ iTerm2 │
-│   (Elisp)   │  python3 ...    │   (pyobjc)   │   Python API     │  app   │
-└─────────────┘                 └──────────────┘                   └────────┘
-#+end_example
-
-Uses a Python bridge script (=iterm2_ctl.py=) because iTerm2 exposes only
-a Python API (pyobjc). The bridge is invoked per-command via =call-process=.
-
-** Configuration
-
-| Variable | Default | Purpose |
-|----------+---------+---------|
-| =claude-org-iterm2-script= | =python/.../iterm2_ctl.py= | Path to Python bridge |
-| =claude-org-iterm2-launch-command= | ='claude-sdd= | Same 3-way as cmux |
-| =claude-org-iterm2-sdd-script= | =uv run ...= | Same default as cmux |
-| =claude-org-iterm2-extra-args= | =nil= | Same as cmux |
-
-** iTerm2-Specific Org Properties
-
-| Property | Purpose | Example |
-|----------+---------+---------|
-| =ITERM2_SESSION_ID= | iTerm2 session UUID | =w0t0p0:UUID= |
-
-** Session Lifecycle
-
-#+begin_example
-claude-org-iterm2--ensure-session:
-1. Read ITERM2_SESSION_ID from org property
-2. If saved: call `iterm2_ctl.py status --session <id>` → parse JSON
-   → Return saved ID if state != "dead"
-3. If dead or missing:
-   a. `iterm2_ctl.py launch --title <title> --cwd <root> --launch-cmd <cmd>`
-   b. Returns iTerm2 UUID directly
-   c. Save ITERM2_SESSION_ID as org property
-   (No readiness waiting — returns immediately)
-#+end_example
-
-** iTerm2-Exclusive Features
-
-| Feature | Function | Purpose |
-|---------+----------+---------|
-| Permission alerts | =--permission-needed= | Mode-line alert + dock bounce + app focus |
-| Permission resolve | =--permission-resolved= | Clear alert |
-| App activation | =--activate-app= | AppleScript focus switching |
-| UUID reverse-lookup | =--lookup-iterm2-session= | Find session across buffers |
-
-* Comparison: cmux vs iTerm2
-
-| Aspect | cmux | iTerm2 |
-|--------+------+--------|
-| IPC | Unix socket CLI (native Swift) | Python bridge (pyobjc) |
-| Terminal ID | Surface ref (=surface:N=) | UUID |
-| Session creation | =cmux new-workspace= + rename | =iterm2_ctl.py launch= |
-| Liveness check | =capture-pane= (non-empty?) | =status= JSON (state != dead?) |
-| Wait for ready | Yes (polls 30s for INSERT mode) | No (returns immediately) |
-| INSERT mode mgmt | Yes (sends ="i"= before prompt) | No |
-| Large text handling | =set-buffer= + =paste-buffer= (>100KB) | Always via stdin temp file |
-| Workspace naming | =rename-workspace= → story name | Tab title only |
-| Sidebar metadata | Status, progress, logs | Not available |
-| In-app notifications | Notification rings | OS-level only |
-| Permission UI | None (uses iTerm2's) | Alert + dock bounce + focus |
-| Property inheritance | =org-entry-get nil prop t= | Manual heading walk |
-| from-emacs flag order | Register query FIRST, then flag | Write flag FIRST, then register |
-| Text property stripping | =substring-no-properties= | Not done |
-| Cancel | =send-key escape= | =iterm2_ctl.py cancel= |
-| Dependencies | cmux.app + CLI binary | Python 3, pyobjc, iTerm2.app |
-
-* Known Coupling
-
-1. *cmux → iTerm2 dependency*: cmux calls
-   =claude-org-iterm2--ensure-ide-server= (guarded by =fboundp=) for MCP
-   IDE server startup. Works without iTerm2 loaded, but IDE features
-   require it.
-
-2. *SDD bridge → iTerm2 hardcoding*: =sdd_bridge.py= hardcodes
-   =claude-org-iterm2--permission-needed= (in =handle_permission=) and
-   =claude-org-iterm2--permission-resolved= (in =handle_permission_clear=)
-   regardless of backend. cmux sessions receive no permission UI.
-
-3. *Completion dispatch priority*: =claude-org--terminal-query-completed=
-   checks cmux hash table first, then falls through to iTerm2 as default.
-
-* Configuration Example
-
-#+begin_example
-,* My Story :claude_chat:
-:PROPERTIES:
-:CLAUDE_BACKEND: cmux
-:CLAUDE_SESSION_ID: my-story-sdd-20260315-120000
-:END:
-
-,#+begin_src ai
-Your prompt here
-,#+end_src
-#+end_example
-
-Both backends coexist — different sections can use different backends.
-Switch by changing =CLAUDE_BACKEND= property (=cmux=, =iterm2=, or =native=).
-
-* Appendix: cmux CLI Reference
+** CLI Commands We Use (16)
 
 | Command | Purpose |
 |---------+---------|
-| =cmux ping= | Check if cmux is running |
-| =cmux new-workspace --cwd P --command C= | Create workspace with command |
-| =cmux rename-workspace --workspace W T= | Rename workspace title |
-| =cmux list-workspaces= | List all workspaces |
-| =cmux select-workspace --workspace W= | Focus workspace |
-| =cmux send --surface S TEXT= | Send text to terminal |
-| =cmux send-key --surface S KEY= | Send special key (enter, escape) |
-| =cmux capture-pane --surface S= | Read terminal screen content |
-| =cmux close-surface --surface S= | Close a terminal pane |
-| =cmux set-buffer --name N TEXT= | Store text in paste buffer |
-| =cmux paste-buffer --name N= | Paste buffer into terminal |
-| =cmux set-status KEY VALUE= | Set sidebar metadata |
-| =cmux set-progress FLOAT= | Set progress bar (0.0–1.0) |
-| =cmux notify --title T --body B= | Show in-app notification |
-| =cmux log LEVEL TEXT= | Log to sidebar |
-| =cmux themes set --light L --dark D= | Set terminal color themes |
-| =cmux tree --all= | Show full object hierarchy |
-| =cmux identify= | Show current surface/workspace IDs |
+| =capture-pane= | Status detection, ready polling, INSERT mode check |
+| =send= | Send prompt text (< 100KB) |
+| =send-key= | Submit enter, send escape (cancel) |
+| =set-buffer= / =paste-buffer= | Large text path (≥ 100KB) |
+| =select-workspace= | Focus workspace for paste, permission focus |
+| =new-workspace= | Create workspace with Claude Code |
+| =new-window= | Fallback when TabManager unavailable |
+| =list-pane-surfaces= | Resolve workspace → surface ref |
+| =rename-workspace= | Set tab title to story name |
+| =set-status= / =clear-status= | Sidebar agent status |
+| =set-progress= | Sidebar progress bar |
+| =notify= | Send notification |
+| =set-app-focus= | Activate cmux app |
+
+** Tracing Coverage (11 spans)
+
+All cmux operations have OTel tracing:
+=cmux-call=, =cmux-ensure-session=, =cmux-execute=, =cmux-query-completed=,
+=cmux-loop-send=, =cmux-wait-for-ready=, =cmux-send-text=, =cmux-cancel=,
+=cmux-permission-needed=, =cmux-permission-resolved=, =cmux-recover-session=.
+
+* Phase 1 — Architecture Fixes (Implemented)
+
+** Permission Routing
+
+=claude-org--terminal-permission-needed= dispatches to cmux or iTerm2
+based on session mapping. cmux handler: focuses workspace, activates app,
+registers mode-line alert via =claude-agent-add-alert= API, sends macOS
+notification. Cleared by =PostToolUse= hook or user click.
+
+** Session Recovery
+
+=claude-org-cmux--recover-session= scans all =claude-org-mode= buffers for
+=CMUX_SURFACE_ID= / =CMUX_WORKSPACE_ID= properties, rebuilds hash tables.
+Called on first hook arrival for unknown session after Emacs restart.
+
+** Unified Terminal Menu
+
+Single =I= "Open terminal" command dispatches to cmux, iTerm2, or native
+based on =CLAUDE_BACKEND= property. Replaced separate =I= / =T= entries.
+
+* Phase 2 — Rich Sidebar Feedback (Planned)
+
+** cmux's Native Claude Hook vs Our SDD Bridge
+
+cmux ships =cmux claude-hook= which manages sidebar status natively:
+
+| Event | cmux claude-hook | Our sdd-bridge |
+|-------+-----------------+----------------|
+| =SessionStart= | Set agent PID, upsert session | (not handled) |
+| =UserPromptSubmit= | Clear notifications, "Running" status | Write busy status, save CLI session |
+| =PreToolUse= | Verbose tool description ("Reading main.py") | Permission notification to Emacs |
+| =Notification= | "Needs input" status, rich notification | (not handled) |
+| =Stop= | "Idle" status, transcript-derived notification | Write ready, insert response |
+| =SessionEnd= | Clear all state | (not handled) |
+
+Both coexist — =claude-hook= registered in cmux's global settings,
+=sdd-bridge= registered in our plugin's =hooks.json=. No conflict.
+
+** Opportunity: Leverage cmux's Sidebar for Query Progress
+
+Instead of duplicating sidebar status, use cmux's existing infrastructure:
+
+#+begin_src python
+# In sdd_bridge.py handle_prompt:
+subprocess.run(["cmux", "log", "--level", "info", "--source", "emacs",
+                "--workspace", ws_id, "--", f"Query: {prompt[:80]}..."],
+               timeout=2, capture_output=True)
+
+# In sdd_bridge.py handle_response:
+subprocess.run(["cmux", "log", "--level", "success", "--source", "emacs",
+                "--workspace", ws_id, "--", f"Response ({len(response)} chars)"],
+               timeout=2, capture_output=True)
+#+end_src
+
+** Opportunity: Rich Metadata Blocks
+
+=report_meta_block= shows markdown in the sidebar:
+
+#+begin_src bash
+cmux report_meta_block "current_query" "**Prompt:** Implement auth flow\n\n**Status:** Running" \
+  --priority 10 --tab <workspace-id> --panel <panel-id>
+#+end_src
+
+** Opportunity: Markdown Design Doc Viewer
+
+=cmux markdown open <path>= opens a live-reloading markdown panel:
+
+#+begin_src elisp
+;; Open current story's design doc in cmux sidebar
+(claude-org-cmux--call "markdown" "open"
+  (expand-file-name "docs/design-docs/2026-current-story.org"
+                    (claude-org--get-project-root)))
+#+end_src
+
+The viewer supports H1–H6, code blocks, tables, blockquotes, and
+auto-reloads when the file changes (atomic-rename safe).
+
+* Phase 3 — Event-Driven Detection (Planned)
+
+** Replace Polling with =wait-for=
+
+=cmux wait-for= uses filesystem sentinel files (=/tmp/cmux-wait-for-<name>.sig=).
+Signal mode creates the file; wait mode polls at 50ms with configurable timeout.
+
+#+begin_src elisp
+;; Signal from sdd-bridge (Python) when Claude Code is ready:
+;; subprocess.run(["cmux", "wait-for", "-S", "claude-ready-<sid>"])
+
+;; Wait in Emacs:
+(claude-org-cmux--call "wait-for" "claude-ready-sdd-test" "--timeout" "30")
+#+end_src
+
+This eliminates the 1-second polling loop in =wait-for-ready=.
+
+** =pipe-pane= for Output Streaming
+
+=cmux pipe-pane= captures the full terminal buffer (including scrollback)
+and pipes to a shell command:
+
+#+begin_src bash
+cmux pipe-pane --command "grep -o 'INSERT' > /tmp/ready.flag" --surface surface:1
+#+end_src
+
+Could enable real-time response streaming without waiting for =Stop= hook.
+
+** Port Detection
+
+cmux's =PortScanner= detects listening ports per terminal (batched =ps= + =lsof=,
+6 scans over 10 seconds). Phoenix (:6006) and MCP server (:9999) ports appear
+automatically in the sidebar within 500ms of starting.
+
+* Phase 4 — Browser Automation (Future)
+
+cmux has 50+ browser automation methods (=WKWebView=):
+
+| Category | Examples |
+|----------+---------|
+| Navigation | =open=, =navigate=, =back=, =forward=, =reload= |
+| Interaction | =click=, =fill=, =type=, =select=, =scroll= |
+| Query | =get text/html/value/attr=, =is visible/enabled= |
+| Locators | =find.role=, =find.text=, =find.label=, =find.nth= |
+| DevTools | =eval <js>=, =console.list=, =errors.list= |
+| Capture | =screenshot=, =snapshot= (accessibility tree) |
+| Wait | =wait --selector=, =wait --text=, =wait --function= |
+
+Potential uses:
+- Automated Phoenix trace verification in E2E tests
+- Web UI testing for projects with frontends
+- Screenshot capture for documentation
+
+* cmux Architecture Reference
+
+** IPC: Dual Protocol
+
+- *V1* (text): =<command> [args]\n= → =OK ...\n= or =ERROR: ...\n=
+- *V2* (JSON-RPC): ={"id":"uuid","method":"surface.send_text","params":{...}}=
+
+Auto-detected: lines starting with ={= are V2. Socket at
+=~/Library/Application Support/cmux/cmux.sock= (production).
+
+** Addressing Model
+
+=--workspace=, =--pane=, =--surface= accept: UUID, ref (=workspace:1=), or index.
+Env vars =CMUX_WORKSPACE_ID= / =CMUX_SURFACE_ID= as defaults in terminals.
+
+** Claude Hook Session Store
+
+Persistent JSON at =~/.cmuxterm/claude-hook-sessions.json= with =flock(LOCK_EX)=.
+Fields: sessionId, workspaceId, surfaceId, cwd, pid, lastSubtitle, lastBody,
+startedAt, updatedAt. Pruned after 7 days. Fallback resolution by surfaceId
+or workspaceId when sessionId not found.
+
+** Verbose Tool Status
+
+When =claudeCodeVerboseStatus= is enabled, the sidebar shows real-time
+tool execution: "Reading main.py", "Running git status", "Editing config.yaml".
+
+** Security
+
+Default =cmuxOnly= mode: only processes descended from cmux can connect
+(PID ancestry check via =sysctl KERN_PROC_PID=). Also supports =automation=,
+=password=, and =allowAll= modes.
+
+* Implementation Priority
+
+| Item | Phase | Effort | Impact |
+|------+-------+--------+--------|
+| Permission routing | 1 | ✅ Done | High |
+| Session recovery | 1 | ✅ Done | Medium |
+| Unified terminal menu | 1 | ✅ Done | Medium |
+| OTel tracing (11 spans) | 1 | ✅ Done | Medium |
+| Sidebar log calls | 2 | 2h | High |
+| Rich metadata blocks | 2 | 1h | Medium |
+| Markdown doc viewer | 2 | 1h | Medium |
+| wait-for ready detection | 3 | 1h | Medium |
+| pipe-pane streaming | 3 | Research | High |
+| Browser automation | 4 | Research | Future |
+
+* References
+
+- [[file:../research/2026-cmux-codebase-study.org][cmux Codebase Study]] — full architecture analysis
+- [[file:../../reference/cmux/][cmux source]] (git submodule)
+- [[file:../../reference/cmux/CLI/cmux.swift][cmux CLI]] (9652 lines)
+- [[file:../../reference/cmux/docs/agent-browser-port-spec.md][Browser automation spec]]
+- [[file:../../claude-org-cmux.org][claude-org-cmux.org]] — our backend implementation
