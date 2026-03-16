@@ -160,6 +160,8 @@ If ARGS contains :stdin KEY, that value is piped as stdin."
   "Block until Claude Code TUI is ready in SURFACE-ID.
 Polls `capture-pane' every second, looking for INSERT mode indicator.
 Returns t when ready, signals error on timeout."
+  (claude-agent-with-span "cmux-wait-for-ready"
+      (list :surface-id surface-id :timeout claude-org-cmux-ready-timeout) nil
   (let ((deadline (+ (float-time) claude-org-cmux-ready-timeout))
         (ready nil))
     (while (and (not ready) (< (float-time) deadline))
@@ -173,7 +175,7 @@ Returns t when ready, signals error on timeout."
     (unless ready
       (error "Timeout: Claude Code not ready in cmux after %ds"
              claude-org-cmux-ready-timeout))
-    t))
+    t)))
 #+END_SRC
 
 * Send Text Helper
@@ -198,6 +200,10 @@ Uses `send --surface` which reliably targets a specific surface.
 Note: `paste-buffer --surface` has a cmux bug (\"Surface is not a terminal\")
 so we avoid it and use `send` directly. For very large text (>100KB),
 we select the workspace first and use paste-buffer without --surface."
+  (claude-agent-with-span "cmux-send-text"
+      (list :surface-id surface-id
+            :text-length (length text)
+            :input (truncate-string-to-width (or text "") 2000)) nil
   (let ((clean-text (substring-no-properties text)))
     ;; Ensure INSERT mode before sending text
     (claude-org-cmux--ensure-insert-mode surface-id)
@@ -212,7 +218,7 @@ we select the workspace first and use paste-buffer without --surface."
         (claude-org-cmux--call "set-buffer" "--name" "emacs-prompt" clean-text)
         (claude-org-cmux--call "paste-buffer" "--name" "emacs-prompt")))
     ;; Send Enter to submit the prompt
-    (claude-org-cmux--call "send-key" "--surface" surface-id "enter")))
+    (claude-org-cmux--call "send-key" "--surface" surface-id "enter"))))
 #+END_SRC
 
 * Tab Title
@@ -686,11 +692,12 @@ Launches Claude Code if no matching workspace exists."
   "Cancel the current Claude Code instruction in cmux.
 Sends Escape to the terminal."
   (interactive)
+  (claude-agent-with-span "cmux-cancel" nil nil
   (let ((surface-id (claude-org-cmux--find-session-property "CMUX_SURFACE_ID")))
     (unless surface-id
       (user-error "No cmux session for this story"))
     (claude-org-cmux--call "send-key" "--surface" surface-id "escape")
-    (message "Cancel sent to Claude Code (waiting for hook...)")))
+    (message "Cancel sent to Claude Code (waiting for hook...)"))))
 #+END_SRC
 
 * Sidebar Feedback
@@ -731,6 +738,8 @@ cmux-specific rich feedback that iTerm2 cannot provide.
 (defun claude-org-cmux--permission-needed (sdd-session-id tool-name)
   "Handle permission notification for a cmux session.
 Registers a mode-line alert, focuses the cmux workspace, and notifies user."
+  (claude-agent-with-span "cmux-permission-needed"
+      (list :session-id sdd-session-id :tool-name tool-name) nil
   ;; Register mode-line alert (same API as iTerm2 backend)
   (claude-agent-add-alert
    (intern sdd-session-id)
@@ -752,12 +761,14 @@ Registers a mode-line alert, focuses the cmux workspace, and notifies user."
                       (format "%s needs approval for %s"
                               (claude-agent--permission-label sdd-session-id)
                               tool-name))
-  "ok")
+  "ok"))
 
 (defun claude-org-cmux--permission-resolved (sdd-session-id)
   "Clear pending permission for a cmux session."
+  (claude-agent-with-span "cmux-permission-resolved"
+      (list :session-id sdd-session-id) nil
   (claude-agent-remove-alert (intern sdd-session-id))
-  "ok")
+  "ok"))
 
 (defun claude-org-cmux--focus-workspace-by-sdd (sdd-session-id)
   "Focus the cmux workspace for SDD-SESSION-ID, if known."
@@ -781,6 +792,8 @@ Registers a mode-line alert, focuses the cmux workspace, and notifies user."
   "Try to recover session mapping by scanning org buffers.
 Called when sdd-session-id is not found in the hash table after Emacs restart.
 Returns the session-key if found, nil otherwise."
+  (claude-agent-with-span "cmux-recover-session"
+      (list :session-id sdd-session-id) nil
   (cl-block recover
     (dolist (buf (buffer-list))
       (when (and (buffer-file-name buf)
@@ -806,7 +819,7 @@ Returns the session-key if found, nil otherwise."
                     (when workspace
                       (puthash sdd-session-id workspace
                                claude-org-cmux--sdd-to-workspace))
-                    (cl-return-from recover session-key)))))))))))
+                    (cl-return-from recover session-key))))))))))))
 #+END_SRC
 
 * Focus Terminal
