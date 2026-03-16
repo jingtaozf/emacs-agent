@@ -5089,16 +5089,16 @@ the eat terminal buffer), then falls back to the session's verbose buffer."
 Transient provides a visual command menu with temporary keybindings.
 Built into Emacs since v28, or install via =M-x package-install RET transient RET=.
 
-*** Unified Terminal Query Completed
+*** Unified Terminal Dispatchers
 
-Dispatcher called by sdd_bridge.py when a query finishes. Routes to
-the correct backend's =--query-completed= function based on =CLAUDE_BACKEND=.
+Dispatchers called by sdd_bridge.py to route events to the correct
+backend (cmux or iTerm2). All use the same pattern: check if the
+session is known to cmux, otherwise fall back to iTerm2.
 
 #+BEGIN_SRC elisp
 (defun claude-org--terminal-query-completed (sdd-session-id)
   "Dispatch query-completed to the correct terminal backend.
-SDD-SESSION-ID identifies the session whose query just finished.
-Checks CLAUDE_BACKEND org property to route to cmux or iTerm2."
+SDD-SESSION-ID identifies the session whose query just finished."
   (cond
    ((and (fboundp 'claude-org-cmux--query-completed)
          (gethash sdd-session-id claude-org-cmux--sdd-to-session-key))
@@ -5106,6 +5106,28 @@ Checks CLAUDE_BACKEND org property to route to cmux or iTerm2."
    ((fboundp 'claude-org-iterm2--query-completed)
     (claude-org-iterm2--query-completed sdd-session-id))
    (t (message "claude-org: no terminal backend loaded for query-completed"))))
+
+(defun claude-org--terminal-permission-needed (sdd-session-id tool-name)
+  "Dispatch permission notification to the correct terminal backend."
+  (cond
+   ((and (fboundp 'claude-org-cmux--permission-needed)
+         (boundp 'claude-org-cmux--sdd-to-session-key)
+         (gethash sdd-session-id claude-org-cmux--sdd-to-session-key))
+    (claude-org-cmux--permission-needed sdd-session-id tool-name))
+   ((fboundp 'claude-org-iterm2--permission-needed)
+    (claude-org-iterm2--permission-needed sdd-session-id tool-name))
+   (t (message "claude-org: no terminal backend loaded for permission-needed"))))
+
+(defun claude-org--terminal-permission-resolved (sdd-session-id)
+  "Dispatch permission resolution to the correct terminal backend."
+  (cond
+   ((and (fboundp 'claude-org-cmux--permission-resolved)
+         (boundp 'claude-org-cmux--sdd-to-session-key)
+         (gethash sdd-session-id claude-org-cmux--sdd-to-session-key))
+    (claude-org-cmux--permission-resolved sdd-session-id))
+   ((fboundp 'claude-org-iterm2--permission-resolved)
+    (claude-org-iterm2--permission-resolved sdd-session-id))
+   (t (message "claude-org: no terminal backend loaded for permission-resolved"))))
 #+END_SRC
 
 *** Unified Terminal Tab

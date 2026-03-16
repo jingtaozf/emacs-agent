@@ -658,37 +658,39 @@ the same session."
 ;;; ============================================================================
 
 (ert-deftest test-cmux-permission-needed-calls-select-workspace ()
-  "claude-org-cmux--permission-needed focuses the cmux workspace."
+  "claude-org-cmux--permission-needed focuses the cmux workspace and adds alert."
   :tags '(:unit :stable)
   (test-cmux--with-mock
-    ;; Register a session mapping so the dispatcher finds cmux
     (puthash "sdd-perm-test" "mock-session-key"
              claude-org-cmux--sdd-to-session-key)
     (puthash "sdd-perm-test" "mock-ws-id"
              claude-org-cmux--sdd-to-workspace)
-    (unwind-protect
-        (progn
-          (claude-org-cmux--permission-needed "sdd-perm-test" "Bash")
-          ;; Should have called select-workspace to focus the terminal
-          (let ((calls (test-cmux--mock-calls-for "select-workspace")))
-            (should calls)
-            (should (member "mock-ws-id" (cdar calls))))
-          ;; Should be registered in pending permissions
-          (should (gethash "sdd-perm-test" claude-agent--pending-permissions)))
-      ;; Cleanup
-      (remhash "sdd-perm-test" claude-org-cmux--sdd-to-session-key)
-      (remhash "sdd-perm-test" claude-org-cmux--sdd-to-workspace)
-      (remhash "sdd-perm-test" claude-agent--pending-permissions))))
+    (let ((saved-alerts claude-agent-pending-alerts))
+      (unwind-protect
+          (progn
+            (claude-org-cmux--permission-needed "sdd-perm-test" "Bash")
+            ;; Should have called select-workspace to focus the terminal
+            (let ((calls (test-cmux--mock-calls-for "select-workspace")))
+              (should calls)
+              (should (member "mock-ws-id" (cdar calls))))
+            ;; Should be registered as a mode-line alert
+            (should (assq (intern "sdd-perm-test") claude-agent-pending-alerts)))
+        ;; Cleanup
+        (setq claude-agent-pending-alerts saved-alerts)
+        (remhash "sdd-perm-test" claude-org-cmux--sdd-to-session-key)
+        (remhash "sdd-perm-test" claude-org-cmux--sdd-to-workspace)))))
 
 (ert-deftest test-cmux-permission-resolved-clears-state ()
-  "claude-org-cmux--permission-resolved clears pending permission."
+  "claude-org-cmux--permission-resolved clears pending alert."
   :tags '(:unit :stable)
-  (puthash "sdd-resolve-test" "Bash" claude-agent--pending-permissions)
-  (unwind-protect
-      (progn
-        (claude-org-cmux--permission-resolved "sdd-resolve-test")
-        (should-not (gethash "sdd-resolve-test" claude-agent--pending-permissions)))
-    (remhash "sdd-resolve-test" claude-agent--pending-permissions)))
+  (let ((saved-alerts claude-agent-pending-alerts))
+    ;; Add a pending alert
+    (claude-agent-add-alert (intern "sdd-resolve-test") :label "test")
+    (unwind-protect
+        (progn
+          (claude-org-cmux--permission-resolved "sdd-resolve-test")
+          (should-not (assq (intern "sdd-resolve-test") claude-agent-pending-alerts)))
+      (setq claude-agent-pending-alerts saved-alerts))))
 
 (ert-deftest test-cmux-terminal-permission-routes-to-cmux ()
   "Terminal permission dispatcher routes cmux sessions to cmux handler."
@@ -698,14 +700,17 @@ the same session."
              claude-org-cmux--sdd-to-session-key)
     (puthash "sdd-route-test" "mock-ws"
              claude-org-cmux--sdd-to-workspace)
-    (unwind-protect
-        (progn
-          (claude-org--terminal-permission-needed "sdd-route-test" "Edit")
-          ;; Should have used cmux path (select-workspace called)
-          (should (test-cmux--mock-calls-for "select-workspace")))
-      (remhash "sdd-route-test" claude-org-cmux--sdd-to-session-key)
-      (remhash "sdd-route-test" claude-org-cmux--sdd-to-workspace)
-      (remhash "sdd-route-test" claude-agent--pending-permissions))))
+    (let ((saved-alerts claude-agent-pending-alerts))
+      (unwind-protect
+          (progn
+            (claude-org--terminal-permission-needed "sdd-route-test" "Edit")
+            ;; Should have used cmux path (select-workspace called)
+            (should (test-cmux--mock-calls-for "select-workspace"))
+            ;; Should have registered alert via cmux handler
+            (should (assq (intern "sdd-route-test") claude-agent-pending-alerts)))
+        (setq claude-agent-pending-alerts saved-alerts)
+        (remhash "sdd-route-test" claude-org-cmux--sdd-to-session-key)
+        (remhash "sdd-route-test" claude-org-cmux--sdd-to-workspace)))))
 
 ;;; ============================================================================
 ;;; Tests: Session Recovery (P1)

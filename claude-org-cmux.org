@@ -73,9 +73,6 @@ Defaults to `uv run --project <pkg>/python claude-sdd'."
 (defvar claude-org-cmux--sdd-to-workspace (make-hash-table :test 'equal)
   "Map SDD session ID → cmux workspace ID.")
 
-(defvar claude-agent--pending-permissions (make-hash-table :test 'equal)
-  "Map SDD session ID → tool-name for sessions waiting on permission.
-Shared between cmux and iTerm2 backends for mode-line display.")
 #+END_SRC
 
 * Navigation Helpers
@@ -733,52 +730,48 @@ cmux-specific rich feedback that iTerm2 cannot provide.
 #+BEGIN_SRC elisp
 (defun claude-org-cmux--permission-needed (sdd-session-id tool-name)
   "Handle permission notification for a cmux session.
-Focuses the cmux workspace and activates cmux app."
-  ;; Register pending permission
-  (puthash sdd-session-id tool-name claude-agent--pending-permissions)
-  ;; Focus cmux workspace
-  (let ((ws-id (gethash sdd-session-id claude-org-cmux--sdd-to-workspace)))
-    (when ws-id
-      (condition-case nil
-          (claude-org-cmux--call "select-workspace" "--workspace" ws-id)
-        (error nil))))
-  ;; Activate cmux app
-  (when (eq system-type 'darwin)
-    (condition-case nil
-        (start-process "activate-cmux" nil "osascript" "-e"
-                       "tell application \"cmux\" to activate")
-      (error nil)))
-  ;; Bring Emacs to front + macOS notification + mode-line update
-  (condition-case nil (claude-org-iterm2--activate-emacs) (error nil))
-  (condition-case nil
-      (claude-org--notify "Claude: Permission Needed"
-                          (format "%s needs approval for %s"
-                                  sdd-session-id tool-name))
-    (error nil))
-  (condition-case nil (claude-agent--update-activity-string) (error nil))
+Registers a mode-line alert, focuses the cmux workspace, and notifies user."
+  ;; Register mode-line alert (same API as iTerm2 backend)
+  (claude-agent-add-alert
+   (intern sdd-session-id)
+   :label (claude-agent--permission-label sdd-session-id)
+   :tooltip (format "Permission needed: %s\nClick to focus cmux workspace" tool-name)
+   :face '(:foreground "orange" :weight bold)
+   :action (lexical-let ((sid sdd-session-id))
+             (lambda ()
+               (claude-agent-remove-alert (intern sid))
+               (claude-org-cmux--focus-workspace-by-sdd sid))))
+  ;; Focus cmux workspace (best-effort)
+  (claude-org-cmux--focus-workspace-by-sdd sdd-session-id)
+  ;; Activate cmux app + Emacs (best-effort, macOS only)
+  (claude-org-cmux--activate-app)
+  (when (fboundp 'claude-org-iterm2--activate-emacs)
+    (ignore-errors (claude-org-iterm2--activate-emacs)))
+  ;; macOS notification
+  (claude-org--notify "Claude: Permission Needed"
+                      (format "%s needs approval for %s"
+                              (claude-agent--permission-label sdd-session-id)
+                              tool-name))
   "ok")
 
 (defun claude-org-cmux--permission-resolved (sdd-session-id)
   "Clear pending permission for a cmux session."
-  (remhash sdd-session-id claude-agent--pending-permissions)
-  (condition-case nil (claude-agent--update-activity-string) (error nil))
+  (claude-agent-remove-alert (intern sdd-session-id))
   "ok")
 
-(defun claude-org--terminal-permission-needed (sdd-session-id tool-name)
-  "Route permission notification to the correct backend."
-  (cond
-   ((gethash sdd-session-id claude-org-cmux--sdd-to-session-key)
-    (claude-org-cmux--permission-needed sdd-session-id tool-name))
-   (t
-    (claude-org-iterm2--permission-needed sdd-session-id tool-name))))
+(defun claude-org-cmux--focus-workspace-by-sdd (sdd-session-id)
+  "Focus the cmux workspace for SDD-SESSION-ID, if known."
+  (let ((ws-id (gethash sdd-session-id claude-org-cmux--sdd-to-workspace)))
+    (when ws-id
+      (ignore-errors
+        (claude-org-cmux--call "select-workspace" "--workspace" ws-id)))))
 
-(defun claude-org--terminal-permission-resolved (sdd-session-id)
-  "Route permission resolution to the correct backend."
-  (cond
-   ((gethash sdd-session-id claude-org-cmux--sdd-to-session-key)
-    (claude-org-cmux--permission-resolved sdd-session-id))
-   (t
-    (claude-org-iterm2--permission-resolved sdd-session-id))))
+(defun claude-org-cmux--activate-app ()
+  "Activate the cmux app on macOS."
+  (when (eq system-type 'darwin)
+    (ignore-errors
+      (start-process "activate-cmux" nil "osascript" "-e"
+                     "tell application \"cmux\" to activate"))))
 #+END_SRC
 
 * Session Recovery
@@ -822,16 +815,10 @@ Returns the session-key if found, nil otherwise."
 (defun claude-org-cmux-focus-terminal ()
   "Focus the cmux workspace for the current SDD story."
   (interactive)
-  (let ((ws-id (condition-case nil
-                   (claude-org-cmux--find-session-property "CMUX_WORKSPACE_ID")
-                 (error nil))))
+  (let ((ws-id (claude-org-cmux--find-session-property "CMUX_WORKSPACE_ID")))
     (unless ws-id (user-error "No cmux workspace for this story"))
     (claude-org-cmux--call "select-workspace" "--workspace" ws-id)
-    (when (eq system-type 'darwin)
-      (condition-case nil
-          (start-process "focus-cmux" nil "osascript" "-e"
-                         "tell application \"cmux\" to activate")
-        (error nil)))))
+    (claude-org-cmux--activate-app)))
 #+END_SRC
 
 * Provide
