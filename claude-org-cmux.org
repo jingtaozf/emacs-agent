@@ -157,12 +157,34 @@ If ARGS contains :stdin KEY, that value is piped as stdin."
   :group 'claude-org)
 
 (defun claude-org-cmux--wait-for-ready (surface-id)
-  "Block until Claude Code TUI is ready in SURFACE-ID.
-Polls `capture-pane' every second, looking for INSERT mode indicator.
-Returns t when ready, signals error on timeout."
+  "Wait for Claude Code TUI to be ready in SURFACE-ID.
+Uses cmux wait-for signal from SessionStart hook (50ms polling).
+Falls back to capture-pane polling if signal times out."
   (claude-agent-with-span "cmux-wait-for-ready"
       (list :surface-id surface-id :timeout claude-org-cmux-ready-timeout) nil
-  (let ((deadline (+ (float-time) claude-org-cmux-ready-timeout))
+  (let ((sdd-session-id
+         (condition-case nil
+             (claude-org-cmux--find-session-property "CLAUDE_SESSION_ID")
+           (error nil)))
+        (timeout (number-to-string claude-org-cmux-ready-timeout)))
+    (if sdd-session-id
+        ;; Event-driven: wait for signal from SessionStart hook
+        (condition-case nil
+            (progn
+              (claude-org-cmux--call "wait-for"
+                (format "claude-ready-%s" sdd-session-id)
+                "--timeout" timeout)
+              t)
+          (error
+           ;; Fallback: poll capture-pane with shorter timeout
+           (claude-org-cmux--wait-for-ready-poll surface-id 10)))
+      ;; No session ID — poll only
+      (claude-org-cmux--wait-for-ready-poll
+       surface-id claude-org-cmux-ready-timeout)))))
+
+(defun claude-org-cmux--wait-for-ready-poll (surface-id timeout)
+  "Fallback: poll capture-pane for INSERT mode every 0.5s up to TIMEOUT seconds."
+  (let ((deadline (+ (float-time) timeout))
         (ready nil))
     (while (and (not ready) (< (float-time) deadline))
       (condition-case nil
@@ -171,11 +193,10 @@ Returns t when ready, signals error on timeout."
             (when (string-match-p "-- INSERT --\\|-- insert --\\|type a message" screen)
               (setq ready t)))
         (error nil))
-      (unless ready (sleep-for 1)))
+      (unless ready (sleep-for 0.5)))
     (unless ready
-      (error "Timeout: Claude Code not ready in cmux after %ds"
-             claude-org-cmux-ready-timeout))
-    t)))
+      (error "Timeout: Claude Code not ready in cmux after %ds" timeout))
+    t))
 #+END_SRC
 
 * Send Text Helper
@@ -538,6 +559,8 @@ When loop state is active, schedules the next iteration."
       ;; Clean up lookup tables
       (remhash sdd-session-id claude-org-cmux--sdd-to-surface)
       (remhash sdd-session-id claude-org-cmux--sdd-to-session-key)
+      ;; Stop response streaming (Stop hook will insert canonical response)
+      (claude-org-cmux--stop-streaming)
       ;; Clear busy state
       (when session-key
         (claude-org--session-put session-key :busy nil))
@@ -653,7 +676,78 @@ Registers in `claude-agent--active-queries' for mode-line."
       (condition-case nil
           (claude-org-cmux--call "set-status" "agent" "Running query...")
         (error nil))
+      ;; Start response streaming (pipe-pane captures incremental output)
+      (let ((ws-id (condition-case nil
+                       (claude-org-cmux--find-session-property "CMUX_WORKSPACE_ID")
+                     (error nil))))
+        (when ws-id
+          (claude-org-cmux--start-streaming
+           surface-id (claude-org--current-session-key) ws-id (current-buffer))))
       (message "Sent to cmux (%d chars)" (length prompt))))))
+#+END_SRC
+
+* Response Streaming
+
+#+BEGIN_SRC elisp
+(defvar-local claude-org-cmux--stream-timer nil
+  "Timer for periodic pipe-pane streaming during active cmux queries.")
+
+(defvar-local claude-org-cmux--stream-marker nil
+  "Marker where streaming output is inserted (in the response section).")
+
+(defvar-local claude-org-cmux--stream-last-len 0
+  "Length of text captured in the last stream tick (for detecting new output).")
+
+(defun claude-org-cmux--start-streaming (surface-id session-key ws-id org-buffer)
+  "Start periodic pipe-pane streaming for live response feedback."
+  (claude-org-cmux--stop-streaming)
+  (with-current-buffer org-buffer
+    (setq claude-org-cmux--stream-last-len 0)
+    (setq claude-org-cmux--stream-timer
+          (run-at-time 3 2  ;; start after 3s, repeat every 2s
+            (lexical-let ((sid surface-id) (sk session-key)
+                          (ws ws-id) (buf org-buffer))
+              (lambda ()
+                (condition-case nil
+                    (when (buffer-live-p buf)
+                      (with-current-buffer buf
+                        (claude-org-cmux--stream-tick sid sk ws)))
+                  (error (claude-org-cmux--stop-streaming)))))))))
+
+(defun claude-org-cmux--stop-streaming ()
+  "Stop the pipe-pane streaming timer."
+  (when claude-org-cmux--stream-timer
+    (cancel-timer claude-org-cmux--stream-timer)
+    (setq claude-org-cmux--stream-timer nil)))
+
+(defun claude-org-cmux--stream-tick (surface-id session-key ws-id)
+  "One tick: capture terminal output and insert new text into response section."
+  ;; Stop if query is no longer active
+  (when (not (claude-org--session-get session-key :busy))
+    (claude-org-cmux--stop-streaming))
+  (when (claude-org--session-get session-key :busy)
+  ;; Capture scrollback
+  (let ((output (condition-case nil
+                    (claude-org-cmux--call "pipe-pane"
+                      "--workspace" ws-id "--surface" surface-id
+                      "--command" "cat")
+                  (error nil))))
+    (when (and output (> (length output) claude-org-cmux--stream-last-len))
+      ;; Extract new content (skip what we already showed)
+      (let* ((new-text (substring output claude-org-cmux--stream-last-len))
+             ;; Strip ANSI escape sequences
+             (clean (replace-regexp-in-string "\\[[][0-9;]*[a-zA-Z]" "" new-text))
+             ;; Strip control chars except newline
+             (clean (replace-regexp-in-string "[[:cntrl:]]" ""
+                      (replace-regexp-in-string "\n" "\n" clean))))
+        (setq claude-org-cmux--stream-last-len (length output))
+        ;; Insert into response section if marker is valid
+        (when (and claude-org-cmux--stream-marker
+                   (marker-buffer claude-org-cmux--stream-marker))
+          (save-excursion
+            (goto-char claude-org-cmux--stream-marker)
+            (insert clean)
+            (set-marker claude-org-cmux--stream-marker (point)))))))))
 #+END_SRC
 
 * User Commands

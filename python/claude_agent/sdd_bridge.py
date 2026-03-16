@@ -7,6 +7,7 @@ Required env vars: SDD_ORG_FILE, SDD_SESSION_ID, EMACS_MCP_URL
 import json
 import logging
 import os
+import subprocess
 import sys
 from contextlib import nullcontext
 
@@ -171,6 +172,27 @@ def _check_any_recent_from_emacs_flag():
     except OSError:
         pass
     return False, ""
+
+
+def handle_session_start(
+    mcp: McpClient,
+    input_data: dict,
+    org_file: str,
+    session_id: str,
+) -> None:
+    """Handle SessionStart hook — signal that Claude Code TUI is ready.
+
+    Creates a cmux wait-for signal so Emacs can stop polling capture-pane.
+    """
+    with _span("handle-session-start", **_span_attrs(session_id, None)):
+        signal_name = f"claude-ready-{session_id}"
+        try:
+            subprocess.run(
+                ["cmux", "wait-for", "-S", signal_name],
+                timeout=5, capture_output=True,
+            )
+        except Exception:
+            pass  # best-effort — Emacs falls back to polling
 
 
 def handle_prompt(
@@ -475,13 +497,22 @@ def handle_permission(
                "input.value": json.dumps(tool_input, default=str)[:1000],
                "input.mime_type": "application/json"})):
         if tool_name in _INTERACTIVE_TOOLS:
+            # Extract question text for richer notifications
+            display_text = tool_name
+            if tool_name == "AskUserQuestion":
+                question = tool_input.get("question", "")
+                if question:
+                    display_text = f"asks: {question[:200]}"
+            elif tool_name == "ExitPlanMode":
+                display_text = "wants to exit plan mode"
+
             # Notify Emacs (best-effort)
             try:
                 _mcp_eval_with_trace(
                     mcp,
                     f'(claude-org--terminal-permission-needed '
                     f'"{_escape_elisp_string(session_id)}" '
-                    f'"{_escape_elisp_string(tool_name)}")'
+                    f'"{_escape_elisp_string(display_text)}")'
                 )
             except (McpConnectionError, McpElispError):
                 pass
@@ -586,7 +617,9 @@ def main() -> None:
                 format(span_ctx.span_id, '016x'),
             )
 
-        if event == "prompt":
+        if event == "session-start":
+            handle_session_start(mcp, input_data, org_file, session_id)
+        elif event == "prompt":
             handle_prompt(mcp, input_data, org_file, session_id)
         elif event == "response":
             handle_response(mcp, input_data, org_file, session_id)
