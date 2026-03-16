@@ -137,33 +137,307 @@ cmux report_meta_block "current_query" "**Prompt:** Implement auth flow\n\n**Sta
 The viewer supports H1–H6, code blocks, tables, blockquotes, and
 auto-reloads when the file changes (atomic-rename safe).
 
-* Phase 3 — Event-Driven Detection (Planned)
+* Phase 3 — AskUserQuestion Pre-Cache (Planned)
+
+** Problem
+
+When Claude Code calls =AskUserQuestion=, our =handle_permission= in
+=sdd_bridge.py= sends a generic notification: "Bash needs approval".
+The actual question text (e.g., "Which database should I use?") is in
+=tool_input= but we don't cache it. When the =Notification= hook fires
+later, cmux's =claude-hook= uses the cached text but our Emacs notification
+doesn't.
+
+** How cmux Does It
+
+cmux's =claude-hook pre-tool-use= handler at =CLI/cmux.swift:8670-8691=:
+1. Detects =tool_name == "AskUserQuestion"=
+2. Extracts the question from =tool_input.question=
+3. Saves it into the session store as =lastSubtitle= / =lastBody=
+4. When the =Notification= hook fires, it reads the cached text and
+   uses it for the notification body instead of the generic message
+
+** Design
+
+In =sdd_bridge.py handle_permission=, when =tool_name= is =AskUserQuestion=:
+
+1. Extract question text from =tool_input.question=
+2. Write it to a status file: =/tmp/claude-agent-status/{session_id}.question=
+3. Pass the question to Emacs for the notification instead of just the tool name
+
+#+begin_src python
+def handle_permission(mcp, input_data, org_file, session_id):
+    tool_name = input_data.get("tool_name", "unknown")
+    tool_input = input_data.get("tool_input", {})
+
+    # Pre-cache AskUserQuestion text for richer notifications
+    question_text = ""
+    if tool_name == "AskUserQuestion":
+        question_text = tool_input.get("question", "")
+        if question_text:
+            _write_question_cache(session_id, question_text)
+
+    if tool_name in _INTERACTIVE_TOOLS:
+        # Pass question text to Emacs for richer notification
+        display_text = question_text or tool_name
+        _mcp_eval_with_trace(mcp,
+            f'(claude-org--terminal-permission-needed '
+            f'"{_escape_elisp_string(session_id)}" '
+            f'"{_escape_elisp_string(display_text)}")')
+#+end_src
+
+On Emacs side, =claude-org-cmux--permission-needed= already shows
+=tool-name= in the alert tooltip and notification. With the question text,
+it becomes:
+
+#+begin_example
+Before: "sdd-20260316 needs approval for AskUserQuestion"
+After:  "sdd-20260316 asks: Which database should I use?"
+#+end_example
+
+** Scope
+
+- Only =AskUserQuestion= and =ExitPlanMode= are cached
+- Question cache file auto-cleaned on =PostToolUse= (permission-clear)
+- Emacs notification and mode-line alert show the actual question
+- No change to the =permissionDecision= flow (still returns "ask")
+
+* Phase 4 — Event-Driven Ready Detection (Planned)
 
 ** Replace Polling with =wait-for=
 
-=cmux wait-for= uses filesystem sentinel files (=/tmp/cmux-wait-for-<name>.sig=).
-Signal mode creates the file; wait mode polls at 50ms with configurable timeout.
+*** Problem
+
+=claude-org-cmux--wait-for-ready= polls =capture-pane= every 1 second for
+up to 30 seconds. This is wasteful and has 1-second latency.
+
+*** How =cmux wait-for= Works
+
+=cmux wait-for= uses filesystem sentinel files:
+- =cmux wait-for -S <name>= — creates =/tmp/cmux-wait-for-<name>.sig= and returns
+- =cmux wait-for <name> --timeout 30= — polls at 50ms until file appears or timeout
+
+The signal and wait can be in different processes. The sentinel file is
+deleted on successful wait.
+
+*** Design
+
+Two-part change: Python signals when ready, Emacs waits for the signal.
+
+**** Python side (=sdd_bridge.py=):
+
+The =SessionStart= hook fires when Claude Code starts. Add a signal:
+
+#+begin_src python
+def handle_session_start(mcp, input_data, org_file, session_id):
+    """Handle SessionStart hook — signal that Claude Code is ready."""
+    signal_name = f"claude-ready-{session_id}"
+    try:
+        subprocess.run(["cmux", "wait-for", "-S", signal_name],
+                       timeout=5, capture_output=True)
+    except Exception:
+        pass
+#+end_src
+
+Register this in =hooks.json=:
+
+#+begin_src json
+"SessionStart": [{
+  "hooks": [{
+    "type": "command",
+    "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python sdd-bridge session-start",
+    "timeout": 5
+  }]
+}]
+#+end_src
+
+**** Emacs side (=claude-org-cmux.org=):
+
+Replace the polling loop with =cmux wait-for=:
 
 #+begin_src elisp
-;; Signal from sdd-bridge (Python) when Claude Code is ready:
-;; subprocess.run(["cmux", "wait-for", "-S", "claude-ready-<sid>"])
+(defun claude-org-cmux--wait-for-ready (surface-id)
+  "Wait for Claude Code to be ready using cmux wait-for signal.
+Falls back to capture-pane polling if wait-for times out."
+  (claude-agent-with-span "cmux-wait-for-ready"
+      (list :surface-id surface-id :timeout claude-org-cmux-ready-timeout) nil
+  (let* ((sdd-session-id
+          (claude-org-cmux--find-session-property "CLAUDE_SESSION_ID"))
+         (signal-name (format "claude-ready-%s" sdd-session-id))
+         (timeout (number-to-string claude-org-cmux-ready-timeout)))
+    ;; Try event-driven wait first
+    (condition-case nil
+        (progn
+          (claude-org-cmux--call "wait-for" signal-name "--timeout" timeout)
+          t)
+      (error
+       ;; Fallback: poll capture-pane (handles case where signal was missed)
+       (claude-org-cmux--wait-for-ready-poll surface-id))))))
 
-;; Wait in Emacs:
-(claude-org-cmux--call "wait-for" "claude-ready-sdd-test" "--timeout" "30")
+(defun claude-org-cmux--wait-for-ready-poll (surface-id)
+  "Fallback polling for ready detection.
+Used when wait-for signal is missed or unavailable."
+  (let ((deadline (+ (float-time) 10))  ;; shorter fallback timeout
+        (ready nil))
+    (while (and (not ready) (< (float-time) deadline))
+      (condition-case nil
+          (let ((screen (claude-org-cmux--call "capture-pane"
+                          "--surface" surface-id)))
+            (when (string-match-p "-- INSERT --\\|type a message" screen)
+              (setq ready t)))
+        (error nil))
+      (unless ready (sleep-for 0.5)))
+    (unless ready
+      (error "Timeout: Claude Code not ready in cmux"))
+    t))
 #+end_src
 
-This eliminates the 1-second polling loop in =wait-for-ready=.
+*** Benefits
 
-** =pipe-pane= for Output Streaming
+| Aspect | Before (polling) | After (wait-for) |
+|--------+-----------------+------------------|
+| Latency | Up to 1 second | ~50ms (sentinel poll interval) |
+| CPU waste | =capture-pane= call every 1s for 30s | One =wait-for= call, 50ms sleep |
+| Reliability | Pattern matching on screen text | Explicit signal from Claude Code |
+| Fallback | None (just timeout) | Falls back to short polling |
 
-=cmux pipe-pane= captures the full terminal buffer (including scrollback)
-and pipes to a shell command:
+* Phase 5 — =pipe-pane= Response Streaming (Planned)
+
+** Problem
+
+Currently, response text is extracted ONLY when the =Stop= hook fires.
+=sdd_bridge.py handle_response= reads the JSONL transcript and inserts
+the full response. The user sees nothing in the org buffer until Claude
+Code finishes its entire turn.
+
+For long responses (multi-paragraph analysis, code generation), this can
+take 30-60 seconds with no feedback.
+
+** How =pipe-pane= Works
+
+=cmux pipe-pane= reads the terminal buffer (with scrollback) and pipes
+it to a shell command. It's a one-shot capture, not a continuous stream.
+But by calling it periodically, we can get incremental output.
 
 #+begin_src bash
-cmux pipe-pane --command "grep -o 'INSERT' > /tmp/ready.flag" --surface surface:1
+# Capture current scrollback and extract new text since last check
+cmux pipe-pane --workspace $CMUX_WORKSPACE_ID --surface $CMUX_SURFACE_ID \
+  --command "tail -n +$LAST_LINE_COUNT"
 #+end_src
 
-Could enable real-time response streaming without waiting for =Stop= hook.
+** Design: Incremental Streaming via Periodic =pipe-pane=
+
+*** Approach: Polling =pipe-pane= During Active Query
+
+NOT a replacement for the =Stop= hook (which does the final canonical
+response insertion). Instead, a SUPPLEMENTARY mechanism for live feedback
+while Claude Code is working.
+
+*** Architecture
+
+#+begin_example
+  C-c C-c (execute AI block)
+    │
+    ▼
+  Emacs sends prompt to cmux → starts streaming timer
+    │
+    ▼
+  Timer fires every 2 seconds while query is active:
+    │  cmux pipe-pane → extract new lines since last check
+    │  → insert incremental text into response section
+    │
+    ▼
+  Stop hook fires (sdd_bridge.py handle_response)
+    │  stops the streaming timer
+    │  replaces the incremental text with the canonical response
+    │  (from JSONL transcript — authoritative, no tool-use noise)
+#+end_example
+
+*** Avoiding Conflict with Stop Hook
+
+The key design constraint: =pipe-pane= streaming and =Stop= hook response
+insertion must not conflict. The solution:
+
+1. *Streaming inserts to a temporary marker region* — not the final response section
+2. *Stop hook replaces the entire region* with the canonical response
+3. *Streaming stops BEFORE Stop hook fires* — the =write_status "ready"= call
+   in =handle_response= (line 262) happens first; Emacs detects the status
+   change and stops the timer before the MCP response insertion call arrives
+
+#+begin_src elisp
+(defvar claude-org-cmux--stream-timer nil
+  "Timer for periodic pipe-pane streaming during active queries.")
+
+(defvar claude-org-cmux--stream-line-count 0
+  "Number of lines already captured by streaming.")
+
+(defun claude-org-cmux--start-streaming (surface-id session-key)
+  "Start periodic pipe-pane streaming for live response feedback."
+  (setq claude-org-cmux--stream-line-count 0)
+  (setq claude-org-cmux--stream-timer
+        (run-at-time 3 2  ;; start after 3s, repeat every 2s
+          (lexical-let ((sid surface-id) (sk session-key))
+            (lambda ()
+              (condition-case nil
+                  (claude-org-cmux--stream-tick sid sk)
+                (error
+                 (claude-org-cmux--stop-streaming))))))))
+
+(defun claude-org-cmux--stop-streaming ()
+  "Stop the pipe-pane streaming timer."
+  (when claude-org-cmux--stream-timer
+    (cancel-timer claude-org-cmux--stream-timer)
+    (setq claude-org-cmux--stream-timer nil)))
+
+(defun claude-org-cmux--stream-tick (surface-id session-key)
+  "One tick of streaming: capture new lines via pipe-pane."
+  ;; Stop if query is no longer active
+  (unless (claude-org--session-get session-key :busy)
+    (claude-org-cmux--stop-streaming)
+    (cl-return-from nil))
+  ;; Capture new output
+  (let* ((ws-id (claude-org--session-get session-key :cmux-workspace))
+         (output (claude-org-cmux--call "pipe-pane"
+                   "--workspace" ws-id "--surface" surface-id
+                   "--command"
+                   (format "tail -n +%d" claude-org-cmux--stream-line-count)))
+         (new-lines (split-string output "\n")))
+    (setq claude-org-cmux--stream-line-count
+          (+ claude-org-cmux--stream-line-count (length new-lines)))
+    ;; Insert incremental text into the response section
+    ;; (implementation depends on how we want to display partial output)
+    ))
+#+end_src
+
+*** Open Questions
+
+1. *Where to insert streaming text?* Options:
+   a. Into the existing response section (replaced on Stop)
+   b. Into a temporary =*Claude Streaming*= buffer (cleared on Stop)
+   c. Into the mode-line / header-line (truncated preview)
+
+2. *How to strip Claude Code TUI chrome from pipe-pane output?*
+   The raw terminal buffer includes ANSI escapes, status bars, and
+   tool-use intermediate output. Need to filter to just assistant text.
+
+3. *Performance*: =pipe-pane= reads the FULL scrollback each time.
+   For long sessions, this could be large. The =tail -n +N= trick
+   mitigates by only processing new lines.
+
+4. *Is 2-second polling acceptable?* Lower means more CLI calls.
+   Higher means more latency. 2 seconds is a balance.
+
+*** Recommendation
+
+Start with option (c) — show a truncated preview in the header-line:
+
+#+begin_example
+[Claude: ...implementing the auth middleware with JWT token validation...]
+#+end_example
+
+This gives immediate feedback without the complexity of incremental
+org buffer insertion. The =Stop= hook still does the canonical response
+insertion into the org file.
 
 ** Port Detection
 
@@ -225,18 +499,19 @@ Default =cmuxOnly= mode: only processes descended from cmux can connect
 
 * Implementation Priority
 
-| Item | Phase | Effort | Impact |
-|------+-------+--------+--------|
-| Permission routing | 1 | ✅ Done | High |
-| Session recovery | 1 | ✅ Done | Medium |
-| Unified terminal menu | 1 | ✅ Done | Medium |
-| OTel tracing (11 spans) | 1 | ✅ Done | Medium |
-| Sidebar log calls | 2 | 2h | High |
-| Rich metadata blocks | 2 | 1h | Medium |
-| Markdown doc viewer | 2 | 1h | Medium |
-| wait-for ready detection | 3 | 1h | Medium |
-| pipe-pane streaming | 3 | Research | High |
-| Browser automation | 4 | Research | Future |
+| Item | Phase | Effort | Impact | Status |
+|------+-------+--------+--------+--------|
+| Permission routing | 1 | ✅ Done | High | Implemented |
+| Session recovery | 1 | ✅ Done | Medium | Implemented |
+| Unified terminal menu | 1 | ✅ Done | Medium | Implemented |
+| OTel tracing (11 spans) | 1 | ✅ Done | Medium | Implemented |
+| Sidebar log calls | 2 | 2h | High | Planned |
+| Rich metadata blocks | 2 | 1h | Medium | Planned |
+| Markdown doc viewer | 2 | 1h | Medium | Planned |
+| AskUserQuestion pre-cache | 3 | 2h | High | Designed |
+| wait-for ready detection | 4 | 2h | Medium | Designed |
+| pipe-pane response streaming | 5 | 4h | High | Designed (with open questions) |
+| Browser automation | 6 | Research | Future | — |
 
 * References
 
