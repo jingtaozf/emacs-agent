@@ -1,6 +1,8 @@
 """Shared OTel configuration for all Python components."""
 
 import os
+import subprocess
+import time
 
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -11,7 +13,46 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 PHOENIX_ENDPOINT = os.environ.get(
     "CLAUDE_OTEL_ENDPOINT", "http://localhost:6006/v1/traces"
 )
+PHOENIX_HEALTH_URL = PHOENIX_ENDPOINT.rsplit("/v1/traces", 1)[0] + "/health"
 STATUS_DIR = "/tmp/claude-agent-status"
+
+
+def _phoenix_is_running() -> bool:
+    """Check if Phoenix is reachable via a quick HTTP health check."""
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(PHOENIX_HEALTH_URL, method="GET")
+        with urllib.request.urlopen(req, timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+def _ensure_phoenix() -> None:
+    """Start Phoenix if not running. Best-effort, never raises."""
+    if _phoenix_is_running():
+        return
+    try:
+        python_dir = os.path.join(
+            os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "python"
+        )
+        if not os.path.isdir(python_dir):
+            return
+        subprocess.Popen(
+            ["uv", "run", "--extra", "phoenix",
+             "python", "-m", "phoenix.server.main", "serve"],
+            cwd=python_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Wait briefly for Phoenix to start accepting connections
+        for _ in range(10):
+            time.sleep(0.5)
+            if _phoenix_is_running():
+                return
+    except Exception:
+        pass  # best-effort
 
 
 def create_exporter():
@@ -29,7 +70,11 @@ def create_exporter():
 
 
 def setup_tracer(service_name: str = "emacs-agent") -> trace.Tracer:
-    """Initialize OTel with SimpleSpanProcessor (auto-exports on span end)."""
+    """Initialize OTel with SimpleSpanProcessor (auto-exports on span end).
+
+    Auto-starts Phoenix if it's not running (best-effort).
+    """
+    _ensure_phoenix()
     resource = Resource.create({
         "service.name": service_name,
         "openinference.project.name": "emacs-agent",
