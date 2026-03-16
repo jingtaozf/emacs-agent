@@ -55,6 +55,7 @@
       (error "Claude Code module not found: %s" file))))
 
 ;; Load all modules
+(claude-code--load-module "claude-agent-trace")
 (claude-code--load-module "claude-agent-backend")
 (claude-code--load-module "claude-agent-permission")
 (claude-code--load-module "claude-agent-ide")
@@ -66,6 +67,7 @@
 (claude-code--load-module "claude-org-history")
 (claude-code--load-module "claude-org-scheduled")
 (claude-code--load-module "claude-org-iterm2")
+(claude-code--load-module "claude-org-cmux")
 (claude-code--load-module "claude-org-native")
 (claude-code--load-module "emacs-mcp-server")
 
