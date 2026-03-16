@@ -11,7 +11,7 @@
 (require 'cl-lib)
 (require 'json)
 
-;; Load project source
+;; Load project source — claude-ide.org requires websocket package
 (let ((project-root (file-name-directory
                      (directory-file-name
                       (file-name-directory
