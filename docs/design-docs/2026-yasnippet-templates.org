@@ -1,0 +1,252 @@
+#+TITLE: Migrate AI Block Templates to yasnippet
+#+DATE: 2026-03-17
+#+STATUS: draft
+
+* Goals
+
+- Replace static =insert= with =yas-expand-snippet= for interactive tab-stop navigation
+- Support static text, dynamic elisp, and user-editable fields in a single template
+- Keep the existing =completing-read= menu (=C-c C-/ t=) as the entry point
+- Make yasnippet an optional dependency — fall back to plain =insert= if absent
+- Ship snippets with the package (no user-managed snippet directories)
+
+* Non-Goals
+
+- Requiring TAB-trigger expansion (we invoke from a command, not by typing a key)
+- Removing support for function-based templates (=Analyze Backtrace=)
+- Breaking existing user-customized =claude-org-templates-file=
+
+* Background
+
+** Current System
+
+=claude-org-templates.el= is an alist of =(NAME . VALUE)= pairs read from disk on
+every invocation. 9 of 10 templates are static strings. 1 is a function reference.
+The entry point =claude-org-insert-template= uses =completing-read= then =(insert content)=.
+
+** What yasnippet Adds
+
+| Capability | Current | yasnippet |
+|------------+---------+-----------|
+| Static text | ✅ =(insert "...")= | ✅ Same text in body |
+| User-editable fields | ❌ None | ✅ =$1=, =${1:default}=, =$0= |
+| Context-aware defaults | ⚠ Function must return whole string | ✅ =`(elisp)`= inline anywhere |
+| Mirrors (repeat field) | ❌ | ✅ =$1= repeated = auto-mirror |
+| Tab navigation | ❌ | ✅ TAB moves between fields |
+| Completing-read menu | ✅ | ✅ =yas-expand-snippet= after selection |
+
+* Technical Design
+
+** Approach: Hybrid — alist body strings become snippet syntax
+
+Minimal change: the template alist stays, but string values use yasnippet
+syntax (=$1=, =`(elisp)`=, =$0=). The =insert-template= function calls
+=yas-expand-snippet= instead of =insert= when yasnippet is available.
+
+** Migration: Template-by-Template
+
+*** Static templates (no change needed — work as-is with yas-expand-snippet)
+
+| Template | Change | Reason |
+|----------+--------+--------|
+| Code Review | None | One-liner, no fields needed |
+| continue | None | One-liner |
+| Git Commit and Push | None | Fixed instruction |
+| Enter Worktree | None | Fixed instruction |
+| Exit Worktree (keep) | None | Fixed instruction |
+| Exit Worktree (remove) | None | Fixed instruction |
+
+*** Templates with natural tab stops
+
+*Fix Error* — scaffold with blank fields:
+
+#+begin_example
+;; Before:
+"Please help fix this error:\n\nError:\n\nContext:\n\n"
+
+;; After:
+"Please help fix this error:\n\nError:\n${1:paste error here}\n\nContext:\n${2:describe context}\n$0"
+#+end_example
+
+*Merge Worktree* — has =<branch-name>= placeholder:
+
+#+begin_example
+;; Before:
+"... git merge --squash <branch-name> ..."
+
+;; After:
+"... git merge --squash ${1:branch-name} ...
+6. Clean up: git worktree remove .claude/worktrees/$1 && git branch -d $1
+$0"
+#+end_example
+
+=$1= mirrors — the branch name typed once appears in all 3 locations.
+
+*** Templates with context-aware defaults
+
+*Debug with Phoenix Traces* — could inject live Phoenix URL:
+
+#+begin_example
+"1. Query recent spans from the emacs-agent project:
+   curl -s -X POST http://localhost:`(or (getenv \"PHOENIX_PORT\") \"6006\")`/graphql ..."
+#+end_example
+
+*Explain Code* — could inject the current file context:
+
+#+begin_example
+"Please explain the code in `(file-name-nondirectory (or buffer-file-name \"\"))`:\n$0"
+#+end_example
+
+*** Function-based template (Analyze Backtrace)
+
+This stays as a function — yasnippet handles it via embedded elisp:
+
+#+begin_example
+"Please analyze this Emacs backtrace:\n\n\\=`\\=`\\=`\n`(claude-org-template--backtrace-text)`\n\\=`\\=`\\=`\n\n$0"
+#+end_example
+
+Where =claude-org-template--backtrace-text= is a helper that reads the
+=*Backtrace*= buffer content (the existing function minus the prompt wrapper).
+
+** Implementation
+
+*** Core Change: =insert-template= uses =yas-expand-snippet=
+
+#+begin_src elisp
+(defun claude-org-insert-template ()
+  "Select and insert a template into the current AI block.
+Uses yasnippet for interactive field navigation when available.
+Falls back to plain insert if yasnippet is not loaded."
+  (interactive)
+  (unless (claude-org--in-ai-block-p)
+    (claude-org--do-insert-block nil)
+    (forward-line -1)
+    (end-of-line))
+  (let* ((templates (claude-org--get-templates))
+         (names (mapcar #'car templates))
+         (completion-extra-properties
+          (list :annotation-function #'claude-org--template-annotation))
+         (selected (completing-read "Template: " names nil t)))
+    (when selected
+      (let ((content (claude-org--get-template-content selected)))
+        (if (and (featurep 'yasnippet) (bound-and-true-p yas-minor-mode))
+            (yas-expand-snippet content)
+          (insert content))
+        (message "Inserted template: %s" selected)))))
+#+end_src
+
+Key points:
+- =(featurep 'yasnippet)= — optional dependency check
+- =yas-minor-mode= — must be active for =yas-expand-snippet=
+- Falls back to =(insert content)= when yasnippet is absent
+- Template strings work with BOTH paths (=$1= is just literal text for plain insert)
+
+*** Enable =yas-minor-mode= in =claude-org-mode=
+
+#+begin_src elisp
+;; In claude-org-mode definition:
+(when (fboundp 'yas-minor-mode)
+  (yas-minor-mode 1))
+#+end_src
+
+*** Updated =claude-org-templates.el=
+
+#+begin_src elisp
+(("Analyze Backtrace" . claude-org-template--backtrace)
+ ("Code Review" . "run code simplifier and code review to the code changes.")
+ ("Explain Code" . "Please explain what this code does, including:
+1. Overall purpose
+2. Key functions and their roles
+3. Data flow
+4. Any notable patterns or techniques
+
+$0")
+ ("Fix Error" . "Please help fix this error:
+
+Error:
+${1:paste error here}
+
+Context:
+${2:describe what you were doing}
+
+$0")
+ ("continue" . "Please continue the previous instruction if not finished.")
+ ("Git Commit and Push" . "Please commit and push the changes.
+
+Note: If there are pre-commit hooks configured, please wait for them to complete
+before considering the commit successful. If hooks fail, fix the issues and retry.
+
+")
+ ("Enter Worktree" . "Please enter a worktree for this story.
+All code changes should happen in the worktree.
+")
+ ("Exit Worktree (keep)" . "Please exit the worktree and keep it.
+I'll review and merge manually.
+")
+ ("Exit Worktree (remove)" . "Please exit the worktree and remove it — discard all changes.
+")
+ ("Merge Worktree" . "Please merge the worktree branch into master:
+1. Exit the worktree if still inside
+2. git checkout master
+3. git merge --squash ${1:branch-name}
+4. Run make check
+5. If tests pass, commit with a descriptive message
+6. Clean up: git worktree remove .claude/worktrees/$1 && git branch -d $1
+$0")
+ ("Debug with Phoenix Traces" . "Please check recent Phoenix traces to understand what happened:
+
+1. Query recent spans from the emacs-agent project:
+   curl -s -X POST http://localhost:6006/graphql -H 'Content-Type: application/json' \\\\
+     -d '{\"query\": \"query { node(id: \\\\\"UHJvamVjdDoy\\\\\") { ... on Project { spans(first: 20, sort: {col: startTime, dir: desc}) { edges { node { name spanId parentId spanKind statusCode startTime latencyMs attributes } } } } } }\"}' | jq '.data.node.spans.edges[].node | {name, statusCode, latencyMs}'
+
+2. Look for: error status spans, unusually high latency, missing child spans
+3. For a specific span, fetch its full tree with descendants
+4. Check input.value and output.value attributes for data flow issues
+5. Report what you find and suggest fixes.
+$0"))
+#+end_src
+
+** yasnippet Gotchas for org-mode
+
+| Issue | Solution |
+|-------+---------|
+| Indentation mangling | Use =(yas-indent-line 'fixed)= in expand-env |
+| TAB conflict with =org-cycle= | =yas-maybe-expand= conditional binding handles this |
+| Literal =$= in templates | Escape as =\$= |
+| Literal backtick in templates | Escape as =\`= |
+| =yas-minor-mode= required | Enable in =claude-org-mode= hook |
+
+** Backward Compatibility
+
+| Scenario | Behavior |
+|----------+----------|
+| yasnippet installed + enabled | =yas-expand-snippet= — interactive fields |
+| yasnippet installed, not enabled | =(insert content)= — static text, =$1= appears literally |
+| yasnippet not installed | =(insert content)= — static text, =$1= appears literally |
+| User has custom =claude-org-templates-file= | Works — their strings still insert; =$N= markers are optional |
+
+** Expand-env for org-mode
+
+To prevent org indentation from breaking snippet structure:
+
+#+begin_src elisp
+;; Pass expand-env to yas-expand-snippet:
+(yas-expand-snippet content nil nil '((yas-indent-line 'fixed)))
+#+end_src
+
+* Features
+
+** TODO Update =claude-org-insert-template= to use =yas-expand-snippet=
+** TODO Enable =yas-minor-mode= in =claude-org-mode= when available
+** TODO Add tab stops to Fix Error, Merge Worktree, Explain Code templates
+** TODO Add =$0= exit points to all templates
+** TODO Test: yasnippet absent → falls back to plain insert
+** TODO Test: yasnippet present → TAB navigates between fields
+
+* References
+
+- yasnippet source: =~/.emacs.d/straight/repos/yasnippet/yasnippet.el=
+- =yas-expand-snippet= signature: line 3994 — =(snippet &optional start end expand-env)=
+- =yas-define-snippets= signature: line 1798 — =(mode snippets)=
+- Current templates: =claude-org-templates.el=
+- Current insert function: =claude-org.org:3662=
