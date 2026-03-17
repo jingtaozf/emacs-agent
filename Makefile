@@ -19,7 +19,8 @@ LITERATE_ELISP_DIR ?= $(HOME)/projects/literate-elisp
 WEB_SERVER_DIR ?= $(HOME)/.emacs.d/straight/build/web-server
 COMPANY_DIR ?= $(HOME)/.emacs.d/straight/build/company
 WEBSOCKET_DIR ?= $(HOME)/.emacs.d/straight/build/websocket
-LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR)
+YASNIPPET_DIR ?= $(HOME)/.emacs.d/straight/build/yasnippet
+LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR) -L $(YASNIPPET_DIR)
 
 # Common literate-elisp load sequences (DRY — used by all test targets)
 # Load order: trace → agent (includes backend) → mcp → org

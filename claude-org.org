@@ -3555,132 +3555,80 @@ Prompts for confirmation if there are active clients."
                                "yes" "no")))))))))
 #+END_SRC
 
-* Template Insertion
+* Template Insertion (yasnippet)
 
-Insert predefined prompts into AI blocks via menu selection.
+AI block templates are yasnippet snippets in =snippets/org-mode/=.
+Supports static text, tab stops (=$1=, =${1:default}=), mirrors,
+embedded elisp (=`(elisp)`=), and =$0= exit points.
 
-** Configuration
+** Setup
 
 #+BEGIN_SRC elisp
-(defun claude-org--templates-file-path ()
-  "Return the path to the default templates file.
-Derives the package directory from `claude-org-prompts-directory' (which is
-resolved at load time) and looks for `claude-org-templates.el' there."
-  (let ((pkg-dir (file-name-directory
-                  (directory-file-name claude-org-prompts-directory))))
-    (expand-file-name "claude-org-templates.el" pkg-dir)))
+(require 'yasnippet)
 
-(defun claude-org--load-templates-from-file (file)
-  "Load templates from FILE as data and return the alist.
-Returns nil if FILE does not exist or cannot be read.
-The file should contain a single top-level alist as its first readable form."
-  (when (and file (file-exists-p file))
-    (condition-case nil
-        (with-temp-buffer
-          (insert-file-contents file)
-          (goto-char (point-min))
-          ;; Skip comments and whitespace to find the data form
-          (while (forward-comment 1))
-          (let ((data (read (current-buffer))))
-            (when (listp data) data)))
-      (error nil))))
+(defun claude-org--setup-yasnippet ()
+  "Load claude-org snippet directory into yasnippet."
+  (let ((snippets-dir (expand-file-name
+                       "snippets"
+                       (or (bound-and-true-p claude-code-directory)
+                           (file-name-directory
+                            (or load-file-name buffer-file-name
+                                default-directory))))))
+    (when (file-directory-p snippets-dir)
+      (add-to-list 'yas-snippet-dirs snippets-dir t)
+      (yas-load-directory snippets-dir nil t))))
 
-(defcustom claude-org-templates-file nil
-  "Path to external file containing template definitions.
-When nil, uses the default `claude-org-templates.el' in the package directory.
-The file should contain a single alist as its first readable form.
-Set to a custom path to override the default templates."
-  :type '(choice (const :tag "Default (package directory)" nil)
-                 (file :tag "Custom templates file"))
-  :group 'claude-org)
-
-(defun claude-org--get-templates ()
-  "Return the current templates alist, loading fresh from file each time.
-This ensures edits to the templates file are picked up immediately
-without restarting Emacs.  Uses `claude-org-templates-file' if set,
-otherwise the default `claude-org-templates.el' in the package directory."
-  (claude-org--load-templates-from-file
-   (or claude-org-templates-file
-       (claude-org--templates-file-path))))
+(with-eval-after-load 'yasnippet
+  (claude-org--setup-yasnippet))
 #+END_SRC
 
-** Built-in Template Functions
+** Backtrace Helper
 
 #+BEGIN_SRC elisp
-(defun claude-org-template--backtrace ()
-  "Generate a prompt to analyze the current Emacs backtrace.
-Returns a formatted string with backtrace content, or signals error if no backtrace.
-Uses markdown code fences since this is inserted inside an AI source block."
-  (let ((content (cond
-                  ((eq major-mode 'debugger-mode)
-                   (buffer-string))
-                  ((get-buffer "*Backtrace*")
-                   (with-current-buffer "*Backtrace*"
-                     (buffer-string)))
-                  (t nil))))
-    (if content
-        (format "Please analyze this Emacs backtrace error:
-
-```
-%s
-```
-
-Provide:
-1. Root Cause - what caused this error
-2. Explanation - why this happened
-3. Fix - concrete steps to resolve
-4. Prevention - how to avoid in future
-
-" content)
-      (user-error "No backtrace buffer found. Trigger an error first"))))
+(defun claude-org-template--backtrace-text ()
+  "Return the current Emacs backtrace as a string.
+Called by the Analyze Backtrace yasnippet via embedded elisp."
+  (let ((buf (or (and (eq major-mode 'debugger-mode) (current-buffer))
+                 (get-buffer "*Backtrace*"))))
+    (if buf
+        (with-current-buffer buf (buffer-string))
+      "(No backtrace found — open *Backtrace* buffer first)")))
 #+END_SRC
 
 ** Template Insertion Command
 
 #+BEGIN_SRC elisp
-(defun claude-org--template-annotation (name)
-  "Return annotation for template NAME in completion."
-  (let ((template (cdr (assoc name (claude-org--get-templates)))))
-    (cond
-     ((functionp template)
-      "  [function]")
-     ((stringp template)
-      (let ((preview (substring template 0 (min 40 (length template)))))
-        (format "  %s..." (string-trim (replace-regexp-in-string "\n" " " preview)))))
-     (t ""))))
-
-(defun claude-org--get-template-content (name)
-  "Get the content for template NAME.
-Calls function templates, returns string templates verbatim."
-  (let ((template (cdr (assoc name (claude-org--get-templates)))))
-    (cond
-     ((functionp template) (funcall template))
-     ((stringp template) template)
-     (t (user-error "Invalid template: %s" name)))))
-
 ;;;###autoload
 (defun claude-org-insert-template ()
-  "Insert a template into the current AI block.
-Templates are loaded fresh from file each time, so edits to the
-templates file take effect immediately.
+  "Select and expand a Claude AI template into the current AI block.
+Uses yasnippet for interactive field navigation and TAB completion.
 If not inside an AI block, creates one first."
   (interactive)
-  ;; Ensure we're in an AI block (or create one)
   (unless (claude-org--in-ai-block-p)
     (claude-org--do-insert-block nil)
-    ;; Move inside the newly created block
     (forward-line -1)
     (end-of-line))
-  ;; Select and insert template
-  (let* ((templates (claude-org--get-templates))
-         (names (mapcar #'car templates))
-         (completion-extra-properties
-          (list :annotation-function #'claude-org--template-annotation))
-         (selected (completing-read "Template: " names nil t)))
-    (when selected
-      (let ((content (claude-org--get-template-content selected)))
-        (insert content)
-        (message "Inserted template: %s" selected)))))
+  (unless (bound-and-true-p yas-minor-mode)
+    (yas-minor-mode 1))
+  ;; Get all Claude AI snippets from the org-mode table
+  (let* ((table (yas--table-get-create 'org-mode))
+         (all-templates '())
+         (_ (maphash (lambda (_k v)
+                       (maphash (lambda (_k2 tmpl) (push tmpl all-templates)) v))
+                     (yas--table-hash table)))
+         (ai-templates (cl-remove-if-not
+                        (lambda (tmpl)
+                          (let ((g (yas--template-group tmpl)))
+                            (or (equal "Claude AI" g)
+                                (equal '("Claude AI") g))))
+                        all-templates))
+         (names (mapcar #'yas--template-name ai-templates))
+         (selected (completing-read "Template: " (sort names #'string<) nil t))
+         (tmpl (cl-find selected ai-templates
+                        :key #'yas--template-name :test #'equal)))
+    (when tmpl
+      (yas-expand-snippet (yas--template-content tmpl))
+      (message "Inserted template: %s" selected))))
 #+END_SRC
 
 * Slash Command Completion

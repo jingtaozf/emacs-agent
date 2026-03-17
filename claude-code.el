@@ -5,7 +5,7 @@
 ;; Author: Jingtao Xu
 ;; URL: https://github.com/jingtaozf/claude-code
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (literate-elisp "0.8") (web-server "0.1.2"))
+;; Package-Requires: ((emacs "27.1") (literate-elisp "0.8") (web-server "0.1.2") (yasnippet "0.14"))
 ;; Keywords: ai, tools, claude
 
 ;; This file is not part of GNU Emacs.
