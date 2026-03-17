@@ -61,6 +61,17 @@ I'll review and merge manually.
 4. Run make check
 5. If tests pass, commit with a descriptive message
 6. Clean up: git worktree remove .claude/worktrees/<name> && git branch -d <branch>
+")
+ ("Debug with Phoenix Traces" . "Please check recent Phoenix traces to understand what happened:
+
+1. Query recent spans from the emacs-agent project:
+   curl -s -X POST http://localhost:6006/graphql -H 'Content-Type: application/json' \\
+     -d '{\"query\": \"query { node(id: \\\"UHJvamVjdDoy\\\") { ... on Project { spans(first: 20, sort: {col: startTime, dir: desc}) { edges { node { name spanId parentId spanKind statusCode startTime latencyMs attributes } } } } } }\"}' | jq '.data.node.spans.edges[].node | {name, statusCode, latencyMs, attrs: (.attributes | fromjson | keys)}'
+
+2. Look for: error status spans, unusually high latency, missing child spans
+3. For a specific span, fetch its full tree with descendants
+4. Check input.value and output.value attributes for data flow issues
+5. Report what you find and suggest fixes.
 "))
 
 ;;; claude-org-templates.el ends here

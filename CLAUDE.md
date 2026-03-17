@@ -105,6 +105,19 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 ### CI Monitoring
 - After every `git push`, monitor GitHub Actions in a background agent
   until the workflow passes (use `gh run list` / `gh run watch`)
+
+### Phoenix Trace Analysis
+- When investigating bugs or unexpected behavior, check Phoenix traces at
+  `http://localhost:6006` for the `emacs-agent` project
+- Use the `/phoenix-span` skill or query the GraphQL API directly:
+  ```bash
+  curl -s -X POST http://localhost:6006/graphql -H "Content-Type: application/json" \
+    -d '{"query": "query { node(id: \"UHJvamVjdDoy\") { ... on Project { spans(first: 10, sort: {col: startTime, dir: desc}) { edges { node { name spanId parentId spanKind statusCode startTime latencyMs attributes } } } } } }"}' | jq '.'
+  ```
+- Every AI block execution produces a trace with spans for: execute-ai-block,
+  cmux-execute, send-text, permission events, response handling
+- Span attributes include input.value, output.value, session IDs, tool names
+- Use traces to verify: correct parent-child relationships, timing, errors
 - If CI fails, fix the issue and push again
 
 ### Error Handling
