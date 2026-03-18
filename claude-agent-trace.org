@@ -85,17 +85,28 @@ Use this to pass context across async boundaries."
 
 #+BEGIN_SRC elisp
 (defun claude-agent-trace--request (path data)
-  "Send async HTTP POST to OTel bridge at PATH with DATA.
-Auto-starts the bridge if needed. Fire-and-forget — errors are silently ignored."
+  "Send HTTP POST to OTel bridge at PATH with DATA.
+Auto-starts the bridge if needed.
+span/start is synchronous (ensures bridge registers the span before body runs).
+span/end is async (fire-and-forget, no ordering risk since span already exists).
+Errors are silently ignored — tracing must never break user workflows."
   (when claude-agent-trace-enabled
     (claude-agent-trace--ensure-bridge)
     (let ((url-request-method "POST")
           (url-request-extra-headers '(("Content-Type" . "application/json")))
-          (url-request-data (encode-coding-string (json-serialize data) 'utf-8 t)))
-      (url-retrieve
-       (concat claude-agent-trace-bridge-url "otel/" path)
-       (lambda (_status) (kill-buffer (current-buffer)))
-       nil t))))
+          (url-request-data (encode-coding-string (json-serialize data) 'utf-8 t))
+          (url (concat claude-agent-trace-bridge-url "otel/" path)))
+      (if (string= path "span/start")
+          ;; Synchronous: span must be registered before body runs,
+          ;; otherwise span/end can arrive first (async race) → 404
+          (condition-case nil
+              (let ((buf (url-retrieve-synchronously url t nil 2)))
+                (when (buffer-live-p buf) (kill-buffer buf)))
+            (error nil))
+        ;; Async for span/end and other paths
+        (url-retrieve url
+         (lambda (_status) (kill-buffer (current-buffer)))
+         nil t)))))
 
 (defun claude-agent-trace-connect ()
   "Check connectivity to the OTel bridge (synchronous health check)."
@@ -210,7 +221,9 @@ Special attrs keys:
   :input       - Input value shown in Phoenix UI
   :output      - Output value shown in Phoenix UI (set before body runs)
 TRACE-CTX is an optional explicit context (TRACE-ID . SPAN-ID) for async use.
-If nil, uses the dynamically bound `claude-agent-trace--current-context'."
+If nil, uses the dynamically bound `claude-agent-trace--current-context'.
+If no context exists at all, auto-promotes to a root trace (new trace-id,
+no parent) so terminal backends don't silently drop spans."
   (declare (indent 2) (debug t))
   (let ((span-id-sym (make-symbol "span-id"))
         (ctx-sym (make-symbol "ctx"))
@@ -220,7 +233,11 @@ If nil, uses the dynamically bound `claude-agent-trace--current-context'."
     `(if (not claude-agent-trace-enabled)
          (progn ,@body)
        (let* ((,attrs-sym ,attrs)
-              (,ctx-sym (or ,trace-ctx claude-agent-trace--current-context))
+              (,ctx-sym (or ,trace-ctx
+                            claude-agent-trace--current-context
+                            ;; Auto-promote: no context → create root trace
+                            ;; Use :null (not nil) so json-serialize emits null, not {}
+                            (cons (claude-agent-trace--generate-trace-id) :null)))
               (,span-id-sym (claude-agent-trace--generate-span-id))
               (,start-sym (truncate (* (float-time) 1e9)))
               (claude-agent-trace--current-context

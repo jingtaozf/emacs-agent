@@ -80,7 +80,7 @@ test_iterm2_functions_defined() {
                             (fboundp 'claude-org-iterm2-cancel)
                             (fboundp 'claude-org-iterm2--set-busy)
                             (fboundp 'claude-org-iterm2--set-ready)
-                            (fboundp 'claude-org-iterm2--read-hook-status)
+                            (fboundp 'claude-org-terminal--read-hook-status)
                             t)")
   echo "$result" | grep -q "t"
 }
@@ -100,19 +100,19 @@ test_hook_status_write_and_read() {
   # Write "busy"
   printf 'busy' > "$status_dir/$test_id"
   local result
-  result=$(call_emacs "(claude-org-iterm2--read-hook-status \"$test_id\")")
+  result=$(call_emacs "(claude-org-terminal--read-hook-status \"$test_id\")")
   echo "$result" | grep -q "busy" || return 1
 
   # Write "ready"
   printf 'ready' > "$status_dir/$test_id"
-  result=$(call_emacs "(claude-org-iterm2--read-hook-status \"$test_id\")")
+  result=$(call_emacs "(claude-org-terminal--read-hook-status \"$test_id\")")
   echo "$result" | grep -q "ready" || return 1
 
   # Cleanup
   rm -f "$status_dir/$test_id"
 
   # Missing file returns "unknown"
-  result=$(call_emacs "(claude-org-iterm2--read-hook-status \"nonexistent-id-$$\")")
+  result=$(call_emacs "(claude-org-terminal--read-hook-status \"nonexistent-id-$$\")")
   echo "$result" | grep -q "unknown"
 }
 

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from claude_agent.claude_sdd import (
     _is_valid_session,
+    _normalize_name,
     build_claude_args,
     cleanup_ide_server,
     parse_args,
@@ -135,3 +136,31 @@ class TestCleanupIdeServer:
         mcp = MagicMock()
         cleanup_ide_server(mcp, "")
         assert not mcp.eval_elisp.called
+
+
+class TestNormalizeName:
+    """Tests for _normalize_name."""
+
+    def test_simple_ascii(self):
+        assert _normalize_name("my story") == "my-story"
+
+    def test_mixed_case(self):
+        assert _normalize_name("My Story Name") == "my-story-name"
+
+    def test_special_chars(self):
+        assert _normalize_name("fix: bug #123!") == "fix-bug-123"
+
+    def test_all_unicode_returns_empty(self):
+        """BUG PY-1: All-unicode name normalizes to empty string."""
+        assert _normalize_name("混合中文") == ""
+
+    def test_empty_name_not_passed_to_cli(self):
+        """BUG PY-1: Empty normalized name must NOT produce --name ''."""
+        args = build_claude_args("/p", "http://x", "", [], story_name="混合中文")
+        assert "--name" not in args
+
+    def test_valid_name_passed_to_cli(self):
+        """Normal story name produces --name with normalized slug."""
+        args = build_claude_args("/p", "http://x", "", [], story_name="My Story")
+        idx = args.index("--name")
+        assert args[idx + 1] == "my-story"

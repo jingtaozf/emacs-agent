@@ -66,6 +66,8 @@
 (claude-code--load-module "claude-org")
 (claude-code--load-module "claude-org-history")
 (claude-code--load-module "claude-org-scheduled")
+(claude-code--load-module "claude-org-sdd-bridge")
+(claude-code--load-module "claude-org-terminal-base")
 (claude-code--load-module "claude-org-iterm2")
 (claude-code--load-module "claude-org-cmux")
 (claude-code--load-module "claude-org-native")

@@ -383,7 +383,7 @@ def _extract_full_response(transcript_path: str) -> str:
             message = entry.get("message")
             if not isinstance(message, dict):
                 continue
-            content = message.get("content", [])
+            content = message.get("content") or []
             has_tool_use = any(p.get("type") == "tool_use" for p in content)
             if has_tool_use:
                 continue

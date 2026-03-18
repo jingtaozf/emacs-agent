@@ -130,13 +130,31 @@ def status():
 @app.route("/otel/span/start", methods=["POST"])
 def span_start():
     data = request.get_json()
-    trace_id = int(data["trace_id"], 16)
+
+    # Validate required keys
+    for key in ("trace_id", "span_id", "name"):
+        if key not in data:
+            return jsonify({"status": "error", "message": f"missing required key: {key}"}), 400
+
+    # Validate hex values
+    try:
+        trace_id = int(data["trace_id"], 16)
+    except ValueError:
+        return jsonify({"status": "error", "message": "invalid hex trace_id"}), 400
+
     span_id_hex = data["span_id"]
     try:
         span_id_int = int(span_id_hex, 16)
     except ValueError:
         span_id_int = None
     parent_span_id = data.get("parent_span_id")
+
+    if parent_span_id:
+        try:
+            int(parent_span_id, 16)
+        except ValueError:
+            return jsonify({"status": "error", "message": "invalid hex parent_span_id"}), 400
+
     name = data["name"]
     start_ns = data.get("start_time_ns")
     attrs = data.get("attrs") or {}
@@ -153,8 +171,11 @@ def span_start():
         )
         ctx = trace.set_span_in_context(NonRecordingSpan(parent_ctx))
     else:
-        # Root span: no parent context needed since _id_gen provides trace_id
-        ctx = None
+        # Root span: use a clean empty context so OTel creates a true root.
+        # Do NOT use NonRecordingSpan(span_id=0) — span_id=0 is invalid in
+        # OTel and causes the exporter to silently drop the span.
+        from opentelemetry.context import Context
+        ctx = Context()
 
     # Filter out meta-keys that control bridge behavior, not span attributes
     _META_KEYS = {"span-kind", "oi-kind", "input", "output"}
@@ -190,6 +211,8 @@ def span_start():
 @app.route("/otel/span/end", methods=["POST"])
 def span_end():
     data = request.get_json()
+    if "span_id" not in data:
+        return jsonify({"status": "error", "message": "missing required key: span_id"}), 400
     span_id_hex = data["span_id"]
     span = spans.pop(span_id_hex, None)
     if span is None:

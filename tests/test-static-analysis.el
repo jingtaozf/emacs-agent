@@ -211,8 +211,11 @@ ELISP-STRING is the source for re-parsing struct definitions."
       default-directory))
 
 (defvar test-static--source-files
-  '("claude-agent-trace.org" "claude-agent.org" "claude-org.org" "claude-org-cmux.org" "emacs-mcp-server.org")
+  '("claude-agent-trace.org" "claude-agent.org" "claude-org.org"
+    "claude-org-sdd-bridge.org" "claude-org-terminal-base.org"
+    "claude-org-iterm2.org" "claude-org-cmux.org" "emacs-mcp-server.org")
   "List of .org source files to analyze.
+Load order matters: sdd-bridge and terminal-base before backends.
 Customize this for your project.")
 
 (defvar test-static--skip-files-without-deps t
@@ -318,7 +321,7 @@ Returns list of warning/error messages."
     ;; Cross-module references (loaded at runtime)
     "emacs-mcp-server-running-p" "emacs-mcp-server-start" "emacs-mcp-server-port"
     "claude-org--insert-block-menu-dynamic"
-    ;; SDD bridge functions (defined in claude-org-iterm2.org, used by claude-org-cmux.org)
+    ;; SDD bridge functions (now in claude-org-sdd-bridge.org)
     "claude-org-sdd-bridge-system-prompt" "claude-org-sdd-bridge-get-cli-session"
     ;; Emacs version-specific functions
     "parse-iso8601-time-string"
@@ -489,7 +492,7 @@ Files with missing optional dependencies are skipped if
     (should (> loaded 0))))
 
 (defvar test-static--known-forward-declarations
-  '("claude-org-cmux--sdd-to-session-key")
+  '("claude-org-terminal--sdd-to-session-key")
   "Symbols that appear as forward declarations (defvar without init value)
 in one file and full definitions in another. Excluded from duplicate checks.")
 

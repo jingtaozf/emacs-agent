@@ -219,7 +219,7 @@ REGRESSION: org-up-heading-safe skips current heading."
     (goto-char (point-min))
     (org-next-visible-heading 1)
     (should (equal "sdd-test-123"
-                   (claude-org-iterm2--find-session-property
+                   (claude-org-terminal--find-session-property
                     "CLAUDE_SESSION_ID")))))
 
 (ert-deftest test-iterm2-find-property-from-body ()
@@ -230,7 +230,7 @@ REGRESSION: org-up-heading-safe skips current heading."
     (insert test-iterm2--org-content-basic)
     (goto-char (point-max))
     (should (equal "sdd-test-123"
-                   (claude-org-iterm2--find-session-property
+                   (claude-org-terminal--find-session-property
                     "CLAUDE_SESSION_ID")))))
 
 (ert-deftest test-iterm2-find-property-nested ()
@@ -243,7 +243,7 @@ REGRESSION: org-up-heading-safe skips current heading."
     (goto-char (point-min))
     (re-search-forward "Explain quantum")
     (should (equal "sdd-nested-456"
-                   (claude-org-iterm2--find-session-property
+                   (claude-org-terminal--find-session-property
                     "CLAUDE_SESSION_ID")))))
 
 (ert-deftest test-iterm2-find-property-inherited ()
@@ -256,7 +256,7 @@ REGRESSION: org-up-heading-safe skips current heading."
     (goto-char (point-min))
     (re-search-forward "inherited backend")
     (should (equal "sdd-inherited-789"
-                   (claude-org-iterm2--find-session-property
+                   (claude-org-terminal--find-session-property
                     "CLAUDE_SESSION_ID")))))
 
 (ert-deftest test-iterm2-find-property-missing ()
@@ -266,7 +266,7 @@ REGRESSION: org-up-heading-safe skips current heading."
     (org-mode)
     (insert test-iterm2--org-content-no-session)
     (goto-char (point-max))
-    (should-not (claude-org-iterm2--find-session-property
+    (should-not (claude-org-terminal--find-session-property
                  "CLAUDE_SESSION_ID"))))
 
 ;;; ============================================================================
@@ -281,7 +281,7 @@ REGRESSION: org-up-heading-safe skips current heading."
     (insert test-iterm2--org-content-basic)
     (goto-char (point-min))
     (org-next-visible-heading 1)
-    (let ((title (claude-org-iterm2--tab-title)))
+    (let ((title (claude-org-terminal--tab-title)))
       (should (string-match-p "Dev Story" title))
       (should (string-match-p "sdd-test-123" title))
       (should (string-match-p "\\[" title)))))
@@ -294,7 +294,7 @@ REGRESSION: org-up-heading-safe skips current heading."
     (insert test-iterm2--org-content-nested)
     (goto-char (point-min))
     (re-search-forward "Explain quantum")
-    (let ((title (claude-org-iterm2--tab-title)))
+    (let ((title (claude-org-terminal--tab-title)))
       (should (string-match-p "Feature A" title))
       (should (string-match-p "sdd-nested-456" title)))))
 
@@ -626,11 +626,11 @@ REGRESSION: Path resolved from load-file-name which differs per install."
     (unwind-protect
         (progn
           (with-temp-file status-file (insert "busy"))
-          (should (equal "busy" (claude-org-iterm2--read-hook-status test-id)))
+          (should (equal "busy" (claude-org-terminal--read-hook-status test-id)))
           (with-temp-file status-file (insert "ready"))
-          (should (equal "ready" (claude-org-iterm2--read-hook-status test-id)))
+          (should (equal "ready" (claude-org-terminal--read-hook-status test-id)))
           (delete-file status-file)
-          (should (equal "unknown" (claude-org-iterm2--read-hook-status test-id))))
+          (should (equal "unknown" (claude-org-terminal--read-hook-status test-id))))
       (when (file-exists-p status-file) (delete-file status-file)))))
 
 (ert-deftest test-iterm2-get-status-prefers-hook-file ()
@@ -680,8 +680,8 @@ REGRESSION: Path resolved from load-file-name which differs per install."
             (goto-char (point-min))
             (org-back-to-heading t)
             ;; Register
-            (claude-org-iterm2--register-query test-session "fake-iterm-id")
-            (let ((req-id (claude-org-iterm2--read-request-id test-session)))
+            (claude-org-terminal--register-query test-session "fake-iterm-id")
+            (let ((req-id (claude-org-terminal--read-request-id test-session)))
               (should req-id)
               (should (claude-agent--get-active-query req-id))
               ;; Unregister
@@ -1175,11 +1175,11 @@ Simulates the Stop hook calling query-completed after iteration 1."
     ;; ensure-session is called by execute-ai-block
     (claude-org-iterm2--execute-ai-block)
     (let ((session-key (gethash "sdd-loop-test"
-                                claude-org-iterm2--sdd-to-session-key)))
+                                claude-org-terminal--sdd-to-session-key)))
       (should session-key)
       (should (equal (claude-org--current-session-key) session-key))
       ;; Cleanup
-      (remhash "sdd-loop-test" claude-org-iterm2--sdd-to-session-key))))
+      (remhash "sdd-loop-test" claude-org-terminal--sdd-to-session-key))))
 
 ;;; ============================================================================
 ;;; IDE Server Integration Tests

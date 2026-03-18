@@ -7,6 +7,7 @@ Usage: claude-sdd <org-file> [session-id] [-- extra-args...]
 
 import atexit
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -172,8 +173,9 @@ def build_claude_args(
     args.extend(["--mcp-config", mcp_config])
 
     # Set session name from SDD story name
-    if story_name:
-        args.extend(["--name", _normalize_name(story_name)])
+    normalized = _normalize_name(story_name) if story_name else ""
+    if normalized:
+        args.extend(["--name", normalized])
 
     if _is_valid_session(system_prompt):
         args.extend(["--system-prompt", system_prompt])
@@ -298,6 +300,15 @@ def main() -> None:
     # Register atexit as belt-and-suspenders for edge cases
     if mcp_ok and session_id:
         atexit.register(cleanup_ide_server, mcp, session_id)
+
+    # Register SIGTERM handler so cleanup runs even on kill/docker stop
+    # (atexit handlers do NOT fire on SIGTERM)
+    def _sigterm_handler(signum, frame):
+        if mcp_ok and session_id:
+            cleanup_ide_server(mcp, session_id)
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     result = subprocess.run(args)
 

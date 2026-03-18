@@ -153,6 +153,8 @@ test-native:
 	@echo "Running native terminal unit tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-native.org\")" \
 		-l tests/test-claude-org-native.el \
@@ -164,6 +166,8 @@ test-cmux:
 	@echo "Running cmux backend E2E tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
 		-l tests/test-cmux-e2e-simulated.el \
 		-f ert-run-tests-batch-and-exit
@@ -298,6 +302,7 @@ test-agent-unit:
 		-l tests/test-claude-agent-error-injection.el \
 		-l tests/test-claude-agent-sentinel.el \
 		-l tests/test-json-parser-property.el \
+		-l tests/test-harness-phase2.el \
 		-f ert-run-tests-batch-and-exit
 # TDD stubs (tests written before implementation):
 #   -l tests/test-claude-agent-input-validation.el
@@ -366,6 +371,8 @@ test-org-unit:
 		-l tests/test-mcp-http.el \
 		-l tests/test-claude-org-cleanup.el \
 		-l tests/test-claude-org-cleanup-r2.el \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		-l tests/test-terminal-prompt-parity.el \
 		-l tests/test-sdd-bridge-response.el \
@@ -611,6 +618,20 @@ watch:
 		echo "Files changed, reloading..."; \
 		$(MAKE) test-unit; \
 	done
+
+# Local-only E2E tests (requires Phoenix + OTel bridge + cmux)
+# Excluded from CI — run on dev machines only
+.PHONY: test-e2e-local
+test-e2e-local:
+	@echo "Running local E2E tests (requires Phoenix + OTel bridge)..."
+	$(BATCH) $(LOAD_PATH) \
+		$(LOAD_ALL) \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
+		-l tests/test-e2e-local-trace.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"
 
 # SDD Bridge E2E tests (requires running Emacs MCP server)
 EMACS_MCP_PORT ?= 9999

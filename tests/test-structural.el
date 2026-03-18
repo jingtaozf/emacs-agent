@@ -687,7 +687,9 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
     ("claude-org-response"     . 3)
     ("claude-org"              . 4)   ; top-level org
     ("claude-org-history"      . 5)   ; top extensions
-    ("claude-org-scheduled"    . 5))
+    ("claude-org-scheduled"    . 5)
+    ("claude-org-sdd-bridge"   . 5)   ; SDD bridge, needs org
+    ("claude-org-terminal-base" . 2)) ; shared terminal, needs agent
   "Module layer assignments from ARCHITECTURE.org.
 Higher layers may depend on same or lower layers, but not upward.")
 
@@ -831,6 +833,31 @@ FIX: Remove the unused function, or add a test/usage for it."
       (should-with-fix (null dead)
         (format "Dead public functions (defined but never referenced elsewhere):\n%s\nFIX: Remove unused functions or add usage/tests."
                 (mapconcat #'identity (sort dead #'string<) "\n"))))))
+
+;;; F35: No hardcoded status paths in backends
+
+(ert-deftest test-structural-no-hardcoded-status-dir ()
+  "Backend .org files must not hardcode /tmp/claude-agent-status.
+Use `claude-org-terminal-status-dir' from claude-org-terminal-base instead.
+FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `claude-org-terminal-status-dir'."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil))
+      (dolist (file '("claude-org-iterm2.org" "claude-org-cmux.org"))
+        (let ((filepath (expand-file-name file test-structural--project-root)))
+          (when (file-exists-p filepath)
+            (let ((content (with-temp-buffer
+                             (insert-file-contents filepath)
+                             (buffer-string)))
+                  (line-num 0))
+              (dolist (line (split-string content "\n"))
+                (cl-incf line-num)
+                (when (string-match-p "/tmp/claude-agent-status" line)
+                  (push (format "%s:%d: %s" file line-num (string-trim line))
+                        violations)))))))
+      (should-with-fix (null violations)
+        (format "Hardcoded /tmp/claude-agent-status found in backend files:\n%s\nFIX: Use `claude-org-terminal-status-dir' constant from claude-org-terminal-base.org."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
 
 (provide 'test-structural)
 ;;; test-structural.el ends here

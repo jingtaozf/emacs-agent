@@ -202,6 +202,23 @@ class TestExtractFullResponse:
         ])
         assert _extract_full_response(path) == ""
 
+    def test_content_null_does_not_crash(self, tmp_path):
+        """BUG-1: content=null in JSON must not raise TypeError."""
+        path = self._make_transcript(tmp_path, [
+            self._user("hello"),
+            {"type": "assistant", "message": {"content": None}},
+            self._assistant("final answer"),
+        ])
+        assert _extract_full_response(path) == "final answer"
+
+    def test_content_null_only(self, tmp_path):
+        """BUG-1: all assistant turns with content=null → empty string."""
+        path = self._make_transcript(tmp_path, [
+            self._user("hello"),
+            {"type": "assistant", "message": {"content": None}},
+        ])
+        assert _extract_full_response(path) == ""
+
 
 class TestFormatTodosAsElisp:
     def test_basic(self):

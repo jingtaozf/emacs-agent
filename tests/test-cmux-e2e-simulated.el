@@ -242,14 +242,14 @@ Returns values from BODY. Cleans up buffer afterwards."
   "Can find CLAUDE_SESSION_ID from within AI block."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((sid (claude-org-cmux--find-session-property "CLAUDE_SESSION_ID")))
+    (let ((sid (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID")))
       (should (equal sid "test-cmux-session-001")))))
 
 (ert-deftest test-cmux-find-session-property-missing ()
   "Returns nil for missing property."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (should (null (claude-org-cmux--find-session-property "NONEXISTENT_PROP")))))
+    (should (null (claude-org-terminal--find-session-property "NONEXISTENT_PROP")))))
 
 ;;; ============================================================================
 ;;; Tests: Tab Title
@@ -259,7 +259,7 @@ Returns values from BODY. Cleans up buffer afterwards."
   "Tab title contains session ID and a heading name."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((title (claude-org-cmux--tab-title)))
+    (let ((title (claude-org-terminal--tab-title)))
       ;; Must contain session ID
       (should (string-match-p "test-cmux-session-001" title))
       ;; Must contain some heading text (the heading that has the property)
@@ -383,7 +383,7 @@ Returns values from BODY. Cleans up buffer afterwards."
         ;; Should have registered one new query
         (should (> (hash-table-count claude-agent--active-queries) initial-count))
         ;; Clean up: unregister
-        (let ((req-id (claude-org-cmux--read-request-id "test-cmux-session-001")))
+        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
             (claude-agent--unregister-query req-id)))))))
 
@@ -400,7 +400,7 @@ Returns values from BODY. Cleans up buffer afterwards."
         (should (file-exists-p flag-path))
         ;; Clean up
         (delete-file flag-path)
-        (let ((req-id (claude-org-cmux--read-request-id "test-cmux-session-001")))
+        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
             (claude-agent--unregister-query req-id)
             (delete-file (expand-file-name
@@ -440,7 +440,7 @@ Returns values from BODY. Cleans up buffer afterwards."
       ;; Verify prompt was sent via send command
       (should (test-cmux--mock-calls-for "send"))
       ;; Clean up active query
-      (let ((req-id (claude-org-cmux--read-request-id "test-cmux-session-002")))
+      (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-002")))
         (when req-id
           (claude-agent--unregister-query req-id)
           (ignore-errors
@@ -462,7 +462,7 @@ Returns values from BODY. Cleans up buffer afterwards."
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
       (claude-org-cmux--execute-ai-block)
-      (let ((req-id (claude-org-cmux--read-request-id "test-cmux-session-001")))
+      (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
         (should req-id)
         ;; Verify query is registered
         (should (claude-agent--get-active-query req-id))
@@ -662,7 +662,7 @@ the same session."
   :tags '(:unit :stable)
   (test-cmux--with-mock
     (puthash "sdd-perm-test" "mock-session-key"
-             claude-org-cmux--sdd-to-session-key)
+             claude-org-terminal--sdd-to-session-key)
     (puthash "sdd-perm-test" "mock-ws-id"
              claude-org-cmux--sdd-to-workspace)
     (let ((saved-alerts claude-agent-pending-alerts))
@@ -677,7 +677,7 @@ the same session."
             (should (assq (intern "sdd-perm-test") claude-agent-pending-alerts)))
         ;; Cleanup
         (setq claude-agent-pending-alerts saved-alerts)
-        (remhash "sdd-perm-test" claude-org-cmux--sdd-to-session-key)
+        (remhash "sdd-perm-test" claude-org-terminal--sdd-to-session-key)
         (remhash "sdd-perm-test" claude-org-cmux--sdd-to-workspace)))))
 
 (ert-deftest test-cmux-permission-resolved-clears-state ()
@@ -697,7 +697,7 @@ the same session."
   :tags '(:unit :stable)
   (test-cmux--with-mock
     (puthash "sdd-route-test" "mock-key"
-             claude-org-cmux--sdd-to-session-key)
+             claude-org-terminal--sdd-to-session-key)
     (puthash "sdd-route-test" "mock-ws"
              claude-org-cmux--sdd-to-workspace)
     (let ((saved-alerts claude-agent-pending-alerts))
@@ -709,7 +709,7 @@ the same session."
             ;; Should have registered alert via cmux handler
             (should (assq (intern "sdd-route-test") claude-agent-pending-alerts)))
         (setq claude-agent-pending-alerts saved-alerts)
-        (remhash "sdd-route-test" claude-org-cmux--sdd-to-session-key)
+        (remhash "sdd-route-test" claude-org-terminal--sdd-to-session-key)
         (remhash "sdd-route-test" claude-org-cmux--sdd-to-workspace)))))
 
 ;;; ============================================================================
@@ -730,16 +730,16 @@ the same session."
             (insert test-cmux--org-content-with-surface)
             (save-buffer))
           ;; Clear hash tables to simulate Emacs restart
-          (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-session-key)
+          (remhash "test-cmux-session-003" claude-org-terminal--sdd-to-session-key)
           (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-surface)
           ;; Try recovery
           (let ((result (claude-org-cmux--recover-session "test-cmux-session-003")))
             (should result)
-            (should (gethash "test-cmux-session-003" claude-org-cmux--sdd-to-session-key))
+            (should (gethash "test-cmux-session-003" claude-org-terminal--sdd-to-session-key))
             (should (equal "surface:existing-123"
                            (gethash "test-cmux-session-003" claude-org-cmux--sdd-to-surface))))
           ;; Cleanup
-          (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-session-key)
+          (remhash "test-cmux-session-003" claude-org-terminal--sdd-to-session-key)
           (remhash "test-cmux-session-003" claude-org-cmux--sdd-to-surface)
           (kill-buffer buf))
       (delete-file file))))

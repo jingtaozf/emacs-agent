@@ -102,6 +102,46 @@ class TestSpanStart:
         span = spans[self.SPAN_ID]
         assert span.kind == SpanKind.SERVER
 
+    def test_missing_trace_id_returns_400(self, client):
+        """BUG-2: Missing trace_id must return 400, not crash with 500."""
+        resp = client.post(
+            "/otel/span/start",
+            json={"span_id": "abc", "name": "test"},
+        )
+        assert resp.status_code == 400
+
+    def test_missing_span_id_returns_400(self, client):
+        """BUG-2: Missing span_id must return 400, not crash with 500."""
+        resp = client.post(
+            "/otel/span/start",
+            json={"trace_id": "0" * 32, "name": "test"},
+        )
+        assert resp.status_code == 400
+
+    def test_missing_name_returns_400(self, client):
+        """BUG-2: Missing name must return 400, not crash with 500."""
+        resp = client.post(
+            "/otel/span/start",
+            json={"trace_id": "0" * 32, "span_id": "abc"},
+        )
+        assert resp.status_code == 400
+
+    def test_invalid_hex_trace_id_returns_400(self, client):
+        """BUG-3: Non-hex trace_id must return 400, not crash with 500."""
+        resp = client.post(
+            "/otel/span/start",
+            json={"trace_id": "not-hex", "span_id": "abc", "name": "t"},
+        )
+        assert resp.status_code == 400
+
+    def test_invalid_hex_parent_span_id_returns_400(self, client):
+        """BUG-3: Non-hex parent_span_id must return 400, not 500."""
+        resp = client.post(
+            "/otel/span/start",
+            json=self._start_payload(parent_span_id="not-hex"),
+        )
+        assert resp.status_code == 400
+
     def test_default_span_kind_is_internal(self, client):
         """SpanKind defaults to INTERNAL when kind is omitted."""
         from opentelemetry.trace import SpanKind
@@ -184,6 +224,14 @@ class TestSpanEnd:
             json={"span_id": self.SPAN_ID},
         )
         assert resp.status_code == 200
+
+    def test_end_missing_span_id_returns_400(self, client):
+        """BUG-2: Missing span_id in end must return 400, not crash."""
+        resp = client.post(
+            "/otel/span/end",
+            json={"status": "ok"},
+        )
+        assert resp.status_code == 400
 
 
 class TestSpanLifecycle:

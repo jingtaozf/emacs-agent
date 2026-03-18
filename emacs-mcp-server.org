@@ -375,16 +375,21 @@ Uses `save-excursion' (marker-based) so point tracks text insertions correctly."
 
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--handler-eval-elisp (params _session)
-  "Handler for evalElisp tool.  PARAMS contains code and optional save_current_state.
+  "Handler for evalElisp tool.  PARAMS contains code, optional save_current_state and timeout.
 When `emacs-mcp-server-path-mappings' is bound (by `claude-agent-query' in Docker
 mode), translates container paths to host paths before evaluation and back again
-in results."
+in results.
+Evaluation is wrapped in `with-timeout' to prevent blocking Emacs (single-threaded).
+The timeout is effective for I/O-bound code (file, network, process); tight CPU
+loops cannot be interrupted — an inherent Emacs limitation."
   (let* ((raw-code (alist-get 'code params))
          ;; Translate container paths to host paths for Emacs to operate on
          (code (emacs-mcp-server--translate-paths-in-code raw-code :to-host))
          (save-state (if (assq 'save_current_state params)
                          (not (eq (alist-get 'save_current_state params) :json-false))
                        t))  ;; Default: true
+         (timeout-secs (let ((val (alist-get 'timeout params)))
+                         (if (and val (numberp val) (> val 0)) val 10)))
          (start-time (current-time))
          result)
     ;; Start indicators
@@ -395,19 +400,29 @@ in results."
     (unwind-protect
         (setq result
               (condition-case err
-                  (let ((form (car (read-from-string code)))
-                        eval-result)
-                    (setq eval-result
-                          (if save-state
-                              (emacs-mcp-server--eval-with-state-preservation form)
-                            (eval form t)))
-                    (emacs-mcp-server--log-eval-end
-                     eval-result
-                     (float-time (time-subtract (current-time) start-time)))
-                    ;; Translate host paths back to container paths in result
-                    `((success . t)
-                      (result . ,(emacs-mcp-server--translate-paths-in-result
-                                  (emacs-mcp-server--pp-to-string eval-result)))))
+                  (with-timeout
+                      (timeout-secs
+                       (let ((elapsed (float-time (time-subtract (current-time) start-time))))
+                         (emacs-mcp-server--log-eval-error
+                          (list 'timeout (format "after %.1fs" elapsed))
+                          elapsed)
+                         `((success . :json-false)
+                           (error . ,(format "Evaluation timed out after %ds. Emacs is single-threaded — long operations block the entire editor. Keep evalElisp calls fast (<10s). For tests or builds, use the Bash tool instead."
+                                             timeout-secs))
+                           (errorType . "timeout"))))
+                    (let ((form (car (read-from-string code)))
+                          eval-result)
+                      (setq eval-result
+                            (if save-state
+                                (emacs-mcp-server--eval-with-state-preservation form)
+                              (eval form t)))
+                      (emacs-mcp-server--log-eval-end
+                       eval-result
+                       (float-time (time-subtract (current-time) start-time)))
+                      ;; Translate host paths back to container paths in result
+                      `((success . t)
+                        (result . ,(emacs-mcp-server--translate-paths-in-result
+                                    (emacs-mcp-server--pp-to-string eval-result))))))
                 (error
                  (emacs-mcp-server--log-eval-error
                   err
@@ -447,13 +462,15 @@ Runs `claude-agent-invocation-hook' with the invocation details."
 
 (defconst emacs-mcp-server--builtin-tools
   `(((name . "evalElisp")
-     (description . "Evaluate a single Elisp form and return the result. This is the single tool for all Emacs operations - use Skills to learn how to construct elisp code for specific tasks like buffer manipulation, variable inspection, navigation, etc. IMPORTANT: The code parameter must contain exactly one top-level Elisp form (use progn to wrap multiple expressions). Each call runs in an isolated context. Point, buffer, narrowing, and window state are restored to the user's editing position after every call. Any navigation you perform (goto-char, re-search-forward, switch-to-buffer) does NOT persist to the next call. You must perform all navigation and action within a single evalElisp call using save-excursion, with-current-buffer, etc.")
+     (description . "Evaluate an Emacs Lisp expression and return the result. This is the single tool for all Emacs operations - use Skills to learn how to construct elisp code for specific tasks like buffer manipulation, variable inspection, navigation, etc. IMPORTANT: Each call runs in an isolated context. Point, buffer, narrowing, and window state are restored to the user's editing position after every call. Any navigation you perform (goto-char, re-search-forward, switch-to-buffer) does NOT persist to the next call. You must perform all navigation and action within a single evalElisp call using save-excursion, with-current-buffer, etc.")
      (handler . emacs-mcp-server--handler-eval-elisp)
      (inputSchema . ((type . "object")
                      (properties . ((code . ((type . "string")
                                              (description . "Elisp code to evaluate")))
                                     (save_current_state . ((type . "boolean")
-                                                           (description . "Whether to preserve buffer, point, narrowing, and window state during evaluation. Default: true — each call runs in full isolation (point, mark, narrowing, window-start all restored after eval). Set to false only when you intentionally need side effects visible to the user (e.g., switching buffers, moving point to show something).")))))
+                                                           (description . "Whether to preserve buffer, point, narrowing, and window state during evaluation. Default: true — each call runs in full isolation (point, mark, narrowing, window-start all restored after eval). Set to false only when you intentionally need side effects visible to the user (e.g., switching buffers, moving point to show something).")))
+                                    (timeout . ((type . "number")
+                                                (description . "Max seconds before aborting evaluation (default 10). IMPORTANT: Emacs is single-threaded — a long evalElisp call blocks the entire editor (no typing, no scrolling, no other tools). Keep evaluations fast. For tests, builds, or anything that may take over 30s, use the Bash tool instead. The timeout is effective for I/O-bound operations (file access, process calls, network); CPU-tight loops cannot be interrupted due to Emacs architecture.")))))
                      (required . ["code"]))))
     ((name . "report_invocation")
      (description . "Report when a skill or rule is being invoked. Call this tool when you invoke a skill (like /commit, /review-pr) or apply a rule from CLAUDE.md or .mdrules files. This enables real-time monitoring of agent behavior.")

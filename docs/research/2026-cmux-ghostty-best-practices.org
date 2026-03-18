@@ -1,0 +1,636 @@
+#+TITLE: cmux & Ghostty Best Practices Guide
+#+DATE: 2026-03-17
+#+STATUS: complete
+
+* Installation
+
+** macOS (DMG — recommended)
+
+Download from [[https://github.com/manaflow-ai/cmux/releases/latest/download/cmux-macos.dmg][GitHub Releases]].
+Open the =.dmg= and drag to Applications. Auto-updates via Sparkle.
+
+** Homebrew
+
+#+begin_src bash
+brew tap manaflow-ai/cmux
+brew install --cask cmux
+# Update:
+brew upgrade --cask cmux
+#+end_src
+
+** Nightly (separate app, runs alongside stable)
+
+#+begin_src bash
+# Download from:
+https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-nightly-macos.dmg
+#+end_src
+
+** CLI Symlink
+
+Install from command palette: =Cmd+P= → "Install cmux CLI".
+This creates =/usr/local/bin/cmux= for shell/script access.
+
+* Ghostty Configuration
+
+cmux uses the Ghostty terminal engine. Your Ghostty config applies inside cmux.
+
+** Config File Locations (checked in order)
+
+1. =~/.config/ghostty/config=
+2. =~/.config/ghostty/config.ghostty=
+3. =~/Library/Application Support/com.mitchellh.ghostty/config=
+4. cmux-specific: =~/Library/Application Support/com.cmuxterm.app/config=
+
+** Recommended Config
+
+#+begin_src ini
+# Font
+font-family = "Berkeley Mono"
+font-size = 14
+
+# Theme (supports light/dark dual mode)
+theme = "Tokyo Night"
+# or dual mode:
+# theme = "light:Catppuccin Latte,dark:Catppuccin Mocha"
+
+# Transparency
+background-opacity = 0.92
+
+# Scrollback
+scrollback-limit = 50000
+
+# Split pane appearance
+unfocused-split-opacity = 0.7
+split-divider-color = #3d4060
+
+# cmux-specific sidebar tinting
+sidebar-background = #1e2030
+sidebar-tint-opacity = 0.85
+#+end_src
+
+** Theme Picker
+
+#+begin_src bash
+cmux themes   # interactive picker with live preview
+#+end_src
+
+Theme files searched in:
+- =~/.config/ghostty/themes/<name>=
+- =/Applications/Ghostty.app/Contents/Resources/ghostty/themes/<name>=
+
+** Reload Config
+
+=Cmd+Shift+,= — reloads Ghostty config without restarting cmux.
+
+* Keyboard Shortcuts
+
+** Workspace Management
+
+| Shortcut | Action |
+|----------+--------|
+| =Cmd+N= | New workspace |
+| =Cmd+1-8= | Jump to workspace 1-8 |
+| =Cmd+9= | Jump to last workspace |
+| =Ctrl+Cmd+]= / =Ctrl+Cmd+[= | Next / previous workspace |
+| =Cmd+Shift+W= | Close workspace |
+| =Cmd+B= | Toggle sidebar |
+| =Cmd+O= | Open folder (creates workspace for directory) |
+
+** Split Panes
+
+| Shortcut | Action |
+|----------+--------|
+| =Cmd+D= | Split right |
+| =Cmd+Shift+D= | Split down |
+| =Option+Cmd+Arrow= | Focus pane directionally |
+| =Cmd+Shift+Enter= | Zoom/maximize focused pane |
+| =Cmd+Shift+H= | Flash focused pane (visual indicator) |
+
+** Tabs (Surfaces within a Pane)
+
+| Shortcut | Action |
+|----------+--------|
+| =Cmd+T= | New tab |
+| =Cmd+Shift+]= / =Cmd+Shift+[= | Next / previous tab |
+| =Ctrl+1-8= | Jump to tab 1-8 |
+| =Cmd+W= | Close tab |
+
+** Browser
+
+| Shortcut | Action |
+|----------+--------|
+| =Cmd+Shift+L= | Open browser in split |
+| =Cmd+L= | Focus address bar |
+| =Cmd+R= | Reload |
+| =Option+Cmd+I= | Developer tools |
+
+** Other
+
+| Shortcut | Action |
+|----------+--------|
+| =Cmd+P= | Command palette |
+| =Cmd+F= | Find in scrollback |
+| =Cmd+K= | Clear scrollback |
+| =Cmd+I= | Notifications panel |
+| =Cmd+Shift+U= | Jump to latest unread notification |
+
+* Socket Access for External Tools
+
+cmux's Unix socket allows external tools (Emacs, scripts) to control it.
+
+** Access Modes
+
+| Mode | Who Can Connect | Use Case |
+|------+-----------------+----------|
+| =cmuxOnly= (default) | Processes descended from cmux only | Shell scripts inside cmux |
+| =automation= | Any process from same macOS user | *Emacs integration, cron jobs* |
+| =password= | Any process with correct password | Shared machines |
+| =allowAll= | All local processes | Development only |
+
+** Setup for Emacs Integration
+
+Set socket access to =automation= in =Settings > Socket Access=.
+
+Socket path: =~/Library/Application Support/cmux/cmux.sock=
+Override: =CMUX_SOCKET_PATH= env var.
+
+* Shell Integration
+
+Shell integration is *injected automatically* — no manual setup needed.
+It hooks =preexec= / =precmd= to push real-time state to the sidebar.
+
+** What the Sidebar Shows Automatically
+
+| Data | Source | Refresh |
+|------+--------+---------|
+| Current directory | =precmd= | Every prompt |
+| Git branch + dirty flag | Async =git rev-parse= | Every prompt (debounced 3s) |
+| PR status | =gh pr view= | Every 45 seconds |
+| Listening ports | =ps= + =lsof= | On each command + 6 scans over 10s |
+| Shell activity | =preexec= / =precmd= | Instant |
+
+** Environment Variables in Every Terminal
+
+| Variable | Description |
+|----------+-------------|
+| =CMUX_SOCKET_PATH= | Socket path for CLI/scripts |
+| =CMUX_WORKSPACE_ID= | Current workspace ref |
+| =CMUX_SURFACE_ID= | Current surface ref |
+| =CMUX_TAB_ID= | Workspace UUID (V1 compat) |
+| =CMUX_PANEL_ID= | Panel UUID (V1 compat) |
+
+* Claude Code Integration
+
+** Hook Setup
+
+Add to =~/.claude/settings.json=:
+
+#+begin_src json
+{
+  "hooks": {
+    "SessionStart": [{"type": "command", "command": "cmux claude-hook session-start"}],
+    "UserPromptSubmit": [{"type": "command", "command": "cmux claude-hook prompt-submit"}],
+    "PreToolUse": [{"type": "command", "command": "cmux claude-hook pre-tool-use"}],
+    "Stop": [{"type": "command", "command": "cmux claude-hook stop"}],
+    "Notification": [{"type": "command", "command": "cmux claude-hook notification"}],
+    "SessionEnd": [{"type": "command", "command": "cmux claude-hook session-end"}]
+  }
+}
+#+end_src
+
+** Sidebar Status States
+
+| State | Icon | Color | Meaning |
+|-------+------+-------+---------|
+| Running | bolt | Blue =#4C8DFF= | Claude Code processing |
+| Idle | pause | Gray =#8E8E93= | Turn ended, waiting |
+| Needs input | bell | Blue =#4C8DFF= | Permission or question needed |
+
+** Verbose Tool Status
+
+Enable in =Settings= or:
+#+begin_src bash
+defaults write com.cmuxterm.app claudeCodeVerboseStatus -bool true
+#+end_src
+
+Shows real-time tool details: "Reading main.py", "Running git status".
+
+** Session Persistence
+
+Session store: =~/.cmuxterm/claude-hook-sessions.json=
+Persists session→workspace→surface mappings. 7-day TTL, auto-pruned.
+
+* Multi-Pane AI Workflow Patterns
+
+** Pattern 1: Agent + Dev Server
+
+#+begin_example
+Workspace: "feature-auth"
+├── Left pane: Claude Code
+└── Right pane: npm run dev  (Cmd+D to split)
+#+end_example
+
+** Pattern 2: Agent + Tests + Browser
+
+#+begin_example
+Workspace: "story-123"
+├── Left pane: Claude Code
+├── Top-right: make test --watch
+└── Bottom-right: Browser (localhost:3000)
+#+end_example
+
+** Pattern 3: Read Companion Pane from Agent
+
+#+begin_src bash
+# From Claude Code's terminal, read the dev server output:
+cmux read-screen --workspace $CMUX_WORKSPACE_ID --surface surface:5 --scrollback --lines 50
+
+# Send command to companion pane:
+cmux send --workspace $CMUX_WORKSPACE_ID --surface surface:5 "npm test"
+cmux send-key --workspace $CMUX_WORKSPACE_ID --surface surface:5 enter
+#+end_src
+
+** Pattern 4: Browser Automation
+
+#+begin_src bash
+# Open browser split
+cmux browser open http://localhost:3000
+
+# Get accessibility tree snapshot
+cmux browser snapshot --surface <browser-surface>
+
+# Interact with elements
+cmux browser click "@e5" --surface <browser-surface>
+cmux browser fill "@input" "test@example.com" --surface <browser-surface>
+cmux browser screenshot --surface <browser-surface> > screenshot.png
+#+end_src
+
+** Pattern 5: Markdown Doc Viewer
+
+#+begin_src bash
+cmux markdown open ./docs/ARCHITECTURE.md
+# Live-reloading panel with full markdown rendering
+#+end_src
+
+* Sidebar as Agent Dashboard
+
+Beyond automatic git/port info, the sidebar supports manual entries:
+
+#+begin_src bash
+# Set named status (multiple keys coexist)
+cmux set-status "build" "Compiling..." --icon bolt.fill --color "#FF9500"
+
+# Progress bar
+cmux set-progress 0.75 --label "3/4 tests done"
+
+# Log entries
+cmux log "Starting build..."
+cmux log --level success "All tests passing"
+cmux log --level error "Build failed: missing dependency"
+
+# Clear
+cmux clear-status "build"
+cmux clear-progress
+cmux clear-log
+#+end_src
+
+* CLI Quick Reference
+
+#+begin_src bash
+# Self-identification
+cmux identify                              # where am I?
+cmux tree --all                            # full workspace hierarchy
+
+# Read terminal content
+cmux read-screen --surface surface:N       # visible screen
+cmux read-screen --surface surface:N --scrollback --lines 100
+
+# Send to terminal
+cmux send --surface surface:N "command"
+cmux send-key --surface surface:N enter
+
+# Create workspace/panes
+cmux new-workspace --cwd /path/to/project
+cmux new-split right
+cmux new-split down
+
+# Notifications
+cmux notify --title "Done" --body "Task complete"
+cmux list-notifications
+cmux clear-notifications
+
+# Workspace management
+cmux rename-workspace "my-story"
+cmux select-workspace --workspace workspace:2
+cmux close-workspace --workspace workspace:3
+
+# Event synchronization
+cmux wait-for my-signal --timeout 30       # block until signal
+cmux wait-for -S my-signal                 # create signal
+
+# Output processing
+cmux pipe-pane --surface surface:N --command "grep error"
+#+end_src
+
+* Emacs Integration Tips
+
+1. *Set socket mode to =automation=* — Emacs is not a cmux child process
+2. *Use =cmux identify= to discover context* — don't hardcode surface IDs
+3. *Session recovery*: Read =~/.cmuxterm/claude-hook-sessions.json= or call
+   =cmux tree --all= to find existing workspaces after Emacs restart
+4. *Avoid TAB conflicts*: cmux's shell integration and yasnippet both use TAB;
+   yasnippet's conditional binding (=yas-maybe-expand=) handles this gracefully
+5. *Large text*: For prompts >4KB, use =workspace.select= before =surface.send_text=
+
+* Session Restore
+
+On relaunch, cmux restores:
+- Window/workspace/pane layout
+- Working directories
+- Terminal scrollback (best effort, up to 4000 lines / 400KB)
+- Browser URLs
+
+Does NOT restore: live processes (Claude Code, tmux). Use Claude Code's
+=--resume= flag or =claude-hook= session store to reconnect.
+
+* Known Limitations
+
+- Terminal title updates suppressed when workspace unfocused
+- CLI commands without =--workspace= target the focused workspace (not caller's)
+- After opening browser tab, arrow keys may not work in terminal until clicked
+- =pipe-pane= is one-shot capture, not continuous streaming
+
+* Ecosystem: Plugins, Extensions, and Tools
+
+** Ghostty Config Generator (3.1K stars)
+
+[[https://ghostty.zerebos.com][ghostty.zerebos.com]] — Web-based visual config editor.
+Adjust fonts, colors, cursors, transparency, keybindings with live preview.
+One-click export to =~/.config/ghostty/config=.
+
+** Ghostty Shaders (1.2K stars)
+
+[[https://github.com/0xhckr/ghostty-shaders][0xhckr/ghostty-shaders]] — 35+ GLSL shaders for visual effects.
+
+Popular shaders: =crt= (retro CRT), =bloom= (glow effect), =matrix-hallway=,
+=animated-gradient=, =cursor-blaze=, =spotlight=.
+
+Setup:
+#+begin_src bash
+git clone https://github.com/0xhckr/ghostty-shaders.git
+cp ghostty-shaders/bloom.glsl ~/.config/ghostty/shaders/
+# Add to config:
+echo "custom-shader = ~/.config/ghostty/shaders/bloom.glsl" >> ~/.config/ghostty/config
+#+end_src
+
+** Ghostty Theme Collections
+
+| Repo | Stars | Content |
+|------+-------+---------|
+| [[https://github.com/mbadolato/iTerm2-Color-Schemes][iTerm2-Color-Schemes]] | 26.6K | 450+ themes ported to Ghostty |
+| [[https://github.com/anhsirk0/ghostty-themes][anhsirk0/ghostty-themes]] | 51 | Modus, Doric, ef-themes for Ghostty |
+| [[https://github.com/hroi/ghostty-themes][hroi/ghostty-themes]] | 5 | Kitty themes converted to Ghostty |
+| [[https://github.com/AlphaTechnolog/alacritty2ghostty][alacritty2ghostty]] | 5 | Alacritty → Ghostty theme converter |
+
+** Ghostty Web (2.1K stars)
+
+[[https://github.com/coder/ghostty-web][coder/ghostty-web]] — Ghostty for the web with xterm.js API compat.
+Enables browser-based terminal with Ghostty rendering.
+
+** Neovim Theme Sync
+
+[[https://github.com/landerson02/ghostty-theme-sync.nvim][ghostty-theme-sync.nvim]] (17 stars) — Auto-syncs Neovim colorscheme
+to Ghostty theme on colorscheme change.
+
+** pi Interactive Subagents (27 stars)
+
+[[https://github.com/HazAT/pi-interactive-subagents][HazAT/pi-interactive-subagents]] — Spawns parallel AI sub-agents in
+cmux split panes. Architecture:
+
+- Main orchestrator in one pane, sub-agents in split panes
+- Role-based agents: scout, planner, worker, reviewer, visual-tester
+- 5-phase workflow: investigate → plan → review → execute → code review
+- Tab titles update dynamically ("🔍 Investigating" → "🔨 Executing")
+- Sequential task execution to avoid git conflicts
+
+This is the most advanced public example of cmux used for AI agent orchestration.
+
+** cmux Windows Port (14 stars)
+
+[[https://github.com/mkurman/cmux-windows][cmux-windows]] — Community Windows port of cmux.
+
+** Session Persistence (zmx, 1K stars)
+
+[[https://github.com/neurosnap/zmx][neurosnap/zmx]] — Session persistence for terminal processes.
+Alternative to tmux for keeping processes alive across terminal restarts.
+
+* Popular Ghostty Configurations from the Community
+
+** Font Recommendations
+
+| Font           | Why People Choose It                   |
+|----------------+----------------------------------------|
+| Berkeley Mono  | Premium, clean, designed for terminals |
+| JetBrains Mono | Free, ligatures, excellent readability |
+| Fira Code      | Free, ligatures, popular with devs     |
+| Iosevka        | Customizable width, many variants      |
+| Monaspace      | GitHub's variable-width mono family    |
+| Cascadia Code  | Microsoft's terminal font, free        |
+
+** Popular Theme Choices
+
+| Theme                | Style                         |
+|----------------------+-------------------------------|
+| Catppuccin Mocha     | Warm dark, pastel accents     |
+| Tokyo Night          | Cool dark, blue accents       |
+| Dracula              | Purple-based dark             |
+| Rose Pine            | Muted, elegant dark           |
+| Gruvbox              | Retro warm dark               |
+| Flexoki (3.1K stars) | Inky, designed for prose+code |
+| Nord                 | Cool blue-gray                |
+
+** Common Config Patterns
+
+#+begin_src ini
+# Minimal productive setup
+font-family = "JetBrains Mono"
+font-size = 14
+theme = "Catppuccin Mocha"
+background-opacity = 0.95
+scrollback-limit = 100000
+cursor-style = bar
+cursor-style-blink = false
+mouse-hide-while-typing = true
+window-padding-x = 8
+window-padding-y = 4
+#+end_src
+
+#+begin_src ini
+# Aesthetic setup with shader
+font-family = "Berkeley Mono"
+font-size = 13
+theme = "Tokyo Night"
+background-opacity = 0.88
+custom-shader = ~/.config/ghostty/shaders/bloom.glsl
+unfocused-split-opacity = 0.6
+#+end_src
+
+* Ghostty Full Config Reference (from ghostty.org)
+
+Key options by category (fetched from [[https://ghostty.org/docs/config/reference][ghostty.org/docs/config/reference]]):
+
+** Font (20+ options)
+
+| Option | Description |
+|--------+-------------|
+| =font-family= | Primary font |
+| =font-family-bold/italic/bold-italic= | Per-style fonts |
+| =font-size= | Size in points |
+| =font-feature= | OpenType features (=liga=, =calt=, =ss01=, =ss02=) |
+| =font-thicken= | Thicker strokes (macOS) |
+| =font-thicken-strength= | Thickening intensity (0-255) |
+| =font-variation= | Variable font axis values |
+| =font-codepoint-map= | Map Unicode codepoints to specific fonts |
+| =font-synthetic-style= | Enable synthetic bold/italic |
+
+** Colors & Appearance
+
+| Option | Description |
+|--------+-------------|
+| =theme= | Color theme (supports =light:X,dark:Y=) |
+| =background= / =foreground= | Base colors |
+| =background-opacity= | Window transparency (0-1) |
+| =background-blur= | Blur intensity when opacity < 1 |
+| =background-image= | Background image path |
+| =minimum-contrast= | WCAG contrast ratio enforcement |
+| =cursor-style= | =block= / =bar= / =underline= / =block_hollow= |
+| =cursor-opacity= | Cursor transparency |
+| =cursor-click-to-move= | Click to move cursor at prompts |
+| =selection-foreground= / =selection-background= | Selection colors |
+
+** Window
+
+| Option | Description |
+|--------+-------------|
+| =window-decoration= | =none= / =auto= / =client= / =server= |
+| =window-padding-x= / =y= | Padding in pixels |
+| =window-theme= | =auto= / =system= / =light= / =dark= / =ghostty= |
+| =window-save-state= | Save/restore on restart (macOS) |
+| =window-step-resize= | Resize in cell increments |
+| =maximize= / =fullscreen= | Start state |
+| =window-colorspace= | =srgb= / =display-p3= (macOS) |
+
+** Split Panes
+
+| Option | Description |
+|--------+-------------|
+| =split-divider-color= | Divider line color |
+| =unfocused-split-opacity= | Dim unfocused panes (0.15-1) |
+| =unfocused-split-fill= | Dim color for unfocused |
+| =focus-follows-mouse= | Mouse selects pane |
+
+** Behavior
+
+| Option | Description |
+|--------+-------------|
+| =scrollback-limit= | Buffer size in bytes |
+| =mouse-hide-while-typing= | Hide cursor when typing |
+| =copy-on-select= | Auto-copy to clipboard |
+| =clipboard-paste-protection= | Confirm unsafe pastes |
+| =clipboard-read= / =clipboard-write= | Allow programs to access clipboard |
+| =link-url= | Enable clickable URLs |
+| =link-previews= | Show URL preview popups |
+| =confirm-close-surface= | Ask before closing |
+
+** Shell Integration
+
+| Option | Description |
+|--------+-------------|
+| =shell-integration-features= | =cursor,sudo,title= |
+| =notify-on-command-finish= | =never= / =unfocused= / =always= |
+| =notify-on-command-finish-after= | Minimum duration before notifying |
+
+** Keybindings
+
+Format: =keybind = trigger=action=
+
+Prefixes: =all:= (all surfaces), =global:= (system-wide), =unconsumed:= (pass-through),
+=performable:= (only if action possible).
+
+Actions include: =new_tab=, =close_surface=, =new_split:right/down=, =goto_split:left/right/up/down=,
+=toggle_split_zoom=, =jump_to_prompt:-1/1=, =reload_config=, =increase_font_size=, =text:\x00=.
+
+Discovery: =ghostty +list-keybinds --default=
+
+* cmux Notification Patterns (from cmux.dev)
+
+** Custom Notification Command
+
+Settings > App > Notification Command. Env vars available:
+- =CMUX_NOTIFICATION_TITLE=
+- =CMUX_NOTIFICATION_SUBTITLE=
+- =CMUX_NOTIFICATION_BODY=
+
+** Shell Function for Long Commands
+
+#+begin_src bash
+notify-after() {
+  "$@"
+  local exit_code=$?
+  [ $exit_code -eq 0 ] && \
+    cmux notify --title "✓ Complete" --body "$1" || \
+    cmux notify --title "✗ Failed" --body "$1 (exit $exit_code)"
+  return $exit_code
+}
+
+# Usage:
+notify-after make test
+notify-after npm run build
+#+end_src
+
+** Python / Node.js Notification
+
+#+begin_src python
+# Python — uses OSC 777 (works in any terminal, not just cmux)
+import sys
+def notify(title, body):
+    sys.stdout.write(f'\x1b]777;notify;{title};{body}\x07')
+    sys.stdout.flush()
+#+end_src
+
+#+begin_src javascript
+// Node.js
+function notify(title, body) {
+  process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+}
+#+end_src
+
+** tmux Passthrough
+
+#+begin_src bash
+# In .tmux.conf: set -g allow-passthrough on
+printf '\ePtmux;\e\e]777;notify;Title;Body\a\e\\'
+#+end_src
+
+* Community Testimonials (from cmux.dev)
+
+- *Mitchell Hashimoto* (Ghostty creator): "Another day another libghostty-based project,
+  this time a macOS terminal with vertical tabs, better organization/notifications,
+  embedded/scriptable browser."
+
+- *Nick Schrock* (Dagster/GraphQL co-creator): "This is exactly the product I've been
+  looking for. After two hours...I'm in love."
+
+- *Edward Grefenstette* (Director of Research, Google DeepMind): "I've been using this
+  all weekend and it's amazing."
+
+* References
+
+- [[https://cmux.dev/docs/getting-started][cmux Official Docs]]
+- [[https://discord.gg/xsgFEVrWCZ][cmux Discord]]
+- [[https://ghostty.org/docs][Ghostty Documentation]]
+- [[file:2026-cmux-codebase-study.org][cmux Codebase Study]] (architecture deep-dive)
+- [[file:../../reference/cmux/README.md][cmux README]] (git submodule)
+- [[file:../../reference/cmux/CHANGELOG.md][cmux Changelog]]
+- [[file:../../reference/cmux/docs/agent-browser-port-spec.md][Browser Automation API Spec]]
+- [[file:../../reference/cmux/docs/notifications.md][Notification System Docs]]

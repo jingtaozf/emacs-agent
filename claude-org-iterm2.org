@@ -6,7 +6,7 @@
 :header-args:elisp: :tangle yes
 :END:
 
-iTerm2 backend and Terminal SDD Bridge for claude-org.
+iTerm2 backend for claude-org.
 Sends prompts to Claude Code running in iTerm2; responses come back via SDD bridge hooks.
 Part of claude-org; loaded after claude-org.org.
 
@@ -14,389 +14,8 @@ Part of claude-org; loaded after claude-org.org.
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
-#+END_SRC
-
-* Terminal SDD Bridge
-
-Functions for bridging between Claude Code CLI (running in a terminal) and
-org-mode SDD sections. Called non-interactively via MCP ~evalElisp~ from
-hook scripts in ~scripts/sdd-bridge.sh~.
-
-** Buffer and Navigation
-
-#+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge--ensure-buffer (org-file)
-  "Ensure ORG-FILE is loaded in Emacs and return its buffer.
-Opens the file via `find-file-noselect' if not already visiting."
-  (or (find-buffer-visiting org-file)
-      (find-file-noselect org-file)))
-
-(defun claude-org-sdd-bridge-list-sessions (org-file)
-  "List all SDD sessions in ORG-FILE.
-Returns a newline-separated string of \"SESSION_ID\\tHEADING\\tPARENT\" lines,
-one per SDD section found. PARENT is the outline path above the SDD heading."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char (point-min))
-        (let (results)
-          (while (re-search-forward
-                  "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+\\(.+?\\)[ \t]*$" nil t)
-            (let ((sid (match-string-no-properties 1)))
-              (save-excursion
-                (org-back-to-heading t)
-                (let* ((heading (substring-no-properties (org-get-heading t t t t)))
-                       (parent (mapconcat
-                                (lambda (s) (substring-no-properties s))
-                                (org-get-outline-path)
-                                " / ")))
-                  (push (format "%s\t%s\t%s" sid heading parent) results)))))
-          (mapconcat #'identity (nreverse results) "\n"))))))
-
-(defun claude-org-sdd-bridge--goto-session (session-id)
-  "Move point to the SDD section matching SESSION-ID in current buffer.
-Searches for :CLAUDE_SESSION_ID: property matching SESSION-ID.
-Signals error if not found."
-  (goto-char (point-min))
-  (let ((found nil))
-    (while (and (not found)
-                (re-search-forward
-                 (format "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+%s[ \t]*$"
-                         (regexp-quote session-id))
-                 nil t))
-      (setq found (point)))
-    (unless found
-      (error "SDD session %s not found in buffer" session-id))
-    ;; Move to the heading that owns this property
-    (org-back-to-heading t)))
-
-(defun claude-org-sdd-bridge--find-workflow (session-id)
-  "Find the Workflow subsection under the SDD heading for SESSION-ID.
-Returns the position of the Workflow heading, or signals error."
-  (claude-org-sdd-bridge--goto-session session-id)
-  (let ((sdd-end (save-excursion (org-end-of-subtree t t) (point)))
-        (found nil))
-    (save-excursion
-      (while (and (not found)
-                  (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" sdd-end t))
-        (setq found (line-beginning-position))))
-    (unless found
-      (error "Workflow section not found under session %s" session-id))
-    (goto-char found)))
-#+END_SRC
-
-** System Prompt
-
-#+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-system-prompt (org-file session-id)
-  "Build and return the SDD system prompt for SESSION-ID in ORG-FILE.
-Called by the launcher script to get the system prompt text.
-Navigates to the SDD section and reuses existing prompt-building logic."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (save-excursion
-      (save-restriction
-        (widen)
-        (claude-org-sdd-bridge--goto-session session-id)
-        ;; Narrow to the SDD subtree so collect-system-prompts finds
-        ;; only this story's system prompt section
-        (org-narrow-to-subtree)
-        (claude-org--build-system-prompt)))))
-#+END_SRC
-
-** Prompt Insertion
-
-#+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-insert-prompt (org-file session-id prompt)
-  "Insert PROMPT as a new AI block in the SDD Workflow for SESSION-ID in ORG-FILE.
-Creates a new Instruction N subsection under the Workflow heading.
-Returns the CUSTOM_ID string for correlating with the Stop hook."
-  (claude-agent-with-span "sdd-insert-prompt"
-      (list :session-id session-id) nil
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (let ((custom-id nil))
-      (save-excursion
-        (save-restriction
-          (widen)
-          (claude-org-sdd-bridge--find-workflow session-id)
-          (let* ((workflow-level (org-current-level))
-                 (instr-level (1+ workflow-level))
-                 (stars (make-string instr-level ?*))
-                 ;; Use regex to find workflow boundary (safe against embedded headings)
-                 (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
-                                workflow-level (point-max)))
-                 (instr-count 0))
-            ;; Count existing instructions by tag (headings may be renamed by auto-title)
-            (save-excursion
-              (while (re-search-forward
-                      (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
-                      workflow-end t)
-                (setq instr-count (1+ instr-count))))
-            (let* ((instr-num (1+ instr-count))
-                   (file-base (file-name-sans-extension (file-name-nondirectory org-file))))
-              (setq custom-id (claude-org--generate-instruction-custom-id file-base instr-num session-id))
-              ;; Go to end of workflow subtree to insert new instruction
-              (goto-char workflow-end)
-              ;; Ensure blank line before heading
-              (unless (bolp) (insert "\n"))
-              (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
-                (insert "\n"))
-              (insert (format "%s Instruction %d :%s:\n" stars instr-num claude-org-heading-tag))
-              (let ((heading-marker (copy-marker (line-beginning-position 0))))
-                (insert ":PROPERTIES:\n")
-                (insert (format ":CUSTOM_ID: %s\n" custom-id))
-                (insert ":END:\n\n")
-                (insert "#+begin_src ai\n")
-                (insert prompt "\n")
-                (insert "#+end_src\n")
-                ;; Register as active query for mode-line and query manager
-                (goto-char heading-marker)
-                (let ((iterm2-id (gethash session-id claude-org-iterm2--sdd-to-iterm2)))
-                  (claude-org-iterm2--register-query session-id iterm2-id))
-                ;; Record in block history (enables "Jump to AI block" for terminal prompts)
-                (let ((session-key (claude-org--current-session-key)))
-                  (when session-key
-                    (run-hook-with-args 'claude-org-execute-hook session-key prompt nil)
-                    (claude-org--session-put session-key :busy t)
-                    ;; Map sdd-session-id → session-key for query-completed
-                    (puthash session-id session-key
-                             claude-org-iterm2--sdd-to-session-key)))
-                ;; Set exec-status on the instruction heading
-                (claude-org--set-exec-status "executing")
-                ;; Auto-generate a meaningful title for the heading
-                (when claude-org-auto-generate-title
-                  (claude-org--maybe-auto-generate-title prompt heading-marker)))))))
-      (save-buffer)
-      custom-id))))
-#+END_SRC
-
-** Response Insertion
-
-#+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge--shift-org-headings (text parent-level)
-  "Shift org heading levels in TEXT to be subsections of PARENT-LEVEL.
-Lines starting with *+ get PARENT-LEVEL additional stars prepended,
-making them children of the parent heading."
-  (let ((prefix (make-string parent-level ?*)))
-    (replace-regexp-in-string
-     "^\\(\\*+ \\)"
-     (concat prefix "\\1")
-     text)))
-
-(defun claude-org-sdd-bridge--find-next-sibling-heading (level limit)
-  "Find the next heading at LEVEL or shallower before LIMIT.
-Searches by regex to avoid `org-end-of-subtree' confusion from
-embedded org headings in response content.
-Returns the position, or LIMIT if none found."
-  (save-excursion
-    ;; Skip current heading line
-    (forward-line 1)
-    (let ((pattern (format "^\\*\\{1,%d\\} " level)))
-      (if (re-search-forward pattern limit t)
-          (line-beginning-position)
-        limit))))
-
-(defun claude-org-sdd-bridge--find-heading-by-custom-id (custom-id limit)
-  "Find heading with CUSTOM_ID before LIMIT.  Returns position or nil."
-  (save-excursion
-    (let ((pattern (format ":CUSTOM_ID: %s" (regexp-quote custom-id))))
-      (when (re-search-forward pattern limit t)
-        (org-back-to-heading t)
-        (point)))))
-
-(defun claude-org-sdd-bridge--find-next-instruction-heading (instr-level tag workflow-end)
-  "Find the next instruction heading (with TAG) at INSTR-LEVEL before WORKFLOW-END.
-Skips response headings (:ai_output:). Returns position, or WORKFLOW-END."
-  (save-excursion
-    (forward-line 1)
-    (let ((pattern (format "^\\*\\{%d\\} +.+:%s:" instr-level tag)))
-      (if (re-search-forward pattern workflow-end t)
-          (line-beginning-position)
-        workflow-end))))
-
-(defun claude-org-sdd-bridge--find-existing-response (instr-pos instr-level next-instr-pos)
-  "Find existing Response heading for instruction at INSTR-POS.
-Searches between INSTR-POS and NEXT-INSTR-POS for a heading at INSTR-LEVEL
-with :ai_output: tag.  Returns (BEG . END) of the response subtree, or nil."
-  (save-excursion
-    (goto-char instr-pos)
-    (forward-line 1)
-    (let ((pattern (format "^\\*\\{%d\\} +.+:ai_output:" instr-level)))
-      (when (re-search-forward pattern next-instr-pos t)
-        (let ((beg (line-beginning-position)))
-          ;; Find end of response subtree (next same-level heading or next-instr-pos)
-          (let ((end (claude-org-sdd-bridge--find-next-sibling-heading
-                      instr-level next-instr-pos)))
-            (cons beg end)))))))
-
-(defun claude-org-sdd-bridge-insert-response (org-file session-id response instr-custom-id)
-  "Insert RESPONSE after the Instruction with INSTR-CUSTOM-ID in ORG-FILE.
-If a Response section already exists for this instruction, appends to it.
-Otherwise creates a new Response section.
-Org headings in response content are shifted to become subsections."
-  (claude-agent-with-span "sdd-insert-response"
-      (list :session-id session-id :custom-id instr-custom-id
-            :response-length (length response)) nil
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (save-excursion
-      (save-restriction
-        (widen)
-        (claude-org-sdd-bridge--find-workflow session-id)
-        (let* ((workflow-level (org-current-level))
-               (instr-level (1+ workflow-level))
-               (stars (make-string instr-level ?*))
-               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
-                              workflow-level (point-max)))
-               (instr-pos (claude-org-sdd-bridge--find-heading-by-custom-id
-                           instr-custom-id workflow-end))
-               (response-num 0))
-          (unless instr-pos
-            (error "Instruction %s not found under Workflow for session %s"
-                   instr-custom-id session-id))
-          ;; Count which instruction this is among siblings (1-indexed)
-          (save-excursion
-            (while (and (re-search-forward
-                         (format "^\\*\\{%d\\} +.+:%s:" instr-level claude-org-heading-tag)
-                         workflow-end t)
-                        (<= (line-beginning-position) instr-pos))
-              (setq response-num (1+ response-num))))
-          ;; Find the next instruction heading (skip responses)
-          (goto-char instr-pos)
-          (let* ((next-instr-pos (claude-org-sdd-bridge--find-next-instruction-heading
-                                  instr-level claude-org-heading-tag workflow-end))
-                 (existing (claude-org-sdd-bridge--find-existing-response
-                            instr-pos instr-level next-instr-pos)))
-            (if existing
-                ;; Append to existing response section (before its end)
-                (let ((response-end (cdr existing)))
-                  (goto-char response-end)
-                  ;; Back up to insert before the next heading, after existing content
-                  (unless (bolp) (insert "\n"))
-                  (insert "\n" (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n"))
-              ;; Create new response section — insert just before the next instruction
-              (let ((timestamp (format-time-string "%Y-%m-%d %H:%M")))
-                (goto-char next-instr-pos)
-                (unless (bolp) (insert "\n"))
-                (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
-                  (insert "\n"))
-                (insert (format "%s Response %d (%s) :ai_output:\n"
-                                stars response-num timestamp))
-                (insert ":PROPERTIES:\n:QUERY_TYPE: terminal\n:END:\n\n")
-                (insert (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n")))))))
-    (save-buffer)
-    (format "Inserted Response (%d chars)" (length response)))))
-#+END_SRC
-
-** CLI Session Persistence
-
-#+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-save-cli-session (org-file session-id cli-session-id)
-  "Save CLI-SESSION-ID as a property on the SDD section for SESSION-ID in ORG-FILE.
-This allows resuming the same Claude CLI session on next launch.
-Saves silently to persist immediately."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (save-excursion
-      (save-restriction
-        (widen)
-        (claude-org-sdd-bridge--goto-session session-id)
-        (org-set-property claude-org-cli-session-property cli-session-id)
-        (let ((inhibit-message t))
-          (save-buffer))
-        cli-session-id))))
-
-(defun claude-org-sdd-bridge-get-cli-session (org-file session-id)
-  "Get the saved Claude CLI session ID for SESSION-ID in ORG-FILE.
-Returns the session ID string, or nil if none saved."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (save-excursion
-      (save-restriction
-        (widen)
-        (claude-org-sdd-bridge--goto-session session-id)
-        (org-entry-get nil claude-org-cli-session-property)))))
-#+END_SRC
-
-** Real-time Tool Output
-
-#+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-update-todos (org-file session-id todos instr-custom-id)
-  "Update checkbox list under the Instruction with INSTR-CUSTOM-ID.
-TODOS is a list of plists with :content, :status, and :priority keys.
-Replaces or creates the checkbox list between the src block and child headings."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
-    (save-excursion
-      (save-restriction
-        (widen)
-        (claude-org-sdd-bridge--find-workflow session-id)
-        (let* ((workflow-level (org-current-level))
-               (instr-level (1+ workflow-level))
-               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
-                              workflow-level (point-max)))
-               (last-instr-pos (claude-org-sdd-bridge--find-heading-by-custom-id
-                                instr-custom-id workflow-end)))
-          (unless last-instr-pos
-            (error "Instruction %s not found under Workflow for session %s"
-                   instr-custom-id session-id))
-          (goto-char last-instr-pos)
-          ;; Find the end of the src block (#+end_src)
-          (let* ((instr-end (claude-org-sdd-bridge--find-next-sibling-heading
-                             instr-level workflow-end))
-                 (src-end nil)
-                 (todo-start nil)
-                 (todo-end nil))
-            ;; Find #+end_src within this instruction
-            (save-excursion
-              (when (re-search-forward "^#\\+end_src" instr-end t)
-                (forward-line 1)
-                (setq src-end (point))))
-            (when src-end
-              ;; Find existing todo region: consecutive lines starting with "- ["
-              (goto-char src-end)
-              ;; Skip blank lines after src block
-              (while (and (< (point) instr-end) (looking-at "^[ \t]*$"))
-                (forward-line 1))
-              (when (looking-at "^- \\[")
-                (setq todo-start (point))
-                (while (and (< (point) instr-end) (looking-at "^- \\["))
-                  (forward-line 1))
-                (setq todo-end (point)))
-              ;; Build new checkbox text
-              (let ((checkbox-text
-                     (mapconcat
-                      (lambda (todo)
-                        (let ((content (plist-get todo :content))
-                              (status (plist-get todo :status)))
-                          (format "- [%s] %s"
-                                  (if (string= status "completed") "X" " ")
-                                  content)))
-                      todos "\n")))
-                (if todo-start
-                    ;; Replace existing todo region
-                    (progn
-                      (delete-region todo-start todo-end)
-                      (goto-char todo-start)
-                      (insert checkbox-text "\n"))
-                  ;; Insert after src block
-                  (goto-char src-end)
-                  (unless (looking-at "^[ \t]*$")
-                    (insert "\n"))
-                  (insert checkbox-text "\n"))
-                ;; Update heading cookie
-                (goto-char last-instr-pos)
-                (let* ((done (cl-count-if
-                              (lambda (todo) (string= (plist-get todo :status) "completed"))
-                              todos))
-                       (total (length todos))
-                       (cookie (format " [%d/%d]" done total)))
-                  ;; Remove existing cookie if any
-                  (when (re-search-forward " \\[[0-9]+/[0-9]+\\]" (line-end-position) t)
-                    (replace-match ""))
-                  ;; Insert cookie before tags
-                  (goto-char last-instr-pos)
-                  (when (re-search-forward "\\( +:\\)" (line-end-position) t)
-                    (goto-char (match-beginning 1))
-                    (insert cookie)))))))
-        (save-buffer)
-        (format "Updated %d todos" (length todos))))))
+(require 'claude-org-sdd-bridge)
+(require 'claude-org-terminal-base)
 #+END_SRC
 
 * iTerm2 Backend
@@ -454,31 +73,6 @@ Example: (\"--model\" \"opus\" \"--verbose\")"
 ** Internal Helpers
 
 #+BEGIN_SRC elisp
-(defun claude-org-iterm2--goto-session-heading ()
-  "Move point to the nearest ancestor heading with CLAUDE_SESSION_ID.
-Starts at current heading, walks up. Returns non-nil if found.
-Caller should wrap in `save-excursion' / `save-restriction' as needed."
-  (widen)
-  (condition-case nil (org-back-to-heading t) (error nil))
-  (or (org-entry-get nil "CLAUDE_SESSION_ID")
-      (let ((found nil))
-        (while (and (not found) (org-up-heading-safe))
-          (setq found (org-entry-get nil "CLAUDE_SESSION_ID")))
-        found)))
-
-(defun claude-org-iterm2--find-session-property (prop)
-  "Find PROP by checking current heading first, then walking up ancestors.
-Returns the property value or nil. Uses `org-back-to-heading' to check
-the current heading before `org-up-heading-safe' to avoid skipping it."
-  (save-excursion
-    (save-restriction
-      (widen)
-      (condition-case nil (org-back-to-heading t) (error nil))
-      (or (org-entry-get nil prop)
-          (let ((val nil))
-            (while (and (not val) (org-up-heading-safe))
-              (setq val (org-entry-get nil prop)))
-            val)))))
 
 (defun claude-org-iterm2--call (subcommand &rest args)
   "Call iterm2-ctl.py SUBCOMMAND with ARGS. Return stdout string.
@@ -524,17 +118,6 @@ and used as stdin for the process (avoids ARG_MAX for large prompts)."
         (when stdin-file (delete-file stdin-file t))
         (delete-file stderr-file t))))))
 
-(defun claude-org-iterm2--tab-title ()
-  "Generate iTerm2 tab title for current SDD session.
-Format: HEADING [SDD-SESSION-ID] — unique across org files."
-  (save-excursion
-    (save-restriction
-      (let ((sdd-id (claude-org-iterm2--goto-session-heading)))
-        (format "%s [%s]"
-                (truncate-string-to-width
-                 (or (org-get-heading t t t t) "untitled") 40)
-                (or sdd-id "no-session"))))))
-
 (defun claude-org-iterm2--build-launch-command (org-file sdd-session-id project-root)
   "Build the shell command to launch Claude Code.
 Uses `claude-org-iterm2-launch-command', `claude-org-iterm2-extra-args',
@@ -543,7 +126,7 @@ ORG-FILE is the org notebook path, SDD-SESSION-ID the session,
 PROJECT-ROOT the working directory."
   (ignore project-root)
   (let* ((prop-args (condition-case nil
-                        (claude-org-iterm2--find-session-property
+                        (claude-org-terminal--find-session-property
                          "CLAUDE_EXTRA_ARGS")
                       (error nil)))
          (all-extra (append (or claude-org-iterm2-extra-args nil)
@@ -557,7 +140,7 @@ PROJECT-ROOT the working directory."
       (let* ((sdd-script claude-org-iterm2-sdd-script)
              (cli-session
               (condition-case nil
-                  (claude-org-iterm2--find-session-property
+                  (claude-org-terminal--find-session-property
                    "CLAUDE_CLI_SESSION")
                 (error nil)))
              (parts (list sdd-script
@@ -620,10 +203,10 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
                              (message "Started Emacs MCP server for SDD bridge")
                            (message "WARNING: MCP server didn't start — SDD bridge will be limited")))))
       (error (message "WARNING: MCP server start failed: %s" err))))
-  (let* ((saved-id (claude-org-iterm2--find-session-property "ITERM2_SESSION_ID"))
-         (title (claude-org-iterm2--tab-title))
+  (let* ((saved-id (claude-org-terminal--find-session-property "ITERM2_SESSION_ID"))
+         (title (claude-org-terminal--tab-title))
          (sdd-session-id
-          (claude-org-iterm2--find-session-property "CLAUDE_SESSION_ID"))
+          (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
          (project-root (or (claude-org--get-project-root)
                            default-directory)))
     ;; Ensure IDE server is running for ALL session paths (new or existing)
@@ -655,7 +238,7 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
               ;; Save ITERM2_SESSION_ID on the heading that has CLAUDE_SESSION_ID
               (save-excursion
                 (save-restriction
-                  (claude-org-iterm2--goto-session-heading)
+                  (claude-org-terminal--goto-session-heading)
                   (org-set-property "ITERM2_SESSION_ID" result)))
               ;; Store mapping for polling and permission-click lookup
               (when sdd-session-id
@@ -665,25 +248,15 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
                 (puthash sdd-session-id result
                          claude-org-iterm2--sdd-to-iterm2)
                 (puthash sdd-session-id (claude-org--current-session-key)
-                         claude-org-iterm2--sdd-to-session-key))
+                         claude-org-terminal--sdd-to-session-key))
               (save-buffer)
               (message "Claude Code in iTerm2 (session: %s)" result)
               result))))))
 
-(defun claude-org-iterm2--read-hook-status (sdd-session-id)
-  "Read Claude Code status from hook-written file. Fast, no API call."
-  (let ((file (expand-file-name (or sdd-session-id "unknown")
-                                "/tmp/claude-agent-status")))
-    (if (file-exists-p file)
-        (string-trim (with-temp-buffer
-                       (insert-file-contents file)
-                       (buffer-string)))
-      "unknown")))
-
 (defun claude-org-iterm2--get-status (sdd-session-id iterm2-session-id)
   "Get Claude Code status.
 SDD-SESSION-ID keys the hook file; ITERM2-SESSION-ID keys the API."
-  (let ((hook-status (claude-org-iterm2--read-hook-status sdd-session-id)))
+  (let ((hook-status (claude-org-terminal--read-hook-status sdd-session-id)))
     (if (member hook-status '("ready" "busy"))
         hook-status
       ;; Fallback to iTerm2 API
@@ -702,91 +275,56 @@ in the global mode-line spinner and =*Claude Queries*= buffer alongside
 native JSON stream queries.
 
 #+BEGIN_SRC elisp
-(defun claude-org-iterm2--save-request-id (sdd-session-id request-id)
-  "Save REQUEST-ID to status file for SDD-SESSION-ID.
-The Python response hook reads this to call query-completed."
-  (let ((dir "/tmp/claude-agent-status"))
-    (make-directory dir t)
-    (with-temp-file (expand-file-name
-                     (concat sdd-session-id ".request-id") dir)
-      (insert request-id))))
-
-(defun claude-org-iterm2--read-request-id (sdd-session-id)
-  "Read the request-id for SDD-SESSION-ID, or nil if not set."
-  (let ((path (expand-file-name
-               (concat sdd-session-id ".request-id")
-               "/tmp/claude-agent-status")))
-    (when (file-exists-p path)
-      (let ((val (string-trim (with-temp-buffer
-                                (insert-file-contents path)
-                                (buffer-string)))))
-        (unless (string-empty-p val) val)))))
-
-(defun claude-org-iterm2--register-query (sdd-session-id iterm2-id)
-  "Register the current AI block as an active query.
-Creates a process-state, registers in `claude-agent--active-queries',
-and saves the request-id to a status file for the Python hook.
-SDD-SESSION-ID is the SDD session, ITERM2-ID is the iTerm2 pane UUID."
-  (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
-         (heading (org-get-heading t t t t))
-         (instr-num (when (and heading
-                               (string-match "\\bInstruction \\([0-9]+\\)" heading))
-                      (string-to-number (match-string 1 heading))))
-         (req-id (claude-agent--generate-request-id))
-         (ctx (claude-agent-make-query-context
-               :instruction-num instr-num
-               :custom-id custom-id))
-         (state (claude-agent--make-process-state
-                 :request-id req-id
-                 :start-time (float-time)
-                 :source-buffer (current-buffer)
-                 :query-context ctx
-                 :source-location-fn (when custom-id #'claude-org-goto-custom-id)
-                 :source-location-args (when custom-id (list custom-id)))))
-    (claude-agent--register-query req-id state)
-    (claude-org-iterm2--save-request-id sdd-session-id req-id)))
-
 (defun claude-org-iterm2--query-completed (sdd-session-id)
   "Mark the iTerm2 query for SDD-SESSION-ID as completed.
 Unregisters from `claude-agent--active-queries' so the mode-line
 and *Claude Queries* buffer update automatically.
-When loop state is active, schedules the next iteration."
-  (let* ((session-key-for-trace (gethash sdd-session-id claude-org-iterm2--sdd-to-session-key))
-         (trace-ctx (when session-key-for-trace
-                      (claude-org--session-get session-key-for-trace :trace-ctx))))
-  (claude-agent-with-span "iterm2-query-completed"
-      (list :session-id sdd-session-id) trace-ctx
-  (let ((req-id (claude-org-iterm2--read-request-id sdd-session-id)))
-    (when req-id
-      (let ((state (claude-agent--get-active-query req-id)))
-        (when state
-          (setf (claude-agent--process-state-closed state) t)
-          (claude-agent--unregister-query req-id)))))
-  ;; Check loop continuation (read before cleanup)
-  (let ((session-key (gethash sdd-session-id claude-org-iterm2--sdd-to-session-key))
-        (iterm2-id (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)))
-    ;; Clean up lookup tables
-    (remhash sdd-session-id claude-org-iterm2--sdd-to-iterm2)
-    (remhash sdd-session-id claude-org-iterm2--sdd-to-session-key)
-    ;; Clear busy state and exec-status for terminal-typed prompts
-    (when session-key
-      (claude-org--session-put session-key :busy nil))
-    (when session-key
-      (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
-            (loop-max (or (claude-org--session-get session-key :loop-max) 1)))
-        (if (< loop-current loop-max)
-            ;; More iterations — schedule next
-            (let ((interval (or (claude-org--session-get session-key :loop-interval) 0))
-                  (prompt (claude-org--session-get session-key :original-prompt)))
-              (claude-org--session-put session-key :loop-current (1+ loop-current))
-              (if (> interval 0)
-                  (run-at-time interval nil
-                               #'claude-org-iterm2--loop-send
-                               sdd-session-id iterm2-id prompt session-key)
-                (claude-org-iterm2--loop-send sdd-session-id iterm2-id prompt session-key)))
-          ;; Loop complete — cleanup
-          (claude-org--session-put session-key :loop-max nil)
-          (claude-org--session-put session-key :loop-current nil))))))))
+When loop state is active, schedules the next iteration.
+Wrapped in condition-case: called from Python via MCP evalElisp,
+so an unhandled error would leave the session permanently :busy t."
+  (condition-case err
+      (let* ((session-key-for-trace (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
+             (trace-ctx (when session-key-for-trace
+                          (claude-org--session-get session-key-for-trace :trace-ctx))))
+        (claude-agent-with-span "iterm2-query-completed"
+            (list :session-id sdd-session-id) trace-ctx
+        (let ((req-id (claude-org-terminal--read-request-id sdd-session-id)))
+          (when req-id
+            (let ((state (claude-agent--get-active-query req-id)))
+              (when state
+                (setf (claude-agent--process-state-closed state) t)
+                (claude-agent--unregister-query req-id)))))
+        ;; Check loop continuation (read before cleanup)
+        (let ((session-key (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
+              (iterm2-id (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)))
+          ;; Clean up lookup tables
+          (remhash sdd-session-id claude-org-iterm2--sdd-to-iterm2)
+          (remhash sdd-session-id claude-org-terminal--sdd-to-session-key)
+          ;; Clear busy state and exec-status for terminal-typed prompts
+          (when session-key
+            (claude-org--session-put session-key :busy nil))
+          (when session-key
+            (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
+                  (loop-max (or (claude-org--session-get session-key :loop-max) 1)))
+              (if (< loop-current loop-max)
+                  ;; More iterations — schedule next
+                  (let ((interval (or (claude-org--session-get session-key :loop-interval) 0))
+                        (prompt (claude-org--session-get session-key :original-prompt)))
+                    (claude-org--session-put session-key :loop-current (1+ loop-current))
+                    (if (> interval 0)
+                        (run-at-time interval nil
+                                     #'claude-org-iterm2--loop-send
+                                     sdd-session-id iterm2-id prompt session-key)
+                      (claude-org-iterm2--loop-send sdd-session-id iterm2-id prompt session-key)))
+                ;; Loop complete — cleanup
+                (claude-org--session-put session-key :loop-max nil)
+                (claude-org--session-put session-key :loop-current nil)))))))
+    (error
+     ;; Ensure busy state is cleared even on error
+     (let ((session-key (gethash sdd-session-id claude-org-terminal--sdd-to-session-key)))
+       (when session-key
+         (claude-org--session-put session-key :busy nil)))
+     (message "claude-org-iterm2: error in query-completed: %S" err))))
 
 
 (defun claude-org-iterm2--loop-send (sdd-session-id iterm2-id prompt session-key)
@@ -804,11 +342,11 @@ Navigates to saved org buffer/marker for org-context-dependent calls."
         (save-excursion
           (goto-char marker)
           (when sdd-session-id
-            (claude-org-iterm2--write-from-emacs-flag sdd-session-id))
+            (claude-org-terminal--write-from-emacs-flag sdd-session-id))
           (save-excursion
             (org-back-to-heading t)
             (when sdd-session-id
-              (claude-org-iterm2--register-query sdd-session-id iterm2-id)))))))
+              (claude-org-terminal--register-query sdd-session-id iterm2-id)))))))
   (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
   (let ((current (claude-org--session-get session-key :loop-current))
         (max (claude-org--session-get session-key :loop-max)))
@@ -819,22 +357,6 @@ Navigates to saved org buffer/marker for org-context-dependent calls."
 ** Execution
 
 #+BEGIN_SRC elisp
-(defun claude-org-iterm2--write-from-emacs-flag (sdd-session-id)
-  "Write flag file indicating the next prompt was sent from Emacs.
-sdd-bridge.sh checks this to skip duplicate instruction insertion.
-Also writes the current instruction's CUSTOM_ID for response correlation."
-  (let ((dir "/tmp/claude-agent-status"))
-    (make-directory dir t)
-    (with-temp-file (expand-file-name
-                     (concat sdd-session-id ".from-emacs") dir)
-      (insert "1"))
-    ;; Save CUSTOM_ID of the current instruction for response hook
-    (let ((custom-id (org-entry-get nil "CUSTOM_ID")))
-      (when custom-id
-        (with-temp-file (expand-file-name
-                         (concat sdd-session-id ".custom-id") dir)
-          (insert custom-id))))))
-
 (defun claude-org-iterm2--execute-ai-block ()
   "Execute current AI block via iTerm2 backend.
 Ensures session exists, checks readiness, sends prompt via stdin.
@@ -848,7 +370,7 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
       (user-error "Point is not inside a #+begin_src ai block"))
     (let* ((iterm2-id (claude-org-iterm2--ensure-session))
            (sdd-session-id
-            (claude-org-iterm2--find-session-property "CLAUDE_SESSION_ID"))
+            (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
            (status (claude-org-iterm2--get-status sdd-session-id iterm2-id)))
       (when (string= status "busy")
         (user-error "Claude Code busy (status: %s). Cancel first?" status))
@@ -857,7 +379,7 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
       ;; Ensure sdd→session-key mapping for loop dispatch from query-completed
       (when sdd-session-id
         (puthash sdd-session-id (claude-org--current-session-key)
-                 claude-org-iterm2--sdd-to-session-key))
+                 claude-org-terminal--sdd-to-session-key))
       ;; Store trace context for async callbacks (query-completed)
       (let ((session-key (claude-org--current-session-key)))
         (when session-key
@@ -869,12 +391,12 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
                                :loop-block-marker (copy-marker (point)))
       ;; Write flag BEFORE sending — hook checks and deletes it
       (when sdd-session-id
-        (claude-org-iterm2--write-from-emacs-flag sdd-session-id))
+        (claude-org-terminal--write-from-emacs-flag sdd-session-id))
       ;; Register in active-queries for mode-line and *Claude Queries* display
       (save-excursion
         (org-back-to-heading t)
         (when sdd-session-id
-          (claude-org-iterm2--register-query sdd-session-id iterm2-id)))
+          (claude-org-terminal--register-query sdd-session-id iterm2-id)))
       (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
       (message "Sent to iTerm2 (%d chars)" (length prompt))))))
 #+END_SRC
@@ -905,7 +427,7 @@ The lockfile must exist before Claude Code launches."
   "Cancel the current Claude Code instruction in iTerm2.
 Sends Escape to the TUI. The Stop hook will fire and set-ready."
   (interactive)
-  (let ((iterm2-id (claude-org-iterm2--find-session-property "ITERM2_SESSION_ID")))
+  (let ((iterm2-id (claude-org-terminal--find-session-property "ITERM2_SESSION_ID")))
     (unless iterm2-id
       (user-error "No iTerm2 session for this story"))
     (claude-org-iterm2--call "cancel" "--session" iterm2-id)
@@ -980,9 +502,6 @@ Called by the PostToolUse hook via MCP, or by mode-line click. Idempotent."
 
 (defvar claude-org-iterm2--sdd-to-iterm2 (make-hash-table :test 'equal)
   "Map of SDD session-id → iTerm2 UUID for quick lookup from MCP calls.")
-
-(defvar claude-org-iterm2--sdd-to-session-key (make-hash-table :test 'equal)
-  "Map of SDD session-id → org session-key for loop dispatch from query-completed.")
 
 (defun claude-org-iterm2--lookup-iterm2-session (sdd-session-id)
   "Look up the iTerm2 UUID for SDD-SESSION-ID.

@@ -1550,3 +1550,364 @@ which lacks a type system). The main gaps are:
 - [[https://martinfowler.com/articles/exploring-gen-ai/harness-engineering.html][Martin Fowler: Harness Engineering]]
 - [[https://tonylee.im/en/blog/openai-harness-engineering-five-principles-codex][5 Harness Engineering Principles (OpenAI summary)]]
 - [[https://medium.com/@christianforce/coding-standards-for-ai-agents-cb5c80696f72][Coding Standards for AI Agents (Medium)]]
+
+
+* 2026-03-18 Dev Team Audit: Architecture & Harness Engineering
+
+A parallel 4-agent dev team analyzed the codebase for architecture issues,
+integration boundary risks, Python bugs, and Emacs test coverage gaps.
+Agents: arch-reviewer, python-harness, emacs-harness, integration-analyst.
+
+** Executive Summary
+
+| Category | Findings | Critical | High | Medium |
+|----------+----------+----------+------+--------|
+| Architecture | 10 | 3 | 4 | 3 |
+| Python bugs | 8 | 3 | 0 | 4 |
+| Emacs test gaps | 10 | 3 | 2 | 5 |
+| Integration boundaries | 10 | 3 | 4 | 3 |
+|----------+----------+----------+------+--------|
+| Total | 38 | 12 | 10 | 15 |
+
+** CRITICAL: Confirmed Python Bugs (Fix Immediately)
+
+*** BUG-1: TypeError crash on =content: null= in transcript
+:PROPERTIES:
+:FILE: python/claude_agent/sdd_bridge.py:387
+:SEVERITY: HIGH
+:END:
+
+=message.get("content", [])= returns =None= when JSON has ="content": null=.
+Python's =.get(key, default)= only applies default when key is *absent*, not
+when value is null. The generator then does =for p in None= → =TypeError=.
+This crashes the hook process, losing the response.
+
+*Fix*: =content = message.get("content") or []=
+
+*** BUG-2: Missing keys cause unhandled 500 in OTel bridge
+:PROPERTIES:
+:FILE: python/claude_agent/otel_bridge.py:133,141,193
+:SEVERITY: HIGH
+:END:
+
+=span_start= uses =data["trace_id"]=, =data["span_id"]=, =data["name"]= via
+direct subscript. Missing keys → =KeyError= → Flask 500. No HTTP 400 returned.
+Any malformed request from Emacs crashes the endpoint.
+
+*Fix*: Validate required keys, return 400 with descriptive error.
+
+*** BUG-3: Non-hex trace/parent IDs raise ValueError 500
+:PROPERTIES:
+:FILE: python/claude_agent/otel_bridge.py:133,150
+:SEVERITY: HIGH
+:END:
+
+=int(data["trace_id"], 16)= raises =ValueError= for non-hex input.
+=span_id= ValueError is caught (lines 136-138), but =trace_id= and
+=parent_span_id= are not.
+
+*Fix*: Wrap all =int(..., 16)= in try/except, return 400.
+
+** CRITICAL: Architecture Issues
+
+*** ARCH-1: cmux depends on iTerm2 internals (cross-peer coupling)
+:PROPERTIES:
+:FILE: claude-org-cmux.org:21-25
+:SEVERITY: CRITICAL
+:END:
+
+=claude-org-cmux.org= declares functions from =claude-org-iterm2.org=:
+=claude-org-sdd-bridge-system-prompt=, =claude-org-sdd-bridge-get-cli-session=,
+=claude-org-iterm2--permission-needed/resolved=, =claude-org-iterm2--activate-emacs=.
+The SDD bridge functions are shared infrastructure living in the wrong module.
+If iTerm2 support were removed, cmux would break.
+
+*Fix*: Extract =claude-org-sdd-bridge-*= into a new =claude-org-sdd-bridge.org= module.
+
+*** ARCH-2: Dual registry with manual sync burden
+:PROPERTIES:
+:FILE: claude-agent-backend.org:2922
+:SEVERITY: CRITICAL
+:END:
+
+Two parallel tracking mechanisms: =claude-agent--registry= (struct with hash
+tables) and =claude-agent--active-queries= (standalone hash table). Require
+manual =setq= sync at every mutation site. =claude-agent-kill-all-processes=
+iterates both separately. Drift between them leaves zombie entries.
+
+*Fix*: Unify into single registry. Remove =--active-queries= as separate store.
+
+*** ARCH-3: Abnormal-exit sentinel skips cleanup
+:PROPERTIES:
+:FILE: claude-agent-backend.org:1628
+:SEVERITY: CRITICAL
+:END:
+
+The abnormal-exit path calls =claude-agent-registry-cleanup-process= but NOT
+=claude-agent--sentinel-cleanup=. Normal-exit calls both. Abnormal exit skips
+output buffer kill and =--cleanup-process-entries= for background-tasks.
+
+*Fix*: Ensure abnormal-exit also calls =--sentinel-cleanup=.
+
+** HIGH: Architecture & Duplication
+
+*** ARCH-4: ~250 lines duplicated between iTerm2 and cmux backends
+:PROPERTIES:
+:SEVERITY: HIGH
+:END:
+
+These functions are copy-pasted with only variable name differences:
+
+| Function | iTerm2 line | cmux line |
+|----------+-------------+-----------|
+| =--save-request-id= | 705 | 501 |
+| =--read-request-id= | 714 | 509 |
+| =--register-query= | 725 | 520 |
+| =--write-from-emacs-flag= | 822 | 615 |
+| =--goto-session-heading= | 457 | 81 |
+| =--find-session-property= | 469 | 94 |
+| =--read-hook-status= | 673 | 470 |
+| =--tab-title= | 527 | 248 |
+| =--build-launch-command= | 538 | 263 |
+| =--query-completed= | 749 | 542 |
+| =--loop-send= | 792 | 588 |
+| =--execute-ai-block= | 838 | 629 |
+
+Adding a third terminal backend would triple this.
+
+*Fix*: Extract into =claude-org-terminal-base.org= with backend-specific config vars.
+
+*** ARCH-5: =/tmp/claude-agent-status/= hardcoded in 8+ places
+:PROPERTIES:
+:SEVERITY: HIGH
+:END:
+
+The status directory path is hardcoded as string literals across 3 modules:
+=claude-org-cmux.org= (lines 473, 503, 513, 618), =claude-org-iterm2.org=
+(lines 676, 708, 718, 826), and =claude-agent-trace.org= (has =defcustom= but
+backends ignore it). File naming conventions (=.from-emacs=, =.request-id=,
+=.custom-id=, =.trace-context=) are tribal knowledge.
+
+*Fix*: Create =claude-org-sdd-status= module with named functions for all paths.
+
+*** ARCH-6: No terminal backend protocol interface
+:PROPERTIES:
+:SEVERITY: HIGH
+:END:
+
+Terminal backends share an implicit contract (=ensure-session=, =execute-ai-block=,
+=get-status=, =register-query=, =query-completed=, =permission-needed/resolved=,
+=loop-send=, =write-from-emacs-flag=) but no =cl-defgeneric= declarations.
+Adding a third backend requires reverse-engineering the implicit protocol.
+
+*Fix*: Define =cl-defgeneric= for the terminal backend protocol.
+
+** HIGH: Integration Boundary Risks
+
+*** INTEG-1: Hook timeout (5-10s) causes silently lost responses
+:PROPERTIES:
+:FILE: hooks/hooks.json
+:SEVERITY: HIGH
+:END:
+
+Hook timeouts: SessionStart=5s, UserPromptSubmit=10s, PreToolUse=5s.
+Python scripts must cold-start =uv run=, connect MCP, eval elisp within these
+windows. On timeout, Claude runs to completion in terminal but the org buffer
+is never updated. The user's org file has no record of the response.
+
+*** INTEG-2: =call-process= blocks Emacs if cmux hangs
+:PROPERTIES:
+:FILE: claude-org-cmux.org:132
+:SEVERITY: HIGH
+:END:
+
+Every cmux interaction (=capture-pane=, =send=, =wait-for=) uses synchronous
+=call-process= with no timeout. If cmux daemon freezes, Emacs freezes.
+The =wait-for-ready-poll= loop with =sleep-for 0.5= makes this worse.
+
+*Fix*: Use =start-process= with timeout, or =call-process= with =with-timeout=.
+
+*** INTEG-3: Backend dispatch fallthrough on typo/restart
+:PROPERTIES:
+:FILE: claude-org.org:4428-4436
+:SEVERITY: HIGH
+:END:
+
+Backend is selected by =(string-equal (downcase ...) "iterm2")=. Typos
+(e.g., "iTerm 2") silently fall through to json-stream. After Emacs restart,
+the cmux/iTerm2 hash tables are empty, so terminal dispatchers
+(=claude-org--terminal-query-completed=) route events to the wrong backend.
+
+*** INTEG-4: Infinite recovery loop if CLI never sends result
+:PROPERTIES:
+:FILE: claude-agent-backend.org:1745-1758
+:SEVERITY: MEDIUM
+:END:
+
+Exit code 0 without =result= message is treated as abnormal. Auto-recovery
+resumes the query. If CLI consistently exits without result (max-turns,
+timeout), this creates an infinite loop burning API credits.
+
+** MEDIUM: Python Issues
+
+*** PY-1: Unicode story name → empty =--name ""= to CLI
+:PROPERTIES:
+:FILE: python/claude_agent/claude_sdd.py:147,175
+:SEVERITY: MEDIUM
+:END:
+
+=_normalize_name()= strips all non-=[a-z0-9]= chars. A unicode-only name like
+"混合中文" normalizes to =""=. Guard =if story_name:= checks original (truthy),
+so =--name ""= is passed to CLI.
+
+*Fix*: Guard on normalized name, not original.
+
+*** PY-2: Cross-session =.from-emacs= flag contamination
+:PROPERTIES:
+:FILE: python/claude_agent/sdd_bridge.py:153-173
+:SEVERITY: MEDIUM
+:END:
+
+=_check_any_recent_from_emacs_flag()= finds *any* =.from-emacs= file newer
+than process start. Session B can consume Session A's flag, causing prompt
+routing errors in multi-session use. Known design compromise.
+
+*** PY-3: Trace context fallback corrupts multi-session traces
+:PROPERTIES:
+:FILE: python/claude_agent/otel_setup.py:124-134
+:SEVERITY: MEDIUM
+:END:
+
+=read_trace_context()= falls back to newest =.trace-context= file.
+With concurrent sessions, Session B inherits Session A's trace ID.
+Session B spans appear as children of Session A's trace in Phoenix.
+
+*** PY-4: SIGTERM bypasses atexit, IDE server lock leaked
+:PROPERTIES:
+:FILE: python/claude_agent/claude_sdd.py:299-308
+:SEVERITY: MEDIUM
+:END:
+
+Python =atexit= handlers don't fire on =SIGTERM=. The IDE WebSocket server
+lock file persists, causing stale server detection on next invocation.
+
+*Fix*: Register =signal.signal(signal.SIGTERM, ...)= handler.
+
+*** PY-5: MCP jsonrpc errors silently return None
+:PROPERTIES:
+:FILE: python/claude_agent/mcp_client.py:84
+:SEVERITY: LOW
+:END:
+
+Server error object ={"error":{...}}= causes =KeyError= on =outer["result"]=,
+caught by broad except, returns =None=. Callers can't distinguish "elisp
+returned nil" from "server error". In =handle_prompt=: silent drop.
+
+** Emacs Test Infrastructure Gaps
+
+*** TEST-1: No =control_request= round-trip test [P0]
+
+The bidirectional =control_request= / =control_response= protocol (permission
+prompts) is the most complex part of the JSON stream. None of the 21 mock
+scenarios contain a =control_request= line. Only tested at unit level in
+=test-claude-agent-json-protocol.el=, never through full subprocess pipeline.
+
+*Action*: Create =permission-prompt.jsonl= fixture, test full round-trip.
+
+*** TEST-2: JSON buffer overflow path untested [P0]
+
+The 10MB overflow guard in process filter (=claude-agent-backend.org:1572=)
+has never been exercised. Set =claude-agent-max-json-buffer-size= to 100
+bytes, feed exceeding data, verify error callback and process kill.
+
+*** TEST-3: UTF-8 byte-level split untested [P0]
+
+Process filter concatenates raw output strings. Multi-byte UTF-8 chars
+split at byte boundary could produce invalid UTF-8. Existing property
+tests use =substring= (character-level, not byte-level).
+
+*** TEST-4: Timer liveness structural test missing [P1]
+
+ARCHITECTURE.org invariant: "Timer callbacks check liveness before
+operating on process/buffer." No structural test enforces this.
+Scan all =run-at-time= calls, verify =process-live-p= or =buffer-live-p= guard.
+
+*** TEST-5: Module layer list incomplete in structural tests [P1]
+
+=test-structural--module-layers= lists only 11 modules but ARCHITECTURE.org
+lists 14+. Missing: =claude-org-iterm2=, =claude-org-cmux=, =claude-org-native=,
+=claude-ide=. Dependency direction checks may miss violations.
+
+*** TEST-6: 75 =sleep-for= calls create flaky test risk [P3]
+
+Most concerning: =test-otel-wait-for-url-timeout= sleeps 2.5s,
+=test-claude-org-integration.el= sleeps 2.0s in multiple places.
+On slow CI, these are insufficient.
+
+*Action*: Replace with =wait-until= polling patterns.
+
+*** TEST-7: No stderr simulation in mocks [P2]
+
+Neither mock CLI simulates stderr output. If stderr mixes into stdout
+(via wrapper script), JSON parser receives non-JSON lines.
+
+*** TEST-8: Terminal backend callbacks not guarded [MEDIUM]
+
+=claude-org-cmux--query-completed= and =claude-org-iterm2--query-completed=
+are called from Python hooks via MCP =evalElisp=. Neither wraps in
+=condition-case=. If they throw, session stays =:busy t= permanently.
+
+** Additional State & Resource Issues
+
+*** Orphaned spans in OTel bridge memory
+=otel_bridge.py:90=: No TTL or max-size on =spans= dict. Emacs crash
+mid-trace → span never ended → memory leak until bridge restart.
+
+*** Hash table / org property divergence on =revert-buffer=
+SDK UUID in hash table and org property drawer can diverge after
+=revert-buffer=. Next query uses stale UUID from hash table.
+
+*** Loop state persists after failed backend execution
+=claude-org.org:4422-4426=: Loop state stored before backend dispatch.
+If backend returns error (cmux not running), loop state remains set.
+Next successful execution inherits wrong loop config.
+
+*** Process-state struct has 22 fields (god object)
+=claude-agent--process-state= in =claude-agent-backend.org:952-981= spans
+4 semantic domains. Three sub-structs are defined but not used.
+
+** Recommended Action Plan
+
+*** Phase 1: Fix confirmed bugs (1-2 days) — DONE 2026-03-18
+1. [X] BUG-1: =content = message.get("content") or []= in =sdd_bridge.py=
+2. [X] BUG-2: Validate required keys in =otel_bridge.py= span endpoints
+3. [X] BUG-3: Wrap =int(..., 16)= in try/except in =otel_bridge.py=
+4. [X] PY-1: Guard on normalized name in =claude_sdd.py=
+5. [X] PY-4: Register =SIGTERM= handler in =claude_sdd.py=
+6. [-] ARCH-3: False positive — =registry-cleanup-process= already covers cleanup
+7. [X] TEST-8: Wrap terminal =query-completed= in =condition-case=
+
+
+*** Phase 2: Critical test gaps (2-3 days) — DONE 2026-03-18
+1. [X] TEST-1: =control_request= round-trip via =permission-prompt.jsonl= fixture
+   - Tests full bidirectional protocol: CLI sends =can_use_tool=, SDK responds, CLI continues
+   - Key insight: dynamic binding must be active during =accept-process-output=
+2. [X] TEST-2: JSON buffer overflow (2 tests: overflow fires error + under-limit OK)
+3. [X] TEST-3: UTF-8 multi-byte handling (2 tests: CJK/emoji + split at every position)
+4. [X] Python tests for BUG-1..3 (14 new tests, all passing)
+5. [-] TEST-5: Module layer completeness — deferred to Phase 3
+
+
+*** Phase 3: Architecture refactoring (1-2 weeks)
+1. [ ] ARCH-1: Extract =claude-org-sdd-bridge.org= from iTerm2 module
+2. [ ] ARCH-4: Extract =claude-org-terminal-base.org= (shared ~250 lines)
+3. [ ] ARCH-5: Create =claude-org-sdd-status= module for IPC paths
+4. [ ] ARCH-6: Define =cl-defgeneric= terminal backend protocol
+5. [ ] ARCH-2: Unify dual registry into single store
+
+*** Phase 4: Hardening (ongoing)
+1. [ ] INTEG-2: Replace =call-process= with async cmux calls
+2. [ ] INTEG-4: Add recovery loop detection (max retries)
+3. [ ] TEST-6: Replace =sleep-for= with =wait-until= polling
+4. [ ] Add orphaned span cleanup (TTL) to OTel bridge
+5. [ ] TEST-4: Timer liveness structural test
