@@ -19,9 +19,7 @@ Part of claude-org; loaded after claude-org.org.
 (require 'claude-org-sdd-bridge)
 (require 'claude-org-terminal-base)
 
-;; Forward declarations for iTerm2-only functions used in cmux
-(declare-function claude-org-iterm2--permission-needed "claude-org-iterm2" (sdd-session-id tool-name))
-(declare-function claude-org-iterm2--permission-resolved "claude-org-iterm2" (sdd-session-id))
+;; Forward declarations for iTerm2 functions used in cmux
 (declare-function claude-org-iterm2--activate-emacs "claude-org-iterm2" ())
 (declare-function claude-org-iterm2--ensure-ide-server "claude-org-iterm2" (project-root sdd-session-id))
 #+END_SRC
@@ -71,6 +69,79 @@ Defaults to `uv run --project <pkg>/python claude-sdd'."
 (defvar claude-org-cmux--sdd-to-workspace (make-hash-table :test 'equal)
   "Map SDD session ID → cmux workspace ID.")
 
+#+END_SRC
+
+* SDD Color
+
+Color the cmux sidebar status pill based on the =SDD_COLOR= org property.
+Supports hex colors (=#4CAF50=) or named presets (=green=).
+
+#+BEGIN_SRC elisp
+(defvar claude-org-cmux--color-presets
+  '(("red"    . "#FF3B30")
+    ("orange" . "#FF9500")
+    ("yellow" . "#FFCC00")
+    ("green"  . "#34C759")
+    ("blue"   . "#007AFF")
+    ("purple" . "#AF52DE")
+    ("pink"   . "#FF2D55")
+    ("gray"   . "#8E8E93")
+    ("cyan"   . "#5AC8FA"))
+  "Named color presets for SDD_COLOR property.
+Use in org files: #+PROPERTY: SDD_COLOR green
+Or per-section:   :SDD_COLOR: #custom-hex")
+
+(defvar claude-org-cmux--icon-presets
+  '(("dev"        . "hammer")
+    ("debug"      . "bug")
+    ("deploy"     . "flame")
+    ("review"     . "eye")
+    ("research"   . "book.fill")
+    ("management" . "chart.bar")
+    ("infra"      . "server.rack")
+    ("test"       . "checkmark.seal")
+    ("network"    . "network")
+    ("data"       . "cylinder"))
+  "Named icon presets for SDD_ICON property.
+Use in org files: #+PROPERTY: SDD_ICON dev")
+
+(defun claude-org-cmux--resolve-color (color-str)
+  "Resolve COLOR-STR to a hex color.
+Accepts hex (#RRGGBB) or a named preset (green, blue, etc.).
+Returns nil if COLOR-STR is nil or unrecognized."
+  (when color-str
+    (let ((lower (downcase (string-trim color-str))))
+      (cond
+       ((string-prefix-p "#" lower) color-str)
+       (t (cdr (assoc lower claude-org-cmux--color-presets)))))))
+
+(defun claude-org-cmux--resolve-icon (icon-str)
+  "Resolve ICON-STR to an SF Symbol name.
+Accepts an SF Symbol name directly (e.g. \"bolt.fill\") or a preset.
+Returns nil if ICON-STR is nil."
+  (when icon-str
+    (let ((lower (downcase (string-trim icon-str))))
+      (or (cdr (assoc lower claude-org-cmux--icon-presets))
+          lower))))
+
+(defun claude-org-cmux--apply-color (workspace-ref label icon)
+  "Set sidebar status pill on WORKSPACE-REF with LABEL, ICON, and SDD_COLOR.
+Reads SDD_COLOR, SDD_ICON from org properties (with inheritance).
+SDD_ICON overrides the default ICON argument.
+No-op if SDD_COLOR is not set."
+  (let* ((color-raw (claude-org-terminal--find-session-property "SDD_COLOR"))
+         (color (claude-org-cmux--resolve-color color-raw))
+         (icon-raw (claude-org-terminal--find-session-property "SDD_ICON"))
+         (resolved-icon (or (claude-org-cmux--resolve-icon icon-raw) icon)))
+    (when color
+      (condition-case nil
+          (apply #'claude-org-cmux--call
+                 "set-status" "project" label
+                 "--icon" resolved-icon
+                 "--color" color
+                 (when workspace-ref
+                   (list "--workspace" workspace-ref)))
+        (error nil)))))
 #+END_SRC
 
 * CLI Gateway
@@ -417,6 +488,9 @@ Auto-starts the Emacs MCP server if not running."
           (message "Claude Code in cmux (surface: %s) — waiting for TUI..." surface-id)
           ;; Wait for Claude Code TUI to be ready before returning
           (claude-org-cmux--wait-for-ready surface-id)
+          ;; Apply SDD_COLOR to sidebar status pill
+          (when (string-prefix-p "workspace:" workspace-ref)
+            (claude-org-cmux--apply-color workspace-ref "Ready" "circle.fill"))
           (message "Claude Code ready in cmux (surface: %s)" surface-id)
           surface-id)))))
 #+END_SRC
@@ -464,16 +538,19 @@ so an unhandled error would leave the session permanently :busy t."
                 (setf (claude-agent--process-state-closed state) t)
                 (claude-agent--unregister-query req-id)))))
         ;; Check loop continuation
-        (let ((surface-id (gethash sdd-session-id claude-org-cmux--sdd-to-surface)))
-          ;; Clean up lookup tables
+        (let ((surface-id (gethash sdd-session-id claude-org-cmux--sdd-to-surface))
+              (ws-id (gethash sdd-session-id claude-org-cmux--sdd-to-workspace)))
+          ;; Clean up all lookup tables (ws-id read above before remhash)
           (remhash sdd-session-id claude-org-cmux--sdd-to-surface)
+          (remhash sdd-session-id claude-org-cmux--sdd-to-workspace)
           (remhash sdd-session-id claude-org-terminal--sdd-to-session-key)
           ;; Stop response streaming (Stop hook will insert canonical response)
           (claude-org-cmux--stop-streaming)
-          ;; Clear busy state
+          ;; Update sidebar color back to Ready
+          (claude-org-cmux--apply-color ws-id "Ready" "checkmark.circle")
+          ;; Clear busy state and check loop continuation
           (when session-key
-            (claude-org--session-put session-key :busy nil))
-          (when session-key
+            (claude-org--session-put session-key :busy nil)
             (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
                   (loop-max (or (claude-org--session-get session-key :loop-max) 1)))
               (if (< loop-current loop-max)
@@ -573,14 +650,11 @@ Registers in `claude-agent--active-queries' for mode-line."
         (claude-org-terminal--write-from-emacs-flag sdd-session-id))
       ;; Send prompt via cmux
       (claude-org-cmux--send-text surface-id prompt)
-      ;; Optional: update sidebar status
-      (condition-case nil
-          (claude-org-cmux--call "set-status" "agent" "Running query...")
-        (error nil))
-      ;; Start response streaming (pipe-pane captures incremental output)
+      ;; Update sidebar status and start streaming (both need workspace ref)
       (let ((ws-id (condition-case nil
                        (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")
                      (error nil))))
+        (claude-org-cmux--apply-color ws-id "Running..." "bolt.fill")
         (when ws-id
           (claude-org-cmux--start-streaming
            surface-id (claude-org--current-session-key) ws-id (current-buffer))))
@@ -771,13 +845,6 @@ Registers a mode-line alert, focuses the cmux workspace, and notifies user."
     (when ws-id
       (ignore-errors
         (claude-org-cmux--call "select-workspace" "--workspace" ws-id)))))
-
-(defun claude-org-cmux--activate-app ()
-  "Activate the cmux app on macOS."
-  (when (eq system-type 'darwin)
-    (ignore-errors
-      (start-process "activate-cmux" nil "osascript" "-e"
-                     "tell application \"cmux\" to activate"))))
 #+END_SRC
 
 * Session Recovery

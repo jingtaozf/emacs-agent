@@ -94,6 +94,9 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 - Use `lexical-let` (from `cl-lib`) for closures in callbacks/timers
 - Use `cond` + `equal` instead of `pcase` string patterns (dynamic binding)
 - After editing `.org` files, **always reload**: `(literate-elisp-load "file.org")`
+- **Macro re-expansion**: When a macro definition changes (e.g. in `claude-agent-trace.org`),
+  ALL modules that USE that macro must also be reloaded — the old function bodies
+  contain the old macro expansion until reloaded
 
 ### Testing
 - All tests in `tests/*.el`, never in `.org` files
