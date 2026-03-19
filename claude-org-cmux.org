@@ -124,15 +124,19 @@ Returns nil if ICON-STR is nil."
       (or (cdr (assoc lower claude-org-cmux--icon-presets))
           lower))))
 
-(defun claude-org-cmux--apply-color (workspace-ref label icon)
-  "Set sidebar status pill on WORKSPACE-REF with LABEL, ICON, and SDD_COLOR.
-Reads SDD_COLOR, SDD_ICON from org properties (with inheritance).
-SDD_ICON overrides the default ICON argument.
+(defun claude-org-cmux--apply-color (workspace-ref &optional icon)
+  "Set sidebar status pill on WORKSPACE-REF using SDD_COLOR and SDD_ICON.
+Label is derived from the org file name (e.g. \"claude-agent-dev\").
+ICON is the default icon, overridden by SDD_ICON if set.
 No-op if SDD_COLOR is not set."
   (let* ((color-raw (claude-org-terminal--find-session-property "SDD_COLOR"))
          (color (claude-org-cmux--resolve-color color-raw))
          (icon-raw (claude-org-terminal--find-session-property "SDD_ICON"))
-         (resolved-icon (or (claude-org-cmux--resolve-icon icon-raw) icon)))
+         (resolved-icon (or (claude-org-cmux--resolve-icon icon-raw) icon "circle.fill"))
+         (label (or (when buffer-file-name
+                      (file-name-sans-extension
+                       (file-name-nondirectory buffer-file-name)))
+                    "project")))
     (when color
       (condition-case nil
           (apply #'claude-org-cmux--call
@@ -426,7 +430,11 @@ Auto-starts the Emacs MCP server if not running."
                                  "--surface" saved-id)))
                    (not (string-empty-p result)))
                (error nil)))
-        saved-id
+        ;; Existing workspace — re-apply SDD color (persists across restarts)
+        (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
+          (when ws-id
+            (claude-org-cmux--apply-color ws-id))
+          saved-id)
       ;; Launch new workspace with Claude Code
       (unless sdd-session-id
         (user-error "No CLAUDE_SESSION_ID found. Create an SDD section first"))
@@ -490,7 +498,7 @@ Auto-starts the Emacs MCP server if not running."
           (claude-org-cmux--wait-for-ready surface-id)
           ;; Apply SDD_COLOR to sidebar status pill
           (when (string-prefix-p "workspace:" workspace-ref)
-            (claude-org-cmux--apply-color workspace-ref "Ready" "circle.fill"))
+            (claude-org-cmux--apply-color workspace-ref))
           (message "Claude Code ready in cmux (surface: %s)" surface-id)
           surface-id)))))
 #+END_SRC
@@ -547,7 +555,7 @@ so an unhandled error would leave the session permanently :busy t."
           ;; Stop response streaming (Stop hook will insert canonical response)
           (claude-org-cmux--stop-streaming)
           ;; Update sidebar color back to Ready
-          (claude-org-cmux--apply-color ws-id "Ready" "checkmark.circle")
+          (claude-org-cmux--apply-color ws-id)
           ;; Clear busy state and check loop continuation
           (when session-key
             (claude-org--session-put session-key :busy nil)
@@ -654,7 +662,7 @@ Registers in `claude-agent--active-queries' for mode-line."
       (let ((ws-id (condition-case nil
                        (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")
                      (error nil))))
-        (claude-org-cmux--apply-color ws-id "Running..." "bolt.fill")
+        (claude-org-cmux--apply-color ws-id)
         (when ws-id
           (claude-org-cmux--start-streaming
            surface-id (claude-org--current-session-key) ws-id (current-buffer))))
@@ -742,16 +750,38 @@ Registers in `claude-agent--active-queries' for mode-line."
 
 (defun claude-org-cmux-open-tab ()
   "Open (or focus) the cmux workspace for this SDD session.
-Launches Claude Code if no matching workspace exists."
+Launches Claude Code if no matching workspace exists.
+Always re-applies SDD_COLOR pill (status pills are transient in cmux)."
   (interactive)
   (claude-org-cmux--ensure-session)
+  ;; Re-read properties AFTER ensure-session (it may have created a new workspace
+  ;; and updated the org properties with fresh refs)
   (let ((workspace-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID"))
         (surface-id (claude-org-terminal--find-session-property "CMUX_SURFACE_ID")))
     (cond
      (workspace-id
-      (claude-org-cmux--call "select-workspace" "--workspace" workspace-id)
-      (claude-org-cmux--activate-app)
-      (message "cmux workspace focused (%s)" workspace-id))
+      (condition-case nil
+          (progn
+            (claude-org-cmux--call "select-workspace" "--workspace" workspace-id)
+            ;; Re-apply color (pills are lost on cmux restart)
+            (claude-org-cmux--apply-color workspace-id)
+            (claude-org-cmux--activate-app)
+            (message "cmux workspace focused (%s)" workspace-id))
+        (error
+         ;; Workspace ref is stale (e.g. switched from production to dev cmux).
+         ;; Clear stale refs and retry — ensure-session will create a new workspace.
+         (save-excursion
+           (save-restriction
+             (claude-org-terminal--goto-session-heading)
+             (org-delete-property "CMUX_WORKSPACE_ID")
+             (org-delete-property "CMUX_SURFACE_ID")
+             (save-buffer)))
+         (claude-org-cmux--ensure-session)
+         (let ((new-ws (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
+           (when new-ws
+             (claude-org-cmux--call "select-workspace" "--workspace" new-ws))
+           (claude-org-cmux--activate-app)
+           (message "cmux workspace created and focused")))))
      (surface-id
       (claude-org-cmux--activate-app)
       (message "cmux surface: %s (focused app)" surface-id))

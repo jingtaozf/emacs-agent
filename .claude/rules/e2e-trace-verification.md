@@ -52,6 +52,29 @@ AI block execution — not just unit tests or manual curl.
 | OTel Bridge | http://localhost:7331 | Elisp → OTel relay |
 | Bridge health | http://localhost:7331/health | Liveness check |
 
+## cmux Dev Build
+
+To test against a locally-built cmux:
+
+```bash
+# Build (first time — needs zig, Xcode, Metal Toolchain)
+cd reference/cmux
+./scripts/setup.sh
+./scripts/reload.sh --tag emacs-test
+
+# Relaunch with open socket (allowAll mode for dev)
+pkill -f "cmux DEV emacs-test"
+open -g "path/to/cmux DEV emacs-test.app" \
+  --env CMUX_SOCKET_MODE=allowAll \
+  --env CMUX_SOCKET_PATH=/tmp/cmux-debug-emacs-test.sock
+```
+
+Then in Emacs:
+```elisp
+(setq claude-org-cmux-socket-path "/tmp/cmux-debug-emacs-test.sock")
+;; To switch back: (setq claude-org-cmux-socket-path nil)
+```
+
 ## Cleanup
 
-Delete the temp org file after verification.
+Test fixtures in `tests/fixtures/` are committed — don't delete them.
