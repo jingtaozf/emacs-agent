@@ -492,10 +492,12 @@ Auto-starts the Emacs MCP server if not running."
                                  "--surface" saved-id)))
                    (not (string-empty-p result)))
                (error nil)))
-        ;; Existing workspace — re-apply SDD color (persists across restarts)
+        ;; Existing workspace — re-apply SDD color and start verbose streaming
         (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
           (when ws-id
             (claude-org-cmux--apply-color ws-id))
+          ;; Start verbose so it's available even for direct cmux input
+          (claude-org-cmux--start-verbose saved-id (claude-org--current-session-key))
           saved-id)
       ;; Launch new workspace with Claude Code
       (unless sdd-session-id
@@ -569,9 +571,10 @@ Auto-starts the Emacs MCP server if not running."
           (message "Claude Code in cmux (surface: %s) — waiting for TUI..." surface-id)
           ;; Wait for Claude Code TUI to be ready before returning
           (claude-org-cmux--wait-for-ready surface-id)
-          ;; Apply SDD_COLOR to sidebar status pill
+          ;; Apply SDD_COLOR and start verbose streaming
           (when (string-prefix-p "workspace:" workspace-ref)
             (claude-org-cmux--apply-color workspace-ref))
+          (claude-org-cmux--start-verbose surface-id (claude-org--current-session-key))
           (message "Claude Code ready in cmux (surface: %s)" surface-id)
           surface-id)))))
 #+END_SRC
@@ -895,16 +898,19 @@ Registers it so `claude-org-show-verbose' can find it."
               (kill-buffer pbuf))))))))
 
 (defun claude-org-cmux--start-verbose (surface-id session-key)
-  "Start verbose output streaming for cmux session."
-  (let ((buf (claude-org-cmux--create-verbose-buffer session-key surface-id)))
-    (claude-org--session-put session-key :verbose-timer
-      (run-at-time 1 1
-        (lexical-let ((sid surface-id) (sk session-key) (vb buf))
-          (lambda ()
-            (condition-case nil
-                (when (buffer-live-p vb)
-                  (claude-org-cmux--verbose-tick sid sk vb))
-              (error nil))))))))
+  "Start verbose output streaming for cmux session. Idempotent."
+  ;; Don't create duplicate timers
+  (let ((existing-timer (claude-org--session-get session-key :verbose-timer)))
+    (unless existing-timer
+      (let ((buf (claude-org-cmux--create-verbose-buffer session-key surface-id)))
+        (claude-org--session-put session-key :verbose-timer
+          (run-at-time 1 1
+            (lexical-let ((sid surface-id) (sk session-key) (vb buf))
+              (lambda ()
+                (condition-case nil
+                    (when (buffer-live-p vb)
+                      (claude-org-cmux--verbose-tick sid sk vb))
+                  (error nil))))))))))
 
 (defun claude-org-cmux--stop-verbose (session-key)
   "Stop verbose output streaming."
