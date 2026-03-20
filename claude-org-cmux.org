@@ -625,8 +625,10 @@ so an unhandled error would leave the session permanently :busy t."
           (remhash sdd-session-id claude-org-cmux--sdd-to-surface)
           (remhash sdd-session-id claude-org-cmux--sdd-to-workspace)
           (remhash sdd-session-id claude-org-terminal--sdd-to-session-key)
-          ;; Stop response streaming (Stop hook will insert canonical response)
+          ;; Stop response and verbose streaming
           (claude-org-cmux--stop-streaming)
+          (when session-key
+            (claude-org-cmux--stop-verbose session-key))
           ;; Update sidebar color back to Ready
           (claude-org-cmux--apply-color ws-id)
           ;; Clear busy state and check loop continuation
@@ -738,7 +740,9 @@ Registers in `claude-agent--active-queries' for mode-line."
         (claude-org-cmux--apply-color ws-id)
         (when ws-id
           (claude-org-cmux--start-streaming
-           surface-id (claude-org--current-session-key) ws-id (current-buffer))))
+           surface-id (claude-org--current-session-key) ws-id (current-buffer)))
+        ;; Start verbose output streaming (for claude-org-show-verbose)
+        (claude-org-cmux--start-verbose surface-id (claude-org--current-session-key)))
       (message "Sent to cmux (%d chars)" (length prompt))))))
 #+END_SRC
 
@@ -804,6 +808,110 @@ Registers in `claude-agent--active-queries' for mode-line."
             (goto-char claude-org-cmux--stream-marker)
             (insert clean)
             (set-marker claude-org-cmux--stream-marker (point)))))))))
+#+END_SRC
+
+* Verbose Output (Live Output Mirror)
+
+Stream cmux terminal output into a read-only Emacs buffer accessible via
+=claude-org-menu → v → Verbose output=. Uses async =capture-pane= polling
+with diff-based deduplication.
+
+#+BEGIN_SRC elisp
+(defvar-local claude-org-cmux--verbose-timer nil
+  "Timer for verbose output streaming.")
+
+(defvar-local claude-org-cmux--verbose-prev-text ""
+  "Previous capture-pane output for diff-based deduplication.")
+
+(defun claude-org-cmux--create-verbose-buffer (session-key surface-id)
+  "Create a verbose output buffer for cmux terminal SESSION-KEY.
+Registers it so `claude-org-show-verbose' can find it."
+  (let* ((sdd-id (or (claude-org--session-get session-key :sdd-session-id)
+                      (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID")
+                      "cmux"))
+         (buf-name (format "*cmux: %s*" sdd-id))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (unless (eq major-mode 'special-mode)
+        (special-mode)
+        (setq-local truncate-lines t)
+        (setq-local claude-org-cmux--verbose-prev-text "")))
+    ;; Register so claude-org-show-verbose finds it
+    (puthash session-key buf claude-agent--session-verbose-buffers)
+    buf))
+
+(defun claude-org-cmux--verbose-insert (buf text)
+  "Insert TEXT into verbose buffer BUF, stripping ANSI escapes."
+  (when (buffer-live-p buf)
+    (let ((clean (replace-regexp-in-string
+                  "\\[[][0-9;]*[a-zA-Z]" ""
+                  (replace-regexp-in-string
+                   "[\x00-\x08\x0b\x0c\x0e-\x1f]" "" text))))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (at-end (= (point) (point-max))))
+          (save-excursion
+            (goto-char (point-max))
+            (insert clean))
+          (when at-end
+            (goto-char (point-max))
+            (dolist (win (get-buffer-window-list buf nil t))
+              (set-window-point win (point-max)))))))))
+
+(defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf)
+  "Async capture-pane tick: capture screen, replace buffer with current view."
+  (when (buffer-live-p verbose-buf)
+    (let* ((socket-path (or claude-org-cmux-socket-path
+                            (condition-case nil
+                                (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
+                              (error nil))))
+           (args (append (when socket-path (list "--socket" socket-path))
+                         (list "capture-pane" "--surface" surface-id
+                               "--scrollback")))
+           (proc-buf (generate-new-buffer " *cmux-vcap*"))
+           (proc (apply #'start-process "cmux-verbose" proc-buf "cmux" args)))
+      (set-process-sentinel proc
+        (lexical-let ((vbuf verbose-buf) (pbuf proc-buf))
+          (lambda (proc event)
+            (when (string-prefix-p "finished" event)
+              (let ((cur-text (with-current-buffer pbuf (buffer-string))))
+                (when (and (not (string-empty-p cur-text))
+                           (buffer-live-p vbuf))
+                  (with-current-buffer vbuf
+                    (unless (string= cur-text claude-org-cmux--verbose-prev-text)
+                      ;; Replace entire buffer with current terminal view
+                      ;; (screen is small, full replace is simpler than diffing)
+                      (let ((inhibit-read-only t))
+                        (erase-buffer)
+                        (insert (replace-regexp-in-string
+                                 "\\[[][0-9;]*[a-zA-Z]" ""
+                                 (replace-regexp-in-string
+                                  "[\x00-\x08\x0b\x0c\x0e-\x1f]" "" cur-text)))
+                        (goto-char (point-max))
+                        (dolist (win (get-buffer-window-list vbuf nil t))
+                          (set-window-point win (point-max))))
+                      (setq-local claude-org-cmux--verbose-prev-text cur-text))))))
+            (when (buffer-live-p pbuf)
+              (kill-buffer pbuf))))))))
+
+(defun claude-org-cmux--start-verbose (surface-id session-key)
+  "Start verbose output streaming for cmux session."
+  (let ((buf (claude-org-cmux--create-verbose-buffer session-key surface-id)))
+    (claude-org--session-put session-key :verbose-timer
+      (run-at-time 1 1
+        (lexical-let ((sid surface-id) (sk session-key) (vb buf))
+          (lambda ()
+            (condition-case nil
+                (when (buffer-live-p vb)
+                  (claude-org-cmux--verbose-tick sid sk vb))
+              (error nil))))))))
+
+(defun claude-org-cmux--stop-verbose (session-key)
+  "Stop verbose output streaming."
+  (let ((timer (claude-org--session-get session-key :verbose-timer)))
+    (when timer
+      (cancel-timer timer)
+      (claude-org--session-put session-key :verbose-timer nil))))
 #+END_SRC
 
 * User Commands
