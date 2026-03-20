@@ -151,9 +151,18 @@ No-op if SDD_COLOR is not set."
         (error nil))
       ;; Workspace tab color — send raw v1 socket command directly
       ;; (the CLI binary may not support set-workspace-color yet)
+      ;; Resolve fresh UUID via sidebar-state (stored UUIDs go stale on cmux restart)
       (when workspace-ref
-        (claude-org-cmux--send-socket-command
-         (format "set_workspace_color %s --tab=%s" color workspace-ref))))))
+        (let ((fresh-uuid
+               (condition-case nil
+                   (let ((state (claude-org-cmux--call
+                                 "sidebar-state" "--workspace" workspace-ref)))
+                     (when (string-match "^tab=\\([0-9A-F-]+\\)" state)
+                       (match-string 1 state)))
+                 (error nil))))
+          (when fresh-uuid
+            (claude-org-cmux--send-socket-command
+             (format "set_workspace_color %s --tab=%s" color fresh-uuid))))))))
 #+END_SRC
 
 * Raw Socket Command
@@ -170,7 +179,11 @@ Bypasses the CLI binary — useful for commands not yet in the released CLI."
   (let ((socket-path (or claude-org-cmux-socket-path
                          (condition-case nil
                              (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
-                           (error nil)))))
+                           (error nil))
+                         ;; Default production socket
+                         (let ((default-sock (expand-file-name
+                                             "~/Library/Application Support/cmux/cmux.sock")))
+                           (when (file-exists-p default-sock) default-sock)))))
     (when socket-path
       (condition-case nil
           (let* ((proc (make-network-process
@@ -839,7 +852,8 @@ Always re-applies SDD_COLOR pill (status pills are transient in cmux)."
          (claude-org-cmux--ensure-session)
          (let ((new-ws (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
            (when new-ws
-             (claude-org-cmux--call "select-workspace" "--workspace" new-ws))
+             (claude-org-cmux--call "select-workspace" "--workspace" new-ws)
+             (claude-org-cmux--apply-color new-ws))
            (claude-org-cmux--activate-app)
            (message "cmux workspace created and focused")))))
      (surface-id

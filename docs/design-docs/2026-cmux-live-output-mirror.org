@@ -1,0 +1,298 @@
+#+TITLE: Design: cmux Live Output Mirror
+#+DATE: 2026-03-20
+
+* Goal
+
+Show cmux terminal output in real-time in Emacs via =claude-org-menu → v → Verbose output=.
+Same UX as the JSON stream backend's verbose buffer, but for the cmux terminal backend.
+
+* User Flow
+
+1. User opens SDD story terminal (=claude-org-menu → Open terminal=)
+2. Claude Code runs in cmux workspace
+3. User presses =v= in claude-org-menu (or =claude-org-show-verbose=)
+4. Emacs opens =*cmux: story-name*= buffer in a side window
+5. Terminal output streams into this buffer in real-time
+6. User sees Claude Code thinking, tool calls, output — without switching to cmux
+7. File paths in output are clickable (jump to file in Emacs)
+8. When query completes, buffer shows final state; canonical response goes to org
+
+* Architecture
+
+#+begin_example
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ Emacs                                                           │
+  │                                                                 │
+  │  ┌─ org buffer ──────────┐  ┌─ *cmux: story-name* ──────────┐ │
+  │  │ * My Story             │  │ ⠂ Claude Code                  │ │
+  │  │ ** Workflow             │  │                                 │ │
+  │  │ #+begin_src ai          │  │ I'll fix the auth bug. Let me  │ │
+  │  │ fix the auth bug        │  │ check the current code...      │ │
+  │  │ #+end_src               │  │                                 │ │
+  │  │                         │  │ Tool: Read auth.py              │ │
+  │  │ ** Response 1           │  │ ...reading 142 lines...         │ │
+  │  │ (streaming...)          │  │                                 │ │
+  │  └─────────────────────────┘  │ Tool: Edit auth.py:42           │ │
+  │                                │ - old: if user.role == "admin" │ │
+  │                                │ + new: if user.has_permission  │ │
+  │                                │                                 │ │
+  │                                │ ✓ Changes applied.             │ │
+  │                                └─────────────────────────────────┘ │
+  └─────────────────────────────────────────────────────────────────┘
+#+end_example
+
+* Data Flow Options
+
+** Option 1: cmux =pipe-pane --follow= (Preferred)
+
+Requires a new cmux feature: continuous output streaming.
+
+#+begin_example
+  cmux surface (PTY)
+    │
+    ├── pipe-pane --follow --surface <id>
+    │   keeps socket connection open
+    │   sends new output chunks as they arrive
+    │
+    └── Emacs: make-network-process :filter
+        receives chunks, inserts into buffer
+#+end_example
+
+Pros: Zero latency, event-driven, no polling
+Cons: Requires cmux Swift change (~30 lines)
+
+** Option 2: Polling =capture-pane= (Current approach, improved)
+
+#+begin_example
+  run-at-time (every 1s)
+    │
+    └── start-process "cmux" "capture-pane" --surface <id>
+        │  (async, non-blocking)
+        │
+        └── process-sentinel: diff against previous, insert new text
+#+end_example
+
+Pros: Works with current cmux, no changes needed
+Cons: 1s latency, growing scrollback makes each capture slower
+
+** Option 3: File-based streaming via FIFO
+
+#+begin_example
+  cmux: pipe-pane --command "cat >> /tmp/claude-output-<sid>.log"
+    │  (periodic re-invocation needed since pipe-pane is one-shot)
+    │
+    └── Emacs: file-notify-add-watch on the log file
+        │  (FSEvents on macOS, ~100ms latency)
+        │
+        └── read new bytes, insert into buffer
+#+end_example
+
+Pros: Decoupled from Emacs (no blocking), familiar pattern
+Cons: File grows unbounded, pipe-pane is one-shot (needs re-invocation)
+
+** Recommendation
+
+Start with *Option 2* (improved polling) since it works today. Design the
+Emacs-side buffer infrastructure so it accepts any data source. Upgrade to
+*Option 1* when =pipe-pane --follow= is implemented in cmux.
+
+* Emacs Implementation
+
+** Verbose buffer creation
+
+Integrate with existing =claude-org-show-verbose= by storing the cmux output
+buffer as the session's verbose buffer.
+
+#+begin_src elisp
+(defun claude-org-cmux--create-verbose-buffer (session-key sdd-session-id)
+  "Create a verbose output buffer for the cmux terminal session.
+Returns the buffer. Stores it as the session's verbose buffer."
+  (let* ((story-name (or (claude-org--session-get session-key :story-name)
+                          sdd-session-id))
+         (buf-name (format "*cmux: %s*" story-name))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (special-mode)  ;; read-only, q to quit
+      (setq-local truncate-lines t)
+      ;; Enable clickable file paths
+      (compilation-minor-mode 1))
+    ;; Store as session verbose buffer so claude-org-show-verbose finds it
+    (claude-agent-set-verbose-buffer session-key buf)
+    buf))
+#+end_src
+
+** Streaming data insertion
+
+Use a marker-based approach matching =comint-output-filter= pattern:
+
+#+begin_src elisp
+(defun claude-org-cmux--insert-output (buf text)
+  "Insert TEXT into verbose output buffer BUF.
+Strips ANSI escapes, auto-scrolls if at end."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((inhibit-read-only t)
+            (at-end (= (point) (point-max))))
+        (save-excursion
+          (goto-char (point-max))
+          (insert (ansi-color-apply text)))
+        (when at-end
+          (goto-char (point-max))
+          ;; Scroll all windows showing this buffer
+          (dolist (win (get-buffer-window-list buf nil t))
+            (set-window-point win (point-max))))))))
+#+end_src
+
+** Async polling (Option 2)
+
+Replace the current =call-process= polling in =claude-org-cmux--stream-tick=
+with non-blocking =start-process=:
+
+#+begin_src elisp
+(defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf)
+  "One async tick: capture terminal output and insert new text."
+  (when (and (claude-org--session-get session-key :busy)
+             (buffer-live-p verbose-buf))
+    (let* ((socket-path (or claude-org-cmux-socket-path
+                            (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")))
+           (args (append (when socket-path (list "--socket" socket-path))
+                         (list "capture-pane" "--surface" surface-id)))
+           (proc (apply #'start-process "cmux-capture" nil "cmux" args)))
+      (set-process-filter proc
+        (lexical-let ((buf verbose-buf)
+                      (sk session-key)
+                      (chunks ""))
+          (lambda (proc string)
+            (setq chunks (concat chunks string)))))
+      (set-process-sentinel proc
+        (lexical-let ((buf verbose-buf)
+                      (sk session-key))
+          (lambda (proc event)
+            (when (string-prefix-p "finished" event)
+              (let* ((output (with-current-buffer (process-buffer proc)
+                               (buffer-string)))
+                     (prev-len (or (claude-org--session-get sk :verbose-last-len) 0)))
+                (when (> (length output) prev-len)
+                  (claude-org-cmux--insert-output
+                   buf (substring output prev-len))
+                  (claude-org--session-put sk :verbose-last-len (length output)))))))))))
+#+end_src
+
+** Timer management
+
+Start/stop the verbose streaming timer alongside the existing response streaming:
+
+#+begin_src elisp
+(defun claude-org-cmux--start-verbose-streaming (surface-id session-key)
+  "Start verbose output streaming for cmux session."
+  (let ((buf (claude-org-cmux--create-verbose-buffer
+              session-key
+              (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID"))))
+    (claude-org--session-put session-key :verbose-timer
+      (run-at-time 1 1
+        (lexical-let ((sid surface-id) (sk session-key) (vb buf))
+          (lambda ()
+            (condition-case nil
+                (claude-org-cmux--verbose-tick sid sk vb)
+              (error nil))))))))
+
+(defun claude-org-cmux--stop-verbose-streaming (session-key)
+  "Stop verbose output streaming."
+  (let ((timer (claude-org--session-get session-key :verbose-timer)))
+    (when timer
+      (cancel-timer timer)
+      (claude-org--session-put session-key :verbose-timer nil))))
+#+end_src
+
+** Integration points
+
+| Where | What |
+|-------+------|
+| =claude-org-cmux--execute-ai-block= | Start verbose streaming after prompt sent |
+| =claude-org-cmux--query-completed= | Stop verbose streaming |
+| =claude-org-show-verbose= | Display the =*cmux: story*= buffer (already works via =claude-agent-get-verbose-buffer=) |
+
+* cmux Implementation (Future: Option 1)
+
+** =pipe-pane --follow= mode
+
+Add =--follow= flag to =pipe-pane= in =CLI/cmux.swift=. Instead of one-shot
+=surface.read_text=, open a persistent subscription:
+
+#+begin_src swift
+// In TerminalController.swift:
+// New V2 method: surface.subscribe_output
+// Keeps connection open, sends new output lines as they arrive
+private func v2SurfaceSubscribeOutput(params: [String: Any]) -> V2CallResult {
+    guard let surfaceId = v2UUID(params, "surface_id") else {
+        return .err(code: "invalid_params", message: "Missing surface_id")
+    }
+    // Register a callback on the surface's terminal output
+    // When new content arrives, write it to the socket connection
+    // Connection stays open until client disconnects
+    // ...
+}
+#+end_src
+
+The key challenge is hooking into Ghostty's terminal content update callback.
+The =GHOSTTY_ACTION_SET_TITLE= callback in =GhosttyTerminalView.swift= fires
+on title changes; a similar callback for content changes would enable this.
+Alternatively, poll the surface's text representation on a fast timer (50ms)
+inside cmux (Swift-side polling is cheaper than cross-process polling).
+
+** Emacs client for streaming
+
+When =pipe-pane --follow= is available, replace the polling timer with a
+persistent socket connection:
+
+#+begin_src elisp
+(defun claude-org-cmux--start-verbose-stream (surface-id session-key)
+  "Start streaming verbose output via persistent cmux socket."
+  (let* ((socket-path ...)
+         (buf (claude-org-cmux--create-verbose-buffer session-key ...))
+         (proc (make-network-process
+                :name "cmux-verbose-stream"
+                :family 'local
+                :remote socket-path
+                :filter (lexical-let ((vb buf))
+                          (lambda (proc string)
+                            (claude-org-cmux--insert-output vb string)))
+                :sentinel (lambda (proc event)
+                            (message "cmux stream: %s" event)))))
+    ;; Send subscribe command
+    (process-send-string proc
+      (format "pipe_pane --follow --surface %s\n" surface-id))
+    (claude-org--session-put session-key :verbose-stream proc)))
+#+end_src
+
+* Verification
+
+** Manual test
+
+1. Open SDD story terminal via =claude-org-menu=
+2. Execute an AI block (C-c C-c)
+3. Press =v= in claude-org-menu → should open =*cmux: story-name*= buffer
+4. Verify output streams in real-time (within ~1s for Option 2)
+5. Verify file paths are clickable
+6. Verify buffer stops updating after query completes
+
+** Automated test (local E2E)
+
+Add to =tests/test-e2e-local-trace.el=:
+
+#+begin_src elisp
+(ert-deftest test-e2e-local-cmux-verbose-buffer ()
+  "Verbose output buffer receives terminal content from cmux."
+  :tags '(:local-e2e :local-cmux)
+  (skip-unless (test-e2e-local--service-alive-p "http://localhost:7331"))
+  ;; Create test session, execute AI block, check verbose buffer content
+  ...)
+#+end_src
+
+* References
+
+- Research: =docs/research/2026-cmux-sdd-enhancements.org=
+- Existing streaming: =claude-org-cmux.org= Response Streaming section
+- JSON stream verbose: =claude-agent-backend.org= verbose buffer
+- comint pattern: Emacs =comint.el= =comint-output-filter=
+- compilation clickable paths: =compilation-error-regexp-alist=
