@@ -222,8 +222,8 @@ Special attrs keys:
   :output      - Output value shown in Phoenix UI (set before body runs)
 TRACE-CTX is an optional explicit context (TRACE-ID . SPAN-ID) for async use.
 If nil, uses the dynamically bound `claude-agent-trace--current-context'.
-If no context exists at all, auto-promotes to a root trace (new trace-id,
-no parent) so terminal backends don't silently drop spans."
+If no context exists at all, BODY runs untraced (no span created).
+Use `claude-agent-with-trace' to create explicit root spans."
   (declare (indent 2) (debug t))
   (let ((span-id-sym (make-symbol "span-id"))
         (ctx-sym (make-symbol "ctx"))
@@ -232,38 +232,38 @@ no parent) so terminal backends don't silently drop spans."
         (start-sym (make-symbol "start-ns")))
     `(if (not claude-agent-trace-enabled)
          (progn ,@body)
-       (let* ((,attrs-sym ,attrs)
-              (,ctx-sym (or ,trace-ctx
-                            claude-agent-trace--current-context
-                            ;; Auto-promote: no context → create root trace
-                            ;; Use :null (not nil) so json-serialize emits null, not {}
-                            (cons (claude-agent-trace--generate-trace-id) :null)))
-              (,span-id-sym (claude-agent-trace--generate-span-id))
-              (,start-sym (truncate (* (float-time) 1e9)))
-              (claude-agent-trace--current-context
-               (cons (car ,ctx-sym) ,span-id-sym)))
-         (claude-agent-trace--request
-          "span/start"
-          (claude-agent-trace--build-start-data
-           (list (cons 'trace_id (car ,ctx-sym))
-                 (cons 'span_id ,span-id-sym)
-                 (cons 'parent_span_id (cdr ,ctx-sym))
-                 (cons 'name ,name)
-                 (cons 'start_time_ns ,start-sym))
-           ,attrs-sym "INTERNAL"))
-         (condition-case err
-             (let ((,result-sym (progn ,@body)))
-               (claude-agent-trace--request
-                "span/end"
-                (claude-agent-trace--build-end-data
-                 ,span-id-sym "ok" nil ,attrs-sym ,result-sym))
-               ,result-sym)
-           (error
-            (claude-agent-trace--request
-             "span/end"
-             (claude-agent-trace--build-end-data
-              ,span-id-sym "error" (error-message-string err) ,attrs-sym))
-            (signal (car err) (cdr err))))))))
+       (let ((,ctx-sym (or ,trace-ctx claude-agent-trace--current-context)))
+         (if (not ,ctx-sym)
+             ;; No trace context — run body untraced (avoids noisy root spans
+             ;; from timers, MCP callbacks, and other async code paths)
+             (progn ,@body)
+           (let* ((,attrs-sym ,attrs)
+                  (,span-id-sym (claude-agent-trace--generate-span-id))
+                  (,start-sym (truncate (* (float-time) 1e9)))
+                  (claude-agent-trace--current-context
+                   (cons (car ,ctx-sym) ,span-id-sym)))
+             (claude-agent-trace--request
+              "span/start"
+              (claude-agent-trace--build-start-data
+               (list (cons 'trace_id (car ,ctx-sym))
+                     (cons 'span_id ,span-id-sym)
+                     (cons 'parent_span_id (cdr ,ctx-sym))
+                     (cons 'name ,name)
+                     (cons 'start_time_ns ,start-sym))
+               ,attrs-sym "INTERNAL"))
+             (condition-case err
+                 (let ((,result-sym (progn ,@body)))
+                   (claude-agent-trace--request
+                    "span/end"
+                    (claude-agent-trace--build-end-data
+                     ,span-id-sym "ok" nil ,attrs-sym ,result-sym))
+                   ,result-sym)
+               (error
+                (claude-agent-trace--request
+                 "span/end"
+                 (claude-agent-trace--build-end-data
+                  ,span-id-sym "error" (error-message-string err) ,attrs-sym))
+                (signal (car err) (cdr err))))))))))
 #+END_SRC
 
 * Cross-Process Context
