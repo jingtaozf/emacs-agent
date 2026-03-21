@@ -348,7 +348,25 @@ we select the workspace first and use paste-buffer without --surface."
         (claude-org-cmux--call "set-buffer" "--name" "emacs-prompt" clean-text)
         (claude-org-cmux--call "paste-buffer" "--name" "emacs-prompt")))
     ;; Send Enter to submit the prompt
-    (claude-org-cmux--call "send-key" "--surface" surface-id "enter"))))
+    (claude-org-cmux--call "send-key" "--surface" surface-id "enter")
+    ;; Retry-on-failure: if Claude Code didn't start working after 3s,
+    ;; the Enter may have been lost (race condition). Resend it.
+    ;; This adds zero overhead to the happy path.
+    (run-at-time 3 nil
+      (lexical-let ((sid surface-id))
+        (lambda ()
+          (condition-case nil
+              (let ((screen (claude-org-cmux--call "capture-pane"
+                              "--surface" sid)))
+                ;; If still showing INSERT mode prompt with no activity,
+                ;; Claude Code didn't receive the Enter — resend it
+                (when (and (string-match-p "-- INSERT --" screen)
+                           (not (string-match-p
+                                 "Thinking\\|Tool:\\|Reading\\|Searching\\|Running\\|Generating"
+                                 screen)))
+                  (claude-org-cmux--call "send-key" "--surface" sid "enter")))
+            (error nil))))))))
+
 #+END_SRC
 
 * Launch Command
