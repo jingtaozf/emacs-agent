@@ -8,3 +8,4 @@
 | 2026-03-16 | cmux Codebase Study — Architecture, Internals, and Lessons | complete |
 | 2026-03-17 | cmux & Ghostty Best Practices Guide | complete |
 - [2026-cmux-sdd-enhancements](2026-cmux-sdd-enhancements.org) — cmux features for SDD story workflow
+- [2026-ghostty-features-for-sdd](2026-ghostty-features-for-sdd.org) — Ghostty features for SDD workflow (shell integration, OSC 133, semantic marks)
