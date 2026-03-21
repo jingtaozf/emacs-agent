@@ -864,13 +864,32 @@ Press `q` to quit."
 (defvar-local claude-org-cmux--verbose-surface-id nil
   "Surface ID for sending commands from this verbose buffer.")
 
+(defvar claude-org-cmux--ctrl-char-map
+  '(("ctrl+a" . "\x01") ("ctrl+b" . "\x02") ("ctrl+c" . "\x03")
+    ("ctrl+d" . "\x04") ("ctrl+e" . "\x05") ("ctrl+f" . "\x06")
+    ("ctrl+g" . "\x07") ("ctrl+h" . "\x08") ("ctrl+i" . "\x09")
+    ("ctrl+j" . "\x0a") ("ctrl+k" . "\x0b") ("ctrl+l" . "\x0c")
+    ("ctrl+n" . "\x0e") ("ctrl+o" . "\x0f") ("ctrl+p" . "\x10")
+    ("ctrl+q" . "\x11") ("ctrl+r" . "\x12") ("ctrl+s" . "\x13")
+    ("ctrl+t" . "\x14") ("ctrl+u" . "\x15") ("ctrl+v" . "\x16")
+    ("ctrl+w" . "\x17") ("ctrl+x" . "\x18") ("ctrl+y" . "\x19")
+    ("ctrl+z" . "\x1a"))
+  "Map ctrl+KEY names to raw ASCII control characters.")
+
 (defun claude-org-cmux--verbose-send-key (key &optional label)
-  "Send KEY to the cmux surface associated with this verbose buffer."
+  "Send KEY to the cmux surface associated with this verbose buffer.
+For ctrl+X keys, sends the raw control character via `send` (not `send-key`)
+because some TUI frameworks need the raw byte, not a key event."
   (when claude-org-cmux--verbose-surface-id
     (condition-case nil
-        (progn
-          (claude-org-cmux--call "send-key" "--surface"
-                                 claude-org-cmux--verbose-surface-id key)
+        (let ((ctrl-char (cdr (assoc (downcase key) claude-org-cmux--ctrl-char-map))))
+          (if ctrl-char
+              ;; Send raw control character via send (more reliable for TUI apps)
+              (claude-org-cmux--call "send" "--surface"
+                                     claude-org-cmux--verbose-surface-id ctrl-char)
+            ;; Named keys (enter, escape, tab, etc.) via send-key
+            (claude-org-cmux--call "send-key" "--surface"
+                                   claude-org-cmux--verbose-surface-id key))
           (message "Sent: %s" (or label key)))
       (error (message "Failed to send key to cmux")))))
 
