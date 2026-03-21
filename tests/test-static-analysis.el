@@ -318,6 +318,8 @@ Returns list of warning/error messages."
     ;; Optional terminal packages (eat, vterm)
     "eat-terminal" "eat-emacs-mode" "eat-semi-char-mode" "eat--semi-char-mode"
     "vterm-send-key" "vterm-copy-mode"
+    ;; Optional evil-mode
+    "evil-define-key"
     ;; Cross-module references (loaded at runtime)
     "emacs-mcp-server-running-p" "emacs-mcp-server-start" "emacs-mcp-server-port"
     "claude-org--insert-block-menu-dynamic"

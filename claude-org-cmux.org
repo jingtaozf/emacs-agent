@@ -837,6 +837,88 @@ Stream cmux terminal output into a read-only Emacs buffer accessible via
 =claude-org-menu → v → Verbose output=. Uses async =capture-pane= polling
 with diff-based deduplication.
 
+** Verbose Mode
+
+A dedicated major mode for verbose output buffers with a transient menu
+to send commands to Claude Code via cmux.
+
+#+BEGIN_SRC elisp
+(defvar claude-org-cmux-verbose-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd ",") #'claude-org-cmux-verbose-menu)
+    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "G") #'claude-org-cmux-verbose-follow)
+    map)
+  "Keymap for `claude-org-cmux-verbose-mode'.")
+
+(define-derived-mode claude-org-cmux-verbose-mode special-mode "cmux-verbose"
+  "Major mode for cmux verbose output buffers.
+Shows live terminal output from Claude Code.
+
+Press `,` to open the command menu for sending keys to Claude Code.
+Press `G` to jump to bottom and follow output.
+Press `q` to quit."
+  (setq-local truncate-lines t)
+  (setq-local buffer-read-only t))
+
+(defvar-local claude-org-cmux--verbose-surface-id nil
+  "Surface ID for sending commands from this verbose buffer.")
+
+(defun claude-org-cmux--verbose-send-key (key &optional label)
+  "Send KEY to the cmux surface associated with this verbose buffer."
+  (when claude-org-cmux--verbose-surface-id
+    (condition-case nil
+        (progn
+          (claude-org-cmux--call "send-key" "--surface"
+                                 claude-org-cmux--verbose-surface-id key)
+          (message "Sent: %s" (or label key)))
+      (error (message "Failed to send key to cmux")))))
+
+(defun claude-org-cmux--verbose-send-text (text &optional label)
+  "Send TEXT to the cmux surface associated with this verbose buffer."
+  (when claude-org-cmux--verbose-surface-id
+    (condition-case nil
+        (progn
+          (claude-org-cmux--call "send" "--surface"
+                                 claude-org-cmux--verbose-surface-id text)
+          (message "Sent: %s" (or label text)))
+      (error (message "Failed to send text to cmux")))))
+
+(defun claude-org-cmux-verbose-follow ()
+  "Jump to the end of the verbose buffer to follow output."
+  (interactive)
+  (goto-char (point-max))
+  (message "Following output"))
+
+;; Transient menu for sending commands to Claude Code
+(transient-define-prefix claude-org-cmux-verbose-menu ()
+  "Send commands to Claude Code via cmux."
+  ["Claude Code Commands"
+   ["Control"
+    ("b" "Background (Ctrl+B)" (lambda () (interactive) (claude-org-cmux--verbose-send-key "ctrl+b" "Ctrl+B")))
+    ("c" "Cancel (Escape)" (lambda () (interactive) (claude-org-cmux--verbose-send-key "escape" "Cancel")))
+    ("s" "Interrupt (Ctrl+C)" (lambda () (interactive) (claude-org-cmux--verbose-send-key "ctrl+c" "Ctrl+C")))
+    ("r" "Retry (Enter)" (lambda () (interactive) (claude-org-cmux--verbose-send-key "enter" "Enter")))]
+   ["Response"
+    ("y" "Yes / Accept" (lambda () (interactive) (claude-org-cmux--verbose-send-text "y" "Yes")))
+    ("n" "No / Reject" (lambda () (interactive) (claude-org-cmux--verbose-send-text "n" "No")))
+    ("a" "Accept all" (lambda () (interactive) (claude-org-cmux--verbose-send-text "a" "Accept all")))]
+   ["View"
+    ("t" "Toggle details (Ctrl+O)" (lambda () (interactive) (claude-org-cmux--verbose-send-key "ctrl+o" "Toggle details")))
+    ("e" "Open in editor (Ctrl+E)" (lambda () (interactive) (claude-org-cmux--verbose-send-key "ctrl+e" "Editor")))
+    ("h" "Help (?)" (lambda () (interactive) (claude-org-cmux--verbose-send-text "?" "Help")))
+    ("G" "Follow output" claude-org-cmux-verbose-follow)]])
+
+;; Evil: use comma as leader to open the transient menu
+(with-eval-after-load 'evil
+  (evil-define-key 'normal claude-org-cmux-verbose-mode-map
+    "," #'claude-org-cmux-verbose-menu
+    "q" #'quit-window
+    "G" #'claude-org-cmux-verbose-follow))
+#+END_SRC
+
+** Buffer and Streaming
+
 #+BEGIN_SRC elisp
 (defvar-local claude-org-cmux--verbose-timer nil
   "Timer for verbose output streaming.")
@@ -853,34 +935,17 @@ Registers it so `claude-org-show-verbose' can find it."
          (buf-name (format "*cmux: %s*" sdd-id))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf
-      (unless (eq major-mode 'special-mode)
-        (special-mode)
-        (setq-local truncate-lines t)
-        (setq-local claude-org-cmux--verbose-prev-text "")))
+      (unless (eq major-mode 'claude-org-cmux-verbose-mode)
+        (claude-org-cmux-verbose-mode)
+        (setq-local claude-org-cmux--verbose-prev-text "")
+        (setq-local claude-org-cmux--verbose-surface-id surface-id)))
     ;; Register so claude-org-show-verbose finds it
     (puthash session-key buf claude-agent--session-verbose-buffers)
     buf))
 
-(defun claude-org-cmux--verbose-insert (buf text)
-  "Insert TEXT into verbose buffer BUF, stripping ANSI escapes."
-  (when (buffer-live-p buf)
-    (let ((clean (replace-regexp-in-string
-                  "\\[[][0-9;]*[a-zA-Z]" ""
-                  (replace-regexp-in-string
-                   "[\x00-\x08\x0b\x0c\x0e-\x1f]" "" text))))
-      (with-current-buffer buf
-        (let ((inhibit-read-only t)
-              (at-end (= (point) (point-max))))
-          (save-excursion
-            (goto-char (point-max))
-            (insert clean))
-          (when at-end
-            (goto-char (point-max))
-            (dolist (win (get-buffer-window-list buf nil t))
-              (set-window-point win (point-max)))))))))
-
 (defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf)
-  "Async capture-pane tick: capture screen, replace buffer with current view."
+  "Async capture-pane tick: capture screen, replace buffer with current view.
+Only auto-scrolls windows where the user is already at the end."
   (when (buffer-live-p verbose-buf)
     (let* ((socket-path (or claude-org-cmux-socket-path
                             (condition-case nil
@@ -900,17 +965,34 @@ Registers it so `claude-org-show-verbose' can find it."
                            (buffer-live-p vbuf))
                   (with-current-buffer vbuf
                     (unless (string= cur-text claude-org-cmux--verbose-prev-text)
-                      ;; Replace entire buffer with current terminal view
-                      ;; (screen is small, full replace is simpler than diffing)
-                      (let ((inhibit-read-only t))
-                        (erase-buffer)
-                        (insert (replace-regexp-in-string
-                                 "\\[[][0-9;]*[a-zA-Z]" ""
-                                 (replace-regexp-in-string
-                                  "[\x00-\x08\x0b\x0c\x0e-\x1f]" "" cur-text)))
-                        (goto-char (point-max))
+                      ;; Save each window's scroll position before replacing content
+                      (let ((win-states nil))
                         (dolist (win (get-buffer-window-list vbuf nil t))
-                          (set-window-point win (point-max))))
+                          (push (list win
+                                      (window-start win)
+                                      (window-point win)
+                                      (= (window-point win) (point-max)))
+                                win-states))
+                        ;; Replace buffer content with current terminal view
+                        (let ((inhibit-read-only t))
+                          (erase-buffer)
+                          (insert (replace-regexp-in-string
+                                   "\\[[][0-9;]*[a-zA-Z]" ""
+                                   (replace-regexp-in-string
+                                    "[\x00-\x08\x0b\x0c\x0e-\x1f]" "" cur-text))))
+                        ;; Restore each window's position
+                        (dolist (state win-states)
+                          (let ((win (nth 0 state))
+                                (start (nth 1 state))
+                                (pt (nth 2 state))
+                                (was-at-end (nth 3 state)))
+                            (when (window-live-p win)
+                              (if was-at-end
+                                  ;; Was following — stay at end
+                                  (set-window-point win (point-max))
+                                ;; Was reading — restore exact position
+                                (set-window-start win (min start (point-max)) t)
+                                (set-window-point win (min pt (point-max))))))))
                       (setq-local claude-org-cmux--verbose-prev-text cur-text))))))
             (when (buffer-live-p pbuf)
               (kill-buffer pbuf))))))))
