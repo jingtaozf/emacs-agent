@@ -28,7 +28,7 @@
   (setq test-chat--original-find-cli (symbol-function 'claude-agent--find-cli))
   (fset 'claude-agent--find-cli (lambda () "/usr/bin/true"))
   ;; Kill any existing chat buffer
-  (when-let ((buf (get-buffer claude-agent-chat-buffer-name)))
+  (when-let* ((buf (get-buffer claude-agent-chat-buffer-name)))
     (kill-buffer buf))
   nil)
 
@@ -39,7 +39,7 @@
     (fset 'claude-agent--find-cli test-chat--original-find-cli)
     (setq test-chat--original-find-cli nil))
   ;; Kill chat buffer
-  (when-let ((buf (get-buffer claude-agent-chat-buffer-name)))
+  (when-let* ((buf (get-buffer claude-agent-chat-buffer-name)))
     (let ((proc (get-buffer-process buf)))
       (when proc
         (set-process-query-on-exit-flag proc nil)

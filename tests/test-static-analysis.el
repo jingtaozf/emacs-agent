@@ -300,7 +300,7 @@ Returns list of warning/error messages."
           ;; Compile
           (byte-compile-file temp-file)
           ;; Extract warnings
-          (when-let ((log-buf (get-buffer "*Compile-Log*")))
+          (when-let* ((log-buf (get-buffer "*Compile-Log*")))
             (with-current-buffer log-buf
               (goto-char (point-min))
               (while (re-search-forward "^.*\\(?:Warning\\|Error\\).*$" nil t)
@@ -397,7 +397,7 @@ source files and checks they are properly defined."
                         (memq name '(org-state
                                      copilot-chat--instances
                                      copilot-chat--magic)))
-              (when-let ((err (test-static--check-symbol-bound type name)))
+              (when-let* ((err (test-static--check-symbol-bound type name)))
                 (push (format "%s: %s" (file-name-nondirectory file) err)
                       file-errors)))))
         (setq all-errors (append file-errors all-errors))))

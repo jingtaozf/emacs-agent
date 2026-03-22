@@ -302,7 +302,7 @@ Translates 'Hello, world!' to Chinese and verifies output contains Chinese chara
 
   ;; Clean up any previous translation state
   (setq claude-agent-translate--active-state nil)
-  (when-let ((buf (get-buffer claude-agent-translate-buffer-name)))
+  (when-let* ((buf (get-buffer claude-agent-translate-buffer-name)))
     (kill-buffer buf))
 
   ;; Run translation (with setting-sources to skip slow plugin loading)

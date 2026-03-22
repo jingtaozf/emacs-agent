@@ -367,7 +367,7 @@ Returns the directory path or nil if not found."
   (let ((search-dir (or project-root default-directory)))
     (or
      ;; 1. Extract from CLI command -f flag
-     (when-let ((compose-file (claude-agent--extract-compose-file-from-command cli-path)))
+     (when-let* ((compose-file (claude-agent--extract-compose-file-from-command cli-path)))
        (let* ((expanded (if (file-name-absolute-p compose-file)
                             compose-file
                           (expand-file-name compose-file (or project-root default-directory))))
@@ -380,7 +380,7 @@ Returns the directory path or nil if not found."
          (when (file-exists-p (expand-file-name "docker-compose.yml" devcontainer))
            devcontainer)))
      ;; 3. Look for .devcontainer in directory hierarchy
-     (when-let ((project-dir (locate-dominating-file search-dir ".devcontainer")))
+     (when-let* ((project-dir (locate-dominating-file search-dir ".devcontainer")))
        (let ((devcontainer (expand-file-name ".devcontainer" project-dir)))
          (when (file-exists-p (expand-file-name "docker-compose.yml" devcontainer))
            devcontainer)))
@@ -586,7 +586,7 @@ Use when session expires or needs reset."
     (remhash session-key claude-agent--session-mapping)
     ;; Optionally kill verbose buffer
     (when claude-agent-verbose-buffer-auto-kill
-      (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+      (when-let* ((buf (gethash session-key claude-agent--session-verbose-buffers)))
         (when (buffer-live-p buf)
           (kill-buffer buf)))
       (remhash session-key claude-agent--session-verbose-buffers))
@@ -815,7 +815,7 @@ STATE is the process state struct."
 (defun claude-agent--dispatch-post-tool-use (parsed state)
   "Dispatch PostToolUse hooks for tool_result blocks in PARSED message.
 STATE is the process state struct."
-  (when-let ((message (plist-get parsed :message)))
+  (when-let* ((message (plist-get parsed :message)))
     (let ((content (plist-get message :content))
           (tool-use-result (plist-get parsed :tool_use_result)))
       ;; Content must be a list of blocks, not a plain string
@@ -1105,7 +1105,7 @@ Checks both closed state and process liveness."
 STATE is the process state returned by `claude-agent-query'.
 Sets the cancelled flag to prevent automatic recovery."
   (setf (claude-agent--process-state-cancelled state) t)
-  (when-let ((process (claude-agent--process-state-process state)))
+  (when-let* ((process (claude-agent--process-state-process state)))
     (when (process-live-p process)
       (interrupt-process process))))
 
@@ -1116,7 +1116,7 @@ Kills the entire process tree to prevent orphaned shell processes.
 Sets the cancelled flag to prevent automatic recovery.
 STATE is the process state returned by `claude-agent-query'."
   (setf (claude-agent--process-state-cancelled state) t)
-  (when-let ((process (claude-agent--process-state-process state)))
+  (when-let* ((process (claude-agent--process-state-process state)))
     (when (process-live-p process)
       (claude-agent--kill-process-tree process))))
 
@@ -1128,13 +1128,13 @@ Returns the number of processes killed."
   (let ((killed 0))
     ;; Kill via active-states tracking (read from registry)
     (dolist (state (claude-agent-registry-active-states))
-      (when-let ((process (claude-agent--process-state-process state)))
+      (when-let* ((process (claude-agent--process-state-process state)))
         (when (process-live-p process)
           (claude-agent--kill-process-tree process)
           (cl-incf killed))))
     ;; Also kill via active-queries hash table
     (maphash (lambda (_req-id state)
-               (when-let ((process (claude-agent--process-state-process state)))
+               (when-let* ((process (claude-agent--process-state-process state)))
                  (when (process-live-p process)
                    (claude-agent--kill-process-tree process)
                    (cl-incf killed))))
@@ -1363,7 +1363,7 @@ Callbacks and process are extracted from STATE."
           ;; This is critical for recovery - result message comes too late
           (when (and (claude-agent-system-message-p message)
                      (equal (claude-agent-system-message-subtype message) "init"))
-            (when-let ((sid (plist-get (claude-agent-system-message-data message) :session_id)))
+            (when-let* ((sid (plist-get (claude-agent-system-message-data message) :session_id)))
               (setf (claude-agent--process-state-session-id state) sid)))
           ;; Set got-result flag when result message received
           (when (claude-agent-result-message-p message)
@@ -1564,7 +1564,7 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
       (let ((state (process-get process 'claude-agent-state)))
         (when (and state (claude-agent--process-state-ready state))
           ;; Log stdout to verbose buffer for debugging
-          (when-let ((session-key (claude-agent--process-state-session-key state)))
+          (when-let* ((session-key (claude-agent--process-state-session-key state)))
             (claude-agent--verbose-insert session-key
                                           (format "<<< STDOUT: %s" output)))
           (let* ((json-buf (or (claude-agent--process-state-json-buffer state) ""))
@@ -1632,7 +1632,7 @@ then resumes the session."
   (let ((trace-ctx (process-get process 'claude-agent-trace-ctx)))
   (claude-agent-with-span "sentinel-abnormal-exit"
       (list :event (string-trim event)) trace-ctx
-  (when-let ((session-key (claude-agent--process-state-session-key state)))
+  (when-let* ((session-key (claude-agent--process-state-session-key state)))
     (claude-agent--verbose-insert session-key
                                   (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
   (claude-agent--insert-recovery-message state event)
@@ -1683,7 +1683,7 @@ and cleanup."
         (claude-agent--debug-log "Process event: %s" (string-trim event))
         (when state
           ;; Always log process exit to verbose buffer for diagnostics
-          (when-let ((session-key (claude-agent--process-state-session-key state)))
+          (when-let* ((session-key (claude-agent--process-state-session-key state)))
             (claude-agent--verbose-insert session-key
                                           (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
                                                   (string-trim event)
@@ -1764,7 +1764,7 @@ STATE is the process state. Returns t if:
 (defun claude-agent--insert-recovery-message (state event)
   "Insert a recovery warning message using token-callback.
 STATE is the process state, EVENT is the exit event."
-  (when-let ((token-callback (claude-agent--process-state-token-callback state)))
+  (when-let* ((token-callback (claude-agent--process-state-token-callback state)))
     (let* ((signal-info (cond
                          ((string-match "killed: \\([0-9]+\\)" event)
                           (format "killed: %s" (match-string 1 event)))
@@ -1952,7 +1952,7 @@ TOOL-USE-RESULT contains:
           (claude-agent--debug-log "Background Task started: %s (owner: %s)"
                                    agent-id owner)))
       ;; Case 2: Bash tool background - backgroundTaskId field
-      (when-let ((bg-task-id (plist-get tool-use-result :backgroundTaskId)))
+      (when-let* ((bg-task-id (plist-get tool-use-result :backgroundTaskId)))
         (puthash bg-task-id (or owner t) claude-agent--pending-background-tasks)
         (claude-agent--debug-log "Background Bash started: %s (owner: %s)"
                                  bg-task-id owner))
@@ -2732,11 +2732,11 @@ Cleans up process and resources, calls on-disconnect callback if set."
   (when (claude-agent-client-connected-p client)
     (let ((on-disconnect (claude-agent-client-on-disconnect client))
           (session-key (claude-agent-client-session-key client)))
-      (when-let ((state (claude-agent-client-state client)))
-        (when-let ((process (claude-agent--process-state-process state)))
+      (when-let* ((state (claude-agent-client-state client)))
+        (when-let* ((process (claude-agent--process-state-process state)))
           (when (process-live-p process)
             (claude-agent--kill-process-tree process)))
-        (when-let ((buf (claude-agent--process-state-buffer state)))
+        (when-let* ((buf (claude-agent--process-state-buffer state)))
           (when (buffer-live-p buf)
             (kill-buffer buf))))
       (setf (claude-agent-client-connected-p client) nil)
@@ -2747,8 +2747,8 @@ Cleans up process and resources, calls on-disconnect callback if set."
 
 (defun claude-agent-client-interrupt (client)
   "Send interrupt signal through CLIENT."
-  (when-let ((state (claude-agent-client-state client)))
-    (when-let ((process (claude-agent--process-state-process state)))
+  (when-let* ((state (claude-agent-client-state client)))
+    (when-let* ((process (claude-agent--process-state-process state)))
       (when (process-live-p process)
         (interrupt-process process)))))
 
@@ -2774,15 +2774,15 @@ Returns nil if not yet available."
 (defun claude-agent-client-alive-p (client)
   "Return non-nil if CLIENT's process is alive and responsive."
   (and (claude-agent-client-connected-p client)
-       (when-let ((state (claude-agent-client-state client)))
-         (when-let ((process (claude-agent--process-state-process state)))
+       (when-let* ((state (claude-agent-client-state client)))
+         (when-let* ((process (claude-agent--process-state-process state)))
            (process-live-p process)))))
 
 (defun claude-agent-client-busy-p (client)
   "Return non-nil if CLIENT is currently processing a query.
 A client is busy if it has sent a message and hasn't received a result yet."
   (and (claude-agent-client-alive-p client)
-       (when-let ((state (claude-agent-client-state client)))
+       (when-let* ((state (claude-agent-client-state client)))
          ;; Check if we're waiting for a result
          (and (claude-agent--process-state-ready state)
               (not (claude-agent--process-state-closed state))
@@ -3039,7 +3039,7 @@ Returns t if found and cancelled, nil if not found."
       (setf (claude-agent--process-state-closed state) t)
       (setf (claude-agent--process-state-cancelled state) t)
       ;; Interrupt process if still alive
-      (when-let ((process (claude-agent--process-state-process state)))
+      (when-let* ((process (claude-agent--process-state-process state)))
         (when (process-live-p process)
           (interrupt-process process)))
       ;; Always unregister from hash table
@@ -3134,7 +3134,7 @@ Recommended: 500000 (500KB) for typical usage."
   "Insert TEXT into verbose buffer for SESSION-KEY.
 When `claude-agent-verbose-buffer-max-size' is set, trims oldest content
 if buffer exceeds the limit after insertion."
-  (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+  (when-let* ((buf (gethash session-key claude-agent--session-verbose-buffers)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (let ((inhibit-read-only t))
@@ -3175,7 +3175,7 @@ if buffer exceeds the limit after insertion."
   "Insert query header in verbose buffer for SESSION-KEY with PROMPT.
 CLI-PATH is the path to claude CLI, ARGS are command line arguments,
 CWD is working directory, ENV-VARS is alist of environment variables."
-  (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+  (when-let* ((buf (gethash session-key claude-agent--session-verbose-buffers)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (let ((inhibit-read-only t))
@@ -3316,7 +3316,7 @@ CWD is working directory, ENV-VARS is alist of environment variables."
                                   ((claude-agent-text-block-p block) "text")
                                   ((claude-agent-tool-result-block-p block) "tool_result")
                                   (t (format "unknown: %S" (type-of block)))))
-        (when-let ((formatted (claude-agent--verbose-format-content-block block)))
+        (when-let* ((formatted (claude-agent--verbose-format-content-block block)))
           (push formatted parts)))
       (when parts
         (mapconcat #'identity (nreverse parts) ""))))
@@ -3329,7 +3329,7 @@ CWD is working directory, ENV-VARS is alist of environment variables."
        ((and (listp content) (listp (car content)))
         (let ((parts nil))
           (dolist (block content)
-            (when-let ((formatted (claude-agent--verbose-format-content-block
+            (when-let* ((formatted (claude-agent--verbose-format-content-block
                                    (claude-agent--parse-content-block block))))
               (push formatted parts)))
           (when parts
@@ -3403,7 +3403,7 @@ CWD is working directory, ENV-VARS is alist of environment variables."
                           (push k keys)))
                       claude-agent--session-verbose-buffers)
              keys))))
-  (when-let ((buf (gethash session-key claude-agent--session-verbose-buffers)))
+  (when-let* ((buf (gethash session-key claude-agent--session-verbose-buffers)))
     (when (buffer-live-p buf)
       (display-buffer buf))))
 
@@ -3418,7 +3418,7 @@ CWD is working directory, ENV-VARS is alist of environment variables."
     (if bufs
         (let ((selected (completing-read "Session buffer: "
                           (mapcar #'car bufs))))
-          (when-let ((buf (cdr (assoc selected bufs))))
+          (when-let* ((buf (cdr (assoc selected bufs))))
             (switch-to-buffer buf)))
       (message "No session verbose buffers"))))
 #+END_SRC
@@ -3531,7 +3531,7 @@ See `claude-agent-backend--callback-capabilities' for the mapping."
     (dolist (mapping claude-agent-backend--callback-capabilities)
       (let ((cb-key (car mapping))
             (cap-key (cdr mapping)))
-        (when-let ((cb (plist-get callbacks cb-key)))
+        (when-let* ((cb (plist-get callbacks cb-key)))
           (when (or (eq cap-key :always)
                     (claude-agent-backend-supports-p backend cap-key))
             (setq result (plist-put result cb-key cb))))))
@@ -3599,13 +3599,13 @@ Handles both per-query and persistent-client modes."
 (cl-defmethod claude-agent-backend-active-p
     ((backend claude-agent-json-backend))
   "Check if JSON backend has an active query."
-  (when-let ((state (claude-agent-json-backend-process-state backend)))
+  (when-let* ((state (claude-agent-json-backend-process-state backend)))
     (claude-agent--query-active-p state)))
 
 (cl-defmethod claude-agent-backend-session-id
     ((backend claude-agent-json-backend))
   "Return SDK UUID for the JSON backend's session."
-  (when-let ((key (claude-agent-json-backend-session-key backend)))
+  (when-let* ((key (claude-agent-json-backend-session-key backend)))
     (claude-agent--get-sdk-uuid key)))
 
 (cl-defmethod claude-agent-backend-cancel
@@ -3617,10 +3617,10 @@ Handles both per-query and persistent-client modes."
 (cl-defmethod claude-agent-backend-cleanup
     ((backend claude-agent-json-backend))
   "Clean up JSON backend resources."
-  (when-let ((state (claude-agent-json-backend-process-state backend)))
+  (when-let* ((state (claude-agent-json-backend-process-state backend)))
     (claude-agent-close-process-state state)
     (setf (claude-agent-json-backend-process-state backend) nil))
-  (when-let ((client (claude-agent-json-backend-client backend)))
+  (when-let* ((client (claude-agent-json-backend-client backend)))
     (when (claude-agent-client-alive-p client)
       (claude-agent-client-disconnect client))
     (setf (claude-agent-json-backend-client backend) nil)))
@@ -3628,8 +3628,8 @@ Handles both per-query and persistent-client modes."
 (cl-defmethod claude-agent-backend-send-input
     ((backend claude-agent-json-backend) input)
   "Send INPUT to the active JSON stream process via stdin."
-  (when-let ((state (claude-agent-json-backend-process-state backend)))
-    (when-let ((proc (claude-agent--process-state-process state)))
+  (when-let* ((state (claude-agent-json-backend-process-state backend)))
+    (when-let* ((proc (claude-agent--process-state-process state)))
       (when (process-live-p proc)
         (process-send-string proc (concat input "\n"))))))
 
@@ -3922,7 +3922,7 @@ Response text comes via CLI Stop hook (not TUI scraping)."
     ((backend claude-agent-claude-backend) _handle)
   "Cancel active query by sending ESC to the terminal."
   (setf (claude-agent-claude-backend-active backend) nil)
-  (when-let ((proc (claude-agent-claude-backend-process backend)))
+  (when-let* ((proc (claude-agent-claude-backend-process backend)))
     (when (process-live-p proc)
       (process-send-string proc "\e"))))
 
@@ -3932,16 +3932,16 @@ Response text comes via CLI Stop hook (not TUI scraping)."
   (unwind-protect
       (progn
         ;; Free marker
-        (when-let ((marker (claude-agent-claude-backend-output-start-pos backend)))
+        (when-let* ((marker (claude-agent-claude-backend-output-start-pos backend)))
           (set-marker marker nil))
         ;; Remove from session registry
-        (when-let ((sid (claude-agent-claude-backend-session-id backend)))
+        (when-let* ((sid (claude-agent-claude-backend-session-id backend)))
           (remhash sid claude-agent-claude-backend--session-registry))
-        (when-let ((cwd (claude-agent-claude-backend--normalize-cwd
+        (when-let* ((cwd (claude-agent-claude-backend--normalize-cwd
                          (claude-agent-claude-backend-cwd backend))))
           (remhash cwd claude-agent-claude-backend--session-registry))
         ;; Kill process/buffer
-        (when-let ((buf (claude-agent-claude-backend-buffer backend)))
+        (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
           (when (buffer-live-p buf)
             (let ((proc (get-buffer-process buf)))
               (when (and proc (process-live-p proc))
@@ -3958,7 +3958,7 @@ Response text comes via CLI Stop hook (not TUI scraping)."
 (cl-defmethod claude-agent-backend-send-input
     ((backend claude-agent-claude-backend) input)
   "Send INPUT text to the terminal."
-  (when-let ((proc (claude-agent-claude-backend-process backend)))
+  (when-let* ((proc (claude-agent-claude-backend-process backend)))
     (when (process-live-p proc)
       (process-send-string proc input))))
 
@@ -3984,14 +3984,14 @@ Response text comes via CLI Stop hook (not TUI scraping)."
 #+BEGIN_SRC elisp
 (defun claude-agent-claude-backend--terminal (backend)
   "Return the eat terminal object for BACKEND, or nil if unavailable."
-  (when-let ((buf (claude-agent-claude-backend-buffer backend)))
+  (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
     (when (and (buffer-live-p buf)
                (local-variable-p 'eat-terminal buf))
       (buffer-local-value 'eat-terminal buf))))
 
 (defun claude-agent-claude-backend--eat-alive-p (backend)
   "Return non-nil if BACKEND's eat terminal is alive."
-  (when-let ((terminal (claude-agent-claude-backend--terminal backend)))
+  (when-let* ((terminal (claude-agent-claude-backend--terminal backend)))
     (if (fboundp 'eat-term-live-p)
         (eat-term-live-p terminal)
       t)))
@@ -4009,24 +4009,24 @@ Does NOT include --output-format, --input-format, --print, or --verbose
 since those are for the JSON streaming backend."
   (let ((switches nil))
     ;; Extract recognized options
-    (when-let ((system-prompt (plist-get options :system-prompt)))
+    (when-let* ((system-prompt (plist-get options :system-prompt)))
       (push system-prompt switches)
       (push "--system-prompt" switches))
-    (when-let ((max-turns (plist-get options :max-turns)))
+    (when-let* ((max-turns (plist-get options :max-turns)))
       (push (if (numberp max-turns) (number-to-string max-turns) max-turns)
             switches)
       (push "--max-turns" switches))
-    (when-let ((permission-mode (plist-get options :permission-mode)))
+    (when-let* ((permission-mode (plist-get options :permission-mode)))
       (push (if (symbolp permission-mode)
                 (symbol-name permission-mode)
               permission-mode)
             switches)
       (push "--permission-mode" switches))
-    (when-let ((mcp-config (plist-get options :mcp-config)))
+    (when-let* ((mcp-config (plist-get options :mcp-config)))
       (push mcp-config switches)
       (push "--mcp-config" switches))
     ;; Resume a previous session by ID
-    (when-let ((resume-id (plist-get options :resume-session-id)))
+    (when-let* ((resume-id (plist-get options :resume-session-id)))
       (push resume-id switches)
       (push "--resume" switches))
     ;; Include hooks settings via --settings flag
@@ -4064,7 +4064,7 @@ the CLI renders a new ❯ prompt at the bottom.  A naive search from
 point-min would find the OLD prompt and return immediately — before the
 new prompt appears — causing the next query to be typed during the
 response display state, which triggers 'Interrupted' in the TUI."
-  (when-let ((buf (claude-agent-claude-backend-buffer backend)))
+  (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (save-excursion
@@ -4181,7 +4181,7 @@ Returns BACKEND as an opaque handle for cancel/tracking."
     (claude-agent-claude-backend--ensure-process backend options)
     (claude-agent-claude-backend--wait-for-ready backend)
     ;; Register in session registry by normalized cwd so SessionStart hook can find us
-    (when-let ((cwd (claude-agent-claude-backend--normalize-cwd
+    (when-let* ((cwd (claude-agent-claude-backend--normalize-cwd
                      (claude-agent-claude-backend-cwd backend))))
       (puthash cwd backend claude-agent-claude-backend--session-registry))
     (let ((buf (claude-agent-claude-backend-buffer backend)))
@@ -4243,7 +4243,7 @@ Returns an alist suitable for `json-encode'."
                 (permissionDecision . ,decision))))
     ;; Add reason for deny
     (when (equal decision "deny")
-      (when-let ((msg (plist-get perm-result :message)))
+      (when-let* ((msg (plist-get perm-result :message)))
         (push `(permissionDecisionReason . ,msg) hso)))
     ;; Add updatedInput for allow with updated-input
     (when (and (equal decision "allow")
@@ -4271,7 +4271,7 @@ Delegates to `claude-agent--run-permission-functions' and translates result."
 (defun claude-agent-claude-backend--maybe-revert-buffer (file-path)
   "Revert buffer visiting FILE-PATH if it exists.
 Called after PostToolUse for Edit/Write to keep Emacs in sync."
-  (when-let ((buf (find-buffer-visiting file-path)))
+  (when-let* ((buf (find-buffer-visiting file-path)))
     (with-current-buffer buf
       (revert-buffer t t t))))
 
@@ -4281,7 +4281,7 @@ INPUT is an alist with tool_name, tool_input, tool_response fields.
 Reverts buffers after Edit/Write/MultiEdit operations."
   (let ((tool-name (alist-get 'tool_name input)))
     (when (member tool-name '("Write" "Edit" "MultiEdit"))
-      (when-let ((file-path (alist-get 'file_path
+      (when-let* ((file-path (alist-get 'file_path
                                        (alist-get 'tool_input input))))
         (claude-agent-claude-backend--maybe-revert-buffer file-path)))
     nil))  ; PostToolUse returns nil (no decision)

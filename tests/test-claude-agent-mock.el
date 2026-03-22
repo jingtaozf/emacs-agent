@@ -378,7 +378,7 @@ Verifies translate buffer is created with Chinese characters."
          (cons "MOCK_SCENARIO=translate" process-environment)))
     ;; Clean up previous state
     (setq claude-agent-translate--active-state nil)
-    (when-let ((buf (get-buffer claude-agent-translate-buffer-name)))
+    (when-let* ((buf (get-buffer claude-agent-translate-buffer-name)))
       (kill-buffer buf))
 
     ;; Run translation

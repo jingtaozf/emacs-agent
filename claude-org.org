@@ -1327,13 +1327,13 @@ Returns alist of (KEY . VALUE). Internal helper for `claude-org--parse-env'."
 (defun claude-org--get-env-file-path ()
   "Get ENV_FILE path from org properties.
 Returns nil if not set. Supports tilde expansion."
-  (when-let ((env-file (claude-org--get-org-property "ENV_FILE" t))) ; no-expand=t
+  (when-let* ((env-file (claude-org--get-org-property "ENV_FILE" t))) ; no-expand=t
     (expand-file-name env-file)))
 
 (defun claude-org--load-env-file ()
   "Load environment variables from ENV_FILE property.
 Returns alist of (VAR . VALUE), or nil if no ENV_FILE is set."
-  (when-let ((env-file-path (claude-org--get-env-file-path)))
+  (when-let* ((env-file-path (claude-org--get-env-file-path)))
     (if (file-exists-p env-file-path)
         (claude-org--parse-env env-file-path)
       (message "Warning: ENV_FILE not found: %s" env-file-path)
@@ -1764,12 +1764,12 @@ When nil, sessions remain connected until explicitly closed."
 
 (defun claude-org--get-persistent-client (session-key)
   "Get persistent client for SESSION-KEY, or nil if none exists."
-  (when-let ((entry (gethash session-key claude-org--persistent-clients)))
+  (when-let* ((entry (gethash session-key claude-org--persistent-clients)))
     (plist-get entry :client)))
 
 (defun claude-org--persistent-client-alive-p (session-key)
   "Return non-nil if persistent client for SESSION-KEY is alive."
-  (when-let ((client (claude-org--get-persistent-client session-key)))
+  (when-let* ((client (claude-org--get-persistent-client session-key)))
     (claude-agent-client-alive-p client)))
 
 (defun claude-org--register-persistent-client (session-key client buffer heading-pos)
@@ -1786,7 +1786,7 @@ HEADING-POS is the position of the session-defining heading."
 
 (defun claude-org--update-persistent-client-activity (session-key)
   "Update last activity timestamp for SESSION-KEY."
-  (when-let ((entry (gethash session-key claude-org--persistent-clients)))
+  (when-let* ((entry (gethash session-key claude-org--persistent-clients)))
     (plist-put entry :last-activity (float-time))
     (plist-put entry :query-count (1+ (or (plist-get entry :query-count) 0)))
     (puthash session-key entry claude-org--persistent-clients)))
@@ -1794,8 +1794,8 @@ HEADING-POS is the position of the session-defining heading."
 (defun claude-org--disconnect-persistent-client (session-key &optional reason)
   "Disconnect persistent client for SESSION-KEY.
 REASON is an optional string explaining why (for logging)."
-  (when-let ((entry (gethash session-key claude-org--persistent-clients)))
-    (when-let ((client (plist-get entry :client)))
+  (when-let* ((entry (gethash session-key claude-org--persistent-clients)))
+    (when-let* ((client (plist-get entry :client)))
       (when (claude-agent-client-alive-p client)
         (claude-agent-client-disconnect client)))
     (remhash session-key claude-org--persistent-clients)
@@ -1913,7 +1913,7 @@ Added to `org-after-todo-state-change-hook' (buffer-local) in `claude-org-mode'.
   (when (and (bound-and-true-p org-state)
              (member org-state '("DONE" "CANCELLED")))
     ;; Check if this heading has a CLAUDE_SESSION_ID
-    (when-let ((session-id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+    (when-let* ((session-id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
       (let ((session-key (claude-org--current-session-key)))
         (when (claude-org--persistent-client-alive-p session-key)
           (claude-org--disconnect-persistent-client
@@ -2439,12 +2439,12 @@ Context is passed to tag methods for dynamic prompt generation (e.g., SDD links)
                            (lambda (a b)
                              (< (claude-org--sdd-tag-priority a)
                                 (claude-org--sdd-tag-priority b)))))
-      (when-let ((prompt (claude-org-tag-prompt (intern tag-str) context)))
+      (when-let* ((prompt (claude-org-tag-prompt (intern tag-str) context)))
         (push prompt parts)))
     ;; Collect header argument prompts
     (cl-loop for (header value) on header-args by #'cddr
              when (keywordp header)
-             do (when-let ((prompt (claude-org--header-prompt header value)))
+             do (when-let* ((prompt (claude-org--header-prompt header value)))
                   (push prompt parts)))
     ;; Combine (reverse to maintain order: tags first, then headers)
     (when parts
@@ -4122,7 +4122,7 @@ lookup).  This ensures tokens are routed to the new section, not the old one."
 (defun claude-org--free-marker (session-key)
   "Free marker for SESSION-KEY to prevent memory leak.
 Markers hold references to buffers; must be explicitly freed."
-  (when-let ((marker (claude-org--session-get session-key :marker)))
+  (when-let* ((marker (claude-org--session-get session-key :marker)))
     (when (markerp marker)
       (set-marker marker nil))
     (claude-org--session-put session-key :marker nil)))
@@ -4141,7 +4141,7 @@ Extracted from insert-error for reuse by cleanup-session."
   (let ((queue (claude-org--session-get session-key :pending-queue)))
     (when queue
       (dolist (block-info queue)
-        (when-let ((queued-marker (plist-get block-info :marker)))
+        (when-let* ((queued-marker (plist-get block-info :marker)))
           (when (and queued-marker (marker-buffer queued-marker))
             (with-current-buffer (marker-buffer queued-marker)
               (save-excursion
@@ -4162,7 +4162,7 @@ Operations are performed in a fixed, canonical order."
   ;; 1. Stop spinner
   (claude-org--stop-spinner session-key)
   ;; 1.5 Cancel loop timer if pending (F22: prevents orphaned timers)
-  (when-let ((timer (claude-org--session-get session-key :loop-timer)))
+  (when-let* ((timer (claude-org--session-get session-key :loop-timer)))
     (when (timerp timer)
       (cancel-timer timer))
     (claude-org--session-put session-key :loop-timer nil))
@@ -4633,7 +4633,7 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
     (let ((org-section-name
            (save-excursion
              (ignore-errors (org-back-to-heading t))
-             (when-let ((heading-pos (claude-org--find-session-scope-heading)))
+             (when-let* ((heading-pos (claude-org--find-session-scope-heading)))
                (goto-char heading-pos)
                (substring-no-properties (org-get-heading t t t t))))))
       ;; Build callbacks with query-id validation via guarded helper
@@ -4684,7 +4684,7 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
       (when (markerp orig-marker)
         (set-marker orig-marker nil))
       ;; Try next in queue
-      (when-let ((next (claude-org--dequeue-block session-key)))
+      (when-let* ((next (claude-org--dequeue-block session-key)))
         (claude-org--execute-queued-block session-key next))
       (cl-return-from claude-org--execute-queued-block nil))
     ;; Navigate to the original position and delegate to shared core

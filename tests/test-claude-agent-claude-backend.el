@@ -953,7 +953,7 @@ Includes the ❯ prompt character to satisfy wait-for-ready."
             (claude-agent-claude-backend--ensure-process backend nil)
             (should (stringp captured-name))
             (should (string-match-p "my-session-123" captured-name)))
-        (when-let ((buf (claude-agent-claude-backend-buffer backend)))
+        (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
           (when (buffer-live-p buf)
             (kill-buffer buf)))))))
 
@@ -1004,7 +1004,7 @@ Includes the ❯ prompt character to satisfy wait-for-ready."
             (should (stringp captured-name))
             ;; Should contain "claude-cli" base name
             (should (string-match-p "claude-cli" captured-name)))
-        (when-let ((buf (claude-agent-claude-backend-buffer backend)))
+        (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
           (when (buffer-live-p buf)
             (kill-buffer buf)))))))
 
@@ -1027,7 +1027,7 @@ Includes the ❯ prompt character to satisfy wait-for-ready."
               (should (buffer-live-p buf))
               ;; The buffer name should contain the session key
               (should (string-match-p "verbose-test" (buffer-name buf)))))
-        (when-let ((buf (claude-agent-claude-backend-buffer backend)))
+        (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
           (when (buffer-live-p buf)
             (kill-buffer buf)))))))
 
