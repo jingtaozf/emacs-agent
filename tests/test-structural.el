@@ -485,6 +485,7 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-agent: query management buffer
     "claude-agent-queries-cancel-at-point"
     "claude-agent-queries-goto-source"
+    "claude-agent-queries-show-verbose"
     ;; claude-agent-backend public API
     "claude-agent-backend-register"
     "claude-agent-backend-get"

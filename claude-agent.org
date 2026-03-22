@@ -424,6 +424,7 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
 (defvar claude-agent-queries-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'claude-agent-queries-goto-source)
+    (define-key map (kbd "v") #'claude-agent-queries-show-verbose)
     (define-key map (kbd "k") #'claude-agent-queries-cancel-at-point)
     (define-key map (kbd "K") #'claude-agent-cancel-all-queries)
     (define-key map (kbd "g") #'claude-agent-list-queries)
@@ -463,19 +464,39 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
                       (navigable (not (null loc-fn))))
                  ;; Track Docker vs local counts
                  (if docker-p (cl-incf docker-count) (cl-incf local-count))
-                 ;; Format: ● [Docker] buffer-name Instruction N  [elapsed]
-                 ;; Use 'link face for navigable queries, regular face otherwise
-                 (insert (propertize (format "● %s" identity)
-                                     'face (if navigable 'link 'font-lock-function-name-face)
-                                     'query-id id
-                                     'navigable navigable))
-                 (when docker-p
-                   (insert (propertize " [Docker]"
-                                       'face '(:weight bold))))
-                 (when-let ((label (claude-agent-query-context-format-label ctx)))
-                   (insert (propertize (format " %s" label)
-                                       'face 'font-lock-keyword-face)))
-                 (insert (format "  [%s]\n" elapsed)))))
+                 ;; Check verbose buffer for activity badge
+                 (let* ((src-buf (claude-agent--process-state-source-buffer state))
+                        (session-key (when (and src-buf (buffer-live-p src-buf))
+                                      (with-current-buffer src-buf
+                                        (condition-case nil
+                                            (claude-org--current-session-key)
+                                          (error nil)))))
+                        (verbose-buf (when session-key
+                                       (gethash session-key claude-agent--session-verbose-buffers)))
+                        (verbose-lines (when (and verbose-buf (buffer-live-p verbose-buf))
+                                         (with-current-buffer verbose-buf
+                                           (count-lines (point-min) (point-max)))))
+                        (has-verbose (and verbose-buf (buffer-live-p verbose-buf))))
+                   ;; Format: ▶ ● buffer-name Instruction N  [elapsed]  [+N lines]
+                   (if has-verbose
+                       (insert (propertize "▶ " 'face 'font-lock-warning-face))
+                     (insert "  "))
+                   (insert (propertize (format "● %s" identity)
+                                       'face (if navigable 'link 'font-lock-function-name-face)
+                                       'query-id id
+                                       'session-key session-key
+                                       'navigable navigable))
+                   (when docker-p
+                     (insert (propertize " [Docker]"
+                                         'face '(:weight bold))))
+                   (when-let ((label (claude-agent-query-context-format-label ctx)))
+                     (insert (propertize (format " %s" label)
+                                         'face 'font-lock-keyword-face)))
+                   (insert (format "  [%s]" elapsed))
+                   (when verbose-lines
+                     (insert (propertize (format "  [%d lines]" verbose-lines)
+                                         'face 'font-lock-comment-face)))
+                   (insert "\n")))))
            claude-agent--active-queries)
           (unless has-queries
             (insert "No active queries.\n"))
@@ -488,7 +509,7 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
               (insert (format "  Local: %d" local-count)))
             (insert "\n")))
         (insert "\n")
-        (insert "Keys: RET=goto source (links)  k=cancel  K=cancel all  g=refresh  q=quit\n"))
+        (insert "Keys: RET=goto source  v=verbose output  k=cancel  K=cancel all  g=refresh  q=quit\n"))
       (claude-agent-queries-mode)
       (goto-char (point-min)))
     (display-buffer buf)))
@@ -534,6 +555,21 @@ For non-navigable queries, jumps to the source buffer only."
               (if (apply loc-fn loc-args)
                   (message "Jumped to source")
                 (message "Location function failed to find target"))))))))))
+#+END_SRC
+
+#+BEGIN_SRC elisp
+(defun claude-agent-queries-show-verbose ()
+  "Show verbose output buffer for the query at point."
+  (interactive)
+  (let ((session-key (get-text-property (point) 'session-key)))
+    (if (null session-key)
+        (message "No session on this line")
+      (let ((verbose-buf (gethash session-key claude-agent--session-verbose-buffers)))
+        (if (and verbose-buf (buffer-live-p verbose-buf))
+            (display-buffer verbose-buf
+              '((display-buffer-reuse-window display-buffer-in-side-window)
+                (side . right) (window-width . 0.5)))
+          (message "No verbose buffer for this session"))))))
 #+END_SRC
 
 ** Auto-Enable
