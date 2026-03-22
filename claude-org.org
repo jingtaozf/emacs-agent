@@ -5066,11 +5066,19 @@ session is known to cmux, otherwise fall back to iTerm2.
 #+BEGIN_SRC elisp
 (defun claude-org--terminal-query-completed (sdd-session-id)
   "Dispatch query-completed to the correct terminal backend.
-SDD-SESSION-ID identifies the session whose query just finished."
+SDD-SESSION-ID identifies the session whose query just finished.
+Tries cmux first (checks hash table, then falls back to request-id file),
+then iTerm2."
   (cond
+   ;; cmux: session-key in hash table (normal path)
    ((and (fboundp 'claude-org-cmux--query-completed)
          (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
     (claude-org-cmux--query-completed sdd-session-id))
+   ;; cmux: hash table empty but request-id file exists (module reload / race)
+   ((and (fboundp 'claude-org-cmux--query-completed)
+         (claude-org-terminal--read-request-id sdd-session-id))
+    (claude-org-cmux--query-completed sdd-session-id))
+   ;; iTerm2 fallback
    ((fboundp 'claude-org-iterm2--query-completed)
     (claude-org-iterm2--query-completed sdd-session-id))
    (t (message "claude-org: no terminal backend loaded for query-completed"))))
