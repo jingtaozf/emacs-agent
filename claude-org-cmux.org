@@ -1149,9 +1149,25 @@ cmux-specific rich feedback that iTerm2 cannot provide.
 #+BEGIN_SRC elisp
 (defun claude-org-cmux--permission-needed (sdd-session-id tool-name)
   "Handle permission notification for a cmux session.
-Registers a mode-line alert, focuses the cmux workspace, and notifies user."
+Registers a mode-line alert, focuses the cmux workspace, and notifies user.
+Also ensures the session is marked busy (self-healing: if the Prompt hook
+was skipped, the permission event proves a query is active)."
   (claude-agent-with-span "cmux-permission-needed"
       (list :session-id sdd-session-id :tool-name tool-name) nil
+  ;; Self-healing: ensure session is marked busy if not already.
+  ;; The Prompt hook may have been skipped (e.g., retry/continue in Claude Code).
+  (let ((session-key (gethash sdd-session-id claude-org-terminal--sdd-to-session-key)))
+    (when (and session-key (not (claude-org--session-get session-key :busy)))
+      (claude-org--session-put session-key :busy t)
+      ;; Also register a query if none exists
+      (unless (claude-org-terminal--read-request-id sdd-session-id)
+        (condition-case nil
+            (save-excursion
+              (let ((buf (claude-org--session-get session-key :source-buffer)))
+                (when (and buf (buffer-live-p buf))
+                  (with-current-buffer buf
+                    (claude-org-terminal--register-query sdd-session-id nil)))))
+          (error nil)))))
   ;; Register mode-line alert (same API as iTerm2 backend)
   (claude-agent-add-alert
    (intern sdd-session-id)
