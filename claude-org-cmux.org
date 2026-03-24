@@ -939,9 +939,6 @@ because some TUI frameworks need the raw byte, not a key event."
 ** Buffer and Streaming
 
 #+BEGIN_SRC elisp
-(defvar-local claude-org-cmux--verbose-timer nil
-  "Timer for verbose output streaming.")
-
 (defvar-local claude-org-cmux--verbose-prev-text ""
   "Previous capture-pane output for diff-based deduplication.")
 
@@ -968,17 +965,22 @@ Registers it so `claude-org-show-verbose' can find it."
     (puthash session-key buf claude-agent--session-verbose-buffers)
     buf))
 
-(defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf)
+(defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf socket-path)
   "Async capture-pane tick: capture screen, replace buffer with current view.
+SURFACE-ID is used as workspace ref fallback. Uses --workspace for reliability
+\(surface refs can go stale when cmux restructures tabs).
+SOCKET-PATH is the cmux socket (resolved once at timer creation).
 Only auto-scrolls windows where the user is already at the end."
   (when (buffer-live-p verbose-buf)
-    (let* ((socket-path (or claude-org-cmux-socket-path
-                            (condition-case nil
-                                (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
-                              (error nil))))
+    (let* (;; Use --workspace (resolves to focused surface) instead of --surface
+           ;; because surface refs can become stale when cmux restructures tabs.
+           ;; Look up workspace from sdd-to-workspace hash (set during ensure-session).
+           (sdd-id (claude-org--session-get session-key :sdd-session-id))
+           (ws-id (or (when sdd-id
+                        (gethash sdd-id claude-org-cmux--sdd-to-workspace))
+                      surface-id))
            (args (append (when socket-path (list "--socket" socket-path))
-                         (list "capture-pane" "--surface" surface-id
-                               "--scrollback")))
+                         (list "capture-pane" "--workspace" ws-id)))
            (proc-buf (generate-new-buffer " *cmux-vcap*"))
            (proc (apply #'start-process "cmux-verbose" proc-buf "cmux" args)))
       (set-process-sentinel proc
@@ -1023,18 +1025,23 @@ Only auto-scrolls windows where the user is already at the end."
               (kill-buffer pbuf))))))))
 
 (defun claude-org-cmux--start-verbose (surface-id session-key)
-  "Start verbose output streaming for cmux session. Idempotent."
-  ;; Don't create duplicate timers
+  "Start verbose output streaming for cmux session. Idempotent.
+Resolves socket path now (from org context) and closes over it,
+since the timer fires in an arbitrary buffer context."
   (let ((existing-timer (claude-org--session-get session-key :verbose-timer)))
     (unless existing-timer
-      (let ((buf (claude-org-cmux--create-verbose-buffer session-key surface-id)))
+      (let ((buf (claude-org-cmux--create-verbose-buffer session-key surface-id))
+            (sock (or claude-org-cmux-socket-path
+                      (condition-case nil
+                          (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
+                        (error nil)))))
         (claude-org--session-put session-key :verbose-timer
           (run-at-time 1 1
-            (lexical-let ((sid surface-id) (sk session-key) (vb buf))
+            (lexical-let ((sid surface-id) (sk session-key) (vb buf) (sp sock))
               (lambda ()
                 (condition-case nil
                     (when (buffer-live-p vb)
-                      (claude-org-cmux--verbose-tick sid sk vb))
+                      (claude-org-cmux--verbose-tick sid sk vb sp))
                   (error nil))))))))))
 
 (defun claude-org-cmux--stop-verbose (session-key)
@@ -1159,14 +1166,16 @@ was skipped, the permission event proves a query is active)."
   (let ((session-key (gethash sdd-session-id claude-org-terminal--sdd-to-session-key)))
     (when (and session-key (not (claude-org--session-get session-key :busy)))
       (claude-org--session-put session-key :busy t)
-      ;; Also register a query if none exists
+      ;; Best-effort: register a query so response hook has a request-id.
+      ;; Point in source-buffer may not be at the AI block heading, so
+      ;; CUSTOM_ID/instruction-num in the query context may be wrong.
+      ;; That's acceptable — the alternative is no query registration at all.
       (unless (claude-org-terminal--read-request-id sdd-session-id)
         (condition-case nil
-            (save-excursion
-              (let ((buf (claude-org--session-get session-key :source-buffer)))
-                (when (and buf (buffer-live-p buf))
-                  (with-current-buffer buf
-                    (claude-org-terminal--register-query sdd-session-id nil)))))
+            (let ((buf (claude-org--session-get session-key :source-buffer)))
+              (when (and buf (buffer-live-p buf))
+                (with-current-buffer buf
+                  (claude-org-terminal--register-query sdd-session-id nil))))
           (error nil)))))
   ;; Register mode-line alert (same API as iTerm2 backend)
   (claude-agent-add-alert

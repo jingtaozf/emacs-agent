@@ -399,10 +399,17 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
                         (ctx (claude-agent--process-state-query-context state))
                         (docker-p (claude-agent--process-state-docker-mode state))
                         (loc-fn (claude-agent--process-state-source-location-fn state))
-                        (navigable (not (null loc-fn))))
+                        (navigable (not (null loc-fn)))
+                        (src-buf (claude-agent--process-state-source-buffer state))
+                        (session-key (when (and src-buf (buffer-live-p src-buf))
+                                       (with-current-buffer src-buf
+                                         (condition-case nil
+                                             (claude-org--current-session-key)
+                                           (error nil))))))
                    (insert (propertize (format "● %s" identity)
                                        'face (if navigable 'link 'font-lock-function-name-face)
                                        'query-id id
+                                       'session-key session-key
                                        'navigable navigable))
                    (when docker-p
                      (insert (propertize " [Docker]" 'face '(:weight bold))))
@@ -414,7 +421,7 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
             (unless has-queries
               (insert "No active queries.\n")))
           (insert "\n")
-          (insert "Keys: RET=goto source (links)  k=cancel  K=cancel all  g=refresh  q=quit\n")
+          (insert "Keys: RET=goto source  v=verbose  k=cancel  K=cancel all  g=refresh  q=quit\n")
           (goto-char (min pos (point-max))))))))
 #+END_SRC
 
@@ -422,15 +429,17 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
 
 #+BEGIN_SRC elisp
 (defvar claude-agent-queries-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'claude-agent-queries-goto-source)
-    (define-key map (kbd "v") #'claude-agent-queries-show-verbose)
-    (define-key map (kbd "k") #'claude-agent-queries-cancel-at-point)
-    (define-key map (kbd "K") #'claude-agent-cancel-all-queries)
-    (define-key map (kbd "g") #'claude-agent-list-queries)
-    (define-key map (kbd "q") #'quit-window)
-    map)
+  (make-sparse-keymap)
   "Keymap for `claude-agent-queries-mode'.")
+
+;; Define keys outside defvar so they are applied on reload
+;; (defvar does not re-evaluate when the variable already has a value).
+(define-key claude-agent-queries-mode-map (kbd "RET") #'claude-agent-queries-goto-source)
+(define-key claude-agent-queries-mode-map (kbd "v") #'claude-agent-queries-show-verbose)
+(define-key claude-agent-queries-mode-map (kbd "k") #'claude-agent-queries-cancel-at-point)
+(define-key claude-agent-queries-mode-map (kbd "K") #'claude-agent-cancel-all-queries)
+(define-key claude-agent-queries-mode-map (kbd "g") #'claude-agent-list-queries)
+(define-key claude-agent-queries-mode-map (kbd "q") #'quit-window)
 
 (define-derived-mode claude-agent-queries-mode special-mode "Claude-Queries"
   "Major mode for viewing and managing Claude Agent queries."

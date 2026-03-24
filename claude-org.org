@@ -5074,11 +5074,21 @@ then iTerm2."
    ((and (fboundp 'claude-org-cmux--query-completed)
          (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
     (claude-org-cmux--query-completed sdd-session-id))
-   ;; cmux: hash table empty but request-id file exists (module reload / race)
+   ;; iTerm2: iterm2 hash has this session (check before cmux fallback so a
+   ;; live iTerm2 session is never dispatched to cmux by the fallback below)
+   ((and (fboundp 'claude-org-iterm2--query-completed)
+         (boundp 'claude-org-iterm2--sdd-to-iterm2)
+         (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2))
+    (claude-org-iterm2--query-completed sdd-session-id))
+   ;; cmux: hash table empty but request-id file exists (module reload / race).
+   ;; Only safe when iTerm2 does NOT claim this session-id — the request-id
+   ;; file alone cannot distinguish which backend wrote it.
    ((and (fboundp 'claude-org-cmux--query-completed)
-         (claude-org-terminal--read-request-id sdd-session-id))
+         (claude-org-terminal--read-request-id sdd-session-id)
+         (not (and (boundp 'claude-org-iterm2--sdd-to-iterm2)
+                   (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2))))
     (claude-org-cmux--query-completed sdd-session-id))
-   ;; iTerm2 fallback
+   ;; iTerm2 fallback (no hash entry — covers post-reload iTerm2 sessions)
    ((fboundp 'claude-org-iterm2--query-completed)
     (claude-org-iterm2--query-completed sdd-session-id))
    (t (message "claude-org: no terminal backend loaded for query-completed"))))
