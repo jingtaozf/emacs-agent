@@ -64,67 +64,7 @@ SESSION-ID is the CLAUDE_SESSION_ID for the SDD section."
   (setq test-tpp--cleanup-buffers nil
         test-tpp--cleanup-files nil))
 
-;;; Test 1: Block history recorded for terminal prompt
-
-(ert-deftest test-tpp-block-history-recorded ()
-  "Terminal-typed prompt via SDD bridge should record block history entry.
-After `claude-org-workspace-bridge-insert-prompt', `claude-org--block-history'
-should contain an entry with the generated CUSTOM_ID."
-  :tags '(:unit :fast :tdd :terminal-parity)
-  (let ((session-id "sdd-20260312-test-hist")
-        (setup nil))
-    (unwind-protect
-        (progn
-          (setq setup (test-tpp--setup-sdd-buffer session-id))
-          (let* ((buf (car setup))
-                 (org-file (cdr setup)))
-            (with-current-buffer buf
-              ;; Clear any existing history
-              (setq-local claude-org--block-history nil)
-              ;; Insert a terminal prompt
-              (let ((custom-id (claude-org-workspace-bridge-insert-prompt
-                                org-file session-id "What is 2+2?")))
-                ;; Should have returned a custom-id
-                (should custom-id)
-                (should (stringp custom-id))
-                ;; Block history should now have an entry
-                (should claude-org--block-history)
-                (should (= 1 (length claude-org--block-history)))
-                ;; Entry should have the correct custom-id
-                (let* ((entry (car claude-org--block-history))
-                       (props (cdr entry)))
-                  (should (string= custom-id (plist-get props :custom-id)))
-                  (should (eq 'in-progress (plist-get props :status)))
-                  (should (numberp (plist-get props :timestamp))))))))
-      (test-tpp--cleanup))))
-
-;;; Test 2: Session :block-id populated
-
-(ert-deftest test-tpp-session-block-id-set ()
-  "Terminal-typed prompt should store :block-id in session state.
-This is needed for `claude-org--update-block-status' to find the entry
-on completion."
-  :tags '(:unit :fast :tdd :terminal-parity)
-  (let ((session-id "sdd-20260312-test-blkid")
-        (setup nil))
-    (unwind-protect
-        (progn
-          (setq setup (test-tpp--setup-sdd-buffer session-id))
-          (let* ((buf (car setup))
-                 (org-file (cdr setup)))
-            (with-current-buffer buf
-              (setq-local claude-org--block-history nil)
-              (claude-org-workspace-bridge-insert-prompt
-               org-file session-id "Tell me a joke")
-              ;; Session should have :block-id set
-              (let* ((session-key (claude-org--current-session-key))
-                     (block-id (claude-org--session-get session-key :block-id)))
-                (should session-key)
-                (should block-id)
-                (should (stringp block-id))))))
-      (test-tpp--cleanup))))
-
-;;; Test 3: Exec-status set to "executing"
+;;; Test 1: Exec-status set to "executing"
 
 (ert-deftest test-tpp-exec-status-executing ()
   "Terminal-typed prompt should set AI_EXEC_STATUS to executing on the heading."
@@ -148,37 +88,7 @@ on completion."
                                (org-entry-get nil claude-org-exec-status-property))))))
       (test-tpp--cleanup))))
 
-;;; Test 4: Completion updates block history status
-
-(ert-deftest test-tpp-completion-updates-history ()
-  "Firing `claude-org-complete-hook' should update block history to completed.
-Simulates what Python handle_response does via MCP."
-  :tags '(:unit :fast :tdd :terminal-parity)
-  (let ((session-id "sdd-20260312-test-comp")
-        (setup nil))
-    (unwind-protect
-        (progn
-          (setq setup (test-tpp--setup-sdd-buffer session-id))
-          (let* ((buf (car setup))
-                 (org-file (cdr setup)))
-            (with-current-buffer buf
-              (setq-local claude-org--block-history nil)
-              (claude-org-workspace-bridge-insert-prompt
-               org-file session-id "Fix this bug")
-              ;; Verify in-progress
-              (should (= 1 (length claude-org--block-history)))
-              (should (eq 'in-progress
-                          (plist-get (cdar claude-org--block-history) :status)))
-              ;; Simulate completion (same as Python does via MCP)
-              (let ((session-key (claude-org--current-session-key)))
-                (run-hook-with-args 'claude-org-complete-hook
-                                    session-key nil 'completed))
-              ;; Block history should now show completed
-              (should (eq 'completed
-                          (plist-get (cdar claude-org--block-history) :status))))))
-      (test-tpp--cleanup))))
-
-;;; Test 5: Query-completed clears busy and sets exec-status
+;;; Test 3: Query-completed clears busy and sets exec-status
 
 (ert-deftest test-tpp-query-completed-clears-state ()
   "claude-org-iterm2--query-completed should clear :busy and set exec-status."
@@ -200,33 +110,6 @@ Simulates what Python handle_response does via MCP."
                 (claude-org-iterm2--query-completed session-id)
                 ;; :busy should be cleared
                 (should-not (claude-org--session-get session-key :busy))))))
-      (test-tpp--cleanup))))
-
-;;; Test 6: Multiple terminal prompts create separate history entries
-
-(ert-deftest test-tpp-multiple-prompts-history ()
-  "Two terminal prompts should create two distinct block history entries."
-  :tags '(:unit :fast :tdd :terminal-parity)
-  (let ((session-id "sdd-20260312-test-multi")
-        (setup nil))
-    (unwind-protect
-        (progn
-          (setq setup (test-tpp--setup-sdd-buffer session-id))
-          (let* ((buf (car setup))
-                 (org-file (cdr setup)))
-            (with-current-buffer buf
-              (setq-local claude-org--block-history nil)
-              (let ((cid1 (claude-org-workspace-bridge-insert-prompt
-                           org-file session-id "First question"))
-                    (cid2 (claude-org-workspace-bridge-insert-prompt
-                           org-file session-id "Second question")))
-                ;; Two distinct custom IDs
-                (should-not (string= cid1 cid2))
-                ;; Two history entries
-                (should (= 2 (length claude-org--block-history)))
-                ;; Most recent is first (stack order)
-                (should (string= cid2
-                                 (plist-get (cdar claude-org--block-history) :custom-id)))))))
       (test-tpp--cleanup))))
 
 (provide 'test-terminal-prompt-parity)

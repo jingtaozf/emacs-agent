@@ -396,40 +396,44 @@ loops cannot be interrupted — an inherent Emacs limitation."
     (emacs-mcp-server--eval-start)
     (redisplay t)  ;; Force display update so spinner shows immediately
     (emacs-mcp-server--log-eval-start code)
-    ;; Execute with cleanup
+    ;; Execute with cleanup — wrapped in OTel span for tracing
     (unwind-protect
         (setq result
-              (condition-case err
-                  (with-timeout
-                      (timeout-secs
-                       (let ((elapsed (float-time (time-subtract (current-time) start-time))))
-                         (emacs-mcp-server--log-eval-error
-                          (list 'timeout (format "after %.1fs" elapsed))
-                          elapsed)
-                         `((success . :json-false)
-                           (error . ,(format "Evaluation timed out after %ds. Emacs is single-threaded — long operations block the entire editor. Keep evalElisp calls fast (<10s). For tests or builds, use the Bash tool instead."
-                                             timeout-secs))
-                           (errorType . "timeout"))))
-                    (let ((form (car (read-from-string code)))
-                          eval-result)
-                      (setq eval-result
-                            (if save-state
-                                (emacs-mcp-server--eval-with-state-preservation form)
-                              (eval form t)))
-                      (emacs-mcp-server--log-eval-end
-                       eval-result
-                       (float-time (time-subtract (current-time) start-time)))
-                      ;; Translate host paths back to container paths in result
-                      `((success . t)
-                        (result . ,(emacs-mcp-server--translate-paths-in-result
-                                    (emacs-mcp-server--pp-to-string eval-result))))))
-                (error
-                 (emacs-mcp-server--log-eval-error
-                  err
-                  (float-time (time-subtract (current-time) start-time)))
-                 `((success . :json-false)
-                   (error . ,(error-message-string err))
-                   (errorType . ,(symbol-name (car err)))))))
+              (claude-agent-with-span "mcp-evalElisp"
+                  (list :input (or code "")
+                        :oi-kind "TOOL"
+                        :code (or code "")) nil
+                (condition-case err
+                    (with-timeout
+                        (timeout-secs
+                         (let ((elapsed (float-time (time-subtract (current-time) start-time))))
+                           (emacs-mcp-server--log-eval-error
+                            (list 'timeout (format "after %.1fs" elapsed))
+                            elapsed)
+                           `((success . :json-false)
+                             (error . ,(format "Evaluation timed out after %ds. Emacs is single-threaded — long operations block the entire editor. Keep evalElisp calls fast (<10s). For tests or builds, use the Bash tool instead."
+                                               timeout-secs))
+                             (errorType . "timeout"))))
+                      (let ((form (car (read-from-string code)))
+                            eval-result)
+                        (setq eval-result
+                              (if save-state
+                                  (emacs-mcp-server--eval-with-state-preservation form)
+                                (eval form t)))
+                        (emacs-mcp-server--log-eval-end
+                         eval-result
+                         (float-time (time-subtract (current-time) start-time)))
+                        ;; Translate host paths back to container paths in result
+                        `((success . t)
+                          (result . ,(emacs-mcp-server--translate-paths-in-result
+                                      (emacs-mcp-server--pp-to-string eval-result))))))
+                  (error
+                   (emacs-mcp-server--log-eval-error
+                    err
+                    (float-time (time-subtract (current-time) start-time)))
+                   `((success . :json-false)
+                     (error . ,(error-message-string err))
+                     (errorType . ,(symbol-name (car err))))))))
       ;; End indicators (always runs)
       (emacs-mcp-server--eval-end))
     (list `((type . "text")

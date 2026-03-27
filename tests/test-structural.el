@@ -512,7 +512,7 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-insert-story"
     "claude-org-next-ai-block"
     "claude-org-prev-ai-block"
-    "claude-org-jump-to-ai-block"
+    "claude-org-goto-story"
     "claude-org-goto-source"
     "claude-org-goto-custom-id"
     ;; claude-org: workspace workflow
@@ -691,7 +691,6 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
     ("claude-org-queue"        . 3)
     ("claude-org-response"     . 3)
     ("claude-org"              . 4)   ; top-level org
-    ("claude-org-history"      . 5)   ; top extensions
     ("claude-org-scheduled"    . 5)
     ("claude-org-workspace-bridge" . 5) ; workspace bridge, needs org
     ("claude-org-terminal-base" . 2)) ; shared terminal, needs agent

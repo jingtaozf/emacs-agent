@@ -25,9 +25,6 @@
     - [[#loop-detection-utilities][Loop Detection Utilities]]
     - [[#pre-completion-utilities][Pre-Completion Utilities]]
     - [[#telemetry-persistence][Telemetry Persistence]]
-  - [[#block-history][Block History]]
-    - [[#configuration][Configuration]]
-    - [[#state-variables][State Variables]]
   - [[#slash-commands][Slash Commands]]
   - [[#file-based-prompt-templates][File-Based Prompt Templates]]
     - [[#prompts-directory-configuration][Prompts Directory Configuration]]
@@ -103,7 +100,6 @@
   - [[#token-handling][Token Handling]]
   - [[#message-handling][Message Handling]]
   - [[#error-handling][Error Handling]]
-- [[#block-history-see-claude-org-historyorg][Block History (see claude-org-history.org)]]
 - [[#execution][Execution]]
   - [[#execute-command][Execute Command]]
   - [[#send-request-helpers][Send Request Helpers]]
@@ -200,15 +196,13 @@ Response will appear here after pressing C-c C-c inside the ai block.
 (require 'cl-lib)
 (require 'cl)  ; For lexical-let in callback closures
 
-;; Forward-declare hook variables needed by claude-org-history module
-;; (canonical definitions with docstrings are in "Execution Hooks" section below)
 (defvar claude-org-execute-hook nil)
 (defvar claude-org-complete-hook nil)
 
 ;; Load extracted modules (literate-elisp .org files, not .el packages)
 (let ((module-dir (file-name-directory (or load-file-name buffer-file-name ""))))
   (dolist (module '("claude-org-session" "claude-org-queue"
-                    "claude-org-response" "claude-org-history"
+                    "claude-org-response"
                     "claude-org-scheduled"))
     (unless (featurep (intern module))
       (literate-elisp-load
@@ -615,52 +609,6 @@ Computes duration from :start-time to now."
                (format ":QUERY_ID: %s" (regexp-quote query-id)) nil t)
           (org-back-to-heading t)
           (org-entry-put nil "TOOL_CALLS" (number-to-string count)))))))
-#+END_SRC
-
-** Block History
-
-Persistent tracking of executed AI blocks, enabling quick navigation to
-recent blocks across Emacs sessions.
-
-*** Configuration
-
-#+NAME: history-config
-#+BEGIN_SRC elisp
-(defcustom claude-org-history-directory
-  (expand-file-name "claude-org" user-emacs-directory)
-  "Directory for persistent block history files.
-Each org file gets its own history file named <basename>--<hash>.el."
-  :type 'directory
-  :group 'claude-org)
-
-(defcustom claude-org-history-max-entries 30
-  "Maximum number of block entries to keep per org file.
-Used for both saving history and displaying in `claude-org-jump-to-ai-block'."
-  :type 'integer
-  :group 'claude-org)
-
-(defconst claude-org--history-save-delay 2.0
-  "Seconds to wait before saving history after changes.")
-#+END_SRC
-
-*** State Variables
-
-#+NAME: history-state
-#+BEGIN_SRC elisp
-(defvar-local claude-org--block-history nil
-  "In-memory cache of block history for current buffer.
-Alist of (BLOCK-ID . PLIST) where PLIST contains:
-  :timestamp  - float-time of execution start
-  :status     - symbol: `in-progress', `completed', `error'
-  :title      - string heading text
-  :line       - integer line number
-  :marker     - marker (transient, not persisted)")
-
-(defvar-local claude-org--history-loaded nil
-  "Non-nil if history has been loaded from disk for this buffer.")
-
-(defvar claude-org--history-save-timer nil
-  "Debounce timer for saving history to disk.")
 #+END_SRC
 
 ** Slash Commands
@@ -2355,6 +2303,196 @@ Must be called with point inside the workspace."
         (when ws
           (goto-char (cdr ws))
           (org-entry-get nil "ACTIVE_STORY"))))))
+#+END_SRC
+
+*** Story Navigation
+
+#+BEGIN_SRC elisp
+(defun claude-org--collect-workspaces ()
+  "Collect all workspace headings in current buffer.
+Returns list of (NAME POS SESSION-ID) ordered by position."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let (result)
+        (while (re-search-forward "^\\*+ " nil t)
+          (let ((ws (org-entry-get nil "CMUX_WORKSPACE")))
+            (when ws
+              (push (list (org-get-heading t t t t)
+                          (line-beginning-position)
+                          (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
+                    result))))
+        (nreverse result)))))
+
+(defun claude-org--collect-stories (workspace-pos)
+  "Collect story headings under workspace at WORKSPACE-POS.
+Stories are direct children (level = workspace-level + 1).
+Returns list of (NAME POS) ordered by position."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char workspace-pos)
+      (let* ((ws-level (org-current-level))
+             (story-level (1+ ws-level))
+             (ws-end (save-excursion (org-end-of-subtree t t) (point)))
+             result)
+        (while (and (outline-next-heading)
+                    (< (point) ws-end))
+          (when (= (org-current-level) story-level)
+            (push (list (org-get-heading t t t t) (point)) result)))
+        (nreverse result)))))
+
+(defun claude-org--find-last-ai-block (subtree-pos)
+  "Find the last ai block within the subtree starting at SUBTREE-POS.
+Returns position inside the block (after #+begin_src ai line), or nil."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char subtree-pos)
+      (let ((subtree-end (save-excursion (org-end-of-subtree t t) (point)))
+            (last-pos nil))
+        (while (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai\\b" subtree-end t)
+          (setq last-pos (1+ (line-end-position))))
+        last-pos))))
+
+(defun claude-org--goto-story-jump (story-pos)
+  "Jump to the last ai block in the story at STORY-POS.
+Falls back to the story heading if no ai block found."
+  (let ((target (claude-org--find-last-ai-block story-pos)))
+    (goto-char (or target story-pos))
+    (org-reveal)
+    (recenter)))
+
+(defun claude-org--goto-story-make-key (index)
+  "Generate a single-key binding for INDEX (0-based). Uses 1-9 then a-z, skips q."
+  (if (< index 9)
+      (char-to-string (+ ?1 index))
+    (let ((c (+ ?a (- index 9))))
+      (when (>= c ?q) (setq c (1+ c)))  ; skip q (used for quit)
+      (char-to-string c))))
+
+(defun claude-org--goto-story-make-action (fn pos)
+  "Create a transient action that calls FN with POS."
+  (lexical-let ((f fn) (p pos))
+    (lambda () (interactive) (funcall f p))))
+
+(defun claude-org--goto-story-build-items (entries jump-fn)
+  "Build transient suffix specs from ENTRIES.
+ENTRIES is a list of (NAME POS ...).  JUMP-FN is the function to call with POS."
+  (apply #'vector
+         (cl-loop for (name pos) in entries
+                  for i from 0
+                  collect (list (claude-org--goto-story-make-key i)
+                                (claude-org--goto-story-make-action jump-fn pos)
+                                :description (truncate-string-to-width
+                                              (substring-no-properties name) 50)))))
+
+(defun claude-org-goto-story ()
+  "Navigate to the last ai block in a story.
+Auto-skips workspace/story selection when only one candidate exists.
+Shows single-key transient menu when multiple candidates."
+  (interactive)
+  (let ((workspaces (claude-org--collect-workspaces)))
+    (cond
+     ((null workspaces)
+      (message "No workspaces found in buffer"))
+     ;; One workspace → skip to story selection
+     ((= 1 (length workspaces))
+      (claude-org--goto-story-select (cadr (car workspaces))))
+     ;; Multiple → show workspace picker
+     (t
+      (claude-org--goto-story-show-menu
+       "Select Workspace"
+       workspaces
+       #'claude-org--goto-story-select)))))
+
+(defun claude-org--goto-story-select (workspace-pos)
+  "Select a story under workspace at WORKSPACE-POS, then jump."
+  (let ((stories (claude-org--collect-stories workspace-pos)))
+    (cond
+     ((null stories)
+      (message "No stories found in workspace"))
+     ;; One story → jump directly
+     ((= 1 (length stories))
+      (claude-org--goto-story-jump (cadr (car stories))))
+     ;; Multiple → show story picker
+     (t
+      (claude-org--goto-story-show-menu
+       "Select Story"
+       stories
+       #'claude-org--goto-story-jump)))))
+
+(defun claude-org--goto-story-show-menu (title entries jump-fn)
+  "Show a dynamic transient menu with TITLE for ENTRIES.
+JUMP-FN is the function to call with the selected POS."
+  (declare-function claude-org--goto-story-dynamic "claude-org")
+  (let ((menu-items (claude-org--goto-story-build-items entries jump-fn)))
+    (transient-define-prefix claude-org--goto-story-dynamic ()
+      "Dynamic story/workspace selector."
+      [:description (lambda () title)
+       :setup-children
+       (lambda (_)
+         (mapcar (lambda (item)
+                   (transient-parse-suffix
+                    (oref transient--prefix command)
+                    item))
+                 (append menu-items nil)))]
+      [("q" "Quit" transient-quit-one)])
+    (claude-org--goto-story-dynamic)))
+#+END_SRC
+
+*** CUSTOM_ID Utilities
+
+#+BEGIN_SRC elisp
+(defun claude-org--goto-block-by-custom-id (custom-id)
+  "Navigate to heading with CUSTOM_ID using org-link-search.
+Returns t if navigation succeeded, nil otherwise."
+  (condition-case nil
+      (progn
+        (org-link-search (format "#%s" custom-id))
+        t)
+    (error nil)))
+
+(defun claude-org--custom-id-exists-p (custom-id)
+  "Check if CUSTOM_ID exists in the current buffer."
+  (when custom-id
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org--goto-block-by-custom-id custom-id)))))
+
+(defun claude-org-goto-custom-id (custom-id)
+  "Navigate to the heading with CUSTOM_ID.
+Returns t if found and positioned, nil otherwise."
+  (goto-char (point-min))
+  (when (re-search-forward
+         (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
+    (org-back-to-heading t)
+    t))
+
+(defun claude-org--find-instruction-custom-id ()
+  "Find the CUSTOM_ID of the instruction heading containing point.
+Checks immediate heading, previous siblings, then parent headings."
+  (save-excursion
+    (let ((custom-id nil))
+      (ignore-errors
+        (org-back-to-heading t)
+        (when (member claude-org-heading-tag (org-get-tags nil t))
+          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
+      (unless custom-id
+        (let ((current-level (org-current-level)))
+          (while (and (not custom-id)
+                      (org-get-previous-sibling))
+            (when (and (= (org-current-level) current-level)
+                       (member claude-org-heading-tag (org-get-tags nil t)))
+              (setq custom-id (org-entry-get nil "CUSTOM_ID"))))))
+      (unless custom-id
+        (ignore-errors
+          (while (and (not custom-id) (org-up-heading-safe))
+            (when (member claude-org-heading-tag (org-get-tags nil t))
+              (setq custom-id (org-entry-get nil "CUSTOM_ID"))))))
+      custom-id)))
 #+END_SRC
 
 *** CUSTOM_ID Generation
@@ -4388,11 +4526,6 @@ section exists yet (same pattern as cancel)."
   (run-hook-with-args 'claude-org-complete-hook session-key error-msg 'error))
 #+END_SRC
 
-* Block History (see claude-org-history.org)
-
-Block history persistence, hook functions, and navigation are now in
-=claude-org-history.org=.
-
 * Execution
 
 Execution and request handling.
@@ -5254,7 +5387,7 @@ Falls back to native terminal if no backend is configured."
     ("s" "Story section" claude-org-insert-story)
     ("w" "Workspace" claude-org-insert-workspace)]
    ["Navigate"
-    ("j" "Jump to AI block" claude-org-jump-to-ai-block)]
+    ("j" "Go to story" claude-org-goto-story)]
    ["Session"
     ("n" "Session info" claude-org-show-session-info)
     ("l" "List sessions" claude-org-list-sessions)

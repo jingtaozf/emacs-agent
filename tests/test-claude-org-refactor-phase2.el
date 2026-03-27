@@ -271,29 +271,6 @@
   (should (fboundp 'claude-org--handle-token-v2)))
 
 ;;; ============================================================
-;;; F8: claude-org-history module extraction
-;;; ============================================================
-
-;; F8.1 Module provides feature
-(ert-deftest test-f8-history-module-provides-feature ()
-  "The claude-org-history module should provide its feature."
-  :tags '(:unit :fast :stable :isolated :refactor :f8)
-  (should (featurep 'claude-org-history)))
-
-;; F8.2 History recording function exists
-(ert-deftest test-f8-record-block-execution-exists ()
-  "record-block-execution should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f8)
-  (should (or (fboundp 'claude-org--record-block-execution)
-              (fboundp 'claude-org--save-history))))
-
-;; F8.3 Jump to AI block function exists
-(ert-deftest test-f8-jump-to-ai-block-exists ()
-  "There should be a function to navigate to AI blocks."
-  :tags '(:unit :fast :stable :isolated :refactor :f8)
-  (should (fboundp 'claude-org-jump-to-ai-block)))
-
-;;; ============================================================
 ;;; Cross-module integration
 ;;; ============================================================
 

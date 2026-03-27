@@ -64,7 +64,6 @@
 (claude-code--load-module "claude-org-queue")
 (claude-code--load-module "claude-org-response")
 (claude-code--load-module "claude-org")
-(claude-code--load-module "claude-org-history")
 (claude-code--load-module "claude-org-scheduled")
 (claude-code--load-module "claude-org-workspace-bridge")
 (claude-code--load-module "claude-org-terminal-base")
