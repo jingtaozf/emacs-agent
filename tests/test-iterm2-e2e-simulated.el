@@ -274,7 +274,7 @@ REGRESSION: org-up-heading-safe skips current heading."
 ;;; ============================================================================
 
 (ert-deftest test-iterm2-tab-title-from-heading ()
-  "Tab title uses heading text and session ID from real org buffer."
+  "Tab title uses ACTIVE_STORY or heading text (no session ID suffix)."
   :tags '(:unit :iterm2 :e2e)
   (with-temp-buffer
     (org-mode)
@@ -282,9 +282,10 @@ REGRESSION: org-up-heading-safe skips current heading."
     (goto-char (point-min))
     (org-next-visible-heading 1)
     (let ((title (claude-org-terminal--tab-title)))
+      ;; Fallback to heading name when no ACTIVE_STORY
       (should (string-match-p "Dev Story" title))
-      (should (string-match-p "sdd-test-123" title))
-      (should (string-match-p "\\[" title)))))
+      ;; No session ID suffix in new format
+      (should-not (string-match-p "\\[" title)))))
 
 (ert-deftest test-iterm2-tab-title-nested ()
   "Tab title from nested heading finds the correct session heading."
@@ -295,8 +296,10 @@ REGRESSION: org-up-heading-safe skips current heading."
     (goto-char (point-min))
     (re-search-forward "Explain quantum")
     (let ((title (claude-org-terminal--tab-title)))
+      ;; Fallback to heading name when no ACTIVE_STORY
       (should (string-match-p "Feature A" title))
-      (should (string-match-p "sdd-nested-456" title)))))
+      ;; No session ID suffix
+      (should-not (string-match-p "\\[" title)))))
 
 ;;; ============================================================================
 ;;; Ensure Session Flow (real org + mock iterm2-ctl)
@@ -368,7 +371,7 @@ REGRESSION: org-up-heading-safe skips current heading."
 
 (ert-deftest test-iterm2-ensure-session-errors-no-sdd-id ()
   "ensure-session errors when no CLAUDE_SESSION_ID exists.
-REGRESSION: Previously passed empty string to claude-sdd."
+REGRESSION: Previously passed empty string to claude-workspace."
   :tags '(:unit :iterm2 :e2e :regression)
   (test-iterm2--with-org-buffer test-iterm2--org-content-no-session
     (goto-char (point-min))
@@ -504,30 +507,30 @@ causing fallthrough to json-stream backend."
 ;;; Launch Command Builder (real defcustoms)
 ;;; ============================================================================
 
-(ert-deftest test-iterm2-build-command-claude-sdd ()
-  "claude-sdd mode includes org-file and session-id."
+(ert-deftest test-iterm2-build-command-claude-workspace ()
+  "claude-workspace mode includes org-file and session-id."
   :tags '(:unit :iterm2 :e2e)
-  (let ((claude-org-iterm2-launch-command 'claude-sdd)
+  (let ((claude-org-iterm2-launch-command 'claude-workspace)
         (claude-org-iterm2-extra-args nil))
     (let ((cmd (claude-org-iterm2--build-launch-command
                 "/tmp/test.org" "sdd-123" "/tmp")))
-      (should (string-match-p "claude-sdd" cmd))
+      (should (string-match-p "claude-workspace" cmd))
       (should (string-match-p "/tmp/test.org" cmd))
       (should (string-match-p "sdd-123" cmd)))))
 
 (ert-deftest test-iterm2-build-command-extra-args ()
   "Extra args appended after -- separator."
   :tags '(:unit :iterm2 :e2e)
-  (let ((claude-org-iterm2-launch-command 'claude-sdd)
+  (let ((claude-org-iterm2-launch-command 'claude-workspace)
         (claude-org-iterm2-extra-args '("--model" "opus")))
     (let ((cmd (claude-org-iterm2--build-launch-command
                 "/tmp/test.org" "sdd-123" "/tmp")))
       (should (string-match-p "-- --model opus" cmd)))))
 
 (ert-deftest test-iterm2-build-command-resume-with-extra-args ()
-  "claude-sdd mode includes --resume AND extra args when both present."
+  "claude-workspace mode includes --resume AND extra args when both present."
   :tags '(:unit :iterm2 :e2e)
-  (let ((claude-org-iterm2-launch-command 'claude-sdd)
+  (let ((claude-org-iterm2-launch-command 'claude-workspace)
         (claude-org-iterm2-extra-args '("--model" "opus")))
     ;; Simulate CLAUDE_CLI_SESSION in org properties
     (with-temp-buffer
@@ -545,7 +548,7 @@ causing fallthrough to json-stream backend."
 (ert-deftest test-iterm2-build-command-extra-args-from-org-property ()
   "CLAUDE_EXTRA_ARGS org property is included in launch command."
   :tags '(:unit :iterm2 :e2e)
-  (let ((claude-org-iterm2-launch-command 'claude-sdd)
+  (let ((claude-org-iterm2-launch-command 'claude-workspace)
         (claude-org-iterm2-extra-args nil))
     (with-temp-buffer
       (org-mode)
@@ -562,7 +565,7 @@ causing fallthrough to json-stream backend."
 (ert-deftest test-iterm2-build-command-extra-args-merged ()
   "CLAUDE_EXTRA_ARGS property merges with defcustom extra-args."
   :tags '(:unit :iterm2 :e2e)
-  (let ((claude-org-iterm2-launch-command 'claude-sdd)
+  (let ((claude-org-iterm2-launch-command 'claude-workspace)
         (claude-org-iterm2-extra-args '("--debug")))
     (with-temp-buffer
       (org-mode)
@@ -597,19 +600,19 @@ causing fallthrough to json-stream backend."
   (should (custom-variable-p 'claude-org-iterm2-script))
   (should (custom-variable-p 'claude-org-iterm2-launch-command))
   (should (custom-variable-p 'claude-org-iterm2-extra-args))
-  (should (custom-variable-p 'claude-org-iterm2-sdd-script))
-  (should (eq (default-value 'claude-org-iterm2-launch-command) 'claude-sdd))
+  (should (custom-variable-p 'claude-org-iterm2-workspace-script))
+  (should (eq (default-value 'claude-org-iterm2-launch-command) 'claude-workspace))
   (should (null (default-value 'claude-org-iterm2-extra-args))))
 
-(ert-deftest test-iterm2-sdd-script-path-exists ()
-  "claude-org-iterm2-sdd-script points to an existing file.
+(ert-deftest test-iterm2-workspace-script-path-exists ()
+  "claude-org-iterm2-workspace-script points to an existing file.
 REGRESSION: Path resolved from load-file-name which differs per install."
   :tags '(:unit :iterm2 :e2e :regression)
-  (let ((script claude-org-iterm2-sdd-script))
-    (when (and (not (equal script "claude-sdd"))
+  (let ((script claude-org-iterm2-workspace-script))
+    (when (and (not (equal script "claude-workspace"))
                (file-name-absolute-p script))
       (should-with-fix (file-exists-p script)
-        (format "claude-org-iterm2-sdd-script → %s does not exist.\nFIX: Customize the variable or put claude-sdd on PATH."
+        (format "claude-org-iterm2-workspace-script → %s does not exist.\nFIX: Customize the variable or put claude-workspace on PATH."
                 script)))))
 
 ;;; ============================================================================
@@ -698,11 +701,11 @@ REGRESSION: Path resolved from load-file-name which differs per install."
   (claude-org-iterm2--query-completed "nonexistent-session"))
 
 ;;; ============================================================================
-;;; sdd-bridge.sh Status File Integration (real shell script)
+;;; workspace-bridge Status File Integration (real shell script)
 ;;; ============================================================================
 
-(ert-deftest test-iterm2-sdd-bridge-prompt-resets-on-mcp-failure ()
-  "sdd-bridge prompt resets status to 'ready' when MCP is unreachable."
+(ert-deftest test-iterm2-workspace-bridge-prompt-resets-on-mcp-failure ()
+  "workspace-bridge prompt resets status to 'ready' when MCP is unreachable."
   :tags '(:unit :iterm2 :e2e)
   (let* ((test-id (format "test-bridge-%d" (random 100000)))
          (status-dir "/tmp/claude-agent-status")
@@ -713,7 +716,7 @@ REGRESSION: Path resolved from load-file-name which differs per install."
     (unwind-protect
         (progn
           (call-process-shell-command
-           (format "echo '{\"prompt\":\"test\"}' | SDD_SESSION_ID='%s' SDD_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' uv run --project '%s' sdd-bridge prompt"
+           (format "echo '{\"prompt\":\"test\"}' | WORKSPACE_SESSION_ID='%s' WORKSPACE_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' uv run --project '%s' workspace-bridge prompt"
                    test-id project-dir)
            nil nil nil)
           (should (file-exists-p status-file))
@@ -724,8 +727,8 @@ REGRESSION: Path resolved from load-file-name which differs per install."
                                         (buffer-string))))))
       (when (file-exists-p status-file) (delete-file status-file)))))
 
-(ert-deftest test-iterm2-sdd-bridge-response-writes-ready ()
-  "sdd-bridge response event writes 'ready' to status file."
+(ert-deftest test-iterm2-workspace-bridge-response-writes-ready ()
+  "workspace-bridge response event writes 'ready' to status file."
   :tags '(:unit :iterm2 :e2e)
   (let* ((test-id (format "test-bridge-%d" (random 100000)))
          (status-dir "/tmp/claude-agent-status")
@@ -736,7 +739,7 @@ REGRESSION: Path resolved from load-file-name which differs per install."
     (unwind-protect
         (progn
           (call-process-shell-command
-           (format "echo '{\"last_assistant_message\":\"hi\"}' | SDD_SESSION_ID='%s' SDD_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' uv run --project '%s' sdd-bridge response"
+           (format "echo '{\"last_assistant_message\":\"hi\"}' | WORKSPACE_SESSION_ID='%s' WORKSPACE_ORG_FILE='/tmp/f.org' EMACS_MCP_URL='http://localhost:1/mcp' uv run --project '%s' workspace-bridge response"
                    test-id project-dir)
            nil nil nil)
           (should (file-exists-p status-file))
@@ -814,7 +817,7 @@ This mirrors what the SDD bridge expects for response insertion.")
 (ert-deftest test-iterm2-response-inserted-after-execute ()
   "Full round-trip: execute AI block → simulate hook callback → response section exists.
 REGRESSION: iTerm2 backend sent prompts but no response appeared in org buffer
-because the response insertion path (sdd-bridge hooks) wasn't tested end-to-end."
+because the response insertion path (workspace-bridge hooks) wasn't tested end-to-end."
   :tags '(:unit :iterm2 :e2e :regression)
   (let ((test-iterm2--mock-call-log nil)
         (tmp-file (make-temp-file "iterm2-resp-" nil ".org")))
@@ -833,11 +836,11 @@ because the response insertion path (sdd-bridge hooks) wasn't tested end-to-end.
                     (claude-org-iterm2--execute-ai-block)
                     (should (assoc "send" test-iterm2--mock-call-log))
 
-                    ;; 2. Simulate sdd-bridge.sh "response" callback
+                    ;; 2. Simulate workspace-bridge "response" callback
                     ;; This is what happens when Claude finishes responding:
-                    ;; the Stop hook fires → sdd-bridge.sh → MCP evalElisp →
-                    ;; claude-org-sdd-bridge-insert-response
-                    (claude-org-sdd-bridge-insert-response
+                    ;; the Stop hook fires → workspace-bridge → MCP evalElisp →
+                    ;; claude-org-workspace-bridge-insert-response
+                    (claude-org-workspace-bridge-insert-response
                      tmp-file "sdd-resp-test" "The answer is 4."
                      "sdd-resp-test-instr-1")
 
@@ -851,9 +854,9 @@ because the response insertion path (sdd-bridge hooks) wasn't tested end-to-end.
 
 (ert-deftest test-iterm2-emacs-prompt-no-duplicate-instruction ()
   "Prompt sent from Emacs must NOT create a duplicate Instruction section.
-REGRESSION: sdd-bridge.sh prompt hook always called insert-prompt,
+REGRESSION: workspace-bridge prompt hook always called insert-prompt,
 duplicating the AI block that Emacs already has in the org file.
-FIX: execute-ai-block writes a from-emacs flag file; sdd-bridge.sh
+FIX: execute-ai-block writes a from-emacs flag file; workspace-bridge
 checks it and skips insert-prompt when the flag exists."
   :tags '(:unit :iterm2 :e2e :regression)
   (let ((test-iterm2--mock-call-log nil)
@@ -878,12 +881,12 @@ checks it and skips insert-prompt when the flag exists."
                     ;; Verify flag was written
                     (should (file-exists-p flag-file))
 
-                    ;; 2. Simulate sdd-bridge.sh checking the flag
+                    ;; 2. Simulate workspace-bridge checking the flag
                     ;; When flag exists, skip insert-prompt
                     (if (file-exists-p flag-file)
                         (delete-file flag-file)
                       ;; If no flag, insert-prompt would be called (bug)
-                      (claude-org-sdd-bridge-insert-prompt
+                      (claude-org-workspace-bridge-insert-prompt
                        tmp-file "sdd-resp-test" "What is 2+2?"))
 
                     ;; 3. Count Instruction headings — should be 1 (no dup)
@@ -914,7 +917,7 @@ When user types in Claude TUI (not from Emacs), the org file needs the prompt."
                 (progn
                   ;; No execute-ai-block — user typed directly in Claude
                   ;; The prompt hook should insert an instruction
-                  (claude-org-sdd-bridge-insert-prompt
+                  (claude-org-workspace-bridge-insert-prompt
                    tmp-file "sdd-resp-test" "Tell me about Emacs")
 
                   ;; Should now have 2 instruction sections
@@ -929,7 +932,7 @@ When user types in Claude TUI (not from Emacs), the org file needs the prompt."
       (when (file-exists-p tmp-file) (delete-file tmp-file)))))
 
 (ert-deftest test-iterm2-launch-always-includes-plugin-dir ()
-  "claude-sdd launch command always includes --plugin-dir and --mcp-config.
+  "claude-workspace launch command always includes --plugin-dir and --mcp-config.
 REGRESSION: When MCP was unreachable at launch time, hooks were omitted,
 so responses never flowed back to Emacs even after MCP became available."
   :tags '(:unit :iterm2 :e2e :regression)
@@ -944,8 +947,8 @@ so responses never flowed back to Emacs even after MCP became available."
            (launch-cmd (when launch-cmd-idx (nth (1+ launch-cmd-idx) args))))
       (should launch-cmd)
       ;; The launch command should always reference plugin-dir
-      ;; (This tests that claude-sdd is invoked, which includes --plugin-dir)
-      (should (string-match-p "claude-sdd\\|claude" launch-cmd)))))
+      ;; (This tests that claude-workspace is invoked, which includes --plugin-dir)
+      (should (string-match-p "claude-workspace\\|claude" launch-cmd)))))
 
 ;;; ============================================================================
 ;;; Issue 1: Dead session relaunch from open-tab
@@ -1025,7 +1028,7 @@ test query
 
 (ert-deftest test-iterm2-launch-passes-resume-from-org-property ()
   "Launch command must include --resume when CLAUDE_CLI_SESSION exists.
-REGRESSION: --resume was only passed by claude-sdd via MCP eval.
+REGRESSION: --resume was only passed by claude-workspace via MCP eval.
 When MCP was unavailable, CLI session was lost. Fix: Emacs reads the
 property directly and passes it in the launch command or extra args."
   :tags '(:unit :iterm2 :e2e :regression)
@@ -1042,8 +1045,8 @@ property directly and passes it in the launch command or extra args."
       ;; Must contain literal "--resume" (not just "resume" in session ID)
       (should-with-fix (string-match-p "--resume" launch-cmd)
         "Launch command missing --resume. CLAUDE_CLI_SESSION is set but not \
-passed to claude-sdd. FIX: build-launch-command should read CLAUDE_CLI_SESSION \
-and pass it as extra arg to claude-sdd.")
+passed to claude-workspace. FIX: build-launch-command should read CLAUDE_CLI_SESSION \
+and pass it as extra arg to claude-workspace.")
       ;; Must contain the actual CLI session UUID
       (should (string-match-p "abc123-cli-session-uuid" launch-cmd)))))
 
@@ -1167,19 +1170,19 @@ Simulates the Stop hook calling query-completed after iteration 1."
       (should-not (claude-org--session-get session-key :loop-max))
       (should-not (claude-org--session-get session-key :loop-current)))))
 
-(ert-deftest test-iterm2-sdd-to-session-key-mapping ()
-  "ensure-session stores sdd-session-id → session-key reverse mapping."
+(ert-deftest test-iterm2-workspace-to-session-key-mapping ()
+  "ensure-session stores workspace-session-id → session-key reverse mapping."
   :tags '(:unit :iterm2 :loop)
   (test-iterm2--with-org-buffer test-iterm2--org-content-loop
     (re-search-forward "Repeat this prompt")
     ;; ensure-session is called by execute-ai-block
     (claude-org-iterm2--execute-ai-block)
     (let ((session-key (gethash "sdd-loop-test"
-                                claude-org-terminal--sdd-to-session-key)))
+                                claude-org-terminal--workspace-to-session-key)))
       (should session-key)
       (should (equal (claude-org--current-session-key) session-key))
       ;; Cleanup
-      (remhash "sdd-loop-test" claude-org-terminal--sdd-to-session-key))))
+      (remhash "sdd-loop-test" claude-org-terminal--workspace-to-session-key))))
 
 ;;; ============================================================================
 ;;; IDE Server Integration Tests
@@ -1396,7 +1399,7 @@ from file, then calls insert-response with it."
 
                       ;; 3. Simulate Python bridge calling insert-response
                       ;;    (exactly what handle_response does via MCP)
-                      (claude-org-sdd-bridge-insert-response
+                      (claude-org-workspace-bridge-insert-response
                        tmp-file "sdd-resp-test"
                        "The answer is 4." custom-id)
 

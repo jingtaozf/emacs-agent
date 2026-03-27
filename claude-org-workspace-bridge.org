@@ -1,13 +1,13 @@
-#+TITLE: Claude Org SDD Bridge
+#+TITLE: Claude Org Workspace Bridge
 #+PROPERTY: literate-load yes
 
-* Claude Org SDD Bridge
+* Claude Org Workspace Bridge
 :PROPERTIES:
 :header-args:elisp: :tangle yes
 :END:
 
 Functions for bridging between Claude Code CLI (running in a terminal) and
-org-mode SDD sections. Called non-interactively via MCP ~evalElisp~ from
+org-mode workspace sections. Called non-interactively via MCP ~evalElisp~ from
 hook scripts.
 
 ** Dependencies
@@ -16,24 +16,24 @@ hook scripts.
 (require 'cl-lib)
 
 ;; Shared terminal-base for query registration and session mapping
-(declare-function claude-org-terminal--register-query "claude-org-terminal-base" (sdd-session-id terminal-id))
-(defvar claude-org-terminal--sdd-to-session-key)
+(declare-function claude-org-terminal--register-query "claude-org-terminal-base" (workspace-session-id terminal-id))
+(defvar claude-org-terminal--workspace-to-session-key)
 #+END_SRC
 
 ** Buffer and Navigation
 
 #+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge--ensure-buffer (org-file)
+(defun claude-org-workspace-bridge--ensure-buffer (org-file)
   "Ensure ORG-FILE is loaded in Emacs and return its buffer.
 Opens the file via `find-file-noselect' if not already visiting."
   (or (find-buffer-visiting org-file)
       (find-file-noselect org-file)))
 
-(defun claude-org-sdd-bridge-list-sessions (org-file)
-  "List all SDD sessions in ORG-FILE.
+(defun claude-org-workspace-bridge-list-sessions (org-file)
+  "List all workspace sessions in ORG-FILE.
 Returns a newline-separated string of \"SESSION_ID\\tHEADING\\tPARENT\" lines,
-one per SDD section found. PARENT is the outline path above the SDD heading."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+one per workspace section found. PARENT is the outline path above the workspace heading."
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
         (widen)
@@ -52,8 +52,8 @@ one per SDD section found. PARENT is the outline path above the SDD heading."
                   (push (format "%s\t%s\t%s" sid heading parent) results)))))
           (mapconcat #'identity (nreverse results) "\n"))))))
 
-(defun claude-org-sdd-bridge--goto-session (session-id)
-  "Move point to the SDD section matching SESSION-ID in current buffer.
+(defun claude-org-workspace-bridge--goto-session (session-id)
+  "Move point to the workspace section matching SESSION-ID in current buffer.
 Searches for :CLAUDE_SESSION_ID: property matching SESSION-ID.
 Signals error if not found."
   (goto-char (point-min))
@@ -65,19 +65,35 @@ Signals error if not found."
                  nil t))
       (setq found (point)))
     (unless found
-      (error "SDD session %s not found in buffer" session-id))
+      (error "Workspace session %s not found in buffer" session-id))
     ;; Move to the heading that owns this property
     (org-back-to-heading t)))
 
-(defun claude-org-sdd-bridge--find-workflow (session-id)
-  "Find the Workflow subsection under the SDD heading for SESSION-ID.
+(defun claude-org-workspace-bridge--find-workflow (session-id)
+  "Find the Workflow subsection under the active story for SESSION-ID.
+Uses ACTIVE_STORY to narrow to the correct story, falls back to any Workflow.
 Returns the position of the Workflow heading, or signals error."
-  (claude-org-sdd-bridge--goto-session session-id)
-  (let ((sdd-end (save-excursion (org-end-of-subtree t t) (point)))
-        (found nil))
+  (claude-org-workspace-bridge--goto-session session-id)
+  (let* ((workspace-end (save-excursion (org-end-of-subtree t t) (point)))
+         (active-story (org-entry-get nil "ACTIVE_STORY"))
+         (search-start (point))
+         (search-end workspace-end)
+         (found nil))
+    ;; If ACTIVE_STORY is set, narrow search to that story's subtree
+    (when active-story
+      (save-excursion
+        (let ((ws-level (org-current-level)))
+          (when (re-search-forward
+                 (format "^\\*\\{%d\\} +%s" (1+ ws-level) (regexp-quote active-story))
+                 workspace-end t)
+            (goto-char (line-beginning-position))
+            (setq search-start (point))
+            (setq search-end (save-excursion (org-end-of-subtree t t) (point)))))))
+    ;; Find Workflow heading (with or without :sdd: tag)
     (save-excursion
+      (goto-char search-start)
       (while (and (not found)
-                  (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" sdd-end t))
+                  (re-search-forward "^\\*+ +Workflow\\b" search-end t))
         (setq found (line-beginning-position))))
     (unless found
       (error "Workflow section not found under session %s" session-id))
@@ -87,16 +103,16 @@ Returns the position of the Workflow heading, or signals error."
 ** System Prompt
 
 #+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-system-prompt (org-file session-id)
-  "Build and return the SDD system prompt for SESSION-ID in ORG-FILE.
+(defun claude-org-workspace-bridge-system-prompt (org-file session-id)
+  "Build and return the workspace system prompt for SESSION-ID in ORG-FILE.
 Called by the launcher script to get the system prompt text.
-Navigates to the SDD section and reuses existing prompt-building logic."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+Navigates to the workspace section and reuses existing prompt-building logic."
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
         (widen)
-        (claude-org-sdd-bridge--goto-session session-id)
-        ;; Narrow to the SDD subtree so collect-system-prompts finds
+        (claude-org-workspace-bridge--goto-session session-id)
+        ;; Narrow to the workspace subtree so collect-system-prompts finds
         ;; only this story's system prompt section
         (org-narrow-to-subtree)
         (claude-org--build-system-prompt)))))
@@ -105,23 +121,23 @@ Navigates to the SDD section and reuses existing prompt-building logic."
 ** Prompt Insertion
 
 #+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-insert-prompt (org-file session-id prompt)
-  "Insert PROMPT as a new AI block in the SDD Workflow for SESSION-ID in ORG-FILE.
+(defun claude-org-workspace-bridge-insert-prompt (org-file session-id prompt)
+  "Insert PROMPT as a new AI block in the workspace Workflow for SESSION-ID in ORG-FILE.
 Creates a new Instruction N subsection under the Workflow heading.
 Returns the CUSTOM_ID string for correlating with the Stop hook."
-  (claude-agent-with-span "sdd-insert-prompt"
+  (claude-agent-with-span "workspace-insert-prompt"
       (list :session-id session-id) nil
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
     (let ((custom-id nil))
       (save-excursion
         (save-restriction
           (widen)
-          (claude-org-sdd-bridge--find-workflow session-id)
+          (claude-org-workspace-bridge--find-workflow session-id)
           (let* ((workflow-level (org-current-level))
                  (instr-level (1+ workflow-level))
                  (stars (make-string instr-level ?*))
                  ;; Use regex to find workflow boundary (safe against embedded headings)
-                 (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
+                 (workflow-end (claude-org-workspace-bridge--find-next-sibling-heading
                                 workflow-level (point-max)))
                  (instr-count 0))
             ;; Count existing instructions by tag (headings may be renamed by auto-title)
@@ -155,9 +171,9 @@ Returns the CUSTOM_ID string for correlating with the Stop hook."
                   (when session-key
                     (run-hook-with-args 'claude-org-execute-hook session-key prompt nil)
                     (claude-org--session-put session-key :busy t)
-                    ;; Map sdd-session-id → session-key (shared across backends)
+                    ;; Map workspace-session-id → session-key (shared across backends)
                     (puthash session-id session-key
-                             claude-org-terminal--sdd-to-session-key)))
+                             claude-org-terminal--workspace-to-session-key)))
                 ;; Set exec-status on the instruction heading
                 (claude-org--set-exec-status "executing")
                 ;; Auto-generate a meaningful title for the heading
@@ -170,7 +186,7 @@ Returns the CUSTOM_ID string for correlating with the Stop hook."
 ** Response Insertion
 
 #+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge--shift-org-headings (text parent-level)
+(defun claude-org-workspace-bridge--shift-org-headings (text parent-level)
   "Shift org heading levels in TEXT to be subsections of PARENT-LEVEL.
 Lines starting with *+ get PARENT-LEVEL additional stars prepended,
 making them children of the parent heading."
@@ -180,7 +196,7 @@ making them children of the parent heading."
      (concat prefix "\\1")
      text)))
 
-(defun claude-org-sdd-bridge--find-next-sibling-heading (level limit)
+(defun claude-org-workspace-bridge--find-next-sibling-heading (level limit)
   "Find the next heading at LEVEL or shallower before LIMIT.
 Searches by regex to avoid `org-end-of-subtree' confusion from
 embedded org headings in response content.
@@ -193,7 +209,7 @@ Returns the position, or LIMIT if none found."
           (line-beginning-position)
         limit))))
 
-(defun claude-org-sdd-bridge--find-heading-by-custom-id (custom-id limit)
+(defun claude-org-workspace-bridge--find-heading-by-custom-id (custom-id limit)
   "Find heading with CUSTOM_ID before LIMIT.  Returns position or nil."
   (save-excursion
     (let ((pattern (format ":CUSTOM_ID: %s" (regexp-quote custom-id))))
@@ -201,7 +217,7 @@ Returns the position, or LIMIT if none found."
         (org-back-to-heading t)
         (point)))))
 
-(defun claude-org-sdd-bridge--find-next-instruction-heading (instr-level tag workflow-end)
+(defun claude-org-workspace-bridge--find-next-instruction-heading (instr-level tag workflow-end)
   "Find the next instruction heading (with TAG) at INSTR-LEVEL before WORKFLOW-END.
 Skips response headings (:ai_output:). Returns position, or WORKFLOW-END."
   (save-excursion
@@ -211,7 +227,7 @@ Skips response headings (:ai_output:). Returns position, or WORKFLOW-END."
           (line-beginning-position)
         workflow-end))))
 
-(defun claude-org-sdd-bridge--find-existing-response (instr-pos instr-level next-instr-pos)
+(defun claude-org-workspace-bridge--find-existing-response (instr-pos instr-level next-instr-pos)
   "Find existing Response heading for instruction at INSTR-POS.
 Searches between INSTR-POS and NEXT-INSTR-POS for a heading at INSTR-LEVEL
 with :ai_output: tag.  Returns (BEG . END) of the response subtree, or nil."
@@ -222,29 +238,29 @@ with :ai_output: tag.  Returns (BEG . END) of the response subtree, or nil."
       (when (re-search-forward pattern next-instr-pos t)
         (let ((beg (line-beginning-position)))
           ;; Find end of response subtree (next same-level heading or next-instr-pos)
-          (let ((end (claude-org-sdd-bridge--find-next-sibling-heading
+          (let ((end (claude-org-workspace-bridge--find-next-sibling-heading
                       instr-level next-instr-pos)))
             (cons beg end)))))))
 
-(defun claude-org-sdd-bridge-insert-response (org-file session-id response instr-custom-id)
+(defun claude-org-workspace-bridge-insert-response (org-file session-id response instr-custom-id)
   "Insert RESPONSE after the Instruction with INSTR-CUSTOM-ID in ORG-FILE.
 If a Response section already exists for this instruction, appends to it.
 Otherwise creates a new Response section.
 Org headings in response content are shifted to become subsections."
-  (claude-agent-with-span "sdd-insert-response"
+  (claude-agent-with-span "workspace-insert-response"
       (list :session-id session-id :custom-id instr-custom-id
             :response-length (length response)) nil
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
         (widen)
-        (claude-org-sdd-bridge--find-workflow session-id)
+        (claude-org-workspace-bridge--find-workflow session-id)
         (let* ((workflow-level (org-current-level))
                (instr-level (1+ workflow-level))
                (stars (make-string instr-level ?*))
-               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
+               (workflow-end (claude-org-workspace-bridge--find-next-sibling-heading
                               workflow-level (point-max)))
-               (instr-pos (claude-org-sdd-bridge--find-heading-by-custom-id
+               (instr-pos (claude-org-workspace-bridge--find-heading-by-custom-id
                            instr-custom-id workflow-end))
                (response-num 0))
           (unless instr-pos
@@ -259,9 +275,9 @@ Org headings in response content are shifted to become subsections."
               (setq response-num (1+ response-num))))
           ;; Find the next instruction heading (skip responses)
           (goto-char instr-pos)
-          (let* ((next-instr-pos (claude-org-sdd-bridge--find-next-instruction-heading
+          (let* ((next-instr-pos (claude-org-workspace-bridge--find-next-instruction-heading
                                   instr-level claude-org-heading-tag workflow-end))
-                 (existing (claude-org-sdd-bridge--find-existing-response
+                 (existing (claude-org-workspace-bridge--find-existing-response
                             instr-pos instr-level next-instr-pos)))
             (if existing
                 ;; Append to existing response section (before its end)
@@ -269,7 +285,7 @@ Org headings in response content are shifted to become subsections."
                   (goto-char response-end)
                   ;; Back up to insert before the next heading, after existing content
                   (unless (bolp) (insert "\n"))
-                  (insert "\n" (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n"))
+                  (insert "\n" (claude-org-workspace-bridge--shift-org-headings response instr-level) "\n"))
               ;; Create new response section — insert just before the next instruction
               (let ((timestamp (format-time-string "%Y-%m-%d %H:%M")))
                 (goto-char next-instr-pos)
@@ -279,7 +295,7 @@ Org headings in response content are shifted to become subsections."
                 (insert (format "%s Response %d (%s) :ai_output:\n"
                                 stars response-num timestamp))
                 (insert ":PROPERTIES:\n:QUERY_TYPE: terminal\n:END:\n\n")
-                (insert (claude-org-sdd-bridge--shift-org-headings response instr-level) "\n")))))))
+                (insert (claude-org-workspace-bridge--shift-org-headings response instr-level) "\n")))))))
     (save-buffer)
     (format "Inserted Response (%d chars)" (length response)))))
 #+END_SRC
@@ -287,55 +303,55 @@ Org headings in response content are shifted to become subsections."
 ** CLI Session Persistence
 
 #+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-save-cli-session (org-file session-id cli-session-id)
-  "Save CLI-SESSION-ID as a property on the SDD section for SESSION-ID in ORG-FILE.
+(defun claude-org-workspace-bridge-save-cli-session (org-file session-id cli-session-id)
+  "Save CLI-SESSION-ID as a property on the workspace section for SESSION-ID in ORG-FILE.
 This allows resuming the same Claude CLI session on next launch.
 Saves silently to persist immediately."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
         (widen)
-        (claude-org-sdd-bridge--goto-session session-id)
+        (claude-org-workspace-bridge--goto-session session-id)
         (org-set-property claude-org-cli-session-property cli-session-id)
         (let ((inhibit-message t))
           (save-buffer))
         cli-session-id))))
 
-(defun claude-org-sdd-bridge-get-cli-session (org-file session-id)
+(defun claude-org-workspace-bridge-get-cli-session (org-file session-id)
   "Get the saved Claude CLI session ID for SESSION-ID in ORG-FILE.
 Returns the session ID string, or nil if none saved."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
         (widen)
-        (claude-org-sdd-bridge--goto-session session-id)
+        (claude-org-workspace-bridge--goto-session session-id)
         (org-entry-get nil claude-org-cli-session-property)))))
 #+END_SRC
 
 ** Real-time Tool Output
 
 #+BEGIN_SRC elisp
-(defun claude-org-sdd-bridge-update-todos (org-file session-id todos instr-custom-id)
+(defun claude-org-workspace-bridge-update-todos (org-file session-id todos instr-custom-id)
   "Update checkbox list under the Instruction with INSTR-CUSTOM-ID.
 TODOS is a list of plists with :content, :status, and :priority keys.
 Replaces or creates the checkbox list between the src block and child headings."
-  (with-current-buffer (claude-org-sdd-bridge--ensure-buffer org-file)
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
     (save-excursion
       (save-restriction
         (widen)
-        (claude-org-sdd-bridge--find-workflow session-id)
+        (claude-org-workspace-bridge--find-workflow session-id)
         (let* ((workflow-level (org-current-level))
                (instr-level (1+ workflow-level))
-               (workflow-end (claude-org-sdd-bridge--find-next-sibling-heading
+               (workflow-end (claude-org-workspace-bridge--find-next-sibling-heading
                               workflow-level (point-max)))
-               (last-instr-pos (claude-org-sdd-bridge--find-heading-by-custom-id
+               (last-instr-pos (claude-org-workspace-bridge--find-heading-by-custom-id
                                 instr-custom-id workflow-end)))
           (unless last-instr-pos
             (error "Instruction %s not found under Workflow for session %s"
                    instr-custom-id session-id))
           (goto-char last-instr-pos)
           ;; Find the end of the src block (#+end_src)
-          (let* ((instr-end (claude-org-sdd-bridge--find-next-sibling-heading
+          (let* ((instr-end (claude-org-workspace-bridge--find-next-sibling-heading
                              instr-level workflow-end))
                  (src-end nil)
                  (todo-start nil)
@@ -399,5 +415,5 @@ Replaces or creates the checkbox list between the src block and child headings."
 ** Provide
 
 #+BEGIN_SRC elisp
-(provide 'claude-org-sdd-bridge)
+(provide 'claude-org-workspace-bridge)
 #+END_SRC

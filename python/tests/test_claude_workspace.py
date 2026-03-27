@@ -1,4 +1,4 @@
-"""Tests for the Claude SDD launcher."""
+"""Tests for the Claude workspace launcher."""
 
 import json
 
@@ -6,7 +6,7 @@ import pytest
 
 from unittest.mock import MagicMock, patch
 
-from claude_agent.claude_sdd import (
+from claude_agent.claude_workspace import (
     _is_valid_session,
     _normalize_name,
     build_claude_args,

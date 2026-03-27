@@ -67,9 +67,9 @@
   - [[#tag-prompt-lookup][Tag Prompt Lookup]]
     - [[#generic-function][Generic Function]]
     - [[#default-method-file-based-loading][Default Method (File-Based Loading)]]
-    - [[#sdd-root-detection][SDD Root Detection]]
+    - [[#workspace-root-detection][Workspace Root Detection]]
     - [[#custom_id-generation][CUSTOM_ID Generation]]
-    - [[#sdd-link-generation][SDD Link Generation]]
+    - [[#workspace-link-generation][Workspace Link Generation]]
   - [[#header-prompt-lookup][Header Prompt Lookup]]
   - [[#collect-current-context][Collect Current Context]]
   - [[#build-behavior-prompt][Build Behavior Prompt]]
@@ -230,7 +230,7 @@ Response will appear here after pressing C-c C-c inside the ai block.
 (declare-function claude-org-iterm2-open-tab "claude-org-iterm2" ())
 (declare-function claude-org-cmux--execute-ai-block "claude-org-cmux" ())
 (declare-function claude-org-cmux-open-tab "claude-org-cmux" ())
-(defvar claude-org-terminal--sdd-to-session-key)
+(defvar claude-org-terminal--workspace-to-session-key)
 (declare-function claude-org-open-native-terminal "claude-org-native" ())
 (declare-function claude-org--native-buffer-alive-p "claude-org-native" (buf))
 (declare-function claude-org--native-send-prompt "claude-org-native" (buf prompt))
@@ -796,8 +796,8 @@ Unified property shared by json-stream and terminal backends.")
 Persisted to the org heading so session can be resumed after Emacs restart.")
 
 (defconst claude-org-cli-session-property "CLAUDE_CLI_SESSION"
-  "Org property for SDD bridge CLI session ID (used for --resume).
-Persisted to the SDD section so terminal sessions can be resumed.")
+  "Org property for workspace bridge CLI session ID (used for --resume).
+Persisted to the workspace section so terminal sessions can be resumed.")
 
 (defconst claude-org-setting-sources-property "CLAUDE_SETTING_SOURCES"
   "Org property name for setting sources (comma-separated list).")
@@ -1039,16 +1039,16 @@ Cannot rely on `claude-org--find-session-scope-heading' because point may
 not be in the correct section (e.g. when called from emacsclient context).
 Instead, extracts the CLAUDE_SESSION_ID from SESSION-KEY and searches for
 the matching heading directly."
-  (let* ((sdd-id (when (string-match "::\\(.+\\)$" session-key)
+  (let* ((workspace-id (when (string-match "::\\(.+\\)$" session-key)
                    (match-string 1 session-key)))
          (heading-pos
-          (when sdd-id
+          (when workspace-id
             (save-excursion
               (goto-char (point-min))
               (catch 'found
                 (while (re-search-forward
                         (format ":CLAUDE_SESSION_ID:[ \t]+%s"
-                                (regexp-quote sdd-id))
+                                (regexp-quote workspace-id))
                         nil t)
                   (org-back-to-heading t)
                   (throw 'found (point)))
@@ -2225,7 +2225,7 @@ Prompts are loaded from =prompts/= directory at runtime.
 ** Tag Prompt Lookup
 
 Tag-based prompt generation using =cl-defgeneric= / =cl-defmethod=.
-This allows specialized behavior per tag (e.g., SDD injects dynamic links).
+This allows specialized behavior per tag (e.g., workspace injects dynamic links).
 
 *** Generic Function
 
@@ -2235,7 +2235,7 @@ This allows specialized behavior per tag (e.g., SDD injects dynamic links).
 TAG is a symbol (e.g., 'sdd, 'research).
 CONTEXT is a plist with keys:
   :file-path   - Absolute path to the org file
-  :sdd-root    - SDD root section name (e.g., \"Feature Name\") or nil
+  :workspace-root - Workspace root section name (e.g., \"Feature Name\") or nil
   :current-tags - List of all inherited tags
 Returns a prompt string or nil.")
 #+END_SRC
@@ -2257,13 +2257,13 @@ Falls back to full file if no Summary section exists."
                      claude-org-prompts-directory)))
 #+END_SRC
 
-*** SDD Root Detection
+*** Workspace Root Detection
 
 #+BEGIN_SRC elisp
-(defun claude-org--find-sdd-root ()
-  "Find the root section name for current SDD.
+(defun claude-org--find-workspace-root ()
+  "Find the root section name for current workspace.
 Returns the heading text (e.g., \"Feature Name\") of the parent section
-that contains the :sdd: tagged Workflow section, or nil if not in SDD."
+that contains the :sdd: tagged Workflow section, or nil if not in a workspace."
   (save-excursion
     (when (member "sdd" (claude-org--get-current-tags))
       ;; Walk up to find section with :sdd: tag
@@ -2274,11 +2274,94 @@ that contains the :sdd: tagged Workflow section, or nil if not in SDD."
         (org-get-heading t t t t)))))
 #+END_SRC
 
+*** Workspace Heading Navigation
+
+#+BEGIN_SRC elisp
+(defun claude-org--find-workspace-heading ()
+  "Find nearest ancestor heading with CMUX_WORKSPACE property.
+Returns (name . position) or nil. Works from any point inside a workspace."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (condition-case nil
+          (progn
+            (unless (org-at-heading-p) (org-back-to-heading t))
+            (let ((found nil))
+              (while (and (not found)
+                          (not (bobp)))
+                (when (org-entry-get nil "CMUX_WORKSPACE")
+                  (setq found (cons (org-get-heading t t t t) (point))))
+                (unless found
+                  (unless (org-up-heading-safe)
+                    (goto-char (point-min)))))
+              found))
+        (error nil)))))
+
+(defun claude-org--find-story-heading ()
+  "Find the story heading containing point.
+A story is a direct child of the workspace heading.
+Returns (name . position) or nil."
+  (save-excursion
+    (save-restriction
+      (let ((ws (claude-org--find-workspace-heading)))
+        (when ws
+          (let ((ws-level (save-excursion
+                            (goto-char (cdr ws))
+                            (org-current-level))))
+            ;; Walk up from current position to find heading at ws-level + 1
+            (condition-case nil
+                (progn
+                  (unless (org-at-heading-p) (org-back-to-heading t))
+                  (let ((found nil))
+                    (while (and (not found)
+                                (> (point) (cdr ws)))
+                      (when (= (org-current-level) (1+ ws-level))
+                        (setq found (cons (org-get-heading t t t t) (point))))
+                      (unless found
+                        (unless (org-up-heading-safe)
+                          (goto-char (point-min)))))
+                    found))
+              (error nil))))))))
+#+END_SRC
+
+*** ACTIVE_STORY Tracking
+
+#+BEGIN_SRC elisp
+(defvar claude-org-active-story-changed-hook nil
+  "Hook called when ACTIVE_STORY changes on a workspace heading.
+Each function receives (workspace-session-id new-story-name).")
+
+(defun claude-org--set-active-story (story-name)
+  "Set ACTIVE_STORY on the workspace heading. Fire hook if changed.
+Must be called with point inside the workspace."
+  (save-excursion
+    (save-restriction
+      (let ((ws (claude-org--find-workspace-heading)))
+        (when ws
+          (goto-char (cdr ws))
+          (let ((old-story (org-entry-get nil "ACTIVE_STORY"))
+                (ws-session-id (org-entry-get nil "CLAUDE_SESSION_ID")))
+            (unless (equal old-story story-name)
+              (org-set-property "ACTIVE_STORY" story-name)
+              (when ws-session-id
+                (run-hook-with-args 'claude-org-active-story-changed-hook
+                                    ws-session-id story-name)))))))))
+
+(defun claude-org-get-active-story ()
+  "Read ACTIVE_STORY from workspace heading at point. For Python bridge."
+  (save-excursion
+    (save-restriction
+      (let ((ws (claude-org--find-workspace-heading)))
+        (when ws
+          (goto-char (cdr ws))
+          (org-entry-get nil "ACTIVE_STORY"))))))
+#+END_SRC
+
 *** CUSTOM_ID Generation
 
 #+BEGIN_SRC elisp
 (defun claude-org--generate-custom-id (session-id section-name &optional file-base)
-  "Generate a CUSTOM_ID for SDD sections.
+  "Generate a CUSTOM_ID for workspace sections.
 SESSION-ID is the session identifier (e.g., \"sdd-20251227-180147\").
 SECTION-NAME is the heading text (e.g., \"Research Output\").
 FILE-BASE is optional file name without extension for cross-file uniqueness.
@@ -2292,7 +2375,7 @@ Returns a slug like \"claude-agent-dev-research-output-sdd-20251227-180147\"."
         (format "%s-%s" session-id slug)))))
 #+END_SRC
 
-*** SDD Link Generation
+*** Workspace Link Generation
 
 #+BEGIN_SRC elisp
 (defun claude-org--get-section-level-by-custom-id (file-path custom-id)
@@ -2416,9 +2499,9 @@ Container tags come before phase tags."
 
 (defun claude-org--build-behavior-context ()
   "Build context plist for tag prompt generation.
-Returns plist with :file-path, :sdd-root, :session-id, :current-tags."
+Returns plist with :file-path, :workspace-root, :session-id, :current-tags."
   (list :file-path (buffer-file-name)
-        :sdd-root (claude-org--find-sdd-root)
+        :workspace-root (claude-org--find-workspace-root)
         :session-id (claude-org--get-session-id)
         :current-tags (claude-org--get-current-tags)))
 
@@ -2426,9 +2509,9 @@ Returns plist with :file-path, :sdd-root, :session-id, :current-tags."
   "Build behavior prompt from current tags and header arguments.
 Returns combined prompt string or nil if no behaviors active.
 
-For SDD workflow, tags are ordered: container (sdd) first, then phase tags.
+For workspace workflow, tags are ordered: container (sdd) first, then phase tags.
 This ensures the workflow context is established before phase-specific behavior.
-Context is passed to tag methods for dynamic prompt generation (e.g., SDD links)."
+Context is passed to tag methods for dynamic prompt generation (e.g., workspace links)."
   (let* ((config (claude-org--collect-behavior-config))
          (tags (plist-get config :tags))
          (header-args (plist-get config :header-args))
@@ -3151,8 +3234,8 @@ Aligns section level with previous story if any exists, otherwise uses top level
     ;; Position cursor for content
     (message "Created story '%s' with session ID: %s" title session-id)))
 
-(defun claude-org--find-previous-sdd-level ()
-  "Find the level of the most recent SDD section before point.
+(defun claude-org--find-previous-workspace-level ()
+  "Find the level of the most recent workspace section before point.
 Searches backwards from current position for a heading with CLAUDE_SESSION_ID
 property starting with 'sdd-'. Returns the level (integer) or nil if not found."
   (save-excursion
@@ -3165,7 +3248,7 @@ property starting with 'sdd-'. Returns the level (integer) or nil if not found."
                     (re-search-backward "^\\*+ " nil t))
           (when (string-prefix-p "sdd-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
             (setq found-level (org-current-level))))
-        ;; If not found before point, search from beginning (for SDDs after point)
+        ;; If not found before point, search from beginning (for workspaces after point)
         (unless found-level
           (goto-char (point-min))
           (while (and (not found-level)
@@ -3174,35 +3257,35 @@ property starting with 'sdd-'. Returns the level (integer) or nil if not found."
               (setq found-level (org-current-level)))))
         found-level))))
 
-(defcustom claude-org-sdd-docs-format "org"
-  "File format for SDD docs/ artifacts (research, design-docs).
+(defcustom claude-org-workspace-docs-format "org"
+  "File format for workspace docs/ artifacts (research, design-docs).
 When \"org\", creates .org files with org-mode markup.
 When \"md\", creates .md files with Markdown markup.
-Can be overridden per-story via the SDD_DOCS_FORMAT org property."
+Can be overridden per-story via the WORKSPACE_DOCS_FORMAT org property."
   :type '(choice (const :tag "Org-mode (.org)" "org")
                  (const :tag "Markdown (.md)" "md"))
   :group 'claude-org)
 
-(defun claude-org--sdd-docs-format ()
+(defun claude-org--workspace-docs-format ()
   "Return the docs format for the current context.
-Checks SDD_DOCS_FORMAT org property (inherited) first,
-then falls back to `claude-org-sdd-docs-format' defcustom."
+Checks WORKSPACE_DOCS_FORMAT org property (inherited) first,
+then falls back to `claude-org-workspace-docs-format' defcustom."
   (or (and (derived-mode-p 'org-mode)
-           (org-entry-get nil "SDD_DOCS_FORMAT" t))
-      claude-org-sdd-docs-format))
+           (org-entry-get nil "WORKSPACE_DOCS_FORMAT" t))
+      claude-org-workspace-docs-format))
 
-(defun claude-org--sdd-name-to-slug (name)
-  "Convert SDD feature NAME to a file-system slug.
+(defun claude-org--workspace-name-to-slug (name)
+  "Convert workspace feature NAME to a file-system slug.
 Lowercases, replaces spaces/special chars with hyphens, collapses runs."
   (let ((slug (downcase name)))
     (setq slug (replace-regexp-in-string "[^a-z0-9]+" "-" slug))
     (setq slug (replace-regexp-in-string "^-\\|-$" "" slug))
     slug))
 
-(defun claude-org--sdd-create-docs-files (name session-id)
-  "Create docs/ research and design-doc files for SDD story NAME.
-SESSION-ID is the SDD session identifier.
-Uses `claude-org--sdd-docs-format' to determine file extension and template.
+(defun claude-org--workspace-create-docs-files (name session-id)
+  "Create docs/ research and design-doc files for workspace story NAME.
+SESSION-ID is the workspace session identifier.
+Uses `claude-org--workspace-docs-format' to determine file extension and template.
 Returns a plist (:research PATH :design PATH) of created file paths,
 or nil if docs/ directories don't exist."
   (let* ((buf-dir (if buffer-file-name
@@ -3212,10 +3295,10 @@ or nil if docs/ directories don't exist."
                            buf-dir))
          (research-dir (expand-file-name "docs/research" project-root))
          (design-dir (expand-file-name "docs/design-docs" project-root))
-         (fmt (claude-org--sdd-docs-format))
+         (fmt (claude-org--workspace-docs-format))
          (ext (concat "." fmt))
          (year (substring session-id 4 8))
-         (slug (claude-org--sdd-name-to-slug name))
+         (slug (claude-org--workspace-name-to-slug name))
          (research-file (expand-file-name (format "%s-%s%s" year slug ext) research-dir))
          (design-file (expand-file-name (format "%s-%s%s" year slug ext) design-dir))
          (is-md (equal fmt "md")))
@@ -3228,7 +3311,7 @@ or nil if docs/ directories don't exist."
               (progn
                 (insert (format "# Research: %s\n\n" name))
                 (insert (format "**Date**: %s\n" (format-time-string "%Y-%m-%d")))
-                (insert (format "**SDD Session**: %s\n" session-id))
+                (insert (format "**Workspace Session**: %s\n" session-id))
                 (insert "**Status**: draft\n\n")
                 (insert "## Codebase Patterns\n\n")
                 (insert "## Relevant Files\n\n")
@@ -3236,7 +3319,7 @@ or nil if docs/ directories don't exist."
                 (insert "## Findings\n"))
             (insert (format "#+TITLE: Research: %s\n" name))
             (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
-            (insert (format "#+SDD_SESSION: %s\n" session-id))
+            (insert (format "#+WORKSPACE_SESSION: %s\n" session-id))
             (insert "#+STATUS: draft\n\n")
             (insert "* Codebase Patterns\n\n")
             (insert "* Relevant Files\n\n")
@@ -3249,7 +3332,7 @@ or nil if docs/ directories don't exist."
               (progn
                 (insert (format "# Design: %s\n\n" name))
                 (insert (format "**Date**: %s\n" (format-time-string "%Y-%m-%d")))
-                (insert (format "**SDD Session**: %s\n" session-id))
+                (insert (format "**Workspace Session**: %s\n" session-id))
                 (insert "**Status**: draft\n\n")
                 (insert "## Goals\n\n")
                 (insert "## Non-Goals\n\n")
@@ -3258,7 +3341,7 @@ or nil if docs/ directories don't exist."
                 (insert "## Features\n"))
             (insert (format "#+TITLE: Design: %s\n" name))
             (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
-            (insert (format "#+SDD_SESSION: %s\n" session-id))
+            (insert (format "#+WORKSPACE_SESSION: %s\n" session-id))
             (insert "#+STATUS: draft\n\n")
             (insert "* Goals\n\n")
             (insert "* Non-Goals\n\n")
@@ -3266,12 +3349,12 @@ or nil if docs/ directories don't exist."
             (insert "* Technical Design\n\n")
             (insert "* Features\n"))))
       ;; Update INDEX.md files
-      (claude-org--sdd-update-index research-dir name session-id)
-      (claude-org--sdd-update-index design-dir name session-id)
+      (claude-org--workspace-update-index research-dir name session-id)
+      (claude-org--workspace-update-index design-dir name session-id)
       (list :research research-file :design design-file))))
 
-(defun claude-org--sdd-update-index (dir name session-id)
-  "Append entry to INDEX.md in DIR for SDD story NAME.
+(defun claude-org--workspace-update-index (dir name session-id)
+  "Append entry to INDEX.md in DIR for workspace story NAME.
 SESSION-ID is accepted for API compatibility but not stored in the index."
   (let ((index-file (expand-file-name "INDEX.md" dir)))
     (when (file-exists-p index-file)
@@ -3283,17 +3366,17 @@ SESSION-ID is accepted for API compatibility but not stored in the index."
                         name))
         (write-region (point-min) (point-max) index-file nil 'silent)))))
 
-(defcustom claude-org-sdd-default-backend "cmux"
-  "Default CLAUDE_BACKEND value for new SDD sections.
-Inserted as a property when creating SDD structures via `claude-org-insert-sdd'.
+(defcustom claude-org-workspace-default-backend "cmux"
+  "Default CLAUDE_BACKEND value for new workspace sections.
+Inserted as a property when creating workspace structures via `claude-org-insert-workspace'.
 Set to nil to omit the property (uses whatever backend the file/section inherits)."
   :type '(choice (const :tag "cmux" "cmux")
                  (const :tag "iTerm2" "iterm2")
                  (const :tag "None (inherit)" nil))
   :group 'claude-org)
 
-(defun claude-org-insert-sdd ()
-  "Insert an SDD (Spec-Driven Development) structure.
+(defun claude-org-insert-workspace ()
+  "Insert a workspace structure.
 Creates two notebook sections:
 1. System Prompt :system_prompt: for AI guidance instructions
 2. Workflow :sdd: with a single AI block (user adds phase tags manually)
@@ -3306,25 +3389,26 @@ The System Prompt auto-populates with paths to these docs/ files.
 
 Each notebook section gets a CUSTOM_ID property for stable cross-file linking.
 Prompts for feature name and sets up unique CLAUDE_SESSION_ID.
-Aligns section level with previous SDD if any exists, otherwise uses top level."
+Aligns section level with previous workspace if any exists, otherwise uses top level."
   (interactive)
   (let* ((name (read-string "Feature name: "))
          (session-id (format "sdd-%s" (format-time-string "%Y%m%d-%H%M%S")))
          (file-base (when buffer-file-name (file-name-base buffer-file-name)))
-         ;; Align with previous SDD level, or use top level (1) if none exists
-         (level (or (claude-org--find-previous-sdd-level) 1))
+         ;; Align with previous workspace level, or use top level (1) if none exists
+         (level (or (claude-org--find-previous-workspace-level) 1))
          (stars (make-string level ?*))
          (stars2 (make-string (1+ level) ?*))
          (stars3 (make-string (+ 2 level) ?*))
          ;; Create docs/ files (side effect only, return value unused)
-         (_ (claude-org--sdd-create-docs-files name session-id)))
+         (_ (claude-org--workspace-create-docs-files name session-id)))
     ;; Insert top-level heading with session
     (insert stars " " name "\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id name file-base) "\n")
+    (insert ":CMUX_WORKSPACE: " (claude-org--workspace-name-to-slug name) "\n")
     (insert ":CLAUDE_SESSION_ID: " session-id "\n")
-    (when claude-org-sdd-default-backend
-      (insert ":CLAUDE_BACKEND: " claude-org-sdd-default-backend "\n"))
+    (when claude-org-workspace-default-backend
+      (insert ":CLAUDE_BACKEND: " claude-org-workspace-default-backend "\n"))
     (insert ":END:\n\n")
 
     ;; 1. Insert System Prompt section for AI guidance
@@ -3332,11 +3416,11 @@ Aligns section level with previous SDD if any exists, otherwise uses top level."
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "System Prompt" file-base) "\n")
     (insert ":END:\n\n")
-    (insert (format "The current SDD story is \"%s\"\n" name))
+    (insert (format "The current workspace story is \"%s\"\n" name))
     ;; Lean docs/ layout — just enough for Claude Code to know the convention
-    (let* ((slug (claude-org--sdd-name-to-slug name))
+    (let* ((slug (claude-org--workspace-name-to-slug name))
            (year (substring session-id 4 8))
-           (fmt (claude-org--sdd-docs-format))
+           (fmt (claude-org--workspace-docs-format))
            (r (format "docs/research/%s-%s.%s" year slug fmt))
            (d (format "docs/design-docs/%s-%s.%s" year slug fmt)))
       (insert (format "
@@ -3372,9 +3456,9 @@ After creating or updating any doc, update its row in the subdirectory's =INDEX.
     ;; Position cursor inside the AI block
     (re-search-backward "^#\\+begin_src ai")
     (forward-line 1)
-    (message "Created SDD '%s' with session ID: %s" name session-id)))
+    (message "Created workspace '%s' with session ID: %s" name session-id)))
 
-(defun claude-org-sdd-archive-workflow ()
+(defun claude-org-workspace-archive-workflow ()
   "Archive the current Workflow via `org-archive-subtree' and create a fresh one.
 Uses the buffer's #+ARCHIVE: property to determine the archive location.
 Inserts a new Workflow at the same position and level with an empty AI block.
@@ -3382,29 +3466,29 @@ Also clears CLAUDE_CLI_SESSION so the next terminal launch starts fresh."
   (interactive)
   (save-excursion
     (org-back-to-heading t)
-    ;; Walk up to find the SDD top-level heading with CLAUDE_SESSION_ID
-    (let ((sdd-pos nil)
+    ;; Walk up to find the workspace top-level heading with CLAUDE_SESSION_ID
+    (let ((workspace-pos nil)
           (session-id nil))
       (save-excursion
         (while (and (not session-id) (org-up-heading-safe))
           (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
-          (when session-id (setq sdd-pos (point)))))
+          (when session-id (setq workspace-pos (point)))))
       (unless session-id
         (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
-        (when session-id (setq sdd-pos (point))))
+        (when session-id (setq workspace-pos (point))))
       (unless session-id
-        (user-error "Not inside an SDD section (no CLAUDE_SESSION_ID found)"))
-      ;; Find the active Workflow heading under this SDD
-      (goto-char sdd-pos)
-      (let* ((sdd-end (save-excursion (org-end-of-subtree t t) (point)))
+        (user-error "Not inside a workspace section (no CLAUDE_SESSION_ID found)"))
+      ;; Find the active Workflow heading under this workspace
+      (goto-char workspace-pos)
+      (let* ((workspace-end (save-excursion (org-end-of-subtree t t) (point)))
              (workflow-pos nil))
         (save-excursion
           (while (and (not workflow-pos)
-                      (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" sdd-end t))
+                      (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" workspace-end t))
             (unless (member "ARCHIVE" (org-get-tags nil t))
               (setq workflow-pos (line-beginning-position)))))
         (unless workflow-pos
-          (user-error "No active Workflow section found under this SDD"))
+          (user-error "No active Workflow section found under this workspace"))
         (goto-char workflow-pos)
         (let* ((wf-level (org-current-level))
                (stars (make-string wf-level ?*))
@@ -3426,7 +3510,7 @@ Also clears CLAUDE_CLI_SESSION so the next terminal launch starts fresh."
           (insert "#+begin_src ai\n\n#+end_src\n")
           ;; Clear CLI session so next terminal launch starts fresh
           (save-excursion
-            (goto-char sdd-pos)
+            (goto-char workspace-pos)
             (org-delete-property claude-org-cli-session-property))
           (save-buffer)
           ;; Position cursor inside the new AI block
@@ -5004,12 +5088,19 @@ Uses `cleanup-queued-blocks' to properly free markers and reset exec-status."
 #+BEGIN_SRC elisp
 (defun claude-org-show-verbose ()
   "Show verbose output buffer for current session.
-Checks backend-verbose-buffer first (for claude-cli backend, this is
-the eat terminal buffer), then falls back to the session's verbose buffer."
+Checks cmux verbose buffer first, then backend-verbose-buffer (for
+claude-cli backend), then falls back to the session's verbose buffer."
   (interactive)
   (let* ((session-key (claude-org--current-session-key))
          (backend (claude-org--session-get session-key :backend))
-         (buf (or (when backend
+         ;; Check cmux verbose buffer (capture-pane output)
+         (ws-id (claude-org--session-get session-key :workspace-session-id))
+         (cmux-buf (when ws-id
+                     (get-buffer (format "*cmux: %s*" ws-id))))
+         (buf (or (when (and cmux-buf (buffer-live-p cmux-buf)
+                             (> (buffer-size cmux-buf) 0))
+                    cmux-buf)
+                  (when backend
                     (claude-agent-backend-verbose-buffer backend))
                   (claude-agent-get-verbose-buffer session-key))))
     (if (and buf (buffer-live-p buf))
@@ -5059,60 +5150,60 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
 
 *** Unified Terminal Dispatchers
 
-Dispatchers called by sdd_bridge.py to route events to the correct
+Dispatchers called by workspace_bridge.py to route events to the correct
 backend (cmux or iTerm2). All use the same pattern: check if the
 session is known to cmux, otherwise fall back to iTerm2.
 
 #+BEGIN_SRC elisp
-(defun claude-org--terminal-query-completed (sdd-session-id)
+(defun claude-org--terminal-query-completed (workspace-session-id)
   "Dispatch query-completed to the correct terminal backend.
-SDD-SESSION-ID identifies the session whose query just finished.
+WORKSPACE-SESSION-ID identifies the session whose query just finished.
 Tries cmux first (checks hash table, then falls back to request-id file),
 then iTerm2."
   (cond
    ;; cmux: session-key in hash table (normal path)
    ((and (fboundp 'claude-org-cmux--query-completed)
-         (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
-    (claude-org-cmux--query-completed sdd-session-id))
+         (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
+    (claude-org-cmux--query-completed workspace-session-id))
    ;; iTerm2: iterm2 hash has this session (check before cmux fallback so a
    ;; live iTerm2 session is never dispatched to cmux by the fallback below)
    ((and (fboundp 'claude-org-iterm2--query-completed)
-         (boundp 'claude-org-iterm2--sdd-to-iterm2)
-         (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2))
-    (claude-org-iterm2--query-completed sdd-session-id))
+         (boundp 'claude-org-iterm2--workspace-to-iterm2)
+         (gethash workspace-session-id claude-org-iterm2--workspace-to-iterm2))
+    (claude-org-iterm2--query-completed workspace-session-id))
    ;; cmux: hash table empty but request-id file exists (module reload / race).
    ;; Only safe when iTerm2 does NOT claim this session-id — the request-id
    ;; file alone cannot distinguish which backend wrote it.
    ((and (fboundp 'claude-org-cmux--query-completed)
-         (claude-org-terminal--read-request-id sdd-session-id)
-         (not (and (boundp 'claude-org-iterm2--sdd-to-iterm2)
-                   (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2))))
-    (claude-org-cmux--query-completed sdd-session-id))
+         (claude-org-terminal--read-request-id workspace-session-id)
+         (not (and (boundp 'claude-org-iterm2--workspace-to-iterm2)
+                   (gethash workspace-session-id claude-org-iterm2--workspace-to-iterm2))))
+    (claude-org-cmux--query-completed workspace-session-id))
    ;; iTerm2 fallback (no hash entry — covers post-reload iTerm2 sessions)
    ((fboundp 'claude-org-iterm2--query-completed)
-    (claude-org-iterm2--query-completed sdd-session-id))
+    (claude-org-iterm2--query-completed workspace-session-id))
    (t (message "claude-org: no terminal backend loaded for query-completed"))))
 
-(defun claude-org--terminal-permission-needed (sdd-session-id tool-name)
+(defun claude-org--terminal-permission-needed (workspace-session-id tool-name)
   "Dispatch permission notification to the correct terminal backend."
   (cond
    ((and (fboundp 'claude-org-cmux--permission-needed)
-         (boundp 'claude-org-terminal--sdd-to-session-key)
-         (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
-    (claude-org-cmux--permission-needed sdd-session-id tool-name))
+         (boundp 'claude-org-terminal--workspace-to-session-key)
+         (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
+    (claude-org-cmux--permission-needed workspace-session-id tool-name))
    ((fboundp 'claude-org-iterm2--permission-needed)
-    (claude-org-iterm2--permission-needed sdd-session-id tool-name))
+    (claude-org-iterm2--permission-needed workspace-session-id tool-name))
    (t (message "claude-org: no terminal backend loaded for permission-needed"))))
 
-(defun claude-org--terminal-permission-resolved (sdd-session-id)
+(defun claude-org--terminal-permission-resolved (workspace-session-id)
   "Dispatch permission resolution to the correct terminal backend."
   (cond
    ((and (fboundp 'claude-org-cmux--permission-resolved)
-         (boundp 'claude-org-terminal--sdd-to-session-key)
-         (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
-    (claude-org-cmux--permission-resolved sdd-session-id))
+         (boundp 'claude-org-terminal--workspace-to-session-key)
+         (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
+    (claude-org-cmux--permission-resolved workspace-session-id))
    ((fboundp 'claude-org-iterm2--permission-resolved)
-    (claude-org-iterm2--permission-resolved sdd-session-id))
+    (claude-org-iterm2--permission-resolved workspace-session-id))
    (t (message "claude-org: no terminal backend loaded for permission-resolved"))))
 #+END_SRC
 
@@ -5161,7 +5252,7 @@ Falls back to native terminal if no backend is configured."
     ("i" "New AI block" claude-org-insert-block)
     ("t" "Template" claude-org-insert-template)
     ("s" "Story section" claude-org-insert-story)
-    ("d" "SDD structure" claude-org-insert-sdd)]
+    ("w" "Workspace" claude-org-insert-workspace)]
    ["Navigate"
     ("j" "Jump to AI block" claude-org-jump-to-ai-block)]
    ["Session"
@@ -5170,7 +5261,7 @@ Falls back to native terminal if no backend is configured."
     ("m" "Query manager" claude-agent-list-queries)
     ("p" "Permission mode" claude-org-switch-permission-mode)
     ("I" "Open terminal" claude-org-open-terminal-tab)
-    ("A" "Archive workflow" claude-org-sdd-archive-workflow)
+    ("A" "Archive workflow" claude-org-workspace-archive-workflow)
     ("D" "Disconnect session" claude-org-disconnect-session)
     ("X" "Disconnect all" claude-org-disconnect-all-sessions)]
    ["Trace"

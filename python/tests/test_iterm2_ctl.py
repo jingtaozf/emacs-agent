@@ -39,13 +39,13 @@ class TestBuildParser:
         parser = build_parser()
         args = parser.parse_args([
             "launch", "--title", "tab", "--cwd", "/project",
-            "--launch-cmd", "claude-sdd test.org",
+            "--launch-cmd", "claude-workspace test.org",
             "--system-prompt-file", "/tmp/sp.txt",
             "--resume", "abc-123",
         ])
         assert args.title == "tab"
         assert args.cwd == "/project"
-        assert args.launch_cmd == "claude-sdd test.org"
+        assert args.launch_cmd == "claude-workspace test.org"
         assert args.system_prompt_file == "/tmp/sp.txt"
         assert args.resume == "abc-123"
 

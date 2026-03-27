@@ -9,7 +9,7 @@
 Shared utilities for terminal backends (iTerm2, cmux). Provides status file I/O,
 session heading navigation, query registration, and shared hash tables.
 
-Both iTerm2 and cmux backends need identical logic for: finding the SDD session
+Both iTerm2 and cmux backends need identical logic for: finding the workspace session
 heading in the org tree, reading/writing status files in =/tmp/claude-agent-status=,
 registering queries in =claude-agent--active-queries=, and generating tab titles.
 This module extracts those functions with a =claude-org-terminal--= prefix.
@@ -40,17 +40,17 @@ Used by hooks, status polling, request-id tracking, and from-emacs flags.")
 ** Shared Hash Tables
 
 A single shared hash table that replaces per-backend tables. Both backends
-register SDD session ID to org session-key mappings here.
+register workspace session ID to org session-key mappings here.
 
 #+BEGIN_SRC elisp
-(defvar claude-org-terminal--sdd-to-session-key (make-hash-table :test 'equal)
-  "Map SDD session ID → org session-key.
+(defvar claude-org-terminal--workspace-to-session-key (make-hash-table :test 'equal)
+  "Map workspace session ID → org session-key.
 Shared by all terminal backends (iTerm2, cmux).")
 #+END_SRC
 
 ** Navigation Helpers
 
-Find the SDD session heading and read properties from the session scope.
+Find the workspace session heading and read properties from the session scope.
 These are identical across iTerm2 and cmux backends.
 
 #+BEGIN_SRC elisp
@@ -66,7 +66,7 @@ Starts at current heading, walks up. Returns the session ID string, or nil."
         found)))
 
 (defun claude-org-terminal--find-session-property (prop)
-  "Find PROP in the SDD session scope.
+  "Find PROP in the workspace session scope.
 Searches up from point for org property PROP using inheritance.
 Also checks file-level #+PROPERTY settings (org-keyword-properties)
 which `org-entry-get' does not include.
@@ -81,41 +81,41 @@ Returns the value string, or nil if not found."
 
 ** Tab Title
 
-Generate a tab/workspace title from the SDD session heading — used by both
+Generate a tab/workspace title from the workspace session heading — used by both
 iTerm2 tab naming and cmux workspace naming.
 
 #+BEGIN_SRC elisp
 (defun claude-org-terminal--tab-title ()
-  "Generate terminal tab/workspace title for current SDD session.
-Format: HEADING [SDD-SESSION-ID] — unique across org files."
+  "Generate terminal tab title for current workspace session.
+Uses ACTIVE_STORY property when available, falls back to heading name."
   (save-excursion
     (save-restriction
-      (let ((sdd-id (claude-org-terminal--goto-session-heading)))
-        (format "%s [%s]"
-                (truncate-string-to-width
-                 (or (org-get-heading t t t t) "untitled") 40)
-                (or sdd-id "no-session"))))))
+      (claude-org-terminal--goto-session-heading)
+      (truncate-string-to-width
+       (or (org-entry-get nil "ACTIVE_STORY")
+           (org-get-heading t t t t)
+           "untitled") 50))))
 #+END_SRC
 
 ** Status File I/O
 
 Read and write status files in =claude-org-terminal-status-dir=. The Python
-SDD bridge hooks write status (ready/busy), and Emacs reads them for fast
+Workspace bridge hooks write status (ready/busy), and Emacs reads them for fast
 polling without API calls.
 
 #+BEGIN_SRC elisp
-(defun claude-org-terminal--save-request-id (sdd-session-id request-id)
-  "Save REQUEST-ID to status file for SDD-SESSION-ID."
+(defun claude-org-terminal--save-request-id (workspace-session-id request-id)
+  "Save REQUEST-ID to status file for WORKSPACE-SESSION-ID."
   (let ((dir claude-org-terminal-status-dir))
     (make-directory dir t)
     (with-temp-file (expand-file-name
-                     (concat sdd-session-id ".request-id") dir)
+                     (concat workspace-session-id ".request-id") dir)
       (insert request-id))))
 
-(defun claude-org-terminal--read-request-id (sdd-session-id)
-  "Read the request-id for SDD-SESSION-ID, or nil if not set."
+(defun claude-org-terminal--read-request-id (workspace-session-id)
+  "Read the request-id for WORKSPACE-SESSION-ID, or nil if not set."
   (let ((path (expand-file-name
-               (concat sdd-session-id ".request-id")
+               (concat workspace-session-id ".request-id")
                claude-org-terminal-status-dir)))
     (when (file-exists-p path)
       (let ((val (string-trim (with-temp-buffer
@@ -123,9 +123,9 @@ polling without API calls.
                                 (buffer-string)))))
         (unless (string-empty-p val) val)))))
 
-(defun claude-org-terminal--read-hook-status (sdd-session-id)
+(defun claude-org-terminal--read-hook-status (workspace-session-id)
   "Read Claude Code status from hook-written file. Fast, no API call."
-  (let ((file (expand-file-name (or sdd-session-id "unknown")
+  (let ((file (expand-file-name (or workspace-session-id "unknown")
                                 claude-org-terminal-status-dir)))
     (if (file-exists-p file)
         (string-trim (with-temp-buffer
@@ -133,18 +133,18 @@ polling without API calls.
                        (buffer-string)))
       "unknown")))
 
-(defun claude-org-terminal--write-from-emacs-flag (sdd-session-id)
+(defun claude-org-terminal--write-from-emacs-flag (workspace-session-id)
   "Write flag file indicating the next prompt was sent from Emacs.
-sdd-bridge.sh checks this to skip duplicate instruction insertion."
+workspace-bridge.sh checks this to skip duplicate instruction insertion."
   (let ((dir claude-org-terminal-status-dir))
     (make-directory dir t)
     (with-temp-file (expand-file-name
-                     (concat sdd-session-id ".from-emacs") dir)
+                     (concat workspace-session-id ".from-emacs") dir)
       (insert "1"))
     (let ((custom-id (org-entry-get nil "CUSTOM_ID")))
       (when custom-id
         (with-temp-file (expand-file-name
-                         (concat sdd-session-id ".custom-id") dir)
+                         (concat workspace-session-id ".custom-id") dir)
           (insert custom-id))))))
 #+END_SRC
 
@@ -155,9 +155,9 @@ Both backends create identical process-state structs and save the request-id
 to a status file for the Python response hook.
 
 #+BEGIN_SRC elisp
-(defun claude-org-terminal--register-query (sdd-session-id _terminal-id)
+(defun claude-org-terminal--register-query (workspace-session-id _terminal-id)
   "Register the current AI block as an active query.
-SDD-SESSION-ID is the SDD session, _TERMINAL-ID is the backend-specific ID (ignored).
+WORKSPACE-SESSION-ID is the workspace session, _TERMINAL-ID is the backend-specific ID (ignored).
 Creates a process-state, registers in `claude-agent--active-queries',
 and saves the request-id to a status file for the Python hook."
   (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
@@ -177,7 +177,7 @@ and saves the request-id to a status file for the Python hook."
                  :source-location-fn (when custom-id #'claude-org-goto-custom-id)
                  :source-location-args (when custom-id (list custom-id)))))
     (claude-agent--register-query req-id state)
-    (claude-org-terminal--save-request-id sdd-session-id req-id)))
+    (claude-org-terminal--save-request-id workspace-session-id req-id)))
 #+END_SRC
 
 ** Provide

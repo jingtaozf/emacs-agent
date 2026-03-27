@@ -64,7 +64,7 @@ help:
 	@echo "  make test-org-mock    - Run org mock CLI tests"
 	@echo "  make test-docker      - Run Docker unit tests (path translation)"
 	@echo "  make test-docker-sandbox - Run Docker sandbox tests (requires container)"
-	@echo "  make test-sdd-bridge  - E2E tests for terminal SDD bridge (requires MCP)"
+	@echo "  make test-workspace-bridge  - E2E tests for terminal workspace bridge (requires MCP)"
 	@echo "  make test-readme-smoke - Run README tutorial smoke tests (no API)"
 	@echo "  make test-readme      - Run full README tutorial tests (requires API)"
 	@echo ""
@@ -153,7 +153,7 @@ test-native:
 	@echo "Running native terminal unit tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-native.org\")" \
@@ -166,7 +166,7 @@ test-cmux:
 	@echo "Running cmux backend E2E tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
 		-l tests/test-cmux-e2e-simulated.el \
@@ -352,7 +352,7 @@ test-org-unit:
 		-l tests/test-claude-org-marker-lifecycle.el \
 		-l tests/test-claude-org-query-id.el \
 		-l tests/test-claude-org-query-id-issues.el \
-		-l tests/test-claude-org-sdd.el \
+		-l tests/test-claude-org-workspace.el \
 		-l tests/test-behavior-prompts.el \
 		-l tests/test-mcp-report-invocation.el \
 		-l tests/test-plugin-discovery.el \
@@ -371,11 +371,11 @@ test-org-unit:
 		-l tests/test-mcp-http.el \
 		-l tests/test-claude-org-cleanup.el \
 		-l tests/test-claude-org-cleanup-r2.el \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		-l tests/test-terminal-prompt-parity.el \
-		-l tests/test-sdd-bridge-response.el \
+		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
@@ -626,19 +626,19 @@ test-e2e-local:
 	@echo "Running local E2E tests (requires Phoenix + OTel bridge)..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-sdd-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
 		-l tests/test-e2e-local-trace.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"
 
-# SDD Bridge E2E tests (requires running Emacs MCP server)
+# Workspace Bridge E2E tests (requires running Emacs MCP server)
 EMACS_MCP_PORT ?= 9999
-.PHONY: test-sdd-bridge
-test-sdd-bridge:
-	@echo "Running SDD Bridge E2E tests (MCP port $(EMACS_MCP_PORT))..."
-	bash tests/test-sdd-bridge-e2e.sh $(EMACS_MCP_PORT)
+.PHONY: test-workspace-bridge
+test-workspace-bridge:
+	@echo "Running Workspace Bridge E2E tests (MCP port $(EMACS_MCP_PORT))..."
+	bash tests/test-workspace-bridge-e2e.sh $(EMACS_MCP_PORT)
 
 # OTel server targets
 .PHONY: otel-server

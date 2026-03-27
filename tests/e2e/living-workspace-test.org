@@ -1,0 +1,359 @@
+#+TITLE: Living Workspace E2E Test Runbook
+#+DATE: 2026-03-26
+
+* Prerequisites
+
+- Emacs running with =claude-org-mode= loaded
+- Emacs MCP server running (=emacs-mcp-server-start=)
+- cmux running (production or dev build)
+- Test fixture: =tests/e2e/org/workspace-test.org=
+
+* Test Fixture
+
+File: =tests/e2e/org/workspace-test.org=
+
+Structure:
+- =* E2E Test Workspace= (workspace heading with =CMUX_WORKSPACE= property)
+  - =** Greeting Test= (story sub-heading)
+    - =*** System Prompt :system_prompt:= (story-specific system prompt)
+    - =*** Workflow :sdd:= (contains ai blocks and responses)
+
+* Tests
+
+** T1: Load test org file in Emacs
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(let ((buf (find-file-noselect "/Users/jingtao/projects/claude-agent/tests/e2e/org/workspace-test.org")))
+  (with-current-buffer buf
+    (list :buffer-name (buffer-name) :major-mode major-mode :claude-org-mode claude-org-mode)))
+#+end_example
+
+*** Expected
+- =:buffer-name "workspace-test.org"=
+- =:major-mode org-mode=
+- =:claude-org-mode t=
+
+** T2: Execute ai block (C-c C-c)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(with-current-buffer (find-buffer-visiting ".../workspace-test.org")
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "Say \"hello e2e test\"" nil t)
+    (claude-org-execute)
+    "execute-started"))
+#+end_example
+
+*** Expected
+- Returns ="execute-started"= (no error)
+- Claude Code launches in cmux
+
+** T3: Workspace appears in cmux
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-cmux--call "list-workspaces")
+#+end_example
+
+*** Expected
+Output contains: =workspace:NN  E2E Test Workspace [sdd-e2e-test-001]=
+
+** T4: Tab name matches workspace heading
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-cmux--call "tree" "--workspace" "<CMUX_WORKSPACE_ID from T2>")
+#+end_example
+
+*** Expected
+Surface line shows: ="E2E Test Workspace [sdd-e2e-test-001]"=
+NOT generic ="Claude Code"= or a project name.
+
+** T5: Response inserted in correct place
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(with-current-buffer (find-buffer-visiting ".../workspace-test.org")
+  (buffer-substring-no-properties (point-min) (point-max)))
+#+end_example
+
+*** Expected
+Buffer contains a =**** Response 1= heading under =*** Workflow :sdd:=,
+after the =**** Instruction 1= heading. Response content includes "hello e2e test".
+
+Structure:
+#+begin_example
+,* E2E Test Workspace
+,** Greeting Test
+,*** Workflow :sdd:
+,**** Instruction 1 :claude_chat:
+,**** Response 1 :ai_output:      <-- correct level, correct position
+#+end_example
+
+** T6: Verbose buffer created
+:PROPERTIES:
+:STATUS: PARTIAL_PASS
+:TESTED: 2026-03-26
+:NOTE: Buffer created but empty (query completed too fast for verbose tick)
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(let ((buf (get-buffer "*cmux: sdd-e2e-test-001*")))
+  (when buf (list :name (buffer-name buf) :size (buffer-size buf))))
+#+end_example
+
+*** Expected
+Buffer =*cmux: sdd-e2e-test-001*= exists. For longer queries, it should
+contain streamed Claude Code output. For very fast queries (like this test),
+it may be empty since the 1-second verbose tick didn't fire before completion.
+
+** T7: CMUX_SURFACE_ID saved on workspace heading
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(with-current-buffer (find-buffer-visiting ".../workspace-test.org")
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward ":CLAUDE_SESSION_ID: sdd-e2e-test-001" nil t)
+    (org-back-to-heading t)
+    (org-entry-get nil "CMUX_SURFACE_ID")))
+#+end_example
+
+*** Expected
+Returns a surface ref like ="surface:49"=.
+
+** T8: CMUX_WORKSPACE_ID saved on workspace heading
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+Same as T7 but read ="CMUX_WORKSPACE_ID"=.
+
+*** Expected
+Returns a UUID like ="09866C3B-CA47-46E3-8209-28A25B3995D5"=.
+
+** T9: Reopen terminal renames tab correctly
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+;; Call ensure-session again (reuse path)
+(with-current-buffer (find-buffer-visiting ".../workspace-test.org")
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "Say \"hello e2e test\"" nil t)
+    (claude-org-cmux--ensure-session)))
+;; Then check tree
+(claude-org-cmux--call "tree" "--workspace" "<UUID>")
+#+end_example
+
+*** Expected
+Surface line still shows ="E2E Test Workspace [sdd-e2e-test-001]"=.
+Tab name is NOT overwritten by Claude Code's default terminal title.
+
+** T10: System prompt contains story content
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-workspace-bridge-system-prompt
+  ".../workspace-test.org" "sdd-e2e-test-001")
+#+end_example
+
+*** Expected
+Result contains: "The current workspace story is \"Greeting Test\""
+and "Keep responses very short".
+
+** T11: List sessions returns workspace
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-workspace-bridge-list-sessions ".../workspace-test.org")
+#+end_example
+
+*** Expected
+Returns: ="sdd-e2e-test-001\tE2E Test Workspace\t"=
+
+** T12: Tab name uses ACTIVE_STORY, not workspace heading
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-26
+:NOTE: Bug found and fixed — tab-title now reads ACTIVE_STORY property
+:END:
+
+*** Setup
+
+Test fixture must have workspace heading name DIFFERENT from ACTIVE_STORY:
+- Workspace heading: "Test Dev Workspace"
+- ACTIVE_STORY: "study code patterns"
+- Story sub-heading: "** study code patterns"
+
+*** Command
+#+begin_example
+evalElisp:
+;; 1. Execute ai block
+(with-current-buffer (find-buffer-visiting ".../workspace-test.org")
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "hello tab name test" nil t)
+    (claude-org-execute)))
+
+;; 2. Check tab name in cmux tree
+(claude-org-cmux--call "tree" "--workspace" "<CMUX_WORKSPACE_ID>")
+#+end_example
+
+*** Expected
+Surface line shows ACTIVE_STORY name: ="study code patterns [sdd-e2e-test-002]"=
+NOT the workspace heading: ="Test Dev Workspace [sdd-e2e-test-002]"=
+
+*** Bug found
+=claude-org-terminal--tab-title= used =(org-get-heading)= which returns the
+workspace heading name, not the story name. Fixed to use =(org-entry-get nil "ACTIVE_STORY")=
+with fallback to heading name.
+
+File: =claude-org-terminal-base.org:88=
+
+** T13: ACTIVE_STORY auto-set on execution (Stage 2)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-27
+:END:
+
+*** Setup
+Remove ACTIVE_STORY from workspace heading in fixture (should be nil).
+
+*** Command
+#+begin_example
+evalElisp:
+;; 1. Verify ACTIVE_STORY is nil before execution
+(org-entry-get nil "ACTIVE_STORY")  ;; => nil
+
+;; 2. Execute ai block
+(claude-org-execute)
+
+;; 3. Check ACTIVE_STORY was auto-set
+(org-entry-get nil "ACTIVE_STORY")  ;; => "study code patterns"
+#+end_example
+
+*** Expected
+ACTIVE_STORY auto-detected from story heading and set on workspace heading.
+
+** T14: Workspace mappings persist after query (Stage 2)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-27
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+;; After query completes, check mappings are NOT cleared
+(list
+ (gethash "sdd-e2e-test-005" claude-org-terminal--workspace-to-session-key)
+ (gethash "sdd-e2e-test-005" claude-org-cmux--workspace-to-surface)
+ (gethash "sdd-e2e-test-005" claude-org-cmux--workspace-to-cmux-id))
+#+end_example
+
+*** Expected
+All three return non-nil values. Previously these were cleared by remhash
+on query-completed, breaking workspace reuse.
+
+** T15: Workspace name vs tab name separation (Stage 2)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-27
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-cmux--call "tree" "--workspace" "<UUID>")
+#+end_example
+
+*** Expected
+- workspace line: "Test Dev Workspace" (heading name)
+- surface line: "study code patterns" (ACTIVE_STORY)
+These should be DIFFERENT when heading != ACTIVE_STORY.
+
+* Results Summary
+
+| Test | Description | Status |
+|------+-------------+--------|
+| T1 | Load test org file | PASS |
+| T2 | Execute ai block | PASS |
+| T3 | Workspace in cmux | PASS |
+| T4 | Tab name = ACTIVE_STORY | PASS |
+| T5 | Response in correct place | PASS |
+| T6 | Verbose buffer | PARTIAL (empty for fast query) |
+| T7 | CMUX_SURFACE_ID saved | PASS |
+| T8 | CMUX_WORKSPACE_ID saved | PASS |
+| T9 | Tab rename on reuse | PASS |
+| T10 | System prompt | PASS |
+| T11 | List sessions | PASS |
+| T12 | Tab uses ACTIVE_STORY not heading | PASS (bug found + fixed) |
+| T13 | ACTIVE_STORY auto-set on execute | PASS (Stage 2) |
+| T14 | Workspace mappings persist | PASS (Stage 2) |
+| T15 | Workspace name != tab name | PASS (Stage 2) |
+
+* Cleanup
+
+To remove the test workspace from cmux:
+#+begin_example
+evalElisp:
+(claude-org-cmux--call "close-workspace"
+  "--workspace" "<CMUX_WORKSPACE_ID>")
+#+end_example
+
+To reset the test fixture (remove saved properties):
+#+begin_example
+git checkout -- tests/e2e/org/workspace-test.org
+#+end_example

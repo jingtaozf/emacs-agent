@@ -23,7 +23,7 @@ mcp_call() {
     | sed 's/^"//;s/"$//'
 }
 
-create_test_sdd() {
+create_test_workspace() {
   local org_file="$1"
   local session_id="$2"
   mcp_call "(let ((debug-on-error nil)

@@ -1,4 +1,4 @@
-"""Tests for the SDD bridge hook handler."""
+"""Tests for the workspace bridge hook handler."""
 
 import json
 import os
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 from claude_agent.mcp_client import McpConnectionError
 
-from claude_agent.sdd_bridge import (
+from claude_agent.workspace_bridge import (
     _escape_elisp_string,
     _extract_full_response,
     _format_todos_as_elisp,
@@ -27,12 +27,12 @@ from claude_agent.sdd_bridge import (
 
 class TestWriteStatus:
     def test_writes_status_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         write_status("test-session", "busy")
         assert (tmp_path / "test-session").read_text() == "busy"
 
     def test_overwrites_existing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         write_status("test-session", "busy")
         write_status("test-session", "ready")
         assert (tmp_path / "test-session").read_text() == "ready"
@@ -40,16 +40,16 @@ class TestWriteStatus:
 
 class TestCustomIdPersistence:
     def test_write_and_read(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         _write_custom_id("sid", "sdd-123-instr-3")
         assert _read_custom_id("sid") == "sdd-123-instr-3"
 
     def test_read_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         assert _read_custom_id("nonexistent") is None
 
     def test_overwrite(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         _write_custom_id("sid", "sdd-123-instr-1")
         _write_custom_id("sid", "sdd-123-instr-2")
         assert _read_custom_id("sid") == "sdd-123-instr-2"
@@ -57,11 +57,11 @@ class TestCustomIdPersistence:
 
 class TestRequestIdPersistence:
     def test_read_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         assert _read_request_id("nonexistent") is None
 
     def test_read_existing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         (tmp_path / "sid.request-id").write_text("req-42-1234")
         assert _read_request_id("sid") == "req-42-1234"
 
@@ -70,7 +70,7 @@ class TestHandleResponseQueryCompleted:
     """handle_response calls query-completed to unregister from active-queries."""
 
     def test_query_completed_called(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         _write_custom_id("sid", "instr-custom-id")
         mcp = MagicMock()
         handle_response(
@@ -84,7 +84,7 @@ class TestHandleResponseQueryCompleted:
 
     def test_query_completed_called_even_without_response(self, tmp_path, monkeypatch):
         """query-completed fires even when there's no response text."""
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         handle_response(
             mcp,
@@ -264,7 +264,7 @@ class TestHandlePromptFiltering:
         return mcp
 
     def test_normal_prompt_calls_mcp(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         mcp.eval_elisp.return_value = "sid-instr-1"
         handle_prompt(mcp, {"prompt": "explain this function"}, "/tmp/f.org", "sid")
@@ -272,7 +272,7 @@ class TestHandlePromptFiltering:
 
     def test_prompt_saves_custom_id(self, tmp_path, monkeypatch):
         """handle_prompt saves the instruction CUSTOM_ID returned by MCP."""
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         mcp.eval_elisp.return_value = "sdd-123-instr-5"
         handle_prompt(mcp, {"prompt": "do X"}, "/tmp/f.org", "sid")
@@ -280,7 +280,7 @@ class TestHandlePromptFiltering:
 
     def test_task_notification_skipped(self, tmp_path, monkeypatch):
         """Task notifications from background agents should not create Instruction headings."""
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         prompt = (
             '<task-notification>\n'
@@ -296,14 +296,14 @@ class TestHandlePromptFiltering:
 
     def test_system_reminder_skipped(self, tmp_path, monkeypatch):
         """System reminders injected by CLI should not create Instruction headings."""
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         prompt = '<system-reminder>\nThe task tools haven\'t been used recently.\n</system-reminder>'
         handle_prompt(mcp, {"prompt": prompt}, "/tmp/f.org", "sid")
         assert not mcp.eval_elisp.called
 
     def test_empty_prompt_skipped(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.sdd_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         handle_prompt(mcp, {"prompt": ""}, "/tmp/f.org", "sid")
         assert not mcp.eval_elisp.called
@@ -385,7 +385,7 @@ class TestMcpEvalWithTrace:
         mock_span = MagicMock()
         mock_span.get_span_context.return_value = mock_ctx
 
-        import claude_agent.sdd_bridge as bridge
+        import claude_agent.workspace_bridge as bridge
         monkeypatch.setattr(bridge.otel_trace, "get_current_span", lambda: mock_span)
 
         mcp = MagicMock()

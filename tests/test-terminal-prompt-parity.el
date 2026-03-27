@@ -68,7 +68,7 @@ SESSION-ID is the CLAUDE_SESSION_ID for the SDD section."
 
 (ert-deftest test-tpp-block-history-recorded ()
   "Terminal-typed prompt via SDD bridge should record block history entry.
-After `claude-org-sdd-bridge-insert-prompt', `claude-org--block-history'
+After `claude-org-workspace-bridge-insert-prompt', `claude-org--block-history'
 should contain an entry with the generated CUSTOM_ID."
   :tags '(:unit :fast :tdd :terminal-parity)
   (let ((session-id "sdd-20260312-test-hist")
@@ -82,7 +82,7 @@ should contain an entry with the generated CUSTOM_ID."
               ;; Clear any existing history
               (setq-local claude-org--block-history nil)
               ;; Insert a terminal prompt
-              (let ((custom-id (claude-org-sdd-bridge-insert-prompt
+              (let ((custom-id (claude-org-workspace-bridge-insert-prompt
                                 org-file session-id "What is 2+2?")))
                 ;; Should have returned a custom-id
                 (should custom-id)
@@ -114,7 +114,7 @@ on completion."
                  (org-file (cdr setup)))
             (with-current-buffer buf
               (setq-local claude-org--block-history nil)
-              (claude-org-sdd-bridge-insert-prompt
+              (claude-org-workspace-bridge-insert-prompt
                org-file session-id "Tell me a joke")
               ;; Session should have :block-id set
               (let* ((session-key (claude-org--current-session-key))
@@ -137,7 +137,7 @@ on completion."
           (let* ((buf (car setup))
                  (org-file (cdr setup)))
             (with-current-buffer buf
-              (claude-org-sdd-bridge-insert-prompt
+              (claude-org-workspace-bridge-insert-prompt
                org-file session-id "Explain closures")
               ;; Navigate to the Instruction heading
               (goto-char (point-min))
@@ -163,7 +163,7 @@ Simulates what Python handle_response does via MCP."
                  (org-file (cdr setup)))
             (with-current-buffer buf
               (setq-local claude-org--block-history nil)
-              (claude-org-sdd-bridge-insert-prompt
+              (claude-org-workspace-bridge-insert-prompt
                org-file session-id "Fix this bug")
               ;; Verify in-progress
               (should (= 1 (length claude-org--block-history)))
@@ -191,7 +191,7 @@ Simulates what Python handle_response does via MCP."
           (let* ((buf (car setup))
                  (org-file (cdr setup)))
             (with-current-buffer buf
-              (claude-org-sdd-bridge-insert-prompt
+              (claude-org-workspace-bridge-insert-prompt
                org-file session-id "Summarize this")
               ;; Session should be busy
               (let ((session-key (claude-org--current-session-key)))
@@ -216,9 +216,9 @@ Simulates what Python handle_response does via MCP."
                  (org-file (cdr setup)))
             (with-current-buffer buf
               (setq-local claude-org--block-history nil)
-              (let ((cid1 (claude-org-sdd-bridge-insert-prompt
+              (let ((cid1 (claude-org-workspace-bridge-insert-prompt
                            org-file session-id "First question"))
-                    (cid2 (claude-org-sdd-bridge-insert-prompt
+                    (cid2 (claude-org-workspace-bridge-insert-prompt
                            org-file session-id "Second question")))
                 ;; Two distinct custom IDs
                 (should-not (string= cid1 cid2))

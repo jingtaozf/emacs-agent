@@ -1,7 +1,7 @@
-"""SDD bridge hook handler — replaces scripts/sdd-bridge.sh.
+"""Workspace bridge hook handler — replaces scripts/workspace-bridge.sh.
 
 Called by Claude CLI hooks with event type as argv[1], JSON on stdin.
-Required env vars: SDD_ORG_FILE, SDD_SESSION_ID, EMACS_MCP_URL
+Required env vars: WORKSPACE_ORG_FILE, WORKSPACE_SESSION_ID, EMACS_MCP_URL
 """
 
 import json
@@ -118,7 +118,7 @@ def _build_save_cli_session_sexp(
     if not cli_session:
         return ""
     return (
-        f'(claude-org-sdd-bridge-save-cli-session '
+        f'(claude-org-workspace-bridge-save-cli-session '
         f'"{_escape_elisp_string(org_file)}" '
         f'"{_escape_elisp_string(session_id)}" '
         f'"{_escape_elisp_string(cli_session)}")'
@@ -155,7 +155,7 @@ def _check_any_recent_from_emacs_flag():
 
     Returns (True, path) if found, (False, "") otherwise.
     Handles the session ID mismatch where Emacs writes the flag keyed by
-    a per-heading session ID but the terminal uses a different SDD_SESSION_ID.
+    a per-heading session ID but the terminal uses a different WORKSPACE_SESSION_ID.
 
     Uses process start time (not a fixed window) to avoid consuming flags
     from unrelated executions that happened before this hook was triggered.
@@ -215,7 +215,7 @@ def handle_prompt(
 
         # Check from-emacs flag — try session-specific first, then any recent flag.
         # Emacs writes the flag keyed by per-heading session ID, which may differ
-        # from the terminal's SDD_SESSION_ID. Checking any recent flag handles this.
+        # from the terminal's WORKSPACE_SESSION_ID. Checking any recent flag handles this.
         from_emacs_flag = os.path.join(STATUS_DIR, f"{session_id}.from-emacs")
         flag_exists = os.path.exists(from_emacs_flag)
         if not flag_exists:
@@ -248,7 +248,7 @@ def handle_prompt(
                 # No flag — prompt was typed in terminal, insert into org
                 escaped_prompt = _escape_elisp_string(prompt)
                 elisp = (
-                    f'(claude-org-sdd-bridge-insert-prompt '
+                    f'(claude-org-workspace-bridge-insert-prompt '
                     f'"{_escape_elisp_string(org_file)}" '
                     f'"{_escape_elisp_string(session_id)}" '
                     f'"{escaped_prompt}")'
@@ -320,13 +320,13 @@ def handle_response(
 
         elisp = (
             f'(progn '
-            f'(claude-org-sdd-bridge-insert-response '
+            f'(claude-org-workspace-bridge-insert-response '
             f'"{_escape_elisp_string(org_file)}" '
             f'"{_escape_elisp_string(session_id)}" '
             f'"{_escape_elisp_string(response)}" '
             f'"{_escape_elisp_string(custom_id)}") '
             f'{save_sexp} '
-            f'(with-current-buffer (claude-org-sdd-bridge--ensure-buffer '
+            f'(with-current-buffer (claude-org-workspace-bridge--ensure-buffer '
             f'"{_escape_elisp_string(org_file)}") '
             f'(run-hook-with-args '
             f"'claude-org-complete-hook "
@@ -459,7 +459,7 @@ def _handle_todo_tool(
 
     elisp_todos = _format_todos_as_elisp(todos)
     elisp = (
-        f'(claude-org-sdd-bridge-update-todos '
+        f'(claude-org-workspace-bridge-update-todos '
         f'"{_escape_elisp_string(org_file)}" '
         f'"{_escape_elisp_string(session_id)}" '
         f"'{elisp_todos} "
@@ -551,23 +551,23 @@ def main() -> None:
     global tracer
 
     if len(sys.argv) < 2:
-        print("Usage: sdd-bridge <event-type>", file=sys.stderr)
+        print("Usage: workspace-bridge <event-type>", file=sys.stderr)
         sys.exit(1)
 
     event = sys.argv[1]
     input_text = sys.stdin.read()
 
-    org_file = os.environ.get("SDD_ORG_FILE")
-    session_id = os.environ.get("SDD_SESSION_ID")
+    org_file = os.environ.get("WORKSPACE_ORG_FILE")
+    session_id = os.environ.get("WORKSPACE_SESSION_ID")
     mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
 
     if not org_file or not session_id:
-        sys.exit(0)  # soft-fail: don't break hooks for non-SDD sessions
+        sys.exit(0)  # soft-fail: don't break hooks for non-workspace sessions
 
     # Initialize tracing (optional — gracefully degrades if deps missing)
     ctx = None
     if setup_tracer:
-        tracer = setup_tracer("claude-agent-sdd-bridge")
+        tracer = setup_tracer("claude-agent-workspace-bridge")
         ctx = read_trace_context(session_id)
 
     try:
@@ -598,12 +598,12 @@ def main() -> None:
 
     if tracer:
         root_span_ctx = tracer.start_as_current_span(
-            f"sdd-bridge-{event}", context=ctx,
+            f"workspace-bridge-{event}", context=ctx,
             kind=root_kind, attributes=root_attrs
         )
     else:
         root_span_ctx = _span(
-            f"sdd-bridge-{event}", kind=root_kind, oi_kind=root_oi_kind,
+            f"workspace-bridge-{event}", kind=root_kind, oi_kind=root_oi_kind,
             **root_attrs
         )
 
@@ -630,7 +630,7 @@ def main() -> None:
         elif event == "permission-clear":
             handle_permission_clear(mcp, input_data, org_file, session_id)
         else:
-            print(f"sdd-bridge: unknown event: {event}", file=sys.stderr)
+            print(f"workspace-bridge: unknown event: {event}", file=sys.stderr)
 
 
 if __name__ == "__main__":

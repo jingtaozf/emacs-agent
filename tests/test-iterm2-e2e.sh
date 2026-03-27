@@ -3,7 +3,7 @@
 #
 # Tests the complete flow:
 #   1. Emacs functions callable via MCP (iterm2--call, ensure-session, etc.)
-#   2. sdd-bridge.sh writes hook status files to /tmp/claude-agent-status/
+#   2. workspace-bridge.sh writes hook status files to /tmp/claude-agent-status/
 #   3. Emacs reads hook status correctly
 #   4. iTerm2 backend dispatch works (CLAUDE_BACKEND=iterm2)
 #
@@ -92,7 +92,7 @@ test_iterm2_script_path_valid() {
 }
 
 test_hook_status_write_and_read() {
-  # Simulate what sdd-bridge.sh does: write status file, read via Emacs
+  # Simulate what workspace-bridge.sh does: write status file, read via Emacs
   local test_id="test-e2e-$$"
   local status_dir="/tmp/claude-agent-status"
   mkdir -p "$status_dir"
@@ -116,8 +116,8 @@ test_hook_status_write_and_read() {
   echo "$result" | grep -q "unknown"
 }
 
-test_sdd_bridge_writes_status() {
-  # Run sdd-bridge.sh prompt event and verify it writes "busy"
+test_workspace_bridge_writes_status() {
+  # Run workspace-bridge.sh prompt event and verify it writes "busy"
   local test_id="test-bridge-$$"
   local status_dir="/tmp/claude-agent-status"
   mkdir -p "$status_dir"
@@ -125,10 +125,10 @@ test_sdd_bridge_writes_status() {
 
   # Run prompt event
   echo '{"prompt":"test","session_id":"s1"}' | \
-    SDD_SESSION_ID="$test_id" \
-    SDD_ORG_FILE="/tmp/fake.org" \
+    WORKSPACE_SESSION_ID="$test_id" \
+    WORKSPACE_ORG_FILE="/tmp/fake.org" \
     EMACS_MCP_URL="$MCP_URL" \
-    uv run --project "$PROJECT_DIR/python" sdd-bridge prompt 2>/dev/null || true
+    uv run --project "$PROJECT_DIR/python" workspace-bridge prompt 2>/dev/null || true
 
   # Check status file was written
   [ -f "$status_dir/$test_id" ] || return 1
@@ -138,10 +138,10 @@ test_sdd_bridge_writes_status() {
 
   # Run response event
   echo '{"last_assistant_message":"hello"}' | \
-    SDD_SESSION_ID="$test_id" \
-    SDD_ORG_FILE="/tmp/fake.org" \
+    WORKSPACE_SESSION_ID="$test_id" \
+    WORKSPACE_ORG_FILE="/tmp/fake.org" \
     EMACS_MCP_URL="$MCP_URL" \
-    uv run --project "$PROJECT_DIR/python" sdd-bridge response 2>/dev/null || true
+    uv run --project "$PROJECT_DIR/python" workspace-bridge response 2>/dev/null || true
 
   status=$(cat "$status_dir/$test_id")
   [ "$status" = "ready" ] || return 1
@@ -185,7 +185,7 @@ run_test "Emacs MCP reachable" test_emacs_mcp_reachable
 run_test "iTerm2 functions defined" test_iterm2_functions_defined
 run_test "iterm2-ctl.py script exists" test_iterm2_script_path_valid
 run_test "Hook status write/read" test_hook_status_write_and_read
-run_test "sdd-bridge.sh writes status" test_sdd_bridge_writes_status
+run_test "workspace-bridge.sh writes status" test_workspace_bridge_writes_status
 run_test "Activity mode-line variable" test_activity_mode_line_variable
 run_test "iterm2-ctl list (Python)" test_iterm2_ctl_list
 run_test "Emacs calls iterm2-ctl list" test_emacs_calls_iterm2_list

@@ -1,8 +1,8 @@
-"""Claude SDD launcher — replaces scripts/claude-sdd.
+"""Claude workspace launcher — replaces scripts/claude-workspace.
 
-Launches Claude Code CLI with SDD bridge hooks and MCP integration.
+Launches Claude Code CLI with workspace bridge hooks and MCP integration.
 
-Usage: claude-sdd <org-file> [session-id] [-- extra-args...]
+Usage: claude-workspace <org-file> [session-id] [-- extra-args...]
 """
 
 import atexit
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from claude_agent.mcp_client import McpClient
-from claude_agent.sdd_bridge import _escape_elisp_string
+from claude_agent.workspace_bridge import _escape_elisp_string
 
 
 def parse_args(argv: list[str]) -> tuple[str, str, list[str]]:
@@ -23,7 +23,7 @@ def parse_args(argv: list[str]) -> tuple[str, str, list[str]]:
     """
     if not argv:
         print(
-            "Usage: claude-sdd <org-file> [session-id] [-- extra-args...]",
+            "Usage: claude-workspace <org-file> [session-id] [-- extra-args...]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -49,17 +49,17 @@ def _is_valid_session(value: str) -> bool:
 
 
 def list_sessions(mcp: McpClient, org_file: str) -> str | None:
-    """List available SDD sessions via MCP."""
+    """List available workspace sessions via MCP."""
     elisp = (
         '(let ((debug-on-error nil) (debug-on-quit nil)) '
-        f'(claude-org-sdd-bridge-list-sessions "{_escape_elisp_string(org_file)}"))'
+        f'(claude-org-workspace-bridge-list-sessions "{_escape_elisp_string(org_file)}"))'
     )
     return mcp.eval_elisp(elisp)
 
 
 def select_session_interactive(sessions_text: str, org_file: str) -> str:
     """Display session list and prompt user to select one."""
-    print(f"\nAvailable SDD sessions in {os.path.basename(org_file)}:")
+    print(f"\nAvailable workspace sessions in {os.path.basename(org_file)}:")
 
     session_ids = []
     current_parent = "__unset__"
@@ -87,7 +87,7 @@ def select_session_interactive(sessions_text: str, org_file: str) -> str:
         session_ids.append(sid)
 
     if not session_ids:
-        print(f"No SDD sessions found in {org_file}", file=sys.stderr)
+        print(f"No workspace sessions found in {org_file}", file=sys.stderr)
         sys.exit(1)
 
     print()
@@ -119,11 +119,11 @@ def fetch_session_metadata(
     esc_sid = _escape_elisp_string(session_id)
     elisp = (
         '(let ((debug-on-error nil) (debug-on-quit nil))'
-        '  (let* ((prompt (claude-org-sdd-bridge-system-prompt '
+        '  (let* ((prompt (claude-org-workspace-bridge-system-prompt '
         f'    "{esc_org}" "{esc_sid}"))'
-        f'         (story (with-current-buffer (claude-org-sdd-bridge--ensure-buffer "{esc_org}")'
+        f'         (story (with-current-buffer (claude-org-workspace-bridge--ensure-buffer "{esc_org}")'
         '            (save-excursion (save-restriction (widen)'
-        f'              (claude-org-sdd-bridge--goto-session "{esc_sid}")'
+        f'              (claude-org-workspace-bridge--goto-session "{esc_sid}")'
         '              (substring-no-properties (org-get-heading t t t t)))))))'
         r'    (substring-no-properties (format "%s\n%s" story prompt))))'
     )
@@ -172,7 +172,7 @@ def build_claude_args(
     )
     args.extend(["--mcp-config", mcp_config])
 
-    # Set session name from SDD story name
+    # Set session name from workspace story name
     normalized = _normalize_name(story_name) if story_name else ""
     if normalized:
         args.extend(["--name", normalized])
@@ -188,7 +188,7 @@ def build_claude_args(
 
 
 def cleanup_ide_server(mcp: McpClient, session_id: str) -> None:
-    """Stop the IDE server in Emacs for this SDD session."""
+    """Stop the IDE server in Emacs for this workspace session."""
     if not session_id:
         return
     try:
@@ -223,7 +223,7 @@ def main() -> None:
     else:
         print(f"  WARNING: MCP server not reachable at {mcp_url}", file=sys.stderr)
         print(
-            "  SDD bridge hooks disabled. Launching without SDD integration...",
+            "  workspace bridge hooks disabled. Launching without workspace integration...",
             file=sys.stderr,
         )
 
@@ -235,7 +235,7 @@ def main() -> None:
         if not session_id:
             sessions = list_sessions(mcp, org_file)
             if not sessions:
-                print(f"No SDD sessions found in {org_file}", file=sys.stderr)
+                print(f"No workspace sessions found in {org_file}", file=sys.stderr)
                 sys.exit(1)
             session_id = select_session_interactive(sessions, org_file)
 
@@ -251,8 +251,8 @@ def main() -> None:
             )
 
     # Export env vars for hook scripts
-    os.environ["SDD_ORG_FILE"] = org_file
-    os.environ["SDD_SESSION_ID"] = session_id or ""
+    os.environ["WORKSPACE_ORG_FILE"] = org_file
+    os.environ["WORKSPACE_SESSION_ID"] = session_id or ""
     os.environ["EMACS_MCP_URL"] = mcp_url
     os.environ["CLAUDE_PLUGIN_ROOT"] = plugin_dir
 

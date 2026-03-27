@@ -1,4 +1,4 @@
-;;; test-claude-org-sdd.el --- Tests for SDD workflow -*- lexical-binding: t; -*-
+;;; test-claude-org-sdd.el --- Tests for workspace insertion -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024 Jingtao Xu
 
@@ -7,10 +7,10 @@
 
 ;;; Commentary:
 
-;; Unit and integration tests for SDD (Spec-Driven Development) workflow.
-;; Tests the claude-org-insert-sdd command and tag inheritance.
+;; Unit and integration tests for workspace workflow.
+;; Tests the claude-org-insert-workspace command and tag inheritance.
 ;;
-;; SDD notebook structure: System Prompt + Workflow only.
+;; Workspace notebook structure: System Prompt + Workflow only.
 ;; Knowledge artifacts (research, spec, features) live in docs/ folder.
 
 ;;; Code:
@@ -21,15 +21,15 @@
 
 ;;; Unit Tests - Structure Creation
 
-(ert-deftest test-sdd-insert-creates-system-prompt-first ()
-  "Test that claude-org-insert-sdd creates System Prompt as the first subsection.
-The default content should indicate the current SDD story name."
+(ert-deftest test-workspace-insert-creates-system-prompt-first ()
+  "Test that claude-org-insert-workspace creates System Prompt as the first subsection.
+The default content should indicate the current workspace story name."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "My SDD Story")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     ;; Verify System Prompt exists with :system_prompt: tag
     (goto-char (point-min))
     (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
@@ -41,7 +41,7 @@ The default content should indicate the current SDD story name."
       (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
       (let ((workflow-pos (point)))
         (should (< system-prompt-pos workflow-pos))))
-    ;; Verify default content contains the SDD story name
+    ;; Verify default content contains the workspace story name
     (goto-char (point-min))
     (re-search-forward "^\\*\\* System Prompt :system_prompt:")
     (forward-line 1)
@@ -50,17 +50,17 @@ The default content should indicate the current SDD story name."
       (re-search-forward ":END:" nil t)
       (forward-line 1))
     ;; Should find the default content with the story name
-    (should (re-search-forward "The current SDD story is \"My SDD Story\"" nil t))))
+    (should (re-search-forward "The current workspace story is \"My SDD Story\"" nil t))))
 
-(ert-deftest test-sdd-insert-creates-two-notebook-sections ()
-  "Test that claude-org-insert-sdd creates only System Prompt and Workflow sections.
+(ert-deftest test-workspace-insert-creates-two-notebook-sections ()
+  "Test that claude-org-insert-workspace creates only System Prompt and Workflow sections.
 Research Output, Spec, and Features now live in docs/ folder, not the notebook."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     ;; Verify structure - only 2 sections in notebook
     (goto-char (point-min))
     ;; Top-level heading
@@ -86,22 +86,22 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
     (goto-char (point-min))
     (should-not (re-search-forward "^\\*\\* Features" nil t))))
 
-(ert-deftest test-sdd-insert-sets-session-id ()
-  "Test that SDD structure has unique CLAUDE_SESSION_ID."
+(ert-deftest test-workspace-insert-sets-session-id ()
+  "Test that workspace structure has unique CLAUDE_SESSION_ID."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "My Feature")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     (goto-char (point-min))
     (re-search-forward "^\\* My Feature")
     (let ((session-id (org-entry-get nil "CLAUDE_SESSION_ID")))
       (should session-id)
       (should (string-prefix-p "sdd-" session-id)))))
 
-(ert-deftest test-sdd-insert-creates-docs-files ()
-  "Test that claude-org-insert-sdd creates research and design-doc files in docs/."
+(ert-deftest test-workspace-insert-creates-docs-files ()
+  "Test that claude-org-insert-workspace creates research and design-doc files in docs/."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (let ((default-directory (make-temp-file "sdd-test-project-" t)))
     (unwind-protect
@@ -117,7 +117,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
             (org-mode)
             (setq buffer-file-name (expand-file-name "notebook.org"))
             (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-              (claude-org-insert-sdd))
+              (claude-org-insert-workspace))
             ;; Verify docs files were created
             (let* ((session-id (save-excursion
                                  (goto-char (point-min))
@@ -135,7 +135,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
               (with-temp-buffer
                 (insert-file-contents research-file)
                 (should (string-match-p "TITLE.*Research.*Test Feature" (buffer-string)))
-                (should (string-match-p "SDD_SESSION" (buffer-string))))
+                (should (string-match-p "WORKSPACE_SESSION" (buffer-string))))
               ;; Verify design doc has correct structure
               (with-temp-buffer
                 (insert-file-contents design-file)
@@ -145,7 +145,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
       ;; Cleanup
       (delete-directory default-directory t))))
 
-(ert-deftest test-sdd-insert-system-prompt-includes-docs-paths ()
+(ert-deftest test-workspace-insert-system-prompt-includes-docs-paths ()
   "Test that System Prompt default content includes docs/ file paths."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (let ((default-directory (make-temp-file "sdd-test-project-" t)))
@@ -161,7 +161,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
             (org-mode)
             (setq buffer-file-name (expand-file-name "notebook.org"))
             (cl-letf (((symbol-function 'read-string) (lambda (_) "My Story")))
-              (claude-org-insert-sdd))
+              (claude-org-insert-workspace))
             ;; System Prompt should reference docs/ files
             (goto-char (point-min))
             (re-search-forward "^\\*\\* System Prompt :system_prompt:")
@@ -172,33 +172,33 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
               (should (re-search-forward "docs/design-docs/" section-end t)))))
       (delete-directory default-directory t))))
 
-(ert-deftest test-sdd-level-alignment ()
-  "Test that new SDD aligns with previous SDD level."
+(ert-deftest test-workspace-level-alignment ()
+  "Test that new workspace aligns with previous workspace level."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
-    ;; Insert first SDD at level 2
+    ;; Insert first workspace at level 2
     (insert "* Existing Section\n\n")
     (insert "** First Feature\n")
     (insert ":PROPERTIES:\n:CLAUDE_SESSION_ID: sdd-existing\n:END:\n\n")
-    ;; Now insert new SDD
+    ;; Now insert new workspace
     (goto-char (point-max))
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Second Feature")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     ;; Verify it's at level 2
     (goto-char (point-min))
     (re-search-forward "^\\*\\* Second Feature")
     (should (= 2 (org-current-level)))))
 
-(ert-deftest test-sdd-cursor-in-first-ai-block ()
+(ert-deftest test-workspace-cursor-in-first-ai-block ()
   "Test that cursor is positioned inside the first AI block after insert."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     ;; Cursor should be between begin_src and end_src
     (let ((line (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
       ;; Should be on empty line inside the src block
@@ -210,14 +210,14 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
     (forward-line 2)
     (should (looking-at "^#\\+end_src"))))
 
-(ert-deftest test-sdd-single-ai-block ()
-  "Test that simplified SDD has exactly one AI block under Workflow."
+(ert-deftest test-workspace-single-ai-block ()
+  "Test that simplified workspace has exactly one AI block under Workflow."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     (goto-char (point-min))
     ;; Count AI blocks - should be 1 (only under Workflow, no phase subsections)
     (let ((count 0))
@@ -227,7 +227,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
 
 ;;; Unit Tests - Tag Selection
 
-(ert-deftest test-sdd-tag-toggle ()
+(ert-deftest test-workspace-tag-toggle ()
   "Test tag toggling for block insertion."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   ;; Clear any previous state
@@ -246,7 +246,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
   ;; Cleanup
   (setq claude-org--selected-tags nil))
 
-(ert-deftest test-sdd-block-with-workflow-tags ()
+(ert-deftest test-workspace-block-with-workflow-tags ()
   "Test inserting block with workflow tags."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
@@ -264,7 +264,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
     (goto-char (point-min))
     (should (re-search-forward (format ":%s:" claude-org-heading-tag) nil t))))
 
-(ert-deftest test-sdd-block-without-tags ()
+(ert-deftest test-workspace-block-without-tags ()
   "Test inserting block without workflow tags."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
@@ -283,8 +283,8 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
 
 ;;; Unit Tests - Tag Inheritance
 
-(ert-deftest test-sdd-tag-priority-ordering ()
-  "Test that SDD tags are ordered correctly (container before phase)."
+(ert-deftest test-workspace-tag-priority-ordering ()
+  "Test that workspace tags are ordered correctly (container before phase)."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   ;; sdd should come before research
   (should (< (claude-org--sdd-tag-priority "sdd")
@@ -297,8 +297,8 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
   (should (< (claude-org--sdd-tag-priority "planning")
              (claude-org--sdd-tag-priority "implementation"))))
 
-(ert-deftest test-sdd-tag-inheritance-in-workflow ()
-  "Test that AI blocks in SDD phases inherit both :sdd: and phase tags."
+(ert-deftest test-workspace-tag-inheritance-in-workflow ()
+  "Test that AI blocks in workspace phases inherit both :sdd: and phase tags."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
@@ -315,8 +315,8 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
 
 ;;; Unit Tests - Behavior Prompt Building
 
-(ert-deftest test-sdd-behavior-prompt-combines-tags ()
-  "Test that behavior prompt combines :sdd: and phase prompts."
+(ert-deftest test-workspace-behavior-prompt-combines-tags ()
+  "Test that behavior prompt combines :sdd: tag and phase prompts."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
@@ -332,7 +332,7 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
       (should (string-match-p "SDD" prompt))
       (should (string-match-p "RESEARCH" prompt)))))
 
-(ert-deftest test-sdd-tag-inheritance-for-behavior-prompt ()
+(ert-deftest test-workspace-tag-inheritance-for-behavior-prompt ()
   "Test that tags are inherited from parent headings for behavior prompts.
 This is the critical test for the bug where :sdd: and :research: tags
 were not inherited because org-get-tags was called with LOCAL=t."
@@ -361,10 +361,10 @@ were not inherited because org-get-tags was called with LOCAL=t."
       (should (string-match-p "SDD" prompt))
       (should (string-match-p "RESEARCH" prompt)))))
 
-;;; Unit Tests - Find Previous SDD Level
+;;; Unit Tests - Find Previous Workspace Level
 
-(ert-deftest test-find-previous-sdd-level ()
-  "Test finding previous SDD section level."
+(ert-deftest test-find-previous-workspace-level ()
+  "Test finding previous workspace section level."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
@@ -374,10 +374,10 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (insert "*** Workflow :sdd:\n")
     (goto-char (point-max))
     ;; Should find level 2
-    (should (= 2 (claude-org--find-previous-sdd-level)))))
+    (should (= 2 (claude-org--find-previous-workspace-level)))))
 
-(ert-deftest test-find-previous-sdd-level-none ()
-  "Test finding previous SDD when none exists."
+(ert-deftest test-find-previous-workspace-level-none ()
+  "Test finding previous workspace when none exists."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
@@ -385,11 +385,11 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (insert "** Subsection\n")
     (goto-char (point-max))
     ;; Should return nil
-    (should-not (claude-org--find-previous-sdd-level))))
+    (should-not (claude-org--find-previous-workspace-level))))
 
 ;;; Unit Tests - Tag-Based Prompt Dispatch
 
-(ert-deftest test-sdd-tag-prompt-generic-dispatch ()
+(ert-deftest test-workspace-tag-prompt-generic-dispatch ()
   "Test that cl-defgeneric claude-org-tag-prompt dispatches correctly."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   ;; Default method should load from file
@@ -397,8 +397,8 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (should (or (null prompt)  ; File may not exist
                 (stringp prompt)))))
 
-(ert-deftest test-sdd-find-sdd-root ()
-  "Test claude-org--find-sdd-root finds correct parent."
+(ert-deftest test-workspace-find-workspace-root ()
+  "Test claude-org--find-workspace-root finds correct parent."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
@@ -409,19 +409,19 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (insert "#+begin_src ai\ntest\n#+end_src\n")
     (goto-char (point-min))
     (re-search-forward "test")
-    (should (equal "My Feature" (claude-org--find-sdd-root)))))
+    (should (equal "My Feature" (claude-org--find-workspace-root)))))
 
-(ert-deftest test-sdd-find-sdd-root-not-in-sdd ()
-  "Test claude-org--find-sdd-root returns nil when not in SDD."
+(ert-deftest test-workspace-find-workspace-root-not-in-workspace ()
+  "Test claude-org--find-workspace-root returns nil when not in workspace."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (insert "* Regular Section\n")
     (insert "** Subsection\n")
     (goto-char (point-max))
-    (should-not (claude-org--find-sdd-root))))
+    (should-not (claude-org--find-workspace-root))))
 
-(ert-deftest test-sdd-build-behavior-context ()
+(ert-deftest test-workspace-build-behavior-context ()
   "Test claude-org--build-behavior-context builds correct plist."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
@@ -434,14 +434,14 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (let ((context (claude-org--build-behavior-context)))
       (should (plistp context))
       (should (equal "/tmp/test-context.org" (plist-get context :file-path)))
-      (should (equal "Feature" (plist-get context :sdd-root)))
+      (should (equal "Feature" (plist-get context :workspace-root)))
       (should (member "sdd" (plist-get context :current-tags)))
       (should (member "research" (plist-get context :current-tags))))))
 
 ;;; Integration Tests (require API)
 
-(ert-deftest test-sdd-integration-workflow ()
-  "Test that SDD workflow uses correct behavior prompt."
+(ert-deftest test-workspace-integration-workflow ()
+  "Test that workspace workflow uses correct behavior prompt."
   :tags '(:integration :slow :api :org :sdd)
   ;; Skip if running in batch mode without interactive features
   (skip-unless (not noninteractive))
@@ -458,7 +458,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (org-mode)
     (setq buffer-file-name (make-temp-file "sdd-test-" nil ".org"))
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     ;; Navigate to Workflow section and add a query
     (goto-char (point-min))
     (re-search-forward "^#\\+begin_src ai")
@@ -480,14 +480,14 @@ were not inherited because org-get-tags was called with LOCAL=t."
     ;; Cleanup
     (delete-file buffer-file-name)))
 
-;;; Integration Tests - SDD Prompt Building
+;;; Integration Tests - Workspace Prompt Building
 
-(ert-deftest test-sdd-integration-behavior-prompt-with-links ()
+(ert-deftest test-workspace-integration-behavior-prompt-with-links ()
   "Test that behavior prompt includes docs/ links when session-id is present."
   :tags '(:integration :fast :stable :org :sdd)
   (with-temp-buffer
     (org-mode)
-    (setq buffer-file-name "/tmp/test-sdd-links.org")
+    (setq buffer-file-name "/tmp/test-workspace-links.org")
     (insert "* My Feature\n")
     (insert ":PROPERTIES:\n")
     (insert ":CLAUDE_SESSION_ID: sdd-test-12345\n")
@@ -506,12 +506,12 @@ were not inherited because org-get-tags was called with LOCAL=t."
       (should (string-match-p "docs/research/" prompt))
       (should (string-match-p "docs/design-docs/" prompt)))))
 
-(ert-deftest test-sdd-integration-multiple-tags-ordered ()
+(ert-deftest test-workspace-integration-multiple-tags-ordered ()
   "Test that multiple tags are processed in correct order with context."
   :tags '(:integration :fast :stable :org :sdd)
   (with-temp-buffer
     (org-mode)
-    (setq buffer-file-name "/tmp/test-sdd-order.org")
+    (setq buffer-file-name "/tmp/test-workspace-order.org")
     (insert "* Feature\n")
     (insert "** Workflow :sdd:\n")
     (insert "*** Research :research:\n")
@@ -526,10 +526,10 @@ were not inherited because org-get-tags was called with LOCAL=t."
         (when (and sdd-pos research-pos)
           (should (< sdd-pos research-pos)))))))
 
-;;; End-to-End Tests - Full SDD Workflow
+;;; End-to-End Tests - Full Workspace Workflow
 
-(ert-deftest test-sdd-e2e-create-and-verify-structure ()
-  "End-to-end: Create SDD, verify docs/ files and notebook structure."
+(ert-deftest test-workspace-e2e-create-and-verify-structure ()
+  "End-to-end: Create workspace, verify docs/ files and notebook structure."
   :tags '(:e2e :slow :org :sdd :tdd)
   (let ((test-dir (make-temp-file "sdd-e2e-" t)))
     (unwind-protect
@@ -546,9 +546,9 @@ were not inherited because org-get-tags was called with LOCAL=t."
             (with-temp-buffer
               (org-mode)
               (setq buffer-file-name test-file)
-              ;; Create SDD structure
+              ;; Create workspace structure
               (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Test Feature")))
-                (claude-org-insert-sdd))
+                (claude-org-insert-workspace))
               (save-buffer)
               ;; Navigate to first AI block
               (goto-char (point-min))
@@ -558,7 +558,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
               (let* ((context (claude-org--build-behavior-context))
                      (prompt (claude-org--build-behavior-prompt)))
                 ;; Context should have correct values
-                (should (equal "E2E Test Feature" (plist-get context :sdd-root)))
+                (should (equal "E2E Test Feature" (plist-get context :workspace-root)))
                 (should (member "sdd" (plist-get context :current-tags)))
                 ;; Prompt should have docs/ links
                 (should (string-match-p "docs/research/" prompt))
@@ -575,15 +575,15 @@ were not inherited because org-get-tags was called with LOCAL=t."
 
 ;;; CUSTOM_ID Tests - Stable Link Support
 
-(ert-deftest test-sdd-generate-custom-id ()
+(ert-deftest test-workspace-generate-custom-id ()
   "Test claude-org--generate-custom-id creates valid IDs."
   :tags '(:unit :fast :stable :isolated :org :sdd)
-  ;; SDD section IDs without file-base (legacy format)
+  ;; Workspace section IDs without file-base (legacy format)
   (should (equal "sdd-12345-workflow"
                  (claude-org--generate-custom-id "sdd-12345" "Workflow")))
   (should (equal "sdd-12345-research-output"
                  (claude-org--generate-custom-id "sdd-12345" "Research Output")))
-  ;; SDD section IDs with file-base (new format for cross-file uniqueness)
+  ;; Workspace section IDs with file-base (new format for cross-file uniqueness)
   (should (equal "my-notes-workflow-sdd-12345"
                  (claude-org--generate-custom-id "sdd-12345" "Workflow" "my-notes")))
   (should (equal "claude-agent-dev-research-output-sdd-12345"
@@ -594,21 +594,21 @@ were not inherited because org-get-tags was called with LOCAL=t."
   (should (equal "sdd-12345-non-goals"
                  (claude-org--generate-custom-id "sdd-12345" "Non-Goals"))))
 
-(ert-deftest test-sdd-generate-custom-id-nil-handling ()
+(ert-deftest test-workspace-generate-custom-id-nil-handling ()
   "Test claude-org--generate-custom-id handles nil inputs."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (should-not (claude-org--generate-custom-id nil "Workflow"))
   (should-not (claude-org--generate-custom-id "sdd-12345" nil))
   (should-not (claude-org--generate-custom-id nil nil)))
 
-(ert-deftest test-sdd-insert-adds-custom-id-to-notebook-sections ()
-  "Test that claude-org-insert-sdd adds CUSTOM_ID to notebook sections only."
+(ert-deftest test-workspace-insert-adds-custom-id-to-notebook-sections ()
+  "Test that claude-org-insert-workspace adds CUSTOM_ID to notebook sections only."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-custom-id.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-      (claude-org-insert-sdd))
+      (claude-org-insert-workspace))
     ;; Verify CUSTOM_ID on top-level heading
     (goto-char (point-min))
     (re-search-forward "^\\* Test Feature")
@@ -633,7 +633,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
 
 ;;; Structural Tests - docs/ Directory
 
-(ert-deftest test-sdd-docs-directories-exist ()
+(ert-deftest test-workspace-docs-directories-exist ()
   "Test that required docs/ subdirectories exist."
   :tags '(:unit :fast :stable :structural :sdd :tdd)
   (let ((project-root (locate-dominating-file default-directory "claude-org.org")))
@@ -643,7 +643,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (should (file-directory-p (expand-file-name "docs/product-specs" project-root)))
     (should (file-directory-p (expand-file-name "docs/references" project-root)))))
 
-(ert-deftest test-sdd-docs-index-files-exist ()
+(ert-deftest test-workspace-docs-index-files-exist ()
   "Test that INDEX.md files exist in docs/ subdirectories."
   :tags '(:unit :fast :stable :structural :sdd :tdd)
   (let ((project-root (locate-dominating-file default-directory "claude-org.org")))
@@ -655,55 +655,55 @@ were not inherited because org-get-tags was called with LOCAL=t."
 
 ;;; Unit Tests - Configurable Docs Format
 
-(ert-deftest test-sdd-docs-format-default ()
+(ert-deftest test-workspace-docs-format-default ()
   "Test that default docs format is 'org'."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (should (equal "org" claude-org-sdd-docs-format)))
+  (should (equal "org" claude-org-workspace-docs-format)))
 
-(ert-deftest test-sdd-docs-format-resolver-default ()
+(ert-deftest test-workspace-docs-format-resolver-default ()
   "Test that resolver returns defcustom value when no property set."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (insert "* Test\n")
     (goto-char (point-min))
-    (let ((claude-org-sdd-docs-format "org"))
-      (should (equal "org" (claude-org--sdd-docs-format))))))
+    (let ((claude-org-workspace-docs-format "org"))
+      (should (equal "org" (claude-org--workspace-docs-format))))))
 
-(ert-deftest test-sdd-docs-format-resolver-property-override ()
-  "Test that SDD_DOCS_FORMAT property overrides defcustom."
+(ert-deftest test-workspace-docs-format-resolver-property-override ()
+  "Test that WORKSPACE_DOCS_FORMAT property overrides defcustom."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (insert "* Test\n")
     (insert ":PROPERTIES:\n")
-    (insert ":SDD_DOCS_FORMAT: md\n")
+    (insert ":WORKSPACE_DOCS_FORMAT: md\n")
     (insert ":END:\n")
     (goto-char (point-min))
     (re-search-forward "Test")
-    (let ((claude-org-sdd-docs-format "org"))
-      (should (equal "md" (claude-org--sdd-docs-format))))))
+    (let ((claude-org-workspace-docs-format "org"))
+      (should (equal "md" (claude-org--workspace-docs-format))))))
 
-(ert-deftest test-sdd-docs-format-resolver-inherited-property ()
-  "Test that SDD_DOCS_FORMAT property is inherited from parent headings."
+(ert-deftest test-workspace-docs-format-resolver-inherited-property ()
+  "Test that WORKSPACE_DOCS_FORMAT property is inherited from parent headings."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (insert "* Project\n")
     (insert ":PROPERTIES:\n")
-    (insert ":SDD_DOCS_FORMAT: md\n")
+    (insert ":WORKSPACE_DOCS_FORMAT: md\n")
     (insert ":END:\n")
     (insert "** Child\n")
     (goto-char (point-min))
     (re-search-forward "Child")
-    (let ((claude-org-sdd-docs-format "org"))
-      (should (equal "md" (claude-org--sdd-docs-format))))))
+    (let ((claude-org-workspace-docs-format "org"))
+      (should (equal "md" (claude-org--workspace-docs-format))))))
 
-(ert-deftest test-sdd-create-docs-files-md-format ()
-  "Test that sdd-create-docs-files creates .md files when format is 'md'."
+(ert-deftest test-workspace-create-docs-files-md-format ()
+  "Test that workspace-create-docs-files creates .md files when format is 'md'."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (let ((default-directory (make-temp-file "sdd-test-md-" t))
-        (claude-org-sdd-docs-format "md"))
+        (claude-org-workspace-docs-format "md"))
     (unwind-protect
         (progn
           (make-directory (expand-file-name "docs/research") t)
@@ -716,7 +716,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
             (org-mode)
             (setq buffer-file-name (expand-file-name "notebook.org"))
             (cl-letf (((symbol-function 'read-string) (lambda (_) "Test MD Feature")))
-              (claude-org-insert-sdd))
+              (claude-org-insert-workspace))
             (let* ((session-id (save-excursion
                                  (goto-char (point-min))
                                  (re-search-forward "^\\* Test MD Feature")
@@ -749,11 +749,11 @@ were not inherited because org-get-tags was called with LOCAL=t."
                 (should (string-match-p "^## Features" (buffer-string)))))))
       (delete-directory default-directory t))))
 
-(ert-deftest test-sdd-insert-system-prompt-md-paths ()
+(ert-deftest test-workspace-insert-system-prompt-md-paths ()
   "Test that System Prompt uses .md paths when format is 'md'."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (let ((default-directory (make-temp-file "sdd-test-md-paths-" t))
-        (claude-org-sdd-docs-format "md"))
+        (claude-org-workspace-docs-format "md"))
     (unwind-protect
         (progn
           (make-directory (expand-file-name "docs/research") t)
@@ -766,7 +766,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
             (org-mode)
             (setq buffer-file-name (expand-file-name "notebook.org"))
             (cl-letf (((symbol-function 'read-string) (lambda (_) "MD Story")))
-              (claude-org-insert-sdd))
+              (claude-org-insert-workspace))
             ;; System Prompt should reference .md files
             (goto-char (point-min))
             (re-search-forward "^\\*\\* System Prompt :system_prompt:")
@@ -782,11 +782,11 @@ were not inherited because org-get-tags was called with LOCAL=t."
                 (should-not has-org-docs)))))
       (delete-directory default-directory t))))
 
-(ert-deftest test-sdd-create-docs-files-default-org-format ()
-  "Test that sdd-create-docs-files creates .org files by default."
+(ert-deftest test-workspace-create-docs-files-default-org-format ()
+  "Test that workspace-create-docs-files creates .org files by default."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (let ((default-directory (make-temp-file "sdd-test-org-" t))
-        (claude-org-sdd-docs-format "org"))
+        (claude-org-workspace-docs-format "org"))
     (unwind-protect
         (progn
           (make-directory (expand-file-name "docs/research") t)
@@ -799,7 +799,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
             (org-mode)
             (setq buffer-file-name (expand-file-name "notebook.org"))
             (cl-letf (((symbol-function 'read-string) (lambda (_) "Org Story")))
-              (claude-org-insert-sdd))
+              (claude-org-insert-workspace))
             (let* ((session-id (save-excursion
                                  (goto-char (point-min))
                                  (re-search-forward "^\\* Org Story")
@@ -821,5 +821,5 @@ were not inherited because org-get-tags was called with LOCAL=t."
                 (should (string-match-p "^\\* " (buffer-string)))))))
       (delete-directory default-directory t))))
 
-(provide 'test-claude-org-sdd)
+(provide 'test-claude-org-workspace)
 ;;; test-claude-org-sdd.el ends here

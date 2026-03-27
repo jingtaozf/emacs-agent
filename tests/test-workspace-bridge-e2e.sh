@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# E2E tests for Terminal SDD Bridge
+# E2E tests for Terminal Workspace Bridge
 # Requires: running Emacs MCP server, jq, curl
 #
-# Usage: bash tests/test-sdd-bridge-e2e.sh [port]
+# Usage: bash tests/test-workspace-bridge-e2e.sh [port]
 
 set -euo pipefail
 
@@ -57,12 +57,12 @@ run_test() {
   local name="$1"
   ((TESTS_RUN++)) || true
   echo -n "  $name... "
-  if "$name" 2>/tmp/test-sdd-bridge-stderr.log; then
+  if "$name" 2>/tmp/test-workspace-bridge-stderr.log; then
     echo "PASS"
     ((PASS++)) || true
   else
     echo "FAIL"
-    cat /tmp/test-sdd-bridge-stderr.log >&2
+    cat /tmp/test-workspace-bridge-stderr.log >&2
     ((FAIL++)) || true
   fi
 }
@@ -71,14 +71,14 @@ run_test() {
 # TC1: Single prompt insertion
 # ---------------------------------------------------------------------------
 test_single_prompt() {
-  local org_file="/tmp/test-sdd-tc1.org"
-  local session_id="sdd-test-tc1"
+  local org_file="/tmp/test-workspace-tc1.org"
+  local session_id="workspace-test-tc1"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   echo '{"prompt":"explain this function","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -94,20 +94,20 @@ test_single_prompt() {
 # TC2: Single response insertion
 # ---------------------------------------------------------------------------
 test_single_response() {
-  local org_file="/tmp/test-sdd-tc2.org"
-  local session_id="sdd-test-tc2"
+  local org_file="/tmp/test-workspace-tc2.org"
+  local session_id="workspace-test-tc2"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   # Insert a prompt first
   echo '{"prompt":"explain this function","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   # Simulate Stop hook with last_assistant_message (as real Claude CLI does)
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"This function takes a list and returns the first element."}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -122,28 +122,28 @@ test_single_response() {
 # TC3: Multi-turn conversation
 # ---------------------------------------------------------------------------
 test_multi_turn() {
-  local org_file="/tmp/test-sdd-tc3.org"
-  local session_id="sdd-test-tc3"
+  local org_file="/tmp/test-workspace-tc3.org"
+  local session_id="workspace-test-tc3"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   # Turn 1
   echo '{"prompt":"what does this module do?","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"This module handles HTTP routing."}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   # Turn 2
   echo '{"prompt":"show me the main entry point","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"The main entry point is the start-server function on line 42."}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   # Assert counts
   local instr_count resp_count
@@ -164,19 +164,19 @@ test_multi_turn() {
 # TC4: Tool-heavy response extracts text only
 # ---------------------------------------------------------------------------
 test_tool_response_text_only() {
-  local org_file="/tmp/test-sdd-tc4.org"
-  local session_id="sdd-test-tc4"
+  local org_file="/tmp/test-workspace-tc4.org"
+  local session_id="workspace-test-tc4"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   echo '{"prompt":"read the config file","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   # last_assistant_message is always text-only (Claude CLI strips tool calls)
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"The config file contains database settings with host=localhost and port=5432."}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -191,9 +191,9 @@ test_tool_response_text_only() {
 # ---------------------------------------------------------------------------
 test_mcp_unreachable() {
   echo '{"prompt":"test prompt","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="/tmp/test-sdd-tc5.org" SDD_SESSION_ID="sdd-test-tc5" \
+    | WORKSPACE_ORG_FILE="/tmp/test-workspace-tc5.org" WORKSPACE_SESSION_ID="workspace-test-tc5" \
       EMACS_MCP_URL="http://localhost:19999/mcp" \
-      uv run --project python sdd-bridge prompt 2>/dev/null
+      uv run --project python workspace-bridge prompt 2>/dev/null
   local exit_code=$?
   assert_equals "$exit_code" "0"
 }
@@ -202,14 +202,14 @@ test_mcp_unreachable() {
 # TC6: Empty prompt is ignored
 # ---------------------------------------------------------------------------
 test_empty_prompt_ignored() {
-  local org_file="/tmp/test-sdd-tc6.org"
-  local session_id="sdd-test-tc6"
+  local org_file="/tmp/test-workspace-tc6.org"
+  local session_id="workspace-test-tc6"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   echo '{"prompt":"","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   local instr_count
   instr_count=$(count_headings "$org_file" "Instruction [0-9]")
@@ -222,13 +222,13 @@ test_empty_prompt_ignored() {
 # TC7: System prompt fetch
 # ---------------------------------------------------------------------------
 test_system_prompt_fetch() {
-  local org_file="/tmp/test-sdd-tc7.org"
-  local session_id="sdd-test-tc7"
+  local org_file="/tmp/test-workspace-tc7.org"
+  local session_id="workspace-test-tc7"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   local prompt
-  prompt=$(mcp_call "(let ((debug-on-error nil) (debug-on-quit nil) (edebug-all-defs nil) (edebug-all-forms nil)) (claude-org-sdd-bridge-system-prompt \"$org_file\" \"$session_id\"))")
+  prompt=$(mcp_call "(let ((debug-on-error nil) (debug-on-quit nil) (edebug-all-defs nil) (edebug-all-forms nil)) (claude-org-workspace-bridge-system-prompt \"$org_file\" \"$session_id\"))")
 
   assert_not_empty "$prompt"
   assert_contains "$prompt" "test feature"
@@ -240,29 +240,29 @@ test_system_prompt_fetch() {
 # TC9: Response with org headings doesn't corrupt structure
 # ---------------------------------------------------------------------------
 test_response_with_org_headings() {
-  local org_file="/tmp/test-sdd-tc9.org"
-  local session_id="sdd-test-tc9"
+  local org_file="/tmp/test-workspace-tc9.org"
+  local session_id="workspace-test-tc9"
 
   cleanup_test_file "$org_file" >/dev/null 2>&1 || true
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   # Turn 1: prompt + response containing ** and *** org headings
   echo '{"prompt":"1+1","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   printf '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"Here is the answer:\\n\\n** Heading Level 2\\n\\nSome content\\n\\n*** Heading Level 3\\n\\nMore content"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   # Turn 2: prompt + response
   echo '{"prompt":"2+2","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"4"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   # Verify structure using raw text between known headings (not org-end-of-subtree,
   # which is the function that's broken by embedded org headings).
@@ -320,25 +320,25 @@ test_response_with_org_headings() {
 # then response A finally comes. It should still be inserted (not lost).
 # ---------------------------------------------------------------------------
 test_response_after_new_prompt_inserted() {
-  local org_file="/tmp/test-sdd-tc10.org"
-  local session_id="sdd-test-tc10"
+  local org_file="/tmp/test-workspace-tc10.org"
+  local session_id="workspace-test-tc10"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   # Prompt A
   echo '{"prompt":"research terminals","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   # Prompt B inserted BEFORE response A arrives
   echo '{"prompt":"fix the bug","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   # Response A arrives late
   echo '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":"Terminal research results: iTerm2 is the best."}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -361,14 +361,14 @@ test_response_after_new_prompt_inserted() {
 # Reproduces the terminal research response scenario
 # ---------------------------------------------------------------------------
 test_large_response_with_many_org_headings() {
-  local org_file="/tmp/test-sdd-tc11.org"
-  local session_id="sdd-test-tc11"
+  local org_file="/tmp/test-workspace-tc11.org"
+  local session_id="workspace-test-tc11"
 
-  create_test_sdd "$org_file" "$session_id" >/dev/null
+  create_test_workspace "$org_file" "$session_id" >/dev/null
 
   echo '{"prompt":"research terminals","session_id":"cli-001","transcript_path":"/dev/null"}' \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge prompt >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge prompt >/dev/null
 
   # Build a large response similar to the terminal research one
   local big_response
@@ -425,8 +425,8 @@ RESP
   # Escape the response for JSON and send
   printf '{"session_id":"cli-001","transcript_path":"/dev/null","last_assistant_message":%s}' \
     "$(printf '%s' "$big_response" | jq -Rs .)" \
-    | SDD_ORG_FILE="$org_file" SDD_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
-      uv run --project python sdd-bridge response >/dev/null
+    | WORKSPACE_ORG_FILE="$org_file" WORKSPACE_SESSION_ID="$session_id" EMACS_MCP_URL="$EMACS_MCP_URL" \
+      uv run --project python workspace-bridge response >/dev/null
 
   local content
   content=$(read_org_buffer "$org_file")
@@ -452,7 +452,7 @@ RESP
 # ---------------------------------------------------------------------------
 test_launcher_fails_fast() {
   EMACS_MCP_URL="http://localhost:19999/mcp" \
-    timeout 10 uv run --project python claude-sdd /tmp/test-sdd-tc8.org sdd-test-tc8 2>/dev/null
+    timeout 10 uv run --project python claude-workspace /tmp/test-workspace-tc8.org workspace-test-tc8 2>/dev/null
   local exit_code=$?
   assert_not_equals "$exit_code" "0"
   # 124 = timeout, which means it didn't fail fast
@@ -484,7 +484,7 @@ if [ "$LOAD_RESULT" != "loaded" ] && [ "$LOAD_RESULT" != '"loaded"' ]; then
 fi
 
 echo ""
-echo "Running SDD Bridge E2E tests..."
+echo "Running Workspace Bridge E2E tests..."
 echo ""
 
 run_test test_single_prompt

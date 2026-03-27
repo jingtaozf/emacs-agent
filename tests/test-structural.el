@@ -515,8 +515,8 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-jump-to-ai-block"
     "claude-org-goto-source"
     "claude-org-goto-custom-id"
-    ;; claude-org: SDD workflow
-    "claude-org-insert-sdd"
+    ;; claude-org: workspace workflow
+    "claude-org-insert-workspace"
     "claude-org-tag-prompt"
     ;; claude-org: refine
     "claude-org-refine"
@@ -587,16 +587,17 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-cmux-open-tab"
     "claude-org-cmux-set-progress"
     "claude-org-cmux-set-status"
-    ;; claude-org: SDD bridge (terminal workflow)
-    "claude-org-sdd-archive-workflow"
-    "claude-org-sdd-bridge-get-cli-session"
-    "claude-org-sdd-bridge-insert-prompt"
-    "claude-org-sdd-bridge-insert-response"
-    "claude-org-sdd-bridge-list-sessions"
-    "claude-org-sdd-bridge-save-cli-session"
-    "claude-org-sdd-bridge-send-prompt"
-    "claude-org-sdd-bridge-system-prompt"
-    "claude-org-sdd-bridge-update-todos"
+    ;; claude-org: workspace bridge (terminal workflow)
+    "claude-org-get-active-story"
+    "claude-org-workspace-archive-workflow"
+    "claude-org-workspace-bridge-get-cli-session"
+    "claude-org-workspace-bridge-insert-prompt"
+    "claude-org-workspace-bridge-insert-response"
+    "claude-org-workspace-bridge-list-sessions"
+    "claude-org-workspace-bridge-save-cli-session"
+    "claude-org-workspace-bridge-send-prompt"
+    "claude-org-workspace-bridge-system-prompt"
+    "claude-org-workspace-bridge-update-todos"
     ;; claude-org: company completion
     "claude-org-company-slash-commands"
     ;; claude-ide: WebSocket IDE server (migrated from monet)
@@ -692,7 +693,7 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
     ("claude-org"              . 4)   ; top-level org
     ("claude-org-history"      . 5)   ; top extensions
     ("claude-org-scheduled"    . 5)
-    ("claude-org-sdd-bridge"   . 5)   ; SDD bridge, needs org
+    ("claude-org-workspace-bridge" . 5) ; workspace bridge, needs org
     ("claude-org-terminal-base" . 2)) ; shared terminal, needs agent
   "Module layer assignments from ARCHITECTURE.org.
 Higher layers may depend on same or lower layers, but not upward.")

@@ -7,14 +7,14 @@
 :END:
 
 iTerm2 backend for claude-org.
-Sends prompts to Claude Code running in iTerm2; responses come back via SDD bridge hooks.
+Sends prompts to Claude Code running in iTerm2; responses come back via workspace bridge hooks.
 Part of claude-org; loaded after claude-org.org.
 
 ** Dependencies
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
-(require 'claude-org-sdd-bridge)
+(require 'claude-org-workspace-bridge)
 (require 'claude-org-terminal-base)
 #+END_SRC
 
@@ -24,7 +24,7 @@ Part of claude-org; loaded after claude-org.org.
 :END:
 
 Control Claude Code running in iTerm2 via stateless Python scripts.
-Prompts sent from Emacs; responses come back via SDD bridge hooks.
+Prompts sent from Emacs; responses come back via workspace bridge hooks.
 
 ** Customization
 
@@ -38,26 +38,26 @@ Invoked via `python3' call-process."
   :type 'file
   :group 'claude-org)
 
-(defcustom claude-org-iterm2-launch-command 'claude-sdd
+(defcustom claude-org-iterm2-launch-command 'claude-workspace
   "Launch command for Claude Code in iTerm2.
-When set to `claude-sdd', uses the SDD bridge launcher which sets up
+When set to `claude-workspace', uses the workspace bridge launcher which sets up
 hooks, system prompt, MCP config, and plugin directory automatically.
 When set to `claude', uses bare Claude CLI with --system-prompt-file.
 Can also be a string for a fully custom command."
-  :type '(choice (const :tag "claude-sdd (SDD bridge)" claude-sdd)
+  :type '(choice (const :tag "claude-workspace (workspace bridge)" claude-workspace)
                  (const :tag "claude (bare CLI)" claude)
                  (string :tag "Custom command"))
   :group 'claude-org)
 
-(defcustom claude-org-iterm2-sdd-script
+(defcustom claude-org-iterm2-workspace-script
   (let* ((pkg-dir (file-name-directory
                    (or load-file-name buffer-file-name "")))
-         (uv-cmd (format "uv run --project %s claude-sdd"
+         (uv-cmd (format "uv run --project %s claude-workspace"
                          (expand-file-name "python" pkg-dir))))
     uv-cmd)
-  "Command to launch the claude-sdd launcher.
-Used when `claude-org-iterm2-launch-command' is `claude-sdd'.
-Defaults to `uv run --project <pkg>/python claude-sdd'."
+  "Command to launch the claude-workspace launcher.
+Used when `claude-org-iterm2-launch-command' is `claude-workspace'.
+Defaults to `uv run --project <pkg>/python claude-workspace'."
   :type 'string
   :group 'claude-org)
 
@@ -118,11 +118,11 @@ and used as stdin for the process (avoids ARG_MAX for large prompts)."
         (when stdin-file (delete-file stdin-file t))
         (delete-file stderr-file t))))))
 
-(defun claude-org-iterm2--build-launch-command (org-file sdd-session-id project-root)
+(defun claude-org-iterm2--build-launch-command (org-file workspace-session-id project-root)
   "Build the shell command to launch Claude Code.
 Uses `claude-org-iterm2-launch-command', `claude-org-iterm2-extra-args',
 and the org property CLAUDE_EXTRA_ARGS (space-separated CLI flags).
-ORG-FILE is the org notebook path, SDD-SESSION-ID the session,
+ORG-FILE is the org notebook path, WORKSPACE-SESSION-ID the session,
 PROJECT-ROOT the working directory."
   (ignore project-root)
   (let* ((prop-args (condition-case nil
@@ -133,20 +133,20 @@ PROJECT-ROOT the working directory."
                             (when prop-args (split-string prop-args))))
          (extra (mapconcat #'shell-quote-argument all-extra " ")))
     (cond
-     ;; claude-sdd: passes org-file and session-id, handles everything
+     ;; claude-workspace: passes org-file and session-id, handles everything
      ;; Also passes --resume from CLAUDE_CLI_SESSION if available, so
-     ;; claude-sdd can resume even when MCP is unreachable.
-     ((eq claude-org-iterm2-launch-command 'claude-sdd)
-      (let* ((sdd-script claude-org-iterm2-sdd-script)
+     ;; claude-workspace can resume even when MCP is unreachable.
+     ((eq claude-org-iterm2-launch-command 'claude-workspace)
+      (let* ((workspace-script claude-org-iterm2-workspace-script)
              (cli-session
               (condition-case nil
                   (claude-org-terminal--find-session-property
                    "CLAUDE_CLI_SESSION")
                 (error nil)))
-             (parts (list sdd-script
+             (parts (list workspace-script
                           (shell-quote-argument (or org-file ""))
-                          (shell-quote-argument (or sdd-session-id "")))))
-        ;; Pass --resume before extra args so claude-sdd can use it
+                          (shell-quote-argument (or workspace-session-id "")))))
+        ;; Pass --resume before extra args so claude-workspace can use it
         (when cli-session
           (setq parts (append parts
                               (list "--"
@@ -161,12 +161,12 @@ PROJECT-ROOT the working directory."
      ((eq claude-org-iterm2-launch-command 'claude)
       (let* ((system-prompt
               (condition-case nil
-                  (claude-org-sdd-bridge-system-prompt org-file sdd-session-id)
+                  (claude-org-workspace-bridge-system-prompt org-file workspace-session-id)
                 (error "")))
              (sp-file (make-temp-file "claude-sp-"))
              (cli-session
               (condition-case nil
-                  (claude-org-sdd-bridge-get-cli-session org-file sdd-session-id)
+                  (claude-org-workspace-bridge-get-cli-session org-file workspace-session-id)
                 (error nil)))
              (parts (list "claude")))
         (with-temp-file sp-file (insert (or system-prompt "")))
@@ -186,11 +186,11 @@ PROJECT-ROOT the working directory."
                claude-org-iterm2-launch-command)))))
 
 (defun claude-org-iterm2--ensure-session ()
-  "Ensure an iTerm2 session exists for the current SDD story.
+  "Ensure an iTerm2 session exists for the current workspace story.
 Returns the iTerm2 session UUID. Launches if needed, reuses by title.
-Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
+Auto-starts the Emacs MCP server if not running (claude-workspace needs it)."
   (claude-agent-with-span "iterm2-ensure-session" nil nil
-  ;; Best-effort MCP server auto-start (claude-sdd degrades gracefully without it)
+  ;; Best-effort MCP server auto-start (claude-workspace degrades gracefully without it)
   (when (and (fboundp 'emacs-mcp-server-running-p)
              (not (emacs-mcp-server-running-p))
              (fboundp 'emacs-mcp-server-start))
@@ -200,18 +200,18 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
           (run-at-time 1 nil
                        (lambda ()
                          (if (emacs-mcp-server-running-p)
-                             (message "Started Emacs MCP server for SDD bridge")
-                           (message "WARNING: MCP server didn't start — SDD bridge will be limited")))))
+                             (message "Started Emacs MCP server for workspace bridge")
+                           (message "WARNING: MCP server didn't start — workspace bridge will be limited")))))
       (error (message "WARNING: MCP server start failed: %s" err))))
   (let* ((saved-id (claude-org-terminal--find-session-property "ITERM2_SESSION_ID"))
          (title (claude-org-terminal--tab-title))
-         (sdd-session-id
+         (workspace-session-id
           (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
          (project-root (or (claude-org--get-project-root)
                            default-directory)))
     ;; Ensure IDE server is running for ALL session paths (new or existing)
-    (when sdd-session-id
-      (claude-org-iterm2--ensure-ide-server project-root sdd-session-id))
+    (when workspace-session-id
+      (claude-org-iterm2--ensure-ide-server project-root workspace-session-id))
     ;; Check if saved session is alive
     (if (and saved-id
              (condition-case nil
@@ -222,13 +222,13 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
                (error nil)))
         saved-id
       ;; Launch: finds existing tab by title or creates new
-      (let* ((_ (unless sdd-session-id
+      (let* ((_ (unless workspace-session-id
                   (user-error
-                   "No CLAUDE_SESSION_ID found. Create an SDD section first")))
+                   "No CLAUDE_SESSION_ID found. Create a workspace section first")))
              (org-file (buffer-file-name))
              ;; Build the launch command string based on defcustom
              (launch-cmd (claude-org-iterm2--build-launch-command
-                          org-file sdd-session-id project-root)))
+                          org-file workspace-session-id project-root)))
         (let ((result (apply #'claude-org-iterm2--call
                        "launch"
                        "--title" title
@@ -241,22 +241,22 @@ Auto-starts the Emacs MCP server if not running (claude-sdd needs it)."
                   (claude-org-terminal--goto-session-heading)
                   (org-set-property "ITERM2_SESSION_ID" result)))
               ;; Store mapping for polling and permission-click lookup
-              (when sdd-session-id
+              (when workspace-session-id
                 (claude-org--session-put
                  (claude-org--current-session-key)
                  :iterm2-session result)
-                (puthash sdd-session-id result
-                         claude-org-iterm2--sdd-to-iterm2)
-                (puthash sdd-session-id (claude-org--current-session-key)
-                         claude-org-terminal--sdd-to-session-key))
+                (puthash workspace-session-id result
+                         claude-org-iterm2--workspace-to-iterm2)
+                (puthash workspace-session-id (claude-org--current-session-key)
+                         claude-org-terminal--workspace-to-session-key))
               (save-buffer)
               (message "Claude Code in iTerm2 (session: %s)" result)
               result))))))
 
-(defun claude-org-iterm2--get-status (sdd-session-id iterm2-session-id)
+(defun claude-org-iterm2--get-status (workspace-session-id iterm2-session-id)
   "Get Claude Code status.
-SDD-SESSION-ID keys the hook file; ITERM2-SESSION-ID keys the API."
-  (let ((hook-status (claude-org-terminal--read-hook-status sdd-session-id)))
+WORKSPACE-SESSION-ID keys the hook file; ITERM2-SESSION-ID keys the API."
+  (let ((hook-status (claude-org-terminal--read-hook-status workspace-session-id)))
     (if (member hook-status '("ready" "busy"))
         hook-status
       ;; Fallback to iTerm2 API
@@ -275,31 +275,31 @@ in the global mode-line spinner and =*Claude Queries*= buffer alongside
 native JSON stream queries.
 
 #+BEGIN_SRC elisp
-(defun claude-org-iterm2--query-completed (sdd-session-id)
-  "Mark the iTerm2 query for SDD-SESSION-ID as completed.
+(defun claude-org-iterm2--query-completed (workspace-session-id)
+  "Mark the iTerm2 query for WORKSPACE-SESSION-ID as completed.
 Unregisters from `claude-agent--active-queries' so the mode-line
 and *Claude Queries* buffer update automatically.
 When loop state is active, schedules the next iteration.
 Wrapped in condition-case: called from Python via MCP evalElisp,
 so an unhandled error would leave the session permanently :busy t."
   (condition-case err
-      (let* ((session-key-for-trace (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
+      (let* ((session-key-for-trace (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
              (trace-ctx (when session-key-for-trace
                           (claude-org--session-get session-key-for-trace :trace-ctx))))
         (claude-agent-with-span "iterm2-query-completed"
-            (list :session-id sdd-session-id) trace-ctx
-        (let ((req-id (claude-org-terminal--read-request-id sdd-session-id)))
+            (list :session-id workspace-session-id) trace-ctx
+        (let ((req-id (claude-org-terminal--read-request-id workspace-session-id)))
           (when req-id
             (let ((state (claude-agent--get-active-query req-id)))
               (when state
                 (setf (claude-agent--process-state-closed state) t)
                 (claude-agent--unregister-query req-id)))))
         ;; Check loop continuation (read before cleanup)
-        (let ((session-key (gethash sdd-session-id claude-org-terminal--sdd-to-session-key))
-              (iterm2-id (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)))
+        (let ((session-key (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
+              (iterm2-id (gethash workspace-session-id claude-org-iterm2--workspace-to-iterm2)))
           ;; Clean up lookup tables
-          (remhash sdd-session-id claude-org-iterm2--sdd-to-iterm2)
-          (remhash sdd-session-id claude-org-terminal--sdd-to-session-key)
+          (remhash workspace-session-id claude-org-iterm2--workspace-to-iterm2)
+          (remhash workspace-session-id claude-org-terminal--workspace-to-session-key)
           ;; Clear busy state and exec-status for terminal-typed prompts
           (when session-key
             (claude-org--session-put session-key :busy nil))
@@ -314,26 +314,26 @@ so an unhandled error would leave the session permanently :busy t."
                     (if (> interval 0)
                         (run-at-time interval nil
                                      #'claude-org-iterm2--loop-send
-                                     sdd-session-id iterm2-id prompt session-key)
-                      (claude-org-iterm2--loop-send sdd-session-id iterm2-id prompt session-key)))
+                                     workspace-session-id iterm2-id prompt session-key)
+                      (claude-org-iterm2--loop-send workspace-session-id iterm2-id prompt session-key)))
                 ;; Loop complete — cleanup
                 (claude-org--session-put session-key :loop-max nil)
                 (claude-org--session-put session-key :loop-current nil)))))))
     (error
      ;; Ensure busy state is cleared even on error
-     (let ((session-key (gethash sdd-session-id claude-org-terminal--sdd-to-session-key)))
+     (let ((session-key (gethash workspace-session-id claude-org-terminal--workspace-to-session-key)))
        (when session-key
          (claude-org--session-put session-key :busy nil)))
      (message "claude-org-iterm2: error in query-completed: %S" err))))
 
 
-(defun claude-org-iterm2--loop-send (sdd-session-id iterm2-id prompt session-key)
+(defun claude-org-iterm2--loop-send (workspace-session-id iterm2-id prompt session-key)
   "Send next loop iteration PROMPT to iTerm2.
-SDD-SESSION-ID and ITERM2-ID identify the session.
+WORKSPACE-SESSION-ID and ITERM2-ID identify the session.
 SESSION-KEY is the org session for loop state.
 Navigates to saved org buffer/marker for org-context-dependent calls."
   (claude-agent-with-span "iterm2-loop-send"
-      (list :session-id sdd-session-id) nil
+      (list :session-id workspace-session-id) nil
   (let ((org-buf (claude-org--session-get session-key :loop-org-buffer))
         (marker (claude-org--session-get session-key :loop-block-marker)))
     ;; write-from-emacs-flag and register-query need org buffer context
@@ -341,12 +341,12 @@ Navigates to saved org buffer/marker for org-context-dependent calls."
       (with-current-buffer org-buf
         (save-excursion
           (goto-char marker)
-          (when sdd-session-id
-            (claude-org-terminal--write-from-emacs-flag sdd-session-id))
+          (when workspace-session-id
+            (claude-org-terminal--write-from-emacs-flag workspace-session-id))
           (save-excursion
             (org-back-to-heading t)
-            (when sdd-session-id
-              (claude-org-terminal--register-query sdd-session-id iterm2-id)))))))
+            (when workspace-session-id
+              (claude-org-terminal--register-query workspace-session-id iterm2-id)))))))
   (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
   (let ((current (claude-org--session-get session-key :loop-current))
         (max (claude-org--session-get session-key :loop-max)))
@@ -369,17 +369,17 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
     (unless prompt
       (user-error "Point is not inside a #+begin_src ai block"))
     (let* ((iterm2-id (claude-org-iterm2--ensure-session))
-           (sdd-session-id
+           (workspace-session-id
             (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
-           (status (claude-org-iterm2--get-status sdd-session-id iterm2-id)))
+           (status (claude-org-iterm2--get-status workspace-session-id iterm2-id)))
       (when (string= status "busy")
         (user-error "Claude Code busy (status: %s). Cancel first?" status))
       (claude-agent-with-span "iterm2-execute"
-          (list :session-id sdd-session-id) nil
-      ;; Ensure sdd→session-key mapping for loop dispatch from query-completed
-      (when sdd-session-id
-        (puthash sdd-session-id (claude-org--current-session-key)
-                 claude-org-terminal--sdd-to-session-key))
+          (list :session-id workspace-session-id) nil
+      ;; Ensure workspace→session-key mapping for loop dispatch from query-completed
+      (when workspace-session-id
+        (puthash workspace-session-id (claude-org--current-session-key)
+                 claude-org-terminal--workspace-to-session-key))
       ;; Store trace context for async callbacks (query-completed)
       (let ((session-key (claude-org--current-session-key)))
         (when session-key
@@ -390,13 +390,13 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
       (claude-org--session-put (claude-org--current-session-key)
                                :loop-block-marker (copy-marker (point)))
       ;; Write flag BEFORE sending — hook checks and deletes it
-      (when sdd-session-id
-        (claude-org-terminal--write-from-emacs-flag sdd-session-id))
+      (when workspace-session-id
+        (claude-org-terminal--write-from-emacs-flag workspace-session-id))
       ;; Register in active-queries for mode-line and *Claude Queries* display
       (save-excursion
         (org-back-to-heading t)
-        (when sdd-session-id
-          (claude-org-terminal--register-query sdd-session-id iterm2-id)))
+        (when workspace-session-id
+          (claude-org-terminal--register-query workspace-session-id iterm2-id)))
       (claude-org-iterm2--call "send" "--session" iterm2-id :stdin prompt)
       (message "Sent to iTerm2 (%d chars)" (length prompt))))))
 #+END_SRC
@@ -405,21 +405,21 @@ Registers in `claude-agent--active-queries' for mode-line and query manager."
 
 #+BEGIN_SRC elisp
 (defun claude-org-iterm2-open-tab ()
-  "Open (or focus) the iTerm2 tab for this SDD session.
+  "Open (or focus) the iTerm2 tab for this workspace session.
 Launches Claude Code if no matching tab exists."
   (interactive)
   (let ((session-id (claude-org-iterm2--ensure-session)))
     (claude-org-iterm2--call "focus" "--session" session-id)
     (message "iTerm2 tab focused (session: %s)" session-id)))
 
-(defun claude-org-iterm2--ensure-ide-server (project-root sdd-session-id)
-  "Ensure IDE WebSocket server is running for this SDD session.
+(defun claude-org-iterm2--ensure-ide-server (project-root workspace-session-id)
+  "Ensure IDE WebSocket server is running for this workspace session.
 Starts the server if not already alive.
 The lockfile must exist before Claude Code launches."
   (when (fboundp 'claude-ide--session-alive-p)
-    (unless (claude-ide--session-alive-p sdd-session-id)
+    (unless (claude-ide--session-alive-p workspace-session-id)
       (let ((port (claude-ide--session-port
-                   (claude-ide-start-server-in-directory sdd-session-id project-root))))
+                   (claude-ide-start-server-in-directory workspace-session-id project-root))))
         (message "IDE server started on port %d for %s"
                  port (file-name-nondirectory project-root))))))
 
@@ -433,25 +433,25 @@ Sends Escape to the TUI. The Stop hook will fire and set-ready."
     (claude-org-iterm2--call "cancel" "--session" iterm2-id)
     (message "Cancel sent to Claude Code (waiting for hook...)")))
 
-(defun claude-org-iterm2--permission-needed (sdd-session-id tool-name)
-  "Handle notification that SDD-SESSION-ID needs permission for TOOL-NAME.
+(defun claude-org-iterm2--permission-needed (workspace-session-id tool-name)
+  "Handle notification that WORKSPACE-SESSION-ID needs permission for TOOL-NAME.
 Called by the PreToolUse hook via MCP. Registers a pending alert,
 focuses the iTerm2 tab, brings both iTerm2 and Emacs to foreground
 \(works across multiple monitors), bounces Emacs dock icon, and sends
 macOS notification."
   ;; Register pending alert
   (claude-agent-add-alert
-   (intern sdd-session-id)
-   :label (claude-agent--permission-label sdd-session-id)
+   (intern workspace-session-id)
+   :label (claude-agent--permission-label workspace-session-id)
    :tooltip (format "Permission needed: %s\nClick to focus iTerm2" tool-name)
    :face '(:foreground "orange" :weight bold)
-   :action (lexical-let ((sid sdd-session-id))
+   :action (lexical-let ((sid workspace-session-id))
              (lambda ()
                (claude-agent-remove-alert (intern sid))
-               (claude-org-iterm2--focus-by-sdd-session sid))))
+               (claude-org-iterm2--focus-by-workspace-session sid))))
 
   ;; 1. Focus the correct iTerm2 tab (select the tab, no app activation yet)
-  (claude-org-iterm2--focus-by-sdd-session sdd-session-id)
+  (claude-org-iterm2--focus-by-workspace-session workspace-session-id)
 
   ;; 2. Activate iTerm2 app (brings its window to foreground on its monitor)
   (claude-org-iterm2--activate-app "iTerm2")
@@ -463,7 +463,7 @@ macOS notification."
   (claude-org--notify
    "Claude: Permission Needed"
    (format "%s needs approval for %s"
-           (claude-agent--permission-label sdd-session-id)
+           (claude-agent--permission-label workspace-session-id)
            tool-name)
    claude-org-notify-sound)
 
@@ -471,10 +471,10 @@ macOS notification."
   (claude-agent--update-activity-string)
   "ok")
 
-(defun claude-org-iterm2--permission-resolved (sdd-session-id)
-  "Clear pending permission for SDD-SESSION-ID.
+(defun claude-org-iterm2--permission-resolved (workspace-session-id)
+  "Clear pending permission for WORKSPACE-SESSION-ID.
 Called by the PostToolUse hook via MCP, or by mode-line click. Idempotent."
-  (claude-agent-remove-alert (intern sdd-session-id))
+  (claude-agent-remove-alert (intern workspace-session-id))
   "ok")
 
 (defun claude-org-iterm2--activate-app (app-name)
@@ -494,31 +494,31 @@ Called by the PostToolUse hook via MCP, or by mode-line click. Idempotent."
              (not (frame-focus-state (selected-frame))))
     (x-focus-frame nil)))
 
-(defun claude-org-iterm2--focus-by-sdd-session (sdd-session-id)
-  "Focus the iTerm2 tab associated with SDD-SESSION-ID."
-  (let ((iterm2-uuid (claude-org-iterm2--lookup-iterm2-session sdd-session-id)))
+(defun claude-org-iterm2--focus-by-workspace-session (workspace-session-id)
+  "Focus the iTerm2 tab associated with WORKSPACE-SESSION-ID."
+  (let ((iterm2-uuid (claude-org-iterm2--lookup-iterm2-session workspace-session-id)))
     (when iterm2-uuid
       (claude-org-iterm2--call "focus" "--session" iterm2-uuid))))
 
-(defvar claude-org-iterm2--sdd-to-iterm2 (make-hash-table :test 'equal)
-  "Map of SDD session-id → iTerm2 UUID for quick lookup from MCP calls.")
+(defvar claude-org-iterm2--workspace-to-iterm2 (make-hash-table :test 'equal)
+  "Map of workspace session-id → iTerm2 UUID for quick lookup from MCP calls.")
 
-(defun claude-org-iterm2--lookup-iterm2-session (sdd-session-id)
-  "Look up the iTerm2 UUID for SDD-SESSION-ID.
+(defun claude-org-iterm2--lookup-iterm2-session (workspace-session-id)
+  "Look up the iTerm2 UUID for WORKSPACE-SESSION-ID.
 Checks the fast in-memory map first, then falls back to scanning
 org buffers for the ITERM2_SESSION_ID property."
-  (or (gethash sdd-session-id claude-org-iterm2--sdd-to-iterm2)
+  (or (gethash workspace-session-id claude-org-iterm2--workspace-to-iterm2)
       ;; Fallback: scan org buffers for property match
-      (let ((uuid (claude-org-iterm2--find-iterm2-uuid-in-buffers sdd-session-id)))
+      (let ((uuid (claude-org-iterm2--find-iterm2-uuid-in-buffers workspace-session-id)))
         (when uuid
           ;; Cache for next time
-          (puthash sdd-session-id uuid claude-org-iterm2--sdd-to-iterm2))
+          (puthash workspace-session-id uuid claude-org-iterm2--workspace-to-iterm2))
         uuid)))
 
-(defun claude-org-iterm2--find-iterm2-uuid-in-buffers (sdd-session-id)
-  "Search org buffers for ITERM2_SESSION_ID on the heading with SDD-SESSION-ID."
+(defun claude-org-iterm2--find-iterm2-uuid-in-buffers (workspace-session-id)
+  "Search org buffers for ITERM2_SESSION_ID on the heading with WORKSPACE-SESSION-ID."
   (let ((session-pattern (concat ":CLAUDE_SESSION_ID: "
-                                 (regexp-quote sdd-session-id)))
+                                 (regexp-quote workspace-session-id)))
         (result nil))
     (cl-dolist (buf (buffer-list))
       (when (and (buffer-file-name buf)
