@@ -1,0 +1,267 @@
+#+TITLE: Design: Comprehensive Feature E2E Test Coverage
+#+DATE: 2026-03-27
+#+STATUS: draft
+
+* Motivation
+
+From Anthropic's "Harness Design for Long-Running Application Development":
+- "Sprint contracts" -- define success criteria before implementation
+- "QA agent tuning" -- evaluator must actively test, not just read diffs
+- "Criteria-based evaluation" -- transform quality into gradable measures
+
+Our E2E tests cover only the happy path (execute ai block -> response). 20+
+cmux and org-mode features have zero E2E coverage. The evaluator should test
+like a user: execute commands, check cmux state, verify org properties.
+
+* Current Coverage
+
+** Tested (T1-T15)
+
+| Area | Tests |
+|------|-------|
+| Workspace creation + execution | T1-T3 |
+| Tab/workspace naming | T4, T9, T12, T15 |
+| Response insertion | T5 |
+| Property persistence | T7, T8 |
+| System prompt + sessions | T10, T11 |
+| ACTIVE_STORY tracking | T13, T14 |
+
+** Not Tested (25 features)
+
+*** HIGH Risk (9 features)
+
+| # | Feature | Module | Why HIGH |
+|---|---------|--------|----------|
+| T16 | Cancel active query | cmux | Data loss if broken |
+| T17 | Permission notification | cmux | Security-critical UX |
+| T18 | Session recovery | cmux | Emacs restart resilience |
+| T19 | Status detection (ready/busy/dead) | cmux | All flow control depends on it |
+| T20 | Stale ref recovery | cmux | Dead workspace = stuck user |
+| T21 | Story switching (ACTIVE_STORY) | cmux + org | Core workspace model |
+| T22 | --resume (CLAUDE_CLI_SESSION) | cmux | Session continuity |
+| T23 | Cancel all queries | org | Batch cancellation |
+| T24 | Query completed cleanup | cmux | Memory/state leaks |
+
+*** MEDIUM Risk (7 features)
+
+| # | Feature | Module |
+|---|---------|--------|
+| T25 | Verbose output streaming | cmux |
+| T26 | Response streaming (pipe-pane) | cmux |
+| T27 | Wait-for-ready (signal + fallback) | cmux |
+| T28 | Open tab / focus workspace | cmux |
+| T29 | Loop execution | cmux |
+| T30 | Direct cmux input routing | bridge |
+| T31 | System prompt on story switch | org |
+
+*** LOW Risk (6 features)
+
+| # | Feature | Module |
+|---|---------|--------|
+| T32 | Workspace color | cmux |
+| T33 | Workspace icon | cmux |
+| T34 | Sidebar status | cmux |
+| T35 | Progress bar | cmux |
+| T36 | Notification | cmux |
+| T37 | Scheduled execution | scheduled |
+
+* Test Story Structure
+
+Each test follows the established T1-T15 pattern:
+
+#+begin_example
+,** T<N>: <Feature Under Test>
+:PROPERTIES:
+:STATUS: UNTESTED
+:TESTED:
+:PRIORITY: HIGH|MEDIUM|LOW
+:DEPENDS: T<M>
+:END:
+
+,*** Setup
+<preconditions: org property changes, cmux state>
+
+,*** Command
+evalElisp:
+<exact Elisp to execute via MCP>
+
+,*** Expected
+<behavioral expectations, observable side effects>
+
+,*** Trace Assertions (optional, from trace-evaluator design)
+<expected Phoenix spans>
+
+,*** Teardown (optional)
+<cleanup: remove properties, close workspaces>
+#+end_example
+
+=:DEPENDS:= enables skip logic when prerequisites fail.
+
+* HIGH Risk Test Details
+
+** T16: Cancel active query
+
+*** Setup
+Execute ai block with slow prompt. Wait 3s for Claude Code to start.
+
+*** Command
+=(claude-org-cancel)= from workspace buffer.
+
+*** Expected
+- Escape key sent to cmux surface
+- Session =:busy= cleared within 5s
+- Mode-line updated
+- No error heading inserted in org
+
+** T17: Permission needed notification
+
+*** Command
+=(claude-org-cmux--permission-needed "sdd-e2e-test-005" "Bash(rm -rf /)")=
+
+*** Expected
+- Mode-line shows orange permission alert
+- cmux workspace focused
+- macOS notification fires
+
+*** Teardown
+=(claude-org-cmux--permission-resolved "sdd-e2e-test-005")=
+
+** T18: Session recovery after restart
+
+*** Setup
+Clear all hash tables to simulate Emacs restart:
+=(clrhash claude-org-terminal--workspace-to-session-key)= etc.
+
+*** Command
+=(claude-org-cmux--recover-session "sdd-e2e-test-005")=
+
+*** Expected
+- Returns non-nil session-key
+- Hash tables repopulated from org properties
+- Subsequent execute works without new workspace
+
+** T19: Status detection
+
+*** Command
+=(claude-org-cmux--get-status "sdd-e2e-test-005" surface-id)=
+
+*** Expected
+- Returns ="ready"= when Claude Code idle
+- Returns ="busy"= during active query
+
+** T20: Stale ref recovery
+
+*** Setup
+Set fake workspace ID: =(org-set-property "CMUX_WORKSPACE_ID" "STALE-FAKE-UUID")=
+
+*** Command
+=(claude-org-cmux-open-tab)=
+
+*** Expected
+- Stale UUID triggers error -> properties cleared
+- New workspace created with fresh UUID
+- New CMUX_WORKSPACE_ID != "STALE-FAKE-UUID"
+
+** T21: Story switching
+
+*** Setup
+Add second story to workspace-test.org with its own ai block.
+
+*** Command
+Execute ai block in second story.
+
+*** Expected
+- ACTIVE_STORY changes to second story name
+- cmux tab renamed
+- =claude-org-active-story-changed-hook= fires
+
+** T22: --resume uses CLAUDE_CLI_SESSION
+
+*** Command
+=(claude-org-cmux--build-launch-command buf session-id dir)=
+
+*** Expected
+- Result contains ="--resume"= and the CLAUDE_CLI_SESSION UUID
+
+** T23: Cancel all queries
+
+*** Command
+=(claude-org-cancel-all)=
+
+*** Expected
+- All active sessions' =:busy= cleared
+- All cmux surfaces receive escape
+
+** T24: Query completed cleanup
+
+*** Command
+=(claude-org-cmux--query-completed "sdd-e2e-test-005")=
+
+*** Expected
+- Session =:busy= set to nil
+- Active query unregistered
+- Workspace mappings NOT cleared (persist)
+
+* Test Fixture Extensions
+
+=workspace-test.org= needs additions:
+
+#+begin_example
+,** second test story                    <- for T21
+,*** Workflow :sdd:
+,**** Story Switch Test :claude_chat:
+,#+begin_src ai
+Say "story switched" and nothing else.
+,#+end_src
+
+,** slow query story                     <- for T16
+,*** Workflow :sdd:
+,**** Slow Query Test :claude_chat:
+,#+begin_src ai
+Read all .org files in this project and count total lines. Take your time.
+,#+end_src
+#+end_example
+
+Also add properties: =:WORKSPACE_COLOR: blue= and =:WORKSPACE_ICON: test=
+on workspace heading for T32-T33.
+
+* Execution Model
+
+Tests run by Claude Code or human operator using evalElisp MCP + cmux CLI.
+NOT mock tests -- real Emacs, real cmux, real Claude Code.
+
+Prerequisites (same as T1-T15):
+1. Emacs with =claude-org-mode= loaded
+2. MCP server running
+3. cmux running
+4. Phoenix + OTel bridge (for trace assertions)
+
+* Implementation Plan
+
+| Phase | Tests | Effort |
+|-------|-------|--------|
+| P1 | Extend workspace-test.org fixture | 1h |
+| P2 | HIGH risk (T16-T24) | 6h |
+| P3 | MEDIUM risk (T25-T31) | 4h |
+| P4 | LOW risk (T32-T37) | 3h |
+| P5 | Integrate trace assertions from trace-evaluator design | 3h |
+
+* Success Criteria
+
+| Metric | Before | After |
+|--------|--------|-------|
+| E2E test cases | 15 | 37 |
+| HIGH risk coverage | 20% | 100% |
+| MEDIUM risk coverage | 0% | 100% |
+| LOW risk coverage | 0% | 100% |
+| Tests with trace assertions | 0 | 15+ |
+
+* Key Files
+
+| File | Action |
+|------|--------|
+| =tests/e2e/org/workspace-test.org= | Extend: add stories for T16-T37 |
+| =tests/e2e/living-workspace-test.org= | Extend: add T16-T37 test entries |
+| =claude-org-cmux.org= | Reference: all 25 untested functions |
+| =claude-org-workspace-bridge.org= | Reference: bridge functions |
+| =tests/e2e/trace-assertions.el= | New: from trace-evaluator design |

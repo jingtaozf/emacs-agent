@@ -2175,17 +2175,20 @@ Falls back to full file if no Summary section exists."
 
 #+BEGIN_SRC elisp
 (defun claude-org--find-workspace-root ()
-  "Find the root section name for current workspace.
-Returns the heading text (e.g., \"Feature Name\") of the parent section
-that contains the :sdd: tagged Workflow section, or nil if not in a workspace."
+  "Find the root workspace name for current position.
+Returns the heading text of the workspace heading (with CMUX_WORKSPACE
+property), or falls back to the grandparent of the :sdd: Workflow section."
   (save-excursion
-    (when (member "sdd" (claude-org--get-current-tags))
-      ;; Walk up to find section with :sdd: tag
-      (while (and (org-up-heading-safe)
-                  (not (member "sdd" (org-get-tags nil t)))))
-      ;; Now at the :sdd: section (Workflow), go up one more to get parent
-      (when (org-up-heading-safe)
-        (org-get-heading t t t t)))))
+    ;; Prefer CMUX_WORKSPACE-based lookup (new workspace layout)
+    (let ((ws (claude-org--find-workspace-heading)))
+      (if ws
+          (car ws)
+        ;; Fallback for old layout: walk up from :sdd: tag
+        (when (member "sdd" (claude-org--get-current-tags))
+          (while (and (org-up-heading-safe)
+                      (not (member "sdd" (org-get-tags nil t)))))
+          (when (org-up-heading-safe)
+            (org-get-heading t t t t)))))))
 #+END_SRC
 
 *** Workspace Heading Navigation
@@ -2200,15 +2203,13 @@ Returns (name . position) or nil. Works from any point inside a workspace."
       (condition-case nil
           (progn
             (unless (org-at-heading-p) (org-back-to-heading t))
-            (let ((found nil))
-              (while (and (not found)
-                          (not (bobp)))
+            ;; Check current heading and walk up until found or at top
+            (cl-block nil
+              (while t
                 (when (org-entry-get nil "CMUX_WORKSPACE")
-                  (setq found (cons (org-get-heading t t t t) (point))))
-                (unless found
-                  (unless (org-up-heading-safe)
-                    (goto-char (point-min)))))
-              found))
+                  (cl-return (cons (org-get-heading t t t t) (point))))
+                (unless (org-up-heading-safe)
+                  (cl-return nil)))))
         (error nil)))))
 
 (defun claude-org--find-story-heading ()
@@ -3464,78 +3465,54 @@ Set to nil to omit the property (uses whatever backend the file/section inherits
   :group 'claude-org)
 
 (defun claude-org-insert-workspace ()
-  "Insert a workspace structure.
-Creates two notebook sections:
-1. System Prompt :system_prompt: for AI guidance instructions
-2. Workflow :sdd: with a single AI block (user adds phase tags manually)
+  "Insert a workspace with one default story.
+Structure:
+  * Workspace Name          (workspace heading with CMUX_WORKSPACE)
+  ** First Story            (story sub-heading, name = workspace name)
+  *** System Prompt         (story-specific AI guidance)
+  *** Workflow :sdd:        (contains AI blocks and responses)
+  **** Instruction 1        (empty AI block, cursor positioned here)
 
-Knowledge artifacts (research, spec, features) are created as files in docs/:
-- docs/research/YYYY-slug.org — research findings
-- docs/design-docs/YYYY-slug.org — design doc with goals, spec, features
-
-The System Prompt auto-populates with paths to these docs/ files.
-
-Each notebook section gets a CUSTOM_ID property for stable cross-file linking.
-Prompts for feature name and sets up unique CLAUDE_SESSION_ID.
-Aligns section level with previous workspace if any exists, otherwise uses top level."
+Prompts for workspace name and sets up CLAUDE_SESSION_ID.
+Aligns level with previous workspace if any exists."
   (interactive)
-  (let* ((name (read-string "Feature name: "))
+  (let* ((name (read-string "Workspace name: "))
          (session-id (format "sdd-%s" (format-time-string "%Y%m%d-%H%M%S")))
          (file-base (when buffer-file-name (file-name-base buffer-file-name)))
-         ;; Align with previous workspace level, or use top level (1) if none exists
          (level (or (claude-org--find-previous-workspace-level) 1))
-         (stars (make-string level ?*))
-         (stars2 (make-string (1+ level) ?*))
-         (stars3 (make-string (+ 2 level) ?*))
-         ;; Create docs/ files (side effect only, return value unused)
-         (_ (claude-org--workspace-create-docs-files name session-id)))
-    ;; Insert top-level heading with session
-    (insert stars " " name "\n")
+         (stars1 (make-string level ?*))           ; workspace
+         (stars2 (make-string (1+ level) ?*))      ; story
+         (stars3 (make-string (+ 2 level) ?*))     ; system prompt, workflow
+         (stars4 (make-string (+ 3 level) ?*)))    ; instruction
+    ;; 1. Workspace heading
+    (insert stars1 " " name "\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id name file-base) "\n")
     (insert ":CMUX_WORKSPACE: " (claude-org--workspace-name-to-slug name) "\n")
     (insert ":CLAUDE_SESSION_ID: " session-id "\n")
+    (insert ":ACTIVE_STORY: First Story\n")
     (when claude-org-workspace-default-backend
       (insert ":CLAUDE_BACKEND: " claude-org-workspace-default-backend "\n"))
     (insert ":END:\n\n")
 
-    ;; 1. Insert System Prompt section for AI guidance
-    (insert stars2 " System Prompt :system_prompt:\n")
+    ;; 2. Default story
+    (insert stars2 " First Story\n")
+
+    ;; 3. System Prompt under story
+    (insert stars3 " System Prompt :system_prompt:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "System Prompt" file-base) "\n")
     (insert ":END:\n\n")
-    (insert (format "The current workspace story is \"%s\"\n" name))
-    ;; Lean docs/ layout — just enough for Claude Code to know the convention
-    (let* ((slug (claude-org--workspace-name-to-slug name))
-           (year (substring session-id 4 8))
-           (fmt (claude-org--workspace-docs-format))
-           (r (format "docs/research/%s-%s.%s" year slug fmt))
-           (d (format "docs/design-docs/%s-%s.%s" year slug fmt)))
-      (insert (format "
-Docs files for this story:
-- *Research*: =%s=
-- *Design Doc*: =%s=
+    (insert (format "The current workspace story is \"%s\"\n\n" name))
 
-docs/ directory layout:
-
-| Directory | Purpose |
-|-----------+---------|
-| =docs/research/= | Research findings |
-| =docs/design-docs/= | Design docs (goals, spec, features) |
-| =docs/product-specs/= | Cross-story product specs |
-| =docs/references/= | Curated external references |
-
-After creating or updating any doc, update its row in the subdirectory's =INDEX.md=.
-
-" r d)))
-
-    ;; 2. Insert Workflow section with single AI block (no phase tags)
-    (insert stars2 " Workflow :sdd:\n")
+    ;; 4. Workflow under story
+    (insert stars3 " Workflow :sdd:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Workflow" file-base) "\n")
     (insert ":END:\n\n")
-    ;; Insert Instruction 1 with CUSTOM_ID for stable navigation
-    (insert stars3 " Instruction 1 :research:" claude-org-heading-tag ":\n")
+
+    ;; 5. First instruction with empty AI block
+    (insert stars4 " Instruction 1 :" claude-org-heading-tag ":\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (claude-org--generate-instruction-custom-id file-base 1 session-id) "\n")
     (insert ":END:\n\n")

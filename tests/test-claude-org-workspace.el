@@ -10,8 +10,8 @@
 ;; Unit and integration tests for workspace workflow.
 ;; Tests the claude-org-insert-workspace command and tag inheritance.
 ;;
-;; Workspace notebook structure: System Prompt + Workflow only.
-;; Knowledge artifacts (research, spec, features) live in docs/ folder.
+;; Workspace structure: * Workspace > ** Story > *** System Prompt + *** Workflow.
+;; Story sub-heading is inserted between workspace and notebook sections.
 
 ;;; Code:
 
@@ -30,20 +30,20 @@ The default content should indicate the current workspace story name."
     (setq buffer-file-name "/tmp/test-sdd.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "My SDD Story")))
       (claude-org-insert-workspace))
-    ;; Verify System Prompt exists with :system_prompt: tag
+    ;; Verify System Prompt exists with :system_prompt: tag (level 3, under story)
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
+    (should (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:" nil t))
     ;; Verify it has CUSTOM_ID
     (should (org-entry-get nil "CUSTOM_ID"))
-    ;; Verify it comes BEFORE Workflow (first subsection)
+    ;; Verify it comes BEFORE Workflow (first subsection under story)
     (let ((system-prompt-pos (point)))
       (goto-char (point-min))
-      (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
+      (should (re-search-forward "^\\*\\*\\* Workflow :sdd:" nil t))
       (let ((workflow-pos (point)))
         (should (< system-prompt-pos workflow-pos))))
     ;; Verify default content contains the workspace story name
     (goto-char (point-min))
-    (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+    (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:")
     (forward-line 1)
     ;; Skip past PROPERTIES drawer
     (when (looking-at ":PROPERTIES:")
@@ -52,39 +52,42 @@ The default content should indicate the current workspace story name."
     ;; Should find the default content with the story name
     (should (re-search-forward "The current workspace story is \"My SDD Story\"" nil t))))
 
-(ert-deftest test-workspace-insert-creates-two-notebook-sections ()
-  "Test that claude-org-insert-workspace creates only System Prompt and Workflow sections.
-Research Output, Spec, and Features now live in docs/ folder, not the notebook."
+(ert-deftest test-workspace-insert-creates-story-and-notebook-sections ()
+  "Test that claude-org-insert-workspace creates story heading, System Prompt, and Workflow.
+The workspace has: * Workspace > ** Story > *** System Prompt + *** Workflow."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
       (claude-org-insert-workspace))
-    ;; Verify structure - only 2 sections in notebook
+    ;; Verify structure
     (goto-char (point-min))
-    ;; Top-level heading
+    ;; Top-level workspace heading
     (should (re-search-forward "^\\* Test Feature" nil t))
-    ;; System Prompt section
+    ;; Story sub-heading
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
-    (should (org-entry-get nil "CUSTOM_ID"))
-    ;; Workflow section with :sdd: tag and CUSTOM_ID
+    (should (re-search-forward "^\\*\\* First Story" nil t))
+    ;; System Prompt section (level 3, under story)
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
+    (should (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:" nil t))
     (should (org-entry-get nil "CUSTOM_ID"))
-    ;; AI block under Workflow
+    ;; Workflow section with :sdd: tag and CUSTOM_ID (level 3, under story)
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Workflow :sdd:" nil t))
+    (should (org-entry-get nil "CUSTOM_ID"))
+    ;; AI block under Workflow (level 4)
     (goto-char (point-min))
     (let ((tag-pattern (format ":%s:" claude-org-heading-tag)))
-      (should (re-search-forward (format "^\\*\\*\\* Instruction 1 .*%s" tag-pattern) nil t))
+      (should (re-search-forward (format "^\\*\\*\\*\\* Instruction 1 .*%s" tag-pattern) nil t))
       (should (re-search-forward "^#\\+begin_src ai" nil t)))
     ;; MUST NOT have Research Output, Spec, or Features sections
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\* Research Output" nil t))
+    (should-not (re-search-forward "^\\*\\*\\* Research Output" nil t))
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\* Spec" nil t))
+    (should-not (re-search-forward "^\\*\\*\\* Spec" nil t))
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\* Features" nil t))))
+    (should-not (re-search-forward "^\\*\\*\\* Features" nil t))))
 
 (ert-deftest test-workspace-insert-sets-session-id ()
   "Test that workspace structure has unique CLAUDE_SESSION_ID."
@@ -100,77 +103,18 @@ Research Output, Spec, and Features now live in docs/ folder, not the notebook."
       (should session-id)
       (should (string-prefix-p "sdd-" session-id)))))
 
-(ert-deftest test-workspace-insert-creates-docs-files ()
-  "Test that claude-org-insert-workspace creates research and design-doc files in docs/."
+(ert-deftest test-workspace-insert-sets-active-story ()
+  "Test that workspace heading has ACTIVE_STORY property set to workspace name."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (let ((default-directory (make-temp-file "sdd-test-project-" t)))
-    (unwind-protect
-        (progn
-          ;; Create docs/ structure
-          (make-directory (expand-file-name "docs/research") t)
-          (make-directory (expand-file-name "docs/design-docs") t)
-          (with-temp-file (expand-file-name "docs/research/INDEX.md")
-            (insert "# Research Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
-          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
-            (insert "# Design Docs Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
-          (with-temp-buffer
-            (org-mode)
-            (setq buffer-file-name (expand-file-name "notebook.org"))
-            (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-              (claude-org-insert-workspace))
-            ;; Verify docs files were created
-            (let* ((session-id (save-excursion
-                                 (goto-char (point-min))
-                                 (re-search-forward "^\\* Test Feature")
-                                 (org-entry-get nil "CLAUDE_SESSION_ID")))
-                   (year (substring session-id 4 8))
-                   (slug "test-feature")
-                   (research-file (expand-file-name
-                                   (format "docs/research/%s-%s.org" year slug)))
-                   (design-file (expand-file-name
-                                 (format "docs/design-docs/%s-%s.org" year slug))))
-              (should (file-exists-p research-file))
-              (should (file-exists-p design-file))
-              ;; Verify research file has correct structure
-              (with-temp-buffer
-                (insert-file-contents research-file)
-                (should (string-match-p "TITLE.*Research.*Test Feature" (buffer-string)))
-                (should (string-match-p "WORKSPACE_SESSION" (buffer-string))))
-              ;; Verify design doc has correct structure
-              (with-temp-buffer
-                (insert-file-contents design-file)
-                (should (string-match-p "TITLE.*Design.*Test Feature" (buffer-string)))
-                (should (string-match-p "Goals" (buffer-string)))
-                (should (string-match-p "Features" (buffer-string)))))))
-      ;; Cleanup
-      (delete-directory default-directory t))))
-
-(ert-deftest test-workspace-insert-system-prompt-includes-docs-paths ()
-  "Test that System Prompt default content includes docs/ file paths."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (let ((default-directory (make-temp-file "sdd-test-project-" t)))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "docs/research") t)
-          (make-directory (expand-file-name "docs/design-docs") t)
-          (with-temp-file (expand-file-name "docs/research/INDEX.md")
-            (insert "# Research Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
-          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
-            (insert "# Design Docs Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
-          (with-temp-buffer
-            (org-mode)
-            (setq buffer-file-name (expand-file-name "notebook.org"))
-            (cl-letf (((symbol-function 'read-string) (lambda (_) "My Story")))
-              (claude-org-insert-workspace))
-            ;; System Prompt should reference docs/ files
-            (goto-char (point-min))
-            (re-search-forward "^\\*\\* System Prompt :system_prompt:")
-            (let ((section-end (save-excursion (org-end-of-subtree t) (point))))
-              (should (re-search-forward "docs/research/" section-end t))
-              (goto-char (point-min))
-              (re-search-forward "^\\*\\* System Prompt :system_prompt:")
-              (should (re-search-forward "docs/design-docs/" section-end t)))))
-      (delete-directory default-directory t))))
+  (with-temp-buffer
+    (org-mode)
+    (setq buffer-file-name "/tmp/test-sdd.org")
+    (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
+      (claude-org-insert-workspace))
+    (goto-char (point-min))
+    (re-search-forward "^\\* Test Feature")
+    (should (equal "First Story" (org-entry-get nil "ACTIVE_STORY"))))
+)
 
 (ert-deftest test-workspace-level-alignment ()
   "Test that new workspace aligns with previous workspace level."
@@ -482,8 +426,8 @@ were not inherited because org-get-tags was called with LOCAL=t."
 
 ;;; Integration Tests - Workspace Prompt Building
 
-(ert-deftest test-workspace-integration-behavior-prompt-with-links ()
-  "Test that behavior prompt includes docs/ links when session-id is present."
+(ert-deftest test-workspace-integration-behavior-prompt-with-tags ()
+  "Test that behavior prompt includes SDD and RESEARCH content from tags."
   :tags '(:integration :fast :stable :org :sdd)
   (with-temp-buffer
     (org-mode)
@@ -502,9 +446,8 @@ were not inherited because org-get-tags was called with LOCAL=t."
       (should (stringp prompt))
       ;; Should have SDD content
       (should (string-match-p "SDD" prompt))
-      ;; Should have docs/ links
-      (should (string-match-p "docs/research/" prompt))
-      (should (string-match-p "docs/design-docs/" prompt)))))
+      ;; Should have RESEARCH content
+      (should (string-match-p "RESEARCH" prompt)))))
 
 (ert-deftest test-workspace-integration-multiple-tags-ordered ()
   "Test that multiple tags are processed in correct order with context."
@@ -529,47 +472,44 @@ were not inherited because org-get-tags was called with LOCAL=t."
 ;;; End-to-End Tests - Full Workspace Workflow
 
 (ert-deftest test-workspace-e2e-create-and-verify-structure ()
-  "End-to-end: Create workspace, verify docs/ files and notebook structure."
+  "End-to-end: Create workspace, verify notebook structure with story heading."
   :tags '(:e2e :slow :org :sdd :tdd)
   (let ((test-dir (make-temp-file "sdd-e2e-" t)))
     (unwind-protect
-        (progn
-          ;; Set up docs/ structure
-          (make-directory (expand-file-name "docs/research" test-dir) t)
-          (make-directory (expand-file-name "docs/design-docs" test-dir) t)
-          (with-temp-file (expand-file-name "docs/research/INDEX.md" test-dir)
-            (insert "# Research Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
-          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md" test-dir)
-            (insert "# Design Docs Index\n\n| Date | Title | Status |\\n|------|-------|--------|\\n"))
-          (let ((default-directory test-dir)
-                (test-file (expand-file-name "test-notebook.org" test-dir)))
-            (with-temp-buffer
-              (org-mode)
-              (setq buffer-file-name test-file)
-              ;; Create workspace structure
-              (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Test Feature")))
-                (claude-org-insert-workspace))
-              (save-buffer)
-              ;; Navigate to first AI block
-              (goto-char (point-min))
-              (re-search-forward "^#\\+begin_src ai")
-              (forward-line 1)
-              ;; Verify context
-              (let* ((context (claude-org--build-behavior-context))
-                     (prompt (claude-org--build-behavior-prompt)))
-                ;; Context should have correct values
-                (should (equal "E2E Test Feature" (plist-get context :workspace-root)))
-                (should (member "sdd" (plist-get context :current-tags)))
-                ;; Prompt should have docs/ links
-                (should (string-match-p "docs/research/" prompt))
-                (should (string-match-p "docs/design-docs/" prompt)))
-              ;; Verify NO Research Output/Spec/Features in notebook
-              (goto-char (point-min))
-              (should-not (re-search-forward "^\\*\\* Research Output" nil t))
-              (goto-char (point-min))
-              (should-not (re-search-forward "^\\*\\* Spec" nil t))
-              (goto-char (point-min))
-              (should-not (re-search-forward "^\\*\\* Features" nil t)))))
+        (let ((default-directory test-dir)
+              (test-file (expand-file-name "test-notebook.org" test-dir)))
+          (with-temp-buffer
+            (org-mode)
+            (setq buffer-file-name test-file)
+            ;; Create workspace structure
+            (cl-letf (((symbol-function 'read-string) (lambda (_) "E2E Test Feature")))
+              (claude-org-insert-workspace))
+            (save-buffer)
+            ;; Navigate to first AI block
+            (goto-char (point-min))
+            (re-search-forward "^#\\+begin_src ai")
+            (forward-line 1)
+            ;; Verify context
+            (let ((context (claude-org--build-behavior-context)))
+              ;; Context should have correct values
+              (should (equal "E2E Test Feature" (plist-get context :workspace-root)))
+              (should (member "sdd" (plist-get context :current-tags))))
+            ;; Verify structure: workspace > story > system prompt + workflow
+            (goto-char (point-min))
+            (should (re-search-forward "^\\* E2E Test Feature" nil t))
+            (goto-char (point-min))
+            (should (re-search-forward "^\\*\\* First Story" nil t))
+            (goto-char (point-min))
+            (should (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:" nil t))
+            (goto-char (point-min))
+            (should (re-search-forward "^\\*\\*\\* Workflow :sdd:" nil t))
+            ;; Verify NO Research Output/Spec/Features in notebook
+            (goto-char (point-min))
+            (should-not (re-search-forward "^\\*\\*\\* Research Output" nil t))
+            (goto-char (point-min))
+            (should-not (re-search-forward "^\\*\\*\\* Spec" nil t))
+            (goto-char (point-min))
+            (should-not (re-search-forward "^\\*\\*\\* Features" nil t))))
       ;; Cleanup
       (delete-directory test-dir t))))
 
@@ -602,34 +542,34 @@ were not inherited because org-get-tags was called with LOCAL=t."
   (should-not (claude-org--generate-custom-id nil nil)))
 
 (ert-deftest test-workspace-insert-adds-custom-id-to-notebook-sections ()
-  "Test that claude-org-insert-workspace adds CUSTOM_ID to notebook sections only."
+  "Test that claude-org-insert-workspace adds CUSTOM_ID to notebook sections."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-custom-id.org")
     (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
       (claude-org-insert-workspace))
-    ;; Verify CUSTOM_ID on top-level heading
+    ;; Verify CUSTOM_ID on top-level workspace heading
     (goto-char (point-min))
     (re-search-forward "^\\* Test Feature")
     (should (org-entry-get nil "CUSTOM_ID"))
-    ;; Verify CUSTOM_ID on System Prompt
+    ;; Verify CUSTOM_ID on System Prompt (level 3, under story)
     (goto-char (point-min))
-    (re-search-forward "^\\*\\* System Prompt :system_prompt:")
+    (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:")
     (should (org-entry-get nil "CUSTOM_ID"))
     (should (string-match-p "^test-custom-id-system-prompt-sdd-" (org-entry-get nil "CUSTOM_ID")))
-    ;; Verify CUSTOM_ID on Workflow section
+    ;; Verify CUSTOM_ID on Workflow section (level 3, under story)
     (goto-char (point-min))
-    (re-search-forward "^\\*\\* Workflow :sdd:")
+    (re-search-forward "^\\*\\*\\* Workflow :sdd:")
     (should (org-entry-get nil "CUSTOM_ID"))
     (should (string-match-p "^test-custom-id-workflow-sdd-" (org-entry-get nil "CUSTOM_ID")))
     ;; MUST NOT have Research Output, Spec, or Features sections at all
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\* Research Output" nil t))
+    (should-not (re-search-forward "^\\*\\*\\* Research Output" nil t))
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\* Spec" nil t))
+    (should-not (re-search-forward "^\\*\\*\\* Spec" nil t))
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\* Features" nil t))))
+    (should-not (re-search-forward "^\\*\\*\\* Features" nil t))))
 
 ;;; Structural Tests - docs/ Directory
 
@@ -699,127 +639,6 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (let ((claude-org-workspace-docs-format "org"))
       (should (equal "md" (claude-org--workspace-docs-format))))))
 
-(ert-deftest test-workspace-create-docs-files-md-format ()
-  "Test that workspace-create-docs-files creates .md files when format is 'md'."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (let ((default-directory (make-temp-file "sdd-test-md-" t))
-        (claude-org-workspace-docs-format "md"))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "docs/research") t)
-          (make-directory (expand-file-name "docs/design-docs") t)
-          (with-temp-file (expand-file-name "docs/research/INDEX.md")
-            (insert "# Research Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
-          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
-            (insert "# Design Docs Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
-          (with-temp-buffer
-            (org-mode)
-            (setq buffer-file-name (expand-file-name "notebook.org"))
-            (cl-letf (((symbol-function 'read-string) (lambda (_) "Test MD Feature")))
-              (claude-org-insert-workspace))
-            (let* ((session-id (save-excursion
-                                 (goto-char (point-min))
-                                 (re-search-forward "^\\* Test MD Feature")
-                                 (org-entry-get nil "CLAUDE_SESSION_ID")))
-                   (year (substring session-id 4 8))
-                   (slug "test-md-feature")
-                   (research-file (expand-file-name
-                                   (format "docs/research/%s-%s.md" year slug)))
-                   (design-file (expand-file-name
-                                 (format "docs/design-docs/%s-%s.md" year slug))))
-              ;; .md files should exist
-              (should (file-exists-p research-file))
-              (should (file-exists-p design-file))
-              ;; .org files should NOT exist
-              (should-not (file-exists-p
-                           (expand-file-name
-                            (format "docs/research/%s-%s.org" year slug))))
-              (should-not (file-exists-p
-                           (expand-file-name
-                            (format "docs/design-docs/%s-%s.org" year slug))))
-              ;; Verify .md content uses markdown headings
-              (with-temp-buffer
-                (insert-file-contents research-file)
-                (should (string-match-p "^# Research:" (buffer-string)))
-                (should (string-match-p "^## " (buffer-string))))
-              (with-temp-buffer
-                (insert-file-contents design-file)
-                (should (string-match-p "^# Design:" (buffer-string)))
-                (should (string-match-p "^## Goals" (buffer-string)))
-                (should (string-match-p "^## Features" (buffer-string)))))))
-      (delete-directory default-directory t))))
-
-(ert-deftest test-workspace-insert-system-prompt-md-paths ()
-  "Test that System Prompt uses .md paths when format is 'md'."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (let ((default-directory (make-temp-file "sdd-test-md-paths-" t))
-        (claude-org-workspace-docs-format "md"))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "docs/research") t)
-          (make-directory (expand-file-name "docs/design-docs") t)
-          (with-temp-file (expand-file-name "docs/research/INDEX.md")
-            (insert "# Research Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
-          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
-            (insert "# Design Docs Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
-          (with-temp-buffer
-            (org-mode)
-            (setq buffer-file-name (expand-file-name "notebook.org"))
-            (cl-letf (((symbol-function 'read-string) (lambda (_) "MD Story")))
-              (claude-org-insert-workspace))
-            ;; System Prompt should reference .md files
-            (goto-char (point-min))
-            (re-search-forward "^\\*\\* System Prompt :system_prompt:")
-            (let ((section-end (save-excursion (org-end-of-subtree t) (point))))
-              ;; Should have .md paths
-              (should (re-search-forward "\\.md=" section-end t))
-              (goto-char (point-min))
-              (re-search-forward "^\\*\\* System Prompt :system_prompt:")
-              ;; Should NOT have .org paths in docs references
-              (let ((has-org-docs nil))
-                (while (re-search-forward "docs/\\(research\\|design-docs\\)/[^ ]*\\.org" section-end t)
-                  (setq has-org-docs t))
-                (should-not has-org-docs)))))
-      (delete-directory default-directory t))))
-
-(ert-deftest test-workspace-create-docs-files-default-org-format ()
-  "Test that workspace-create-docs-files creates .org files by default."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (let ((default-directory (make-temp-file "sdd-test-org-" t))
-        (claude-org-workspace-docs-format "org"))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "docs/research") t)
-          (make-directory (expand-file-name "docs/design-docs") t)
-          (with-temp-file (expand-file-name "docs/research/INDEX.md")
-            (insert "# Research Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
-          (with-temp-file (expand-file-name "docs/design-docs/INDEX.md")
-            (insert "# Design Docs Index\n\n| Date | Title | Status |\n|------|-------|--------|\n"))
-          (with-temp-buffer
-            (org-mode)
-            (setq buffer-file-name (expand-file-name "notebook.org"))
-            (cl-letf (((symbol-function 'read-string) (lambda (_) "Org Story")))
-              (claude-org-insert-workspace))
-            (let* ((session-id (save-excursion
-                                 (goto-char (point-min))
-                                 (re-search-forward "^\\* Org Story")
-                                 (org-entry-get nil "CLAUDE_SESSION_ID")))
-                   (year (substring session-id 4 8))
-                   (slug "org-story"))
-              ;; .org files should exist
-              (should (file-exists-p
-                       (expand-file-name
-                        (format "docs/research/%s-%s.org" year slug))))
-              (should (file-exists-p
-                       (expand-file-name
-                        (format "docs/design-docs/%s-%s.org" year slug))))
-              ;; Verify org content uses org headings
-              (with-temp-buffer
-                (insert-file-contents
-                 (expand-file-name (format "docs/research/%s-%s.org" year slug)))
-                (should (string-match-p "^#\\+TITLE:" (buffer-string)))
-                (should (string-match-p "^\\* " (buffer-string)))))))
-      (delete-directory default-directory t))))
 
 (provide 'test-claude-org-workspace)
 ;;; test-claude-org-sdd.el ends here
