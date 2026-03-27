@@ -633,6 +633,12 @@ test-e2e-local:
 		-l tests/test-e2e-local-trace.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"
 
+# Trace health check (requires Phoenix at localhost:6006)
+.PHONY: test-trace-health
+test-trace-health:
+	@echo "Running Phoenix trace health check..."
+	python3 tests/e2e/trace_health.py
+
 # Workspace Bridge E2E tests (requires running Emacs MCP server)
 EMACS_MCP_PORT ?= 9999
 .PHONY: test-workspace-bridge

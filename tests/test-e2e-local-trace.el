@@ -58,6 +58,53 @@
   "Filter SPANS to only root spans (parentId is null)."
   (seq-filter (lambda (s) (eq (alist-get 'parentId s) :null)) spans))
 
+(defun test-e2e-local--recent-spans-full (n)
+  "Get N most recent spans with statusCode and latencyMs."
+  (let* ((query (format "query { node(id: \"UHJvamVjdDoy\") { ... on Project { spans(first: %d, sort: {col: startTime, dir: desc}) { edges { node { name parentId spanId spanKind statusCode startTime latencyMs } } } } } }" n))
+         (result (test-e2e-local--query-phoenix query))
+         (edges (alist-get 'edges
+                  (alist-get 'spans
+                    (alist-get 'node
+                      (alist-get 'data result))))))
+    (mapcar (lambda (e) (alist-get 'node e)) edges)))
+
+(defun test-e2e-local--find-span (spans name)
+  "Find first span in SPANS with given NAME."
+  (seq-find (lambda (s) (equal (alist-get 'name s) name)) spans))
+
+(defun test-e2e-local--find-spans (spans name)
+  "Find all spans in SPANS with given NAME."
+  (seq-filter (lambda (s) (equal (alist-get 'name s) name)) spans))
+
+(defun test-e2e-local--assert-span-exists (spans name)
+  "Assert that a span named NAME exists in SPANS. Returns the span."
+  (let ((span (test-e2e-local--find-span spans name)))
+    (should-not (null span))
+    span))
+
+(defun test-e2e-local--assert-parent-child (spans parent-name child-name)
+  "Assert that CHILD-NAME span has PARENT-NAME span as its parent."
+  (let ((parent (test-e2e-local--find-span spans parent-name))
+        (child (test-e2e-local--find-span spans child-name)))
+    (should-not (null parent))
+    (should-not (null child))
+    (should (equal (alist-get 'parentId child)
+                   (alist-get 'spanId parent)))))
+
+(defun test-e2e-local--assert-no-errors (spans)
+  "Assert no span in SPANS has ERROR statusCode."
+  (let ((errors (seq-filter
+                 (lambda (s) (equal (alist-get 'statusCode s) "ERROR"))
+                 spans)))
+    (when errors
+      (ert-fail (format "Found %d ERROR spans: %s"
+                        (length errors)
+                        (mapconcat (lambda (s) (alist-get 'name s)) errors ", "))))))
+
+(defun test-e2e-local--spans-by-name-prefix (spans prefix)
+  "Filter SPANS to those whose name starts with PREFIX."
+  (seq-filter (lambda (s) (string-prefix-p prefix (or (alist-get 'name s) ""))) spans))
+
 ;;; Tests
 
 (ert-deftest test-e2e-local-phoenix-reachable ()
