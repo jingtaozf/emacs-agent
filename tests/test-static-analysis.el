@@ -323,15 +323,8 @@ Returns list of warning/error messages."
     ;; Cross-module references (loaded at runtime)
     "emacs-mcp-server-running-p" "emacs-mcp-server-start" "emacs-mcp-server-port"
     "claude-org--insert-block-menu-dynamic"
-    ;; Workspace bridge functions (now in claude-org-workspace-bridge.org)
-    "claude-org-workspace-bridge-system-prompt" "claude-org-workspace-bridge-get-cli-session"
     ;; Emacs version-specific functions
-    "parse-iso8601-time-string"
-    ;; Struct accessors referenced before struct is parsed
-    "claude-agent-pre-tool-use-input-tool-name"
-    "claude-agent-pre-tool-use-input-tool-input"
-    ;; Variables defined in claude-org.org but referenced in claude-agent.org
-    "claude-agent-translate-model")
+    "parse-iso8601-time-string")
   "List of symbol names known to be external or forward-referenced.
 These are excluded from byte-compile undefined warnings.")
 

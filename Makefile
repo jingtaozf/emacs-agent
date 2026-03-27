@@ -27,7 +27,7 @@ LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COM
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
 LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
 LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")"
-LOAD_MCP = --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
+LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/claude-org.org\")"
 # Presets for common combinations
 LOAD_AGENT_ONLY = $(LOAD_LITERATE) $(LOAD_AGENT)

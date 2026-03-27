@@ -592,17 +592,6 @@ Use when session expires or needs reset."
       (remhash session-key claude-agent--session-verbose-buffers))
     (claude-agent--debug-log "Session cleared: %s" session-key)))
 
-(defun claude-agent--clear-all-sessions ()
-  "Clear all session mappings."
-  (clrhash claude-agent--session-mapping)
-  ;; Optionally kill all verbose buffers
-  (when claude-agent-verbose-buffer-auto-kill
-    (maphash (lambda (_key buf)
-               (when (buffer-live-p buf)
-                 (kill-buffer buf)))
-             claude-agent--session-verbose-buffers)
-    (clrhash claude-agent--session-verbose-buffers)))
-
 (defun claude-agent--session-expired-p (error-message)
   "Check if ERROR-MESSAGE indicates session expiration.
 Returns non-nil if the error is about an expired/missing session."
@@ -621,12 +610,6 @@ Returns non-nil if the error is about exceeding context limits."
         (string-match-p "exceeds.*context" error-message)
         (string-match-p "token.*limit" error-message))))
 
-(defun claude-agent--session-needs-reset-p (error-message)
-  "Check if ERROR-MESSAGE indicates session needs to be reset.
-Returns non-nil if the error requires starting a fresh session.
-This includes both expired sessions and context limit errors."
-  (or (claude-agent--session-expired-p error-message)
-      (claude-agent--context-too-long-p error-message)))
 #+END_SRC
 
 ** Data Structures
@@ -2778,16 +2761,6 @@ Returns nil if not yet available."
          (when-let* ((process (claude-agent--process-state-process state)))
            (process-live-p process)))))
 
-(defun claude-agent-client-busy-p (client)
-  "Return non-nil if CLIENT is currently processing a query.
-A client is busy if it has sent a message and hasn't received a result yet."
-  (and (claude-agent-client-alive-p client)
-       (when-let* ((state (claude-agent-client-state client)))
-         ;; Check if we're waiting for a result
-         (and (claude-agent--process-state-ready state)
-              (not (claude-agent--process-state-closed state))
-              ;; Also check if there are pending responses
-              (not (claude-agent--process-state-got-result state))))))
 #+END_SRC
 
 ** Control Request Handling
@@ -3080,12 +3053,6 @@ Cancels active queries and removes stale entries."
           (run-with-timer claude-agent-cleanup-interval
                           claude-agent-cleanup-interval
                           #'claude-agent--cleanup-stale-queries))))
-
-(defun claude-agent--stop-cleanup-timer ()
-  "Stop periodic cleanup timer."
-  (when claude-agent--cleanup-timer
-    (cancel-timer claude-agent--cleanup-timer)
-    (setq claude-agent--cleanup-timer nil)))
 
 (defun claude-agent--kill-emacs-cleanup ()
   "Kill all Claude processes before Emacs exits.

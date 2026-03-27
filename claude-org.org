@@ -1703,13 +1703,6 @@ Selects which backend implementation to use for new sessions.
                 (const :tag "Claude CLI terminal (requires eat)" claude-cli))
   :group 'claude-org)
 
-(defcustom claude-org-session-idle-timeout nil
-  "Seconds of inactivity before auto-closing idle persistent sessions.
-When nil, sessions remain connected until explicitly closed."
-  :type '(choice (const :tag "Never timeout" nil)
-                 (integer :tag "Seconds"))
-  :group 'claude-org)
-
 (defun claude-org--get-persistent-client (session-key)
   "Get persistent client for SESSION-KEY, or nil if none exists."
   (when-let* ((entry (gethash session-key claude-org--persistent-clients)))
@@ -1802,33 +1795,6 @@ Install with: M-x package-install RET eat RET"))
        :session-key session-key
        :persistent-p claude-org-persistent-sessions)))))
 
-(defun claude-org--get-or-create-persistent-client (session-key options)
-  "Get or create a persistent client for SESSION-KEY.
-OPTIONS is a plist of claude-agent options.
-Returns the client struct, creating and connecting a new one if needed."
-  (let ((existing (claude-org--get-persistent-client session-key)))
-    (if (and existing (claude-agent-client-alive-p existing))
-        ;; Return existing alive client
-        existing
-      ;; Create new client
-      (let* ((buffer (current-buffer))
-             (heading-pos (save-excursion
-                           (ignore-errors (org-back-to-heading t))
-                           (claude-org--find-session-scope-heading)))
-             (client (claude-agent-client-create
-                      :options options
-                      :session-key session-key
-                      :on-disconnect
-                      (lambda (c)
-                        (let ((key (claude-agent-client-session-key c)))
-                          (remhash key claude-org--persistent-clients)
-                          (message "Claude: Session %s disconnected"
-                                   (claude-org--session-display-name key)))))))
-        ;; Connect the client (without initial prompt - we'll send messages later)
-        (claude-agent-client-connect client "")
-        ;; Register in persistent clients registry
-        (claude-org--register-persistent-client session-key client buffer heading-pos)
-        client))))
 #+END_SRC
 
 ** Lifecycle Hooks
@@ -2511,22 +2477,6 @@ Returns a slug like \"claude-agent-dev-research-output-sdd-20251227-180147\"."
       (if file-base
           (format "%s-%s-%s" file-base slug session-id)
         (format "%s-%s" session-id slug)))))
-#+END_SRC
-
-*** Workspace Link Generation
-
-#+BEGIN_SRC elisp
-(defun claude-org--get-section-level-by-custom-id (file-path custom-id)
-  "Get the heading level of section with CUSTOM_ID in FILE-PATH.
-Returns the level (integer) or nil if not found."
-  (when (and file-path (file-exists-p file-path))
-    (with-current-buffer (find-file-noselect file-path)
-      (save-excursion
-        (goto-char (point-min))
-        (when (re-search-forward (format ":CUSTOM_ID: %s" (regexp-quote custom-id)) nil t)
-          (org-back-to-heading t)
-          (org-outline-level))))))
-
 #+END_SRC
 
 ** Header Prompt Lookup

@@ -440,8 +440,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-update-state-callbacks"
     ;; claude-agent: permission system
     "claude-agent-check-permission"
-    "claude-agent-permission-check"
-    "claude-agent-permission-handler"
     "claude-agent-permission-check-patterns"
     "claude-agent-permission-prompt"
     "claude-agent-permission-auto-allow"
@@ -449,15 +447,12 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-agent: IDE context
     "claude-agent-collect-ide-context"
     "claude-agent-get-system-reminder"
-    "claude-agent-ide-context"
     "claude-agent-build-system-reminder"
     ;; claude-agent: alerts (mode-line)
     "claude-agent-add-alert"
     "claude-agent-remove-alert"
     ;; claude-agent: CLI switches (public wrapper)
     "claude-agent-build-cli-switches"
-    ;; claude-agent: path mappings (per-process Docker support)
-    "claude-agent-active-path-mappings"
     ;; claude-agent: verbose/debug
     "claude-agent-get-verbose-buffer"
     "claude-agent-show-session-verbose"
@@ -513,7 +508,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-next-ai-block"
     "claude-org-prev-ai-block"
     "claude-org-goto-story"
-    "claude-org-goto-source"
     "claude-org-goto-custom-id"
     ;; claude-org: workspace workflow
     "claude-org-insert-workspace"

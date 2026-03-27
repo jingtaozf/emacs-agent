@@ -15,7 +15,6 @@ from claude_agent.workspace_bridge import (
     _format_todos_as_elisp,
     _mcp_eval_with_trace,
     _read_custom_id,
-    _read_request_id,
     _write_custom_id,
     handle_permission,
     handle_permission_clear,
@@ -53,17 +52,6 @@ class TestCustomIdPersistence:
         _write_custom_id("sid", "sdd-123-instr-1")
         _write_custom_id("sid", "sdd-123-instr-2")
         assert _read_custom_id("sid") == "sdd-123-instr-2"
-
-
-class TestRequestIdPersistence:
-    def test_read_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        assert _read_request_id("nonexistent") is None
-
-    def test_read_existing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        (tmp_path / "sid.request-id").write_text("req-42-1234")
-        assert _read_request_id("sid") == "req-42-1234"
 
 
 class TestHandleResponseQueryCompleted:

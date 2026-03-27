@@ -88,17 +88,6 @@ def _notify_query_completed(mcp: McpClient, session_id: str, custom_id: str | No
             logger.warning("Failed to notify query completed for %s", session_id)
 
 
-def _read_request_id(session_id: str) -> str | None:
-    """Read the active-query request-id written by Emacs, or None."""
-    path = os.path.join(STATUS_DIR, f"{session_id}.request-id")
-    try:
-        with open(path) as f:
-            value = f.read().strip()
-            return value if value else None
-    except FileNotFoundError:
-        return None
-
-
 def _escape_elisp_string(s: str) -> str:
     """Escape a string for embedding in an elisp double-quoted string."""
     return (
