@@ -526,6 +526,95 @@ evalElisp:
 | T21 | Story switching | PASS |
 | T22 | --resume CLI session | PASS |
 | T24 | Query completed cleanup | PASS |
+| T25 | Live: basic execution (separate workspace) | PASS |
+| T26 | Live: story switching (two stories, same workspace) | PASS |
+| T27 | Live: verbose buffer populated | PASS |
+| T28 | Live: Phoenix traces (execute-ai-block spans) | PASS |
+
+* Live E2E Tests (Actual Claude Code Execution)
+
+These tests use separate workspaces in =workspace-test.org= (one per test
+scenario). Each workspace gets its own cmux instance via =ensure-session=.
+
+** T25: Basic execution in dedicated workspace
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:END:
+
+Uses workspace =E2E Basic Execution= (session =sdd-e2e-basic-001=).
+
+*** Command
+Execute the "13 + 29" ai block via =claude-org-execute=.
+
+*** Checks
+1. Query completes (=:busy= nil)
+2. Response inserted in org (contains "42")
+3. cmux shows INSERT mode (idle)
+4. Verbose buffer has content (>0 bytes)
+
+** T26: Story switching with live execution
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:END:
+
+Uses workspace =E2E Story Switch= (session =sdd-e2e-switch-001=)
+with two stories: "first task" and "second task".
+
+*** Command
+1. Execute ai block in "first task" → wait for completion
+2. Execute ai block in "second task" → wait for completion
+
+*** Checks
+1. After step 1: ACTIVE_STORY = "first task", response inserted
+2. After step 2: ACTIVE_STORY = "second task", response inserted
+3. cmux tab renamed to "second task"
+4. Both responses under their respective story Workflow sections
+
+** T27: Verbose buffer has live content
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: MEDIUM
+:END:
+
+Uses workspace =E2E Verbose Check= (session =sdd-e2e-verbose-001=).
+
+*** Command
+Execute "Count from 1 to 5" ai block.
+
+*** Checks
+1. Response in org contains "1\n2\n3\n4\n5"
+2. Verbose buffer =*cmux: sdd-e2e-verbose-001*= has >0 bytes
+3. cmux shows INSERT mode after completion
+
+** T28: Phoenix traces for live execution
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:NOTE: Required trace macro unwind-protect fix to work
+:END:
+
+*** Command
+After T25/T26/T27 complete, query Phoenix:
+#+begin_example
+evalElisp:
+(let ((spans (test-e2e-local--recent-spans-full 100)))
+  (list :execute-blocks (length (test-e2e-local--find-spans spans "execute-ai-block"))
+        :cmux-executes (length (test-e2e-local--find-spans spans "cmux-execute"))
+        :no-errors (condition-case err
+                       (progn (test-e2e-local--assert-no-errors spans) t)
+                     (error nil))))
+#+end_example
+
+*** Checks
+1. =execute-ai-block= root spans appear (>0)
+2. =cmux-execute= child spans appear (>0)
+3. No ERROR status spans
 
 * Cleanup
 
