@@ -30,8 +30,7 @@
   (literate-elisp-load (expand-file-name "claude-agent-trace.org" project-root))
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
   (literate-elisp-load (expand-file-name "claude-agent-backend.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org-iterm2.org" project-root)))
+  (literate-elisp-load (expand-file-name "claude-org.org" project-root)))
 
 ;;; ============================================================================
 ;;; Test Fixtures

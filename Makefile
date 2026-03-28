@@ -146,20 +146,7 @@ test-smoke:
 
 # Unit test targets are independent — use 'make -j4 test-unit' for parallel
 .PHONY: test-unit
-test-unit: test-agent-unit test-org-unit test-backend-unit test-native test-cmux
-
-.PHONY: test-native
-test-native:
-	@echo "Running native terminal unit tests..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-native.org\")" \
-		-l tests/test-claude-org-native.el \
-		-l tests/test-iterm2-e2e-simulated.el \
-		-f ert-run-tests-batch-and-exit
+test-unit: test-agent-unit test-org-unit test-backend-unit test-cmux
 
 .PHONY: test-cmux
 test-cmux:
@@ -373,8 +360,6 @@ test-org-unit:
 		-l tests/test-claude-org-cleanup-r2.el \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
-		-l tests/test-terminal-prompt-parity.el \
 		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
@@ -628,7 +613,6 @@ test-e2e-local:
 		$(LOAD_ALL) \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-iterm2.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
 		-l tests/test-e2e-local-trace.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"

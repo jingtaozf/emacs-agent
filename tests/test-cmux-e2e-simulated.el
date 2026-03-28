@@ -4,7 +4,7 @@
 ;; Everything else — org buffer, properties, dispatch, session lookup —
 ;; uses real code against real org buffers.
 ;;
-;; Mirrors test-iterm2-e2e-simulated.el patterns for consistency.
+;; Uses real org buffers with mock cmux CLI calls.
 
 ;;; Code:
 
@@ -21,7 +21,6 @@
   (require 'literate-elisp)
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
   (literate-elisp-load (expand-file-name "claude-org.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org-iterm2.org" project-root))
   (literate-elisp-load (expand-file-name "claude-org-cmux.org" project-root)))
 
 (defvar test-cmux--project-root

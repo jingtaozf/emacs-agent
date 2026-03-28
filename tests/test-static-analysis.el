@@ -213,7 +213,7 @@ ELISP-STRING is the source for re-parsing struct definitions."
 (defvar test-static--source-files
   '("claude-agent-trace.org" "claude-agent.org" "claude-org.org"
     "claude-org-workspace-bridge.org" "claude-org-terminal-base.org"
-    "claude-org-iterm2.org" "claude-org-cmux.org" "emacs-mcp-server.org")
+    "claude-org-cmux.org" "emacs-mcp-server.org")
   "List of .org source files to analyze.
 Load order matters: workspace-bridge and terminal-base before backends.
 Customize this for your project.")

@@ -552,25 +552,8 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-org: permissions
     "claude-org-permission-protect-org"
     "claude-org-switch-permission-mode"
-    ;; claude-org: native terminal
-    "claude-org-open-native-terminal"
-    "claude-org-native-mode"
-    "claude-org-native-kill"
-    "claude-org-native-refresh"
-    "claude-org-native-menu"
-    "claude-org-native-send-command"
-    "claude-org-native-send-escape"
-    "claude-org-native-send-interrupt"
-    "claude-org-native-send-option"
-    "claude-org-native-send-return"
-    "claude-org-native-send-shift-tab"
-    "claude-org-native-send-slash"
-    "claude-org-native-toggle-copy-mode"
     ;; claude-org: unified terminal tab
     "claude-org-open-terminal-tab"
-    ;; claude-org: iTerm2 backend
-    "claude-org-iterm2-open-tab"
-    "claude-org-iterm2-cancel"
     ;; claude-org: cmux backend
     "claude-org-cmux-cancel"
     "claude-org-cmux-clear-status"
@@ -841,7 +824,7 @@ FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `claude-org-terminal-st
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
     (let ((violations nil))
-      (dolist (file '("claude-org-iterm2.org" "claude-org-cmux.org"))
+      (dolist (file '("claude-org-cmux.org"))
         (let ((filepath (expand-file-name file test-structural--project-root)))
           (when (file-exists-p filepath)
             (let ((content (with-temp-buffer

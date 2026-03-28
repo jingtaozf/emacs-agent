@@ -220,15 +220,9 @@ Response will appear here after pressing C-c C-c inside the ai block.
 (declare-function claude-ide-stop-server "claude-ide" (key))
 
 ;; Forward declarations for extracted backends (loaded after claude-org.org)
-(declare-function claude-org-iterm2--execute-ai-block "claude-org-iterm2" ())
-(declare-function claude-org-iterm2-open-tab "claude-org-iterm2" ())
 (declare-function claude-org-cmux--execute-ai-block "claude-org-cmux" ())
 (declare-function claude-org-cmux-open-tab "claude-org-cmux" ())
 (defvar claude-org-terminal--workspace-to-session-key)
-(declare-function claude-org-open-native-terminal "claude-org-native" ())
-(declare-function claude-org--native-buffer-alive-p "claude-org-native" (buf))
-(declare-function claude-org--native-send-prompt "claude-org-native" (buf prompt))
-(declare-function claude-org--native-loop-send "claude-org-native" (session-key buf prompt iteration max))
 #+END_SRC
 
 * Customization
@@ -739,10 +733,6 @@ configuration. Using constants ensures consistency across the codebase.
   "Org property name for CLI session UUID (used for --resume).
 Unified property shared by json-stream and terminal backends.")
 
-(defconst claude-org-native-session-id-property "CLAUDE_NATIVE_SESSION_ID"
-  "Org property for native terminal CLI session ID (used for --resume).
-Persisted to the org heading so session can be resumed after Emacs restart.")
-
 (defconst claude-org-cli-session-property "CLAUDE_CLI_SESSION"
   "Org property for workspace bridge CLI session ID (used for --resume).
 Persisted to the workspace section so terminal sessions can be resumed.")
@@ -968,43 +958,6 @@ Removes the property from the appropriate scope based on where CLAUDE_SESSION_ID
                nil t)
           (replace-match ""))))))
 
-(defun claude-org--get-native-session-id ()
-  "Get native CLI session ID from org property for current session.
-Returns the value of CLAUDE_NATIVE_SESSION_ID from the heading that
-defines the session scope, or nil if not set."
-  (let ((session-heading (claude-org--find-session-scope-heading)))
-    (when session-heading
-      (save-excursion
-        (goto-char session-heading)
-        (org-entry-get nil claude-org-native-session-id-property nil)))))
-
-(defun claude-org--set-native-session-id (session-key session-id)
-  "Persist SESSION-ID as org property in the heading for SESSION-KEY.
-Writes CLAUDE_NATIVE_SESSION_ID to the property drawer of the session
-scope heading.  Must be called with the org buffer current.
-
-Cannot rely on `claude-org--find-session-scope-heading' because point may
-not be in the correct section (e.g. when called from emacsclient context).
-Instead, extracts the CLAUDE_SESSION_ID from SESSION-KEY and searches for
-the matching heading directly."
-  (let* ((workspace-id (when (string-match "::\\(.+\\)$" session-key)
-                   (match-string 1 session-key)))
-         (heading-pos
-          (when workspace-id
-            (save-excursion
-              (goto-char (point-min))
-              (catch 'found
-                (while (re-search-forward
-                        (format ":CLAUDE_SESSION_ID:[ \t]+%s"
-                                (regexp-quote workspace-id))
-                        nil t)
-                  (org-back-to-heading t)
-                  (throw 'found (point)))
-                nil)))))
-    (when heading-pos
-      (save-excursion
-        (goto-char heading-pos)
-        (org-set-property claude-org-native-session-id-property session-id)))))
 #+END_SRC
 
 ** Session Recovery
@@ -1769,19 +1722,14 @@ REASON is an optional string explaining why (for logging)."
 (defun claude-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
 Dispatches on CLAUDE_BACKEND org property (if set) or `claude-org-backend-type'.
-Returns a backend struct (json-backend or claude-backend), or nil for native."
+Returns a backend struct (json-backend or claude-backend)."
   (let* ((prop-value (claude-org--get-org-property "CLAUDE_BACKEND" t))
          (backend-type (or (cond
                              ((equal prop-value "claude-cli") 'claude-cli)
                              ((equal prop-value "json-stream") 'json-stream)
-                             ((equal prop-value "native") 'native)
                              (t nil))
                            claude-org-backend-type)))
     (cond
-     ((eq backend-type 'native)
-      ;; Native: set flag, return nil (no automated backend)
-      (claude-org--session-put session-key :native-mode t)
-      nil)
      ((eq backend-type 'claude-cli)
       (unless (featurep 'eat)
         (user-error "The `eat' package is required for claude-cli backend. \
@@ -3460,7 +3408,6 @@ SESSION-ID is accepted for API compatibility but not stored in the index."
 Inserted as a property when creating workspace structures via `claude-org-insert-workspace'.
 Set to nil to omit the property (uses whatever backend the file/section inherits)."
   :type '(choice (const :tag "cmux" "cmux")
-                 (const :tag "iTerm2" "iterm2")
                  (const :tag "None (inherit)" nil))
   :group 'claude-org)
 
@@ -4571,11 +4518,6 @@ If the session is busy, queues the block for execution when current query comple
                              (copy-marker (point))))))
     (unless content
       (user-error "Empty ai block"))
-    ;; Clear stale :native-mode if backend property changed away from native
-    (when (and (claude-org--session-get session-key :native-mode)
-               (let ((prop (claude-org--get-org-property "CLAUDE_BACKEND" t)))
-                 (and prop (not (equal prop "native")))))
-      (claude-org--session-put session-key :native-mode nil))
     ;; Record execution for all backends (history, jump-to-block)
     (run-hook-with-args 'claude-org-execute-hook session-key content nil)
     ;; Auto-generate title for all backends
@@ -4586,33 +4528,10 @@ If the session is busy, queues the block for execution when current query comple
     (claude-org--session-put session-key :loop-current 1)
     (claude-org--session-put session-key :loop-interval loop-interval)
     (claude-org--session-put session-key :original-prompt content)
-    ;; iTerm2 backend: send prompt to external iTerm2 terminal
-    (when (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
-                        "iterm2")
-      (claude-org-iterm2--execute-ai-block)
-      (cl-return-from claude-org-execute nil))
     ;; cmux backend: send prompt to cmux terminal
     (when (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
                         "cmux")
       (claude-org-cmux--execute-ai-block)
-      (cl-return-from claude-org-execute nil))
-    ;; Native mode: open terminal and paste prompt, skip org capture
-    (when (or (claude-org--session-get session-key :native-mode)
-              (string-equal (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))
-                            "native"))
-      (claude-org--session-put session-key :native-mode t)
-      (claude-org-open-native-terminal)
-      (let ((buf (claude-org--session-get session-key :native-buffer)))
-        (if (claude-org--native-buffer-alive-p buf)
-            (claude-org--native-send-prompt buf content)
-          (user-error
-           "Native terminal not ready; re-run once the terminal shows a prompt"))
-        ;; Schedule remaining loop iterations (timer-based, no completion detection)
-        (when (> loop-max 1)
-          (cl-loop for i from 2 to loop-max
-                   do (run-at-time (* (1- i) (max loop-interval 1)) nil
-                                   #'claude-org--native-loop-send
-                                   session-key buf content i loop-max))))
       (cl-return-from claude-org-execute nil))
     ;; If session is busy, queue the block instead of erroring
     (when (claude-org--session-get session-key :busy)
@@ -5218,30 +5137,16 @@ session is known to cmux, otherwise fall back to iTerm2.
 (defun claude-org--terminal-query-completed (workspace-session-id)
   "Dispatch query-completed to the correct terminal backend.
 WORKSPACE-SESSION-ID identifies the session whose query just finished.
-Tries cmux first (checks hash table, then falls back to request-id file),
-then iTerm2."
+Tries cmux (checks hash table, then falls back to request-id file)."
   (cond
    ;; cmux: session-key in hash table (normal path)
    ((and (fboundp 'claude-org-cmux--query-completed)
          (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
     (claude-org-cmux--query-completed workspace-session-id))
-   ;; iTerm2: iterm2 hash has this session (check before cmux fallback so a
-   ;; live iTerm2 session is never dispatched to cmux by the fallback below)
-   ((and (fboundp 'claude-org-iterm2--query-completed)
-         (boundp 'claude-org-iterm2--workspace-to-iterm2)
-         (gethash workspace-session-id claude-org-iterm2--workspace-to-iterm2))
-    (claude-org-iterm2--query-completed workspace-session-id))
-   ;; cmux: hash table empty but request-id file exists (module reload / race).
-   ;; Only safe when iTerm2 does NOT claim this session-id — the request-id
-   ;; file alone cannot distinguish which backend wrote it.
+   ;; cmux: hash table empty but request-id file exists (module reload / race)
    ((and (fboundp 'claude-org-cmux--query-completed)
-         (claude-org-terminal--read-request-id workspace-session-id)
-         (not (and (boundp 'claude-org-iterm2--workspace-to-iterm2)
-                   (gethash workspace-session-id claude-org-iterm2--workspace-to-iterm2))))
+         (claude-org-terminal--read-request-id workspace-session-id))
     (claude-org-cmux--query-completed workspace-session-id))
-   ;; iTerm2 fallback (no hash entry — covers post-reload iTerm2 sessions)
-   ((fboundp 'claude-org-iterm2--query-completed)
-    (claude-org-iterm2--query-completed workspace-session-id))
    (t (message "claude-org: no terminal backend loaded for query-completed"))))
 
 (defun claude-org--terminal-permission-needed (workspace-session-id tool-name)
@@ -5251,8 +5156,6 @@ then iTerm2."
          (boundp 'claude-org-terminal--workspace-to-session-key)
          (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
     (claude-org-cmux--permission-needed workspace-session-id tool-name))
-   ((fboundp 'claude-org-iterm2--permission-needed)
-    (claude-org-iterm2--permission-needed workspace-session-id tool-name))
    (t (message "claude-org: no terminal backend loaded for permission-needed"))))
 
 (defun claude-org--terminal-permission-resolved (workspace-session-id)
@@ -5262,33 +5165,24 @@ then iTerm2."
          (boundp 'claude-org-terminal--workspace-to-session-key)
          (gethash workspace-session-id claude-org-terminal--workspace-to-session-key))
     (claude-org-cmux--permission-resolved workspace-session-id))
-   ((fboundp 'claude-org-iterm2--permission-resolved)
-    (claude-org-iterm2--permission-resolved workspace-session-id))
    (t (message "claude-org: no terminal backend loaded for permission-resolved"))))
 #+END_SRC
 
 *** Unified Terminal Tab
 
-Opens the terminal tab for the current session, dispatching to the
-appropriate backend (iTerm2 or cmux) based on the =CLAUDE_BACKEND= property.
+Opens the terminal tab for the current session using the cmux backend.
 
 #+BEGIN_SRC elisp
 (defun claude-org-open-terminal-tab ()
   "Open the terminal for this session based on the configured backend.
-Dispatches to iTerm2, cmux, or native terminal depending on CLAUDE_BACKEND.
-Falls back to native terminal if no backend is configured."
+Dispatches to cmux backend."
   (interactive)
   (let ((backend (downcase (or (claude-org--get-org-property "CLAUDE_BACKEND" t) ""))))
     (cond
-     ((string-equal backend "iterm2")
-      (claude-org-iterm2-open-tab))
      ((string-equal backend "cmux")
       (claude-org-cmux-open-tab))
-     ((string-equal backend "native")
-      (claude-org-open-native-terminal))
      ((string-empty-p backend)
-      ;; No backend configured — default to native terminal
-      (claude-org-open-native-terminal))
+      (claude-org-cmux-open-tab))
      (t
       (user-error "Unknown CLAUDE_BACKEND: %s" backend)))))
 #+END_SRC
