@@ -361,6 +361,146 @@ evalElisp:
 - surface line: "study code patterns" (ACTIVE_STORY)
 These should be DIFFERENT when heading != ACTIVE_STORY.
 
+** T17: Permission needed notification (HIGH)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-cmux--permission-needed "sdd-e2e-test-005" "Bash(rm -rf /)")
+;; Check alert
+claude-agent-pending-alerts
+#+end_example
+
+*** Expected
+- =claude-agent-pending-alerts= contains entry with =:face (:foreground "orange")=
+- Tooltip mentions tool name
+
+*** Teardown
+#+begin_example
+evalElisp:
+(claude-org-cmux--permission-resolved "sdd-e2e-test-005")
+#+end_example
+
+** T18: Session recovery after restart (HIGH)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:NOTE: Bug found — ensure-session reuse path didn't restore hash table mappings. Fixed.
+:END:
+
+*** Setup
+Clear hash tables to simulate Emacs restart:
+#+begin_example
+evalElisp:
+(clrhash claude-org-terminal--workspace-to-session-key)
+(clrhash claude-org-cmux--workspace-to-surface)
+(clrhash claude-org-cmux--workspace-to-cmux-id)
+#+end_example
+
+*** Command
+#+begin_example
+evalElisp:
+;; ensure-session repopulates from org properties
+(with-current-buffer (find-buffer-visiting ".../workspace-test.org")
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "hello stage2 test" nil t)
+    (claude-org-cmux--ensure-session)))
+;; Verify
+(gethash "sdd-e2e-test-005" claude-org-terminal--workspace-to-session-key)
+#+end_example
+
+*** Expected
+All three hash tables repopulated from org properties.
+
+** T19: Status detection (HIGH)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-cmux--get-status "sdd-e2e-test-005" "surface:60")
+#+end_example
+
+*** Expected
+Returns ="ready"= when Claude Code is idle (INSERT mode visible).
+
+** T21: Story switching changes ACTIVE_STORY (HIGH)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:END:
+
+*** Setup
+Second story "story switching test" added to workspace-test.org.
+
+*** Command
+#+begin_example
+evalElisp:
+(with-current-buffer (find-buffer-visiting ".../workspace-test.org")
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "story switched" nil t)
+    (let ((story (claude-org--find-story-heading)))
+      (when story (claude-org--set-active-story (car story))))))
+;; Check
+(org-entry-get nil "ACTIVE_STORY")  ;; => "story switching test"
+#+end_example
+
+*** Expected
+ACTIVE_STORY changes from "study code patterns" to "story switching test".
+
+*** Teardown
+Restore: =(claude-org--set-active-story "study code patterns")=
+
+** T22: --resume uses CLAUDE_CLI_SESSION (HIGH)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org-cmux--build-launch-command
+  buffer-file-name "sdd-e2e-test-005" default-directory)
+#+end_example
+
+*** Expected
+Result contains ="--resume"= and the CLAUDE_CLI_SESSION UUID.
+
+** T24: Query completed cleanup (HIGH)
+:PROPERTIES:
+:STATUS: PASS
+:TESTED: 2026-03-28
+:PRIORITY: HIGH
+:NOTE: Required T18 fix (hash table restore) to work.
+:END:
+
+*** Command
+#+begin_example
+evalElisp:
+(claude-org--session-put sk :busy t)
+(claude-org-cmux--query-completed "sdd-e2e-test-005")
+(claude-org--session-get sk :busy)  ;; => nil
+#+end_example
+
+*** Expected
+- =:busy= cleared from t to nil
+- Workspace mappings persist (not cleared by remhash)
+
 * Results Summary
 
 | Test | Description | Status |
@@ -380,6 +520,12 @@ These should be DIFFERENT when heading != ACTIVE_STORY.
 | T13 | ACTIVE_STORY auto-set on execute | PASS (Stage 2) |
 | T14 | Workspace mappings persist | PASS (Stage 2) |
 | T15 | Workspace name != tab name | PASS (Stage 2) |
+| T17 | Permission notification | PASS |
+| T18 | Session recovery | PASS (bug found + fixed) |
+| T19 | Status detection | PASS |
+| T21 | Story switching | PASS |
+| T22 | --resume CLI session | PASS |
+| T24 | Query completed cleanup | PASS |
 
 * Cleanup
 
