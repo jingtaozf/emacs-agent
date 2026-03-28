@@ -194,19 +194,23 @@ Special attrs keys:
                  (cons 'name ,name)
                  (cons 'start_time_ns ,start-sym))
            ,attrs-sym "SERVER"))
-         (condition-case err
-             (let ((,result-sym (progn ,@body)))
-               (claude-agent-trace--request
-                "span/end"
-                (claude-agent-trace--build-end-data
-                 ,span-id-sym "ok" nil ,attrs-sym ,result-sym))
-               ,result-sym)
-           (error
-            (claude-agent-trace--request
-             "span/end"
-             (claude-agent-trace--build-end-data
-              ,span-id-sym "error" (error-message-string err) ,attrs-sym))
-            (signal (car err) (cdr err))))))))
+         (let ((,result-sym nil)
+               (trace-err-flag nil))
+           (unwind-protect
+               (condition-case err
+                   (setq ,result-sym (progn ,@body))
+                 (error
+                  (setq trace-err-flag err)
+                  (signal (car err) (cdr err))))
+             ;; Always send span/end, even on non-local exit (cl-return-from, throw)
+             (claude-agent-trace--request
+              "span/end"
+              (claude-agent-trace--build-end-data
+               ,span-id-sym
+               (if trace-err-flag "error" "ok")
+               (when trace-err-flag (error-message-string trace-err-flag))
+               ,attrs-sym ,result-sym)))
+           ,result-sym)))))
 #+END_SRC
 
 ** Child Span
@@ -251,19 +255,22 @@ Use `claude-agent-with-trace' to create explicit root spans."
                      (cons 'name ,name)
                      (cons 'start_time_ns ,start-sym))
                ,attrs-sym "INTERNAL"))
-             (condition-case err
-                 (let ((,result-sym (progn ,@body)))
-                   (claude-agent-trace--request
-                    "span/end"
-                    (claude-agent-trace--build-end-data
-                     ,span-id-sym "ok" nil ,attrs-sym ,result-sym))
-                   ,result-sym)
-               (error
-                (claude-agent-trace--request
-                 "span/end"
-                 (claude-agent-trace--build-end-data
-                  ,span-id-sym "error" (error-message-string err) ,attrs-sym))
-                (signal (car err) (cdr err))))))))))
+             (let ((,result-sym nil)
+                   (span-err-flag nil))
+               (unwind-protect
+                   (condition-case err
+                       (setq ,result-sym (progn ,@body))
+                     (error
+                      (setq span-err-flag err)
+                      (signal (car err) (cdr err))))
+                 (claude-agent-trace--request
+                  "span/end"
+                  (claude-agent-trace--build-end-data
+                   ,span-id-sym
+                   (if span-err-flag "error" "ok")
+                   (when span-err-flag (error-message-string span-err-flag))
+                   ,attrs-sym ,result-sym)))
+               ,result-sym)))))))
 #+END_SRC
 
 * Cross-Process Context
