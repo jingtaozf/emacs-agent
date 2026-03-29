@@ -41,11 +41,7 @@
   (should (fboundp 'claude-agent-json-backend-p))
   (should (fboundp 'claude-agent-json-backend--create)))
 
-;; F11.5 Claude CLI backend exists (if eat is available)
-(ert-deftest test-f11-claude-cli-backend-struct ()
-  "Claude CLI backend struct should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f11)
-  (should (fboundp 'claude-agent-claude-backend-p)))
+;; F11.5 Claude CLI backend was removed (no longer supported)
 
 ;; F11.6 Backend filter-callbacks helper
 (ert-deftest test-f11-backend-filter-callbacks ()

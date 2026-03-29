@@ -1649,12 +1649,9 @@ conversation context internally."
   "Backend type for Claude CLI communication.
 Selects which backend implementation to use for new sessions.
 
-  - `json-stream': JSON streaming via subprocess (default, backward compatible).
-    Uses --output-format stream-json with structured messages.
-  - `claude-cli': Interactive terminal via eat terminal emulator.
-    Runs Claude CLI as long-lived TUI process. Requires the `eat' package."
-  :type '(radio (const :tag "JSON stream (default)" json-stream)
-                (const :tag "Claude CLI terminal (requires eat)" claude-cli))
+  - `json-stream': JSON streaming via subprocess (default).
+    Uses --output-format stream-json with structured messages."
+  :type '(radio (const :tag "JSON stream (default)" json-stream))
   :group 'claude-org)
 
 (defun claude-org--get-persistent-client (session-key)
@@ -1723,26 +1720,15 @@ REASON is an optional string explaining why (for logging)."
 (defun claude-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
 Dispatches on CLAUDE_BACKEND org property (if set) or `claude-org-backend-type'.
-Returns a backend struct (json-backend or claude-backend)."
+Returns a backend struct (json-backend)."
   (let* ((prop-value (claude-org--get-org-property "CLAUDE_BACKEND" t))
          (backend-type (or (cond
-                             ((equal prop-value "claude-cli") 'claude-cli)
                              ((equal prop-value "json-stream") 'json-stream)
                              (t nil))
                            claude-org-backend-type)))
-    (cond
-     ((eq backend-type 'claude-cli)
-      (unless (featurep 'eat)
-        (user-error "The `eat' package is required for claude-cli backend. \
-Install with: M-x package-install RET eat RET"))
-      (claude-agent-claude-backend--create
-       :session-key session-key
-       :cwd (or (claude-org--get-project-root) default-directory)
-       :options options))
-     (t ; json-stream (default)
-      (claude-agent-json-backend--create
-       :session-key session-key
-       :persistent-p claude-org-persistent-sessions)))))
+    (claude-agent-json-backend--create
+     :session-key session-key
+     :persistent-p claude-org-persistent-sessions)))
 
 #+END_SRC
 
@@ -5101,8 +5087,8 @@ Uses `cleanup-queued-blocks' to properly free markers and reset exec-status."
 #+BEGIN_SRC elisp
 (defun claude-org-show-verbose ()
   "Show verbose output buffer for current session.
-Checks cmux verbose buffer first, then backend-verbose-buffer (for
-claude-cli backend), then falls back to the session's verbose buffer."
+Checks cmux capture buffer first, then backend-specific verbose buffer,
+then the shared session verbose buffer."
   (interactive)
   (let* ((session-key (claude-org--current-session-key))
          (backend (claude-org--session-get session-key :backend))

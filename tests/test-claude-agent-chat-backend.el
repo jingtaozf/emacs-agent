@@ -55,35 +55,6 @@
     (let ((backend (claude-agent-chat--make-backend)))
       (should (claude-agent-json-backend-p backend)))))
 
-(ert-deftest test-chat-f3-make-backend-claude-cli ()
-  "make-backend with claude-cli type creates claude-backend."
-  :tags '(:unit :fast :stable :isolated :chat-backend :f3)
-  (let ((claude-agent-chat-backend-type 'claude-cli))
-    (cl-letf (((symbol-function 'featurep)
-               (lambda (f &rest _) (if (eq f 'eat) t (featurep f)))))
-      (let ((backend (claude-agent-chat--make-backend)))
-        (should (claude-agent-claude-backend-p backend))))))
-
-(ert-deftest test-chat-f3-make-backend-claude-cli-no-eat-errors ()
-  "make-backend with claude-cli type errors when eat is not available."
-  :tags '(:unit :fast :stable :isolated :chat-backend :f3)
-  (let ((claude-agent-chat-backend-type 'claude-cli))
-    (cl-letf (((symbol-function 'featurep)
-               (lambda (f &rest _) (if (eq f 'eat) nil (featurep f)))))
-      (should-error (claude-agent-chat--make-backend)
-                    :type 'user-error))))
-
-(ert-deftest test-chat-f3-make-backend-uses-default-directory ()
-  "make-backend claude-cli uses default-directory as cwd."
-  :tags '(:unit :fast :stable :isolated :chat-backend :f3)
-  (let ((claude-agent-chat-backend-type 'claude-cli)
-        (default-directory "/tmp/test-dir/"))
-    (cl-letf (((symbol-function 'featurep)
-               (lambda (f &rest _) (if (eq f 'eat) t (featurep f)))))
-      (let ((backend (claude-agent-chat--make-backend)))
-        (should (equal "/tmp/test-dir/"
-                       (claude-agent-claude-backend-cwd backend)))))))
-
 ;; ---------------------------------------------------------------------------
 ;; F4: send-input uses backend
 ;; ---------------------------------------------------------------------------
@@ -384,24 +355,6 @@
                  (lambda (&rest _) nil)))
         (claude-agent-chat-new-session)
         (should-not claude-agent-chat--session-id)))))
-
-(ert-deftest test-chat-f7-new-session-claude-cli-cleans-up-backend ()
-  "new-session with claude-cli backend cleans up and nils backend for fresh terminal."
-  :tags '(:unit :fast :stable :isolated :chat-backend :f7)
-  (with-temp-buffer
-    (let ((cleanup-called nil)
-          (claude-agent-chat--backend (claude-agent-claude-backend--create))
-          (claude-agent-chat--query-handle 'handle)
-          (claude-agent-chat--session-id nil)
-          (claude-agent-chat-backend-type 'claude-cli))
-      (cl-letf (((symbol-function 'claude-agent-backend-cleanup)
-                 (lambda (backend) (setq cleanup-called t)))
-                ((symbol-function 'claude-agent-chat--insert)
-                 (lambda (&rest _) nil)))
-        (claude-agent-chat-new-session)
-        (should cleanup-called)
-        (should-not claude-agent-chat--backend)
-        (should-not claude-agent-chat--query-handle)))))
 
 (provide 'test-claude-agent-chat-backend)
 ;;; test-claude-agent-chat-backend.el ends here

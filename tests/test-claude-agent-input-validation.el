@@ -1,8 +1,7 @@
-;;; test-claude-agent-input-validation.el --- TDD Tests for Input Validation -*- lexical-binding: t; -*-
+;;; test-claude-agent-input-validation.el --- Tests for Input Validation -*- lexical-binding: t; -*-
 
-;; TDD tests for input validation layer
-;; These tests define expected behavior BEFORE implementation
-;; Tag: :tdd - written test-first
+;; Tests for input validation layer (answer length, file path, command, env parsing)
+;; Originally written test-first (TDD), now validating implemented functions.
 
 (require 'ert)
 (require 'cl-lib)

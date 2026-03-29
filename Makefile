@@ -290,9 +290,9 @@ test-agent-unit:
 		-l tests/test-claude-agent-sentinel.el \
 		-l tests/test-json-parser-property.el \
 		-l tests/test-harness-phase2.el \
+		-l tests/test-permission-round-trip.el \
+		-l tests/test-verbose-formatter.el \
 		-f ert-run-tests-batch-and-exit
-# TDD stubs (tests written before implementation):
-#   -l tests/test-claude-agent-input-validation.el
 
 .PHONY: test-backend-unit
 test-backend-unit:
@@ -301,17 +301,7 @@ test-backend-unit:
 		$(LOAD_AGENT_ONLY) \
 		-l tests/test-claude-agent-backend.el \
 		-l tests/test-claude-agent-backend-protocol.el \
-		-l tests/test-claude-agent-claude-backend.el \
 		-l tests/test-claude-agent-chat-backend.el \
-		-f ert-run-tests-batch-and-exit
-
-.PHONY: test-backend-integration
-test-backend-integration:
-	@echo "Running backend integration tests..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_ORG) \
-		-l tests/test-claude-agent-claude-backend-integration.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-org-unit
@@ -362,6 +352,7 @@ test-org-unit:
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
+		-l tests/test-claude-agent-input-validation.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mcp-unit

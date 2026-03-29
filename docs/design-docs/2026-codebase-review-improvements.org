@@ -282,6 +282,27 @@ prevents reintroduction by scanning all source =.org= files for "iTerm2".
 *Proposal*: Remove all iTerm2 mentions from source .org file docstrings and prose.
 Add structural test to prevent reintroduction.
 
+** DONE Q20. =claude-org-cmux--ensure-session= Too Long (154 lines) (MEDIUM) :done:
+
+*Status*: Implemented [2026-03-29]
+
+Extracted 4 focused helper functions from the 154-line monolith:
+- =claude-org-cmux--workspace-alive-p= (13 lines): checks if saved workspace still responds
+- =claude-org-cmux--restore-workspace= (25 lines): restores existing workspace mappings/color/verbose
+- =claude-org-cmux--resolve-workspace-uuid= (13 lines): resolves workspace ref to stable UUID
+- =claude-org-cmux--launch-workspace= (63 lines): launches new workspace with full lifecycle
+The orchestrator =ensure-session= is now 30 lines: MCP auto-start, gather context,
+dispatch to restore or launch.
+
+** DONE Q21. Stale Verbose Output Docstring (LOW) :done:
+
+*Status*: Implemented [2026-03-29]
+
+=claude-org-show-verbose= docstring referenced "backend-verbose-buffer" and
+"session's verbose buffer" without explaining what they are. Updated to
+"cmux capture buffer", "backend-specific verbose buffer", "shared session
+verbose buffer" — matching the actual three-level fallback.
+
 * Test Harness Findings
 
 ** T1. No Error Injection in Mock CLI (HIGH)
@@ -364,7 +385,7 @@ exists.
 
 *Status*: Implemented [2026-03-29]
 
-=tests/test-claude-agent-sentinel.el= now has 19 tests covering all sentinel paths:
+=tests/test-claude-agent-sentinel.el= now has 21 tests covering all sentinel paths:
 - Normal exit (exit 0): state cleanup, complete callback fires with nil
 - Crash exit (mock crash-mid-stream): state closed, process dead
 - OOM kill (SIGKILL): state fully cleaned up after signal death
@@ -380,20 +401,44 @@ exists.
 *Proposal*: Create tests that start a mock CLI process, kill it, and verify session state
 transitions (=:busy → nil=), marker freeing, and error callback invocation.
 
-** T8. Mock CLI is One-Way Only — No Bidirectional Protocol (MEDIUM)
+** DONE T8. Permission Round-Trip Tests (MEDIUM) :done:
 
-The mock reads stdin once then replays a static JSONL file. It cannot respond to =control_request=
-messages (permission prompts, ask-user-question). The permission round-trip is completely untested.
+*Status*: Implemented [2026-03-29]
 
-*Proposal*: Extend =mock-claude-cli.sh= to support a state machine that waits for
-=control_response= on stdin before continuing output. Add =WAIT_FOR_INPUT= directive.
+10 unit tests in =tests/test-permission-round-trip.el= covering the full
+=control_request= (=can_use_tool=) round-trip lifecycle:
 
-** T9. Buffer-Killed-During-Streaming Untested (MEDIUM)
+- Allow round-trip: request tracked, permission functions called, response sent, request untracked
+- Deny round-trip: deny behavior and message in response
+- Permission error → deny (SECURITY: deny on error, not allow)
+- Tracking lifecycle: tracked BEFORE permission runs, untracked AFTER response sent
+- hook_callback subtype: returns success response
+- Unsupported subtype: returns error response with subtype name
+- Dead process: response dropped but tracking still cleaned up (no leak)
+- Context propagation: session-id, context-label, suggestions passed to permission functions
+- Updated input: permission function can rewrite tool input via :updated-input
+- Concurrent requests: multiple pending control requests tracked independently
 
-No test kills the org buffer while a query is actively streaming. This is a common user action.
+Integration-level test in =test-harness-phase2.el= (=test-harness-control-request-round-trip=)
+already covers the end-to-end flow via mock CLI v2 with =permission-prompt.jsonl= fixture.
 
-*Proposal*: Start a slow-response mock scenario, kill the buffer mid-stream, verify no errors are
-signalled and the process is cleaned up.
+** DONE T9. Sentinel Edge Cases + Non-Object JSON Bug Fix (MEDIUM) :done:
+
+*Status*: Implemented [2026-03-29]
+
+7 new tests in =test-claude-agent-sentinel.el= covering sentinel edge cases:
+
+- Buffer killed during stream: output buffer killed before sentinel fires — cleanup completes
+- Signal exit (hangup): unknown signal event handled via fallback branch
+- Signal exit (killed: 9) with recovery disabled: signal events produce structured error
+- Double sentinel fire: second invocation is safe (idempotent state transitions)
+- Non-object JSON in remaining buffer: bare =42= or ="string"= doesn't crash sentinel
+- Non-object JSON in filter path: bare JSON values treated as CLI errors, not crashes
+
+Bug fix in =claude-agent-backend.org=: both =process-json-buffer= and the sentinel's
+remaining-JSON handler now guard against non-plist parsed values (bare numbers, strings,
+booleans). Previously, =plist-get= on a non-list returned nil, then =(intern nil)= crashed.
+The fix adds =(listp parsed)= check and =(stringp msg-type)= guard before dispatch.
 
 ** T10. =claude-agent-chat= Has Zero Tests (MEDIUM)
 
@@ -427,8 +472,8 @@ Ranked by impact on reliability and developer productivity:
 | P1 | Q19: Remove stale iTerm2 refs from source (DONE 2026-03-29) | S | Clean up after backend removal |
 | P2 | T2: MCP round-trip test harness | L | Catches bridge bugs |
 | P2 | T3: JSON stream protocol fuzzer (DONE 2026-03-29) | M | Catches parser edge cases |
-| P2 | T8: Bidirectional mock CLI protocol | M | Tests permission round-trip |
-| P2 | T9: Buffer-killed-during-streaming test | S | Tests common user action |
+| P2 | T8: Permission round-trip tests (DONE 2026-03-29) | M | Tests permission round-trip |
+| P2 | T9: Sentinel edge cases + non-object JSON fix (DONE 2026-03-29) | S | Tests common user action + bug fix |
 | P2 | A3: Single load path | S | Prevents double-init bugs |
 | P2 | A8: iTerm2/native implement backend protocol | L | Makes extension point real |
 | P2 | Q5: Hash table cleanup | S | Prevents memory leaks |
@@ -438,7 +483,10 @@ Ranked by impact on reliability and developer productivity:
 | P3 | T10: Chat mode test suite | M | Tests zero-coverage module |
 | P3 | A2: MCP server boundary fix | S | Clean layering |
 | P3 | A9: Generic pending-alerts (remove iTerm2 state from SDK) | S | Clean layering |
+| P3 | Hardcoded /tmp paths in tests (DONE 2026-03-29) | S | Use constant, structural test F40 |
 | P3 | Q6-Q10, Q13-Q18: Minor fixes | S each | Correctness polish |
+| P3 | Q20: Extract ensure-session (154→30 lines) (DONE 2026-03-29) | S | Readability, 4 focused helpers |
+| P3 | Q21: Stale verbose output docstring (DONE 2026-03-29) | S | Docstring accuracy |
 
 Effort: S = hours, M = 1-2 days, L = 3-5 days.
 

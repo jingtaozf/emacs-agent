@@ -969,10 +969,11 @@ phases will compose them into the main process-state.
 Single registry struct consolidating all global tracking tables.
 Per-process cleanup via =claude-agent-registry-cleanup-process= — never =clrhash=.
 
-All process-tracking state lives in =claude-agent--registry=.  The standalone
-variables =claude-agent--active-states=, =claude-agent--pending-background-tasks=,
-and =claude-agent--pending-control-requests= are backward-compatible aliases
-that share the same underlying data with the registry struct.
+All process-tracking state lives in =claude-agent--registry=.  Access active-states
+exclusively through =claude-agent-registry-active-states= or the struct accessor.
+The hash-table fields =claude-agent--pending-background-tasks= and
+=claude-agent--pending-control-requests= are aliases into the same hash-table
+objects stored in the registry struct.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent--registry
@@ -1004,20 +1005,7 @@ that share the same underlying data with the registry struct.
   "Return pending control requests hash table from the unified registry."
   (claude-agent--registry-control-requests claude-agent--registry))
 
-;;;; Standalone Variable Aliases
-;; These exist for backward compatibility with tests and callers that
-;; reference the standalone variables directly.  They are NOT independent
-;; storage — they point into the registry struct fields.
-
-;; For the list-typed active-states, we keep a defvar in sync with the
-;; registry via explicit setq at every mutation site.
-(defvar claude-agent--active-states nil
-  "Backward-compatible alias into `claude-agent--registry' active-states.
-Kept in sync with the registry at every mutation site.")
-;; Initialize from registry
-(setq claude-agent--active-states
-      (claude-agent--registry-active-states claude-agent--registry))
-
+;;;; Hash-Table Aliases
 ;; For hash-table fields, the standalone vars hold the SAME hash-table
 ;; object that lives in the registry struct.  Mutations via
 ;; puthash/remhash/clrhash are visible through both names.
@@ -1047,14 +1035,10 @@ Also unregisters from `claude-agent--active-queries' to ensure the
 *Claude Queries* buffer and mode-line reflect the terminal state."
   (let* ((req-id (claude-agent--process-state-request-id state))
          (reg claude-agent--registry))
-    ;; Remove from active-states list (registry is canonical; sync alias)
+    ;; Remove from active-states list (registry is sole owner)
     (setf (claude-agent--registry-active-states reg)
           (delq state (claude-agent--registry-active-states reg)))
-    (setq claude-agent--active-states
-          (claude-agent--registry-active-states reg))
     ;; Remove owned entries from all registry tables
-    ;; (background-tasks and control-requests share the same hash-table
-    ;; objects as the standalone vars — no separate sync needed)
     (when req-id
       (claude-agent--remove-hash-entries-by-value
        (claude-agent--registry-background-tasks reg) req-id)
@@ -1122,9 +1106,8 @@ Returns the number of processes killed."
                    (claude-agent--kill-process-tree process)
                    (cl-incf killed))))
              claude-agent--active-queries)
-    ;; Clear state tracking (registry + alias)
+    ;; Clear state tracking (registry is sole owner)
     (setf (claude-agent--registry-active-states claude-agent--registry) nil)
-    (setq claude-agent--active-states nil)
     (clrhash claude-agent--active-queries)
     (when (called-interactively-p 'any)
       (message "Killed %d Claude process(es)" killed))
@@ -1513,17 +1496,25 @@ Parses complete newline-delimited JSON and invokes callbacks."
         (setq buf rest)
         (when (and line (not (string-empty-p (string-trim line))))
           (let ((parsed (claude-agent--try-parse-json line)))
-            (if parsed
+            (if (and parsed (listp parsed))
                 (let ((msg-type (plist-get parsed :type)))
-                  (claude-agent--debug-log "Parsed JSON: %S" msg-type)
-
-                  ;; Control requests use direct dispatch (bidirectional protocol)
-                  (if (equal msg-type "control_request")
-                      (claude-agent--handle-control-request process parsed)
-                    ;; All other types: generic dispatch via cl-defmethod
-                    (claude-agent-handle-message
-                     (intern msg-type) parsed state)))
-              ;; Line is not valid JSON - could be plain text error from CLI
+                  (if (not (stringp msg-type))
+                      ;; Parsed as JSON object but missing :type — treat as error
+                      (progn
+                        (claude-agent--debug-log "JSON object without :type field: %s" line)
+                        (when error-callback
+                          (funcall error-callback
+                                   (list 'claude-agent-cli-error
+                                         :message line
+                                         :original-error nil))))
+                    (claude-agent--debug-log "Parsed JSON: %S" msg-type)
+                    ;; Control requests use direct dispatch (bidirectional protocol)
+                    (if (equal msg-type "control_request")
+                        (claude-agent--handle-control-request process parsed)
+                      ;; All other types: generic dispatch via cl-defmethod
+                      (claude-agent-handle-message
+                       (intern msg-type) parsed state))))
+              ;; Line is not valid JSON or is a bare value (number, string, boolean)
               (claude-agent--debug-log "Non-JSON output: %s" line)
               (when error-callback
                 (funcall error-callback
@@ -1637,12 +1628,10 @@ Kills orphaned children, removes from active-states, unregisters
 query, clears Docker mappings, and kills output buffer."
   ;; Kill any orphaned child processes (delegate to existing helper)
   (claude-agent--kill-child-processes (process-id process))
-  ;; Remove from active states (registry is canonical; sync alias)
+  ;; Remove from active states (registry is sole owner)
   (setf (claude-agent--registry-active-states claude-agent--registry)
         (delq state (claude-agent--registry-active-states claude-agent--registry)))
-  (setq claude-agent--active-states
-        (claude-agent--registry-active-states claude-agent--registry))
-  ;; Per-process cleanup via registry (same hash-table objects as standalone vars)
+  ;; Per-process cleanup via registry
   (when-let* ((req-id (claude-agent--process-state-request-id state)))
     (claude-agent--cleanup-process-entries req-id)
     (claude-agent--unregister-query req-id))
@@ -1684,20 +1673,26 @@ and cleanup."
                     (session-key (claude-agent--process-state-session-key state)))
                 (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
                 (let ((parsed (claude-agent--try-parse-json trimmed)))
-                  (if parsed
+                  (if (and parsed (listp parsed))
                       (let ((msg-type (plist-get parsed :type)))
-                        (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
-                        (if (equal msg-type "control_request")
-                            (progn
-                              (when session-key
-                                (claude-agent--verbose-insert
-                                 session-key
-                                 (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
-                              (message "Claude: control_request received but CLI died before we could respond"))
-                          (when session-key
-                            (claude-agent--verbose-insert
-                             session-key
-                             (format ">>> INFO: Final message without newline: %s" msg-type)))))
+                        (if (not (stringp msg-type))
+                            ;; JSON object without :type — log as info
+                            (when session-key
+                              (claude-agent--verbose-insert
+                               session-key
+                               (format ">>> INFO: Final JSON without :type: %s" trimmed)))
+                          (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
+                          (if (equal msg-type "control_request")
+                              (progn
+                                (when session-key
+                                  (claude-agent--verbose-insert
+                                   session-key
+                                   (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
+                                (message "Claude: control_request received but CLI died before we could respond"))
+                            (when session-key
+                              (claude-agent--verbose-insert
+                               session-key
+                               (format ">>> INFO: Final message without newline: %s" msg-type))))))
                     (when error-callback
                       (funcall error-callback
                                (list 'claude-agent-cli-error
@@ -2209,11 +2204,9 @@ Returns a process state object."
                                                    args default-directory env-vars))
       ;; Streaming mode: Send initialization and prompt via stdin
       (claude-agent--streaming-init process state prompt)
-      ;; Register in registry (canonical) and sync alias
+      ;; Register in registry (sole owner of active-states)
       (setf (claude-agent--registry-active-states claude-agent--registry)
             (cons state (claude-agent--registry-active-states claude-agent--registry)))
-      (setq claude-agent--active-states
-            (claude-agent--registry-active-states claude-agent--registry))
       state))))
 #+END_SRC
 
@@ -2986,7 +2979,6 @@ outdated structure, or queries that have exceeded timeout."
                                  (and proc (not (process-live-p proc))))))
                          current)))
           (setf (claude-agent--registry-active-states claude-agent--registry) cleaned)
-          (setq claude-agent--active-states cleaned)
           (let ((removed (- initial-count (length cleaned))))
             (when (> removed 0)
               (claude-agent--debug-log "Cleaned up %d stale states" removed)))))
@@ -3267,74 +3259,80 @@ CWD is working directory, ENV-VARS is alist of environment variables."
 
    (t nil)))
 
+(defun claude-agent--verbose-format-content-blocks (blocks &optional parse-raw)
+  "Format BLOCKS list into a single string via verbose-format-content-block.
+Each block is formatted individually, then joined.  When PARSE-RAW is non-nil,
+each element is first passed through `claude-agent--parse-content-block'
+\(used for raw user-message plists)."
+  (let ((parts nil))
+    (dolist (block blocks)
+      (let ((parsed (if parse-raw
+                        (claude-agent--parse-content-block block)
+                      block)))
+        (when-let* ((formatted (claude-agent--verbose-format-content-block parsed)))
+          (push formatted parts))))
+    (when parts
+      (mapconcat #'identity (nreverse parts) ""))))
+
+(defun claude-agent--verbose-format-assistant-msg (msg)
+  "Format assistant MSG for verbose buffer display."
+  (let ((content (claude-agent-assistant-message-content msg)))
+    (claude-agent--debug-log "Assistant content blocks: %d items" (length content))
+    (dolist (block content)
+      (claude-agent--debug-log "  Block type: %s"
+                               (cond
+                                ((claude-agent-tool-use-block-p block) "tool_use")
+                                ((claude-agent-thinking-block-p block) "thinking")
+                                ((claude-agent-text-block-p block) "text")
+                                ((claude-agent-tool-result-block-p block) "tool_result")
+                                (t (format "unknown: %S" (type-of block))))))
+    (claude-agent--verbose-format-content-blocks content)))
+
+(defun claude-agent--verbose-format-user-msg (msg)
+  "Format user MSG for verbose buffer display.
+Shows tool results but skips plain string content (already in header)."
+  (let ((content (claude-agent-user-message-content msg)))
+    (cond
+     ;; Content is a list of blocks (tool results)
+     ((and (listp content) (listp (car content)))
+      (claude-agent--verbose-format-content-blocks content t))
+     ;; String content or anything else — nothing to show
+     (t nil))))
+
+(defun claude-agent--verbose-format-system-msg (msg)
+  "Format system MSG for verbose buffer display."
+  (let* ((subtype (claude-agent-system-message-subtype msg))
+         (data (claude-agent-system-message-data msg))
+         (message-text (plist-get data :message)))
+    (cond
+     ((string= subtype "error")
+      (format "❌ Error: %s\n" (or message-text subtype)))
+     ((string= subtype "init")
+      (format "ℹ️ %s\n" (or message-text "Initializing...")))
+     (message-text
+      (format "ℹ️ %s\n" message-text))
+     (subtype
+      (format "ℹ️ %s\n" subtype))
+     (t nil))))
+
+(defun claude-agent--verbose-format-result-msg (msg)
+  "Format result MSG for verbose buffer display."
+  (format "\n%s\n"
+          (propertize
+           (format "════ Complete: %.1fs | $%.4f ════"
+                   (/ (or (claude-agent-result-message-duration-ms msg) 0) 1000.0)
+                   (or (claude-agent-result-message-total-cost-usd msg) 0))
+           'face 'font-lock-comment-face)))
+
 (defun claude-agent--verbose-format-message (msg)
-  "Format MSG for verbose buffer display."
+  "Format MSG for verbose buffer display.
+Dispatches to type-specific formatters for assistant, user, system,
+and result messages."
   (cond
-   ;; Assistant message - iterate through content blocks
-   ((claude-agent-assistant-message-p msg)
-    (let ((content (claude-agent-assistant-message-content msg))
-          (parts nil))
-      (claude-agent--debug-log "Assistant content blocks: %d items" (length content))
-      (dolist (block content)
-        (claude-agent--debug-log "  Block type: %s"
-                                 (cond
-                                  ((claude-agent-tool-use-block-p block) "tool_use")
-                                  ((claude-agent-thinking-block-p block) "thinking")
-                                  ((claude-agent-text-block-p block) "text")
-                                  ((claude-agent-tool-result-block-p block) "tool_result")
-                                  (t (format "unknown: %S" (type-of block)))))
-        (when-let* ((formatted (claude-agent--verbose-format-content-block block)))
-          (push formatted parts)))
-      (when parts
-        (mapconcat #'identity (nreverse parts) ""))))
-
-   ;; User message - show tool results if any
-   ((claude-agent-user-message-p msg)
-    (let ((content (claude-agent-user-message-content msg)))
-      (cond
-       ;; Content is a list of blocks (tool results)
-       ((and (listp content) (listp (car content)))
-        (let ((parts nil))
-          (dolist (block content)
-            (when-let* ((formatted (claude-agent--verbose-format-content-block
-                                   (claude-agent--parse-content-block block))))
-              (push formatted parts)))
-          (when parts
-            (mapconcat #'identity (nreverse parts) ""))))
-       ;; Content is just a string
-       ((stringp content)
-        nil)  ; Don't show user input (already shown in header)
-       (t nil))))
-
-   ;; System message
-   ((claude-agent-system-message-p msg)
-    (let* ((subtype (claude-agent-system-message-subtype msg))
-           (data (claude-agent-system-message-data msg))
-           (message-text (plist-get data :message)))
-      (cond
-       ;; Show error messages with message text
-       ((string= subtype "error")
-        (format "❌ Error: %s\n" (or message-text subtype)))
-       ;; Show init messages
-       ((string= subtype "init")
-        (format "ℹ️ %s\n" (or message-text "Initializing...")))
-       ;; Show any message that has text (like "Compacting conversation...")
-       (message-text
-        (format "ℹ️ %s\n" message-text))
-       ;; For other subtypes, just show the subtype
-       (subtype
-        (format "ℹ️ %s\n" subtype))
-       (t nil))))
-
-   ;; Result message
-   ((claude-agent-result-message-p msg)
-    (format "\n%s\n"
-            (propertize
-             (format "════ Complete: %.1fs | $%.4f ════"
-                     (/ (or (claude-agent-result-message-duration-ms msg) 0) 1000.0)
-                     (or (claude-agent-result-message-total-cost-usd msg) 0))
-             'face 'font-lock-comment-face)))
-
+   ((claude-agent-assistant-message-p msg) (claude-agent--verbose-format-assistant-msg msg))
+   ((claude-agent-user-message-p msg)      (claude-agent--verbose-format-user-msg msg))
+   ((claude-agent-system-message-p msg)    (claude-agent--verbose-format-system-msg msg))
+   ((claude-agent-result-message-p msg)    (claude-agent--verbose-format-result-msg msg))
    (t nil)))
 
 (defun claude-agent--verbose-write-message (session-key msg)
@@ -3770,701 +3768,6 @@ To add a new backend (e.g., HTTP API, terminal multiplexer):
 (defun claude-org--make-my-backend (session-key options)
   (claude-agent-my-backend--create :session-key session-key))
 #+end_example
-
-
-* Claude CLI Backend
-:PROPERTIES:
-:DEPENDS_ON: Backend Protocol
-:DEPENDED_BY: Core API
-:END:
-
-Terminal-based backend using Claude CLI interactive TUI via eat.
-Runs Claude Code as a long-lived interactive terminal process.
-
-** Dependencies and Declarations
-
-#+BEGIN_SRC elisp
-(require 'eat nil t)  ;; soft require — only needed when this backend is used
-
-(declare-function eat-make "eat" (name program &optional startfile &rest switches))
-(declare-function eat-kill-process "eat" (&optional buffer))
-(declare-function eat-term-send-string "eat" (terminal string))
-(declare-function eat-term-send-string-as-yank "eat" (terminal args))
-(declare-function eat-term-filter-string "eat" (string))
-(declare-function eat-term-live-p "eat" (terminal))
-(declare-function eat-term-parameter "eat" (terminal parameter) t)
-(declare-function eat-term-input-event "eat" (terminal n event))
-#+END_SRC
-
-** Customization
-
-#+BEGIN_SRC elisp
-(defgroup claude-agent-claude-backend nil
-  "Claude CLI terminal backend settings."
-  :group 'claude-agent
-  :prefix "claude-agent-claude-backend-")
-
-(defcustom claude-agent-claude-backend-cli-switches nil
-  "Additional CLI switches for the Claude terminal backend.
-These are appended to the command line when starting the terminal process."
-  :type '(repeat string)
-  :group 'claude-agent-claude-backend)
-
-(defcustom claude-agent-claude-backend-hook-wrapper-path
-  (expand-file-name "bin/claude-agent-hook-wrapper"
-                    (file-name-directory
-                     (or load-file-name buffer-file-name "")))
-  "Path to the hook wrapper script for Claude CLI hooks.
-This script is called by Claude Code for PreToolUse, PostToolUse, and Stop events."
-  :type 'file
-  :group 'claude-agent-claude-backend)
-#+END_SRC
-
-** Struct Definition
-
-#+BEGIN_SRC elisp
-(cl-defstruct (claude-agent-claude-backend
-               (:include claude-agent-backend (type :claude-cli))
-               (:constructor claude-agent-claude-backend--create)
-               (:copier nil))
-  "Terminal-based backend using Claude CLI interactive TUI via eat.
-Runs Claude Code as a long-lived interactive terminal process.
-The eat terminal buffer serves as the verbose/debug view.
-Response text comes via CLI Stop hook (not TUI scraping)."
-  (process nil :documentation "Eat terminal process object.")
-  (buffer nil :documentation "Eat terminal buffer (= verbose buffer).")
-  (session-key nil :documentation "File-based session key.")
-  (active nil :documentation "Non-nil when query in-flight.")
-  (output-start-pos nil :documentation "Marker at query start (legacy, kept for tests).")
-  (options nil :documentation "Options plist from last query.")
-  (callbacks nil :documentation "Current callbacks plist.")
-  (query-count 0 :documentation "Queries sent through this instance.")
-  (cwd nil :documentation "Working directory for CLI.")
-  (session-id nil :documentation "CLI session ID from SessionStart hook."))
-#+END_SRC
-
-** Capability Matrix
-
-#+BEGIN_SRC elisp
-(cl-defmethod claude-agent-backend-supports-p
-    ((_backend claude-agent-claude-backend) capability)
-  "Report capabilities of the Claude CLI terminal backend."
-  (pcase capability
-    (:streaming-tokens t)          ; extracted from terminal buffer
-    (:structured-messages nil)     ; no JSON messages from TUI
-    (:tool-use nil)                ; hooks handle externally
-    (:session-resume t)            ; long-lived process + --continue
-    (:interactive-input t)         ; keystrokes to PTY
-    (:persistent-client t)         ; terminal stays alive
-    (:hook-permissions t)          ; permissions via hook system
-    (:terminal-verbose t)          ; terminal IS verbose buffer
-    (_ nil)))
-#+END_SRC
-
-** Protocol Methods
-
-#+BEGIN_SRC elisp
-(cl-defmethod claude-agent-backend-verbose-buffer
-    ((backend claude-agent-claude-backend))
-  "Return the eat terminal buffer as the verbose buffer."
-  (claude-agent-claude-backend-buffer backend))
-
-(cl-defmethod claude-agent-backend-session-id
-    ((_backend claude-agent-claude-backend))
-  "Claude CLI backend does not expose a session UUID."
-  nil)
-
-(cl-defmethod claude-agent-backend-ready-p
-    ((backend claude-agent-claude-backend))
-  "Claude CLI backend is ready when no query is active."
-  (not (claude-agent-claude-backend-active backend)))
-
-(cl-defmethod claude-agent-backend-active-p
-    ((backend claude-agent-claude-backend))
-  "Return non-nil if a query is currently active."
-  (and (claude-agent-claude-backend-active backend)
-       (claude-agent-claude-backend--eat-alive-p backend)))
-
-(cl-defmethod claude-agent-backend-cancel
-    ((backend claude-agent-claude-backend) _handle)
-  "Cancel active query by sending ESC to the terminal."
-  (setf (claude-agent-claude-backend-active backend) nil)
-  (when-let* ((proc (claude-agent-claude-backend-process backend)))
-    (when (process-live-p proc)
-      (process-send-string proc "\e"))))
-
-(cl-defmethod claude-agent-backend-cleanup
-    ((backend claude-agent-claude-backend))
-  "Release all resources held by the Claude CLI backend."
-  (unwind-protect
-      (progn
-        ;; Free marker
-        (when-let* ((marker (claude-agent-claude-backend-output-start-pos backend)))
-          (set-marker marker nil))
-        ;; Remove from session registry
-        (when-let* ((sid (claude-agent-claude-backend-session-id backend)))
-          (remhash sid claude-agent-claude-backend--session-registry))
-        (when-let* ((cwd (claude-agent-claude-backend--normalize-cwd
-                         (claude-agent-claude-backend-cwd backend))))
-          (remhash cwd claude-agent-claude-backend--session-registry))
-        ;; Kill process/buffer
-        (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
-          (when (buffer-live-p buf)
-            (let ((proc (get-buffer-process buf)))
-              (when (and proc (process-live-p proc))
-                (delete-process proc)))
-            (kill-buffer buf))))
-    ;; Always nil out fields, even on error
-    (setf (claude-agent-claude-backend-process backend) nil)
-    (setf (claude-agent-claude-backend-buffer backend) nil)
-    (setf (claude-agent-claude-backend-active backend) nil)
-    (setf (claude-agent-claude-backend-output-start-pos backend) nil)
-    (setf (claude-agent-claude-backend-callbacks backend) nil)
-    (setf (claude-agent-claude-backend-options backend) nil)))
-
-(cl-defmethod claude-agent-backend-send-input
-    ((backend claude-agent-claude-backend) input)
-  "Send INPUT text to the terminal."
-  (when-let* ((proc (claude-agent-claude-backend-process backend)))
-    (when (process-live-p proc)
-      (process-send-string proc input))))
-
-(cl-defmethod claude-agent-backend-classify-error
-    ((_backend claude-agent-claude-backend) error)
-  "Classify ERROR using text pattern matching."
-  (let ((msg (cond
-              ((stringp error) error)
-              ((and (listp error) (plist-get error :message))
-               (plist-get error :message))
-              (t nil))))
-    (cond
-     ((or (null msg) (equal msg "")) 'unknown)
-     ((string-match-p "\\(?:context too long\\|token limit\\|maximum context\\|too long\\)" msg)
-      'context-limit)
-     ((string-match-p "\\(?:session expired\\|invalid session\\|session.*not found\\)" msg)
-      'session-expired)
-     (t 'unknown))))
-#+END_SRC
-
-** Terminal Management
-
-#+BEGIN_SRC elisp
-(defun claude-agent-claude-backend--terminal (backend)
-  "Return the eat terminal object for BACKEND, or nil if unavailable."
-  (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
-    (when (and (buffer-live-p buf)
-               (local-variable-p 'eat-terminal buf))
-      (buffer-local-value 'eat-terminal buf))))
-
-(defun claude-agent-claude-backend--eat-alive-p (backend)
-  "Return non-nil if BACKEND's eat terminal is alive."
-  (when-let* ((terminal (claude-agent-claude-backend--terminal backend)))
-    (if (fboundp 'eat-term-live-p)
-        (eat-term-live-p terminal)
-      t)))
-
-(defun claude-agent-build-cli-switches (options)
-  "Build CLI switches from OPTIONS plist for terminal mode.
-Public wrapper around the backend implementation.
-Does NOT include --output-format, --input-format, --print, or --verbose
-since those are for the JSON streaming backend."
-  (claude-agent-claude-backend--build-switches options))
-
-(defun claude-agent-claude-backend--build-switches (options)
-  "Build CLI switches from OPTIONS plist for interactive terminal mode.
-Does NOT include --output-format, --input-format, --print, or --verbose
-since those are for the JSON streaming backend."
-  (let ((switches nil))
-    ;; Extract recognized options
-    (when-let* ((system-prompt (plist-get options :system-prompt)))
-      (push system-prompt switches)
-      (push "--system-prompt" switches))
-    (when-let* ((max-turns (plist-get options :max-turns)))
-      (push (if (numberp max-turns) (number-to-string max-turns) max-turns)
-            switches)
-      (push "--max-turns" switches))
-    (when-let* ((permission-mode (plist-get options :permission-mode)))
-      (push (if (symbolp permission-mode)
-                (symbol-name permission-mode)
-              permission-mode)
-            switches)
-      (push "--permission-mode" switches))
-    (when-let* ((mcp-config (plist-get options :mcp-config)))
-      (push mcp-config switches)
-      (push "--mcp-config" switches))
-    ;; Resume a previous session by ID
-    (when-let* ((resume-id (plist-get options :resume-session-id)))
-      (push resume-id switches)
-      (push "--resume" switches))
-    ;; Include hooks settings via --settings flag
-    (let ((hooks-file (claude-agent-claude-backend--hooks-settings-file)))
-      (when hooks-file
-        (push hooks-file switches)
-        (push "--settings" switches)))
-    ;; Append user-configured extra switches
-    (when claude-agent-claude-backend-cli-switches
-      (setq switches (append switches claude-agent-claude-backend-cli-switches)))
-    switches))
-#+END_SRC
-
-** Query Execution
-
-#+BEGIN_SRC elisp
-(defcustom claude-agent-claude-backend-ready-timeout 30
-  "Seconds to wait for Claude CLI prompt before giving up."
-  :type 'integer
-  :group 'claude-agent-claude-backend)
-
-(defcustom claude-agent-claude-backend-ready-poll-interval 0.2
-  "Seconds between polls when waiting for Claude CLI prompt."
-  :type 'number
-  :group 'claude-agent-claude-backend)
-
-(defun claude-agent-claude-backend--prompt-ready-p (backend)
-  "Return non-nil if BACKEND's eat buffer shows a fresh Claude CLI prompt.
-Checks that the ❯ character appears near the end of the buffer (within
-the last few lines).  This prevents false positives from old prompts
-embedded earlier in the buffer.
-
-Critical for queued queries: after the Stop hook delivers a response,
-the CLI renders a new ❯ prompt at the bottom.  A naive search from
-point-min would find the OLD prompt and return immediately — before the
-new prompt appears — causing the next query to be typed during the
-response display state, which triggers 'Interrupted' in the TUI."
-  (when-let* ((buf (claude-agent-claude-backend-buffer backend)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (save-excursion
-          ;; Search within the last ~500 chars for the prompt
-          (goto-char (max (point-min) (- (point-max) 500)))
-          (search-forward "❯" nil t))))))
-
-(defun claude-agent-claude-backend--wait-for-ready (backend)
-  "Wait until BACKEND's eat buffer shows a fresh Claude CLI prompt.
-Polls the buffer for the ❯ character near the end.
-Signals an error if the timeout is reached.
-Uses `accept-process-output' to allow terminal rendering between polls."
-  (let ((deadline (+ (float-time) claude-agent-claude-backend-ready-timeout)))
-    (while (and (not (claude-agent-claude-backend--prompt-ready-p backend))
-                (< (float-time) deadline))
-      (accept-process-output nil claude-agent-claude-backend-ready-poll-interval))
-    (unless (claude-agent-claude-backend--prompt-ready-p backend)
-      (error "Claude CLI did not become ready within %d seconds"
-             claude-agent-claude-backend-ready-timeout))))
-
-(defun claude-agent-claude-backend--ensure-process (backend options)
-  "Ensure BACKEND has a live eat terminal process.
-Creates a new eat terminal buffer if none exists or the existing one is dead.
-OPTIONS is a plist of query options (passed to --build-switches).
-Respects :env option to set environment variables for the CLI process.
-Hooks are passed dynamically via --settings flag (no global settings mutation)."
-  (unless (featurep 'eat)
-    (error "The `eat' package is required for claude-cli backend"))
-  ;; Reuse existing live buffer
-  (unless (claude-agent-claude-backend--eat-alive-p backend)
-    (let* ((cli (claude-agent--find-cli))
-           (switches (claude-agent-claude-backend--build-switches options))
-           (cwd (or (claude-agent-claude-backend-cwd backend)
-                    default-directory))
-           (default-directory cwd)
-           (env-vars (plist-get options :env))
-           (cli-dir (when cli (file-name-directory cli)))
-           (process-environment (if env-vars
-                                    (claude-agent--build-process-environment
-                                     env-vars cli-dir)
-                                  process-environment))
-           (eat-name (format "claude-cli<%s>"
-                            (or (claude-agent-claude-backend-session-key backend)
-                                "default")))
-           (buf (apply #'eat-make
-                       eat-name
-                       cli
-                       nil     ; no startfile
-                       switches)))
-      (setf (claude-agent-claude-backend-buffer backend) buf)
-      (setf (claude-agent-claude-backend-process backend)
-            (get-buffer-process buf)))))
-
-(defcustom claude-agent-claude-backend-input-delay 0.3
-  "Seconds to wait between input steps when sending to Claude CLI TUI.
-The terminal needs time to process each input event (text, ESC, Enter)."
-  :type 'number
-  :group 'claude-agent-claude-backend)
-
-(defcustom claude-agent-claude-backend-stop-complete-delay 0.5
-  "Seconds to delay the on-complete callback after a Stop hook.
-Gives the CLI TUI time to render the new ❯ prompt before the next
-queued query is dispatched.  Without this delay, `send-prompt' types
-text while the TUI is still in the response-display state, which
-triggers an 'Interrupted' message.  Set to 0 for testing."
-  :type 'number
-  :group 'claude-agent-claude-backend)
-
-(defun claude-agent-claude-backend--send-prompt (backend prompt)
-  "Send PROMPT to BACKEND's Claude CLI terminal using bracketed paste.
-Wraps PROMPT in bracketed-paste escape sequences (ESC[200~ ... ESC[201~)
-so the TUI treats it as a single paste operation, then sends Enter after
-a short delay to submit.  Uses `eat-term-send-string' (the proper eat
-API) instead of raw `process-send-string'.
-With vimMode disabled via --settings, Enter submits directly—no ESC needed."
-  (let ((buf (claude-agent-claude-backend-buffer backend)))
-    (unless (and buf (buffer-live-p buf))
-      (error "Claude CLI backend buffer is not alive"))
-    ;; DEBUG: Log prompt being sent
-    (message "SEND-PROMPT[%d]: len=%d preview=%.120s"
-             (claude-agent-claude-backend-query-count backend)
-             (length prompt)
-             (substring prompt 0 (min 120 (length prompt))))
-    (with-current-buffer buf
-      (let ((terminal (and (boundp 'eat-terminal) eat-terminal)))
-        (unless terminal
-          (error "No eat-terminal in buffer %s" (buffer-name buf)))
-        ;; Send prompt wrapped in bracketed paste
-        (eat-term-send-string terminal
-          (concat "\e[200~" prompt "\e[201~"))
-        ;; Schedule Enter after delay (non-blocking, immune to C-g)
-        (lexical-let ((buf buf)
-                      (terminal terminal))
-          (run-at-time claude-agent-claude-backend-input-delay nil
-            (lambda ()
-              (when (buffer-live-p buf)
-                (with-current-buffer buf
-                  (eat-term-send-string terminal "\r"))))))))))
-
-(cl-defmethod claude-agent-backend-query
-    ((backend claude-agent-claude-backend) prompt callbacks &rest args)
-  "Send PROMPT to Claude CLI terminal BACKEND, invoking CALLBACKS.
-CALLBACKS is a plist with :on-token, :on-error, :on-complete.
-Note: :on-message is NOT supported (no structured messages from TUI).
-ARGS are keyword options: :options, :session-key, etc.
-Returns BACKEND as an opaque handle for cancel/tracking."
-  ;; Guard: refuse if already active
-  (when (claude-agent-claude-backend-active backend)
-    (error "Claude CLI backend already has an active query"))
-  (let ((options (plist-get args :options))
-        (filtered-callbacks (claude-agent-backend-filter-callbacks
-                             backend callbacks)))
-    ;; Ensure terminal process exists and is ready for input
-    (claude-agent-claude-backend--ensure-process backend options)
-    (claude-agent-claude-backend--wait-for-ready backend)
-    ;; Register in session registry by normalized cwd so SessionStart hook can find us
-    (when-let* ((cwd (claude-agent-claude-backend--normalize-cwd
-                     (claude-agent-claude-backend-cwd backend))))
-      (puthash cwd backend claude-agent-claude-backend--session-registry))
-    (let ((buf (claude-agent-claude-backend-buffer backend)))
-      ;; Record output start position
-      (with-current-buffer buf
-        (setf (claude-agent-claude-backend-output-start-pos backend)
-              (point-max-marker)))
-      ;; Store callbacks and mark active
-      (setf (claude-agent-claude-backend-callbacks backend) filtered-callbacks)
-      (setf (claude-agent-claude-backend-active backend) t)
-      (cl-incf (claude-agent-claude-backend-query-count backend))
-      ;; Send prompt to terminal.  Response completion is detected via
-      ;; the Stop CLI hook (no polling needed).
-      (claude-agent-claude-backend--send-prompt backend prompt)
-      ;; Return backend as handle
-      backend)))
-#+END_SRC
-
-** Hook Handler
-
-The Claude CLI backend uses Claude Code's hook system (=settings.json=)
-to handle permissions and tool events. A shell wrapper script calls
-=emacsclient --eval= which invokes these Elisp handlers.
-
-Hook JSON input (from stdin) uses alists (=json-read-from-string= default).
-Hook JSON output uses =json-encode= with alist structures.
-
-#+BEGIN_SRC elisp
-(defun claude-agent-claude-backend--parse-hook-input (json-string)
-  "Parse JSON-STRING from hook stdin into an alist.
-Returns alist on success, nil on parse error."
-  (condition-case nil
-      (json-read-from-string json-string)
-    (error nil)))
-
-(defun claude-agent-claude-backend--alist-tool-input-to-plist (alist)
-  "Convert an ALIST of tool input to a keyword plist.
-Converts symbol keys like \\='file_path to keyword :file_path."
-  (cl-loop for (key . val) in alist
-           nconc (list (intern (concat ":" (symbol-name key))) val)))
-
-(defun claude-agent-claude-backend--translate-permission-result (perm-result &optional event-name)
-  "Translate permission PERM-RESULT plist to Claude Code hook alist.
-PERM-RESULT is from `claude-agent--run-permission-functions':
-  nil                            → ask (fallback to terminal)
-  (:behavior \"allow\")           → allow
-  (:behavior \"allow\" :updated-input ...) → allow with updatedInput
-  (:behavior \"deny\" :message ..) → deny with reason
-
-EVENT-NAME defaults to \"PreToolUse\" if not specified.
-Returns an alist suitable for `json-encode'."
-  (let* ((behavior (plist-get perm-result :behavior))
-         (event (or event-name "PreToolUse"))
-         (decision (cond
-                    ((equal behavior "allow") "allow")
-                    ((equal behavior "deny") "deny")
-                    (t "ask")))
-         (hso `((hookEventName . ,event)
-                (permissionDecision . ,decision))))
-    ;; Add reason for deny
-    (when (equal decision "deny")
-      (when-let* ((msg (plist-get perm-result :message)))
-        (push `(permissionDecisionReason . ,msg) hso)))
-    ;; Add updatedInput for allow with updated-input
-    (when (and (equal decision "allow")
-               (plist-get perm-result :updated-input))
-      (push `(updatedInput . ,(plist-get perm-result :updated-input)) hso))
-    `((hookSpecificOutput . ,hso))))
-
-(defun claude-agent-claude-backend--format-hook-response (alist)
-  "Encode ALIST as JSON string for hook stdout.
-Uses `json-encode' for safe serialization."
-  (json-encode alist))
-
-(defun claude-agent-claude-backend--handle-pre-tool-use (input)
-  "Handle a PreToolUse hook event.
-INPUT is an alist with tool_name, tool_input fields.
-Delegates to `claude-agent--run-permission-functions' and translates result."
-  (let* ((tool-name (alist-get 'tool_name input))
-         (tool-input-alist (alist-get 'tool_input input))
-         (tool-input-plist (claude-agent-claude-backend--alist-tool-input-to-plist
-                            tool-input-alist))
-         (perm-result (claude-agent--run-permission-functions
-                       tool-name tool-input-plist nil)))
-    (claude-agent-claude-backend--translate-permission-result perm-result)))
-
-(defun claude-agent-claude-backend--maybe-revert-buffer (file-path)
-  "Revert buffer visiting FILE-PATH if it exists.
-Called after PostToolUse for Edit/Write to keep Emacs in sync."
-  (when-let* ((buf (find-buffer-visiting file-path)))
-    (with-current-buffer buf
-      (revert-buffer t t t))))
-
-(defun claude-agent-claude-backend--handle-post-tool-use (input)
-  "Handle a PostToolUse hook event.
-INPUT is an alist with tool_name, tool_input, tool_response fields.
-Reverts buffers after Edit/Write/MultiEdit operations."
-  (let ((tool-name (alist-get 'tool_name input)))
-    (when (member tool-name '("Write" "Edit" "MultiEdit"))
-      (when-let* ((file-path (alist-get 'file_path
-                                       (alist-get 'tool_input input))))
-        (claude-agent-claude-backend--maybe-revert-buffer file-path)))
-    nil))  ; PostToolUse returns nil (no decision)
-
-(defun claude-agent-claude-backend--handle-hook (event-type input)
-  "Dispatch hook handler for EVENT-TYPE with INPUT alist.
-Returns alist for JSON response, or nil for no response.
-Wraps all handlers in condition-case for safety."
-  (condition-case err
-      (pcase event-type
-        ("PreToolUse"
-         (claude-agent-claude-backend--handle-pre-tool-use input))
-        ("PostToolUse"
-         (claude-agent-claude-backend--handle-post-tool-use input))
-        (_ nil))
-    (error
-     (message "claude-agent hook error (%s): %s"
-              event-type (error-message-string err))
-     ;; Safe fallback: for PreToolUse return "ask", for others return nil
-     (when (equal event-type "PreToolUse")
-       `((hookSpecificOutput
-          . ((hookEventName . ,event-type)
-             (permissionDecision . "ask")
-             (permissionDecisionReason
-              . ,(format "Emacs hook error: %s"
-                         (error-message-string err))))))))))
-#+END_SRC
-
-** Hook Script and Settings
-
-The Claude CLI hook system invokes shell scripts on events like
-=SessionStart= and =Stop=.  A single script handles both events,
-extracting JSON fields with =jq= and calling =emacsclient --eval=
-to deliver data back to Emacs.
-
-Hooks are NOT installed into the global =~/.claude/settings.json=.
-Instead, we generate a separate settings file and pass it via the
-=--settings= CLI flag, keeping the user's global config untouched.
-
-#+BEGIN_SRC elisp
-(defun claude-agent-claude-backend--hook-script-content ()
-  "Return the shell script content for the Claude CLI hook.
-Handles SessionStart (captures session_id + cwd) and Stop
-(writes last_assistant_message to temp file, notifies Emacs)."
-  "#!/bin/bash
-# Claude Agent hook script — handles SessionStart and Stop events.
-# Installed by claude-agent-claude-backend--install-hook-script.
-set -euo pipefail
-
-INPUT=$(cat)
-EVENT=$(echo \"$INPUT\" | jq -r '.hook_event_name // empty')
-SESSION=$(echo \"$INPUT\" | jq -r '.session_id // empty')
-
-case \"$EVENT\" in
-  SessionStart)
-    CWD=$(echo \"$INPUT\" | jq -r '.cwd // empty')
-    emacsclient --no-wait --eval \\
-      \"(claude-agent-claude-backend--on-session-start \\\"$SESSION\\\" \\\"$CWD\\\")\" \\
-      2>/dev/null || true
-    ;;
-  Stop)
-    TMPFILE=\"/tmp/claude-stop-${SESSION}.txt\"
-    echo \"$INPUT\" | jq -r '.last_assistant_message // empty' > \"$TMPFILE\"
-    emacsclient --no-wait --eval \\
-      \"(claude-agent-claude-backend--on-stop \\\"$SESSION\\\" \\\"$TMPFILE\\\")\" \\
-      2>/dev/null || true
-    ;;
-esac
-")
-
-(defun claude-agent-claude-backend--install-hook-script (hooks-dir)
-  "Write the hook script to HOOKS-DIR and make it executable.
-Creates HOOKS-DIR if it does not exist."
-  (unless (file-directory-p hooks-dir)
-    (make-directory hooks-dir t))
-  (let ((script-path (expand-file-name "emacs-agent-hook.sh" hooks-dir)))
-    (with-temp-file script-path
-      (insert (claude-agent-claude-backend--hook-script-content)))
-    (set-file-modes script-path #o755)
-    script-path))
-
-(defvar claude-agent-claude-backend--hooks-settings-file nil
-  "Cached path to the temporary settings JSON file with hooks config.
-Created once per session, reused across all backends.")
-
-(defun claude-agent-claude-backend--hooks-settings-file ()
-  "Return path to a settings JSON file containing our hooks configuration.
-Creates the hook script and settings file on first call, then caches.
-The settings file contains only hooks entries (SessionStart + Stop)
-and is passed to the CLI via --settings flag."
-  (or claude-agent-claude-backend--hooks-settings-file
-      (let* ((hooks-dir (expand-file-name "~/.claude/hooks"))
-             (script-path (claude-agent-claude-backend--install-hook-script hooks-dir))
-             (hook-entry `[((hooks . [((type . "command")
-                                       (command . ,script-path))]))])
-             (settings `((hooks . ((SessionStart . ,hook-entry)
-                                   (Stop . ,hook-entry)))
-                         ;; Disable vim mode so Enter submits directly
-                         ;; (no ESC→NORMAL→Enter sequence needed).
-                         (vimMode . :json-false)))
-             (settings-file (expand-file-name
-                             "emacs-agent-settings.json" hooks-dir)))
-        (with-temp-file settings-file
-          (insert (json-encode settings)))
-        (setq claude-agent-claude-backend--hooks-settings-file settings-file))))
-#+END_SRC
-
-** Session Registry and Hook Handlers
-
-Global hash table mapping =session_id= → backend instance.
-Populated by the =SessionStart= hook, queried by the =Stop= hook.
-
-#+BEGIN_SRC elisp
-(defvar claude-agent-claude-backend--session-registry
-  (make-hash-table :test 'equal)
-  "Hash table mapping session_id (or cwd) to claude-backend instances.
-Populated by --on-session-start, queried by --on-stop.")
-
-(defvar claude-agent-claude-backend-session-start-functions nil
-  "Abnormal hook run when SessionStart fires.
-Each function is called with (SESSION-ID NORMALIZED-CWD).
-Used by claude-org native terminal to capture session IDs.")
-
-(defun claude-agent-claude-backend--normalize-cwd (path)
-  "Strip trailing slash from PATH for consistent hash-table keys.
-The CLI reports cwd without trailing slash but Emacs `default-directory'
-always includes one.  Normalizing both sides avoids lookup mismatches."
-  (when (and path (not (string-empty-p path)))
-    (directory-file-name path)))
-
-(defun claude-agent-claude-backend--on-session-start (session-id cwd)
-  "Handle SessionStart hook: map SESSION-ID to the backend for CWD.
-Looks up the backend previously registered by cwd, then stores
-a second entry keyed by SESSION-ID for later use by --on-stop.
-Also runs `claude-agent-claude-backend-session-start-functions' so
-other subsystems (e.g. native terminal) can capture the session-id."
-  (when (and session-id (not (string-empty-p session-id)))
-    (let* ((key (claude-agent-claude-backend--normalize-cwd cwd))
-           (backend (gethash key claude-agent-claude-backend--session-registry)))
-      (when backend
-        (setf (claude-agent-claude-backend-session-id backend) session-id)
-        (puthash session-id backend
-                 claude-agent-claude-backend--session-registry))
-      ;; Notify listeners (e.g., native terminal session capture)
-      (run-hook-with-args 'claude-agent-claude-backend-session-start-functions
-                          session-id key))))
-
-(defvar claude-agent-claude-backend--stop-log nil
-  "Debug log of Stop hook invocations.
-Each entry: (timestamp session-id active-p query-count text-length text-preview).
-Set to nil to clear.  Inspect with `claude-agent-claude-backend--stop-log'.")
-
-(defun claude-agent-claude-backend--read-and-delete-tmpfile (tmpfile)
-  "Read contents of TMPFILE and delete it.  Return text or nil."
-  (when (and tmpfile (file-exists-p tmpfile))
-    (prog1 (with-temp-buffer
-             (insert-file-contents tmpfile)
-             (buffer-string))
-      (ignore-errors (delete-file tmpfile)))))
-
-(defun claude-agent-claude-backend--on-stop (session-id tmpfile)
-  "Handle Stop hook: deliver response to the backend for SESSION-ID.
-Reads response text from TMPFILE, delivers it as a single :on-token call,
-then calls :on-complete with nil.  Deletes TMPFILE after reading.
-
-Guards:
-- Ignores if SESSION-ID is unknown (no error).
-- Ignores if backend is not active (stale Stop from user-interrupted query
-  or manual terminal input).  The Claude Code docs state Stop does NOT fire
-  for interrupted responses, but a subsequent manual prompt in the same
-  session will trigger Stop with unrelated content.  Dropping it prevents
-  delivering wrong text to the automated callback."
-  (let ((backend (gethash session-id
-                          claude-agent-claude-backend--session-registry)))
-    (when backend
-      (let* ((is-active (claude-agent-claude-backend-active backend))
-             (callbacks (claude-agent-claude-backend-callbacks backend))
-             (on-token (plist-get callbacks :on-token))
-             (on-complete (plist-get callbacks :on-complete))
-             (text (claude-agent-claude-backend--read-and-delete-tmpfile tmpfile))
-             (text-len (if text (length text) 0))
-             (text-preview (if text (substring text 0 (min 200 (length text))) "<nil>")))
-        ;; DEBUG: Log every Stop invocation
-        (push (list (format-time-string "%H:%M:%S.%3N")
-                    session-id is-active
-                    (claude-agent-claude-backend-query-count backend)
-                    text-len text-preview)
-              claude-agent-claude-backend--stop-log)
-        (message "STOP-HOOK[%d]: active=%s len=%s preview=%.80s"
-                 (claude-agent-claude-backend-query-count backend)
-                 is-active text-len
-                 (if text (substring text 0 (min 80 (length text))) "<nil>"))
-        ;; Guard: only deliver when backend is actively waiting.
-        ;; Stale Stop events are logged above but silently dropped.
-        (if (not is-active)
-            (message "STOP-HOOK: dropping stale Stop (active=nil) for session %s"
-                     session-id)
-          ;; Deliver entire response as a single token (preserves formatting)
-          (when (and text (not (string-empty-p text)) on-token)
-            (funcall on-token text))
-          ;; Reset active state BEFORE calling on-complete, because
-          ;; on-complete may dequeue the next block and call backend-query
-          ;; which sets active=t.  If we reset after, we'd clobber that.
-          (setf (claude-agent-claude-backend-active backend) nil)
-          ;; Delay on-complete so the CLI TUI has time to render the new
-          ;; ❯ prompt before we dispatch the next queued query.  Without
-          ;; this delay, send-prompt types text while the TUI is still
-          ;; in the response-display state, which triggers "Interrupted".
-          (when on-complete
-            (if (> claude-agent-claude-backend-stop-complete-delay 0)
-                (lexical-let ((on-complete on-complete))
-                  (run-at-time claude-agent-claude-backend-stop-complete-delay nil
-                    (lambda ()
-                      (funcall on-complete nil))))
-              (funcall on-complete nil))))))))
-#+END_SRC
 
 
 * Provide Feature

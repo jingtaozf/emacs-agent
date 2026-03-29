@@ -49,7 +49,7 @@ The old dead entry persists in the queries buffer."
                  :session-key "test-session-key"))
          ;; Save and restore global state
          (saved-active-queries (copy-hash-table claude-agent--active-queries))
-         (saved-active-states (copy-sequence claude-agent--active-states)))
+         (saved-active-states (copy-sequence (claude-agent-registry-active-states))))
     (unwind-protect
         (progn
           ;; Register the query in active-queries
@@ -71,7 +71,7 @@ The old dead entry persists in the queries buffer."
       ;; Cleanup
       (when (process-live-p proc) (delete-process proc))
       (setq claude-agent--active-queries saved-active-queries)
-      (setq claude-agent--active-states saved-active-states))))
+      (setf (claude-agent--registry-active-states claude-agent--registry) saved-active-states))))
 
 (ert-deftest test-normal-exit-does-unregister-from-active-queries ()
   "Normal exit path (sentinel-cleanup) should remove from active-queries.
@@ -83,12 +83,13 @@ This test verifies the normal path works correctly as a control case."
                  :request-id "test-normal-001"
                  :session-key "test-session-key"))
          (saved-active-queries (copy-hash-table claude-agent--active-queries))
-         (saved-active-states (copy-sequence claude-agent--active-states)))
+         (saved-active-states (copy-sequence (claude-agent-registry-active-states))))
     (unwind-protect
         (progn
           ;; Register the query
           (claude-agent--register-query "test-normal-001" state)
-          (push state claude-agent--active-states)
+          (setf (claude-agent--registry-active-states claude-agent--registry)
+                    (cons state (claude-agent-registry-active-states)))
           (should (gethash "test-normal-001" claude-agent--active-queries))
 
           ;; Simulate normal exit: sentinel-cleanup unregisters
@@ -99,7 +100,7 @@ This test verifies the normal path works correctly as a control case."
       ;; Cleanup
       (when (process-live-p proc) (delete-process proc))
       (setq claude-agent--active-queries saved-active-queries)
-      (setq claude-agent--active-states saved-active-states))))
+      (setf (claude-agent--registry-active-states claude-agent--registry) saved-active-states))))
 
 ;;; Bug 2: Process killed by signal 9 (OOM) stays in active-queries
 
@@ -120,7 +121,7 @@ Bug: When a process is killed by signal 9:
                  :session-key "test-session-key"))
          (claude-agent-auto-recovery t)
          (saved-active-queries (copy-hash-table claude-agent--active-queries))
-         (saved-active-states (copy-sequence claude-agent--active-states)))
+         (saved-active-states (copy-sequence (claude-agent-registry-active-states))))
     (unwind-protect
         (progn
           ;; Register the query
@@ -145,7 +146,7 @@ Bug: When a process is killed by signal 9:
       ;; Cleanup
       (when (process-live-p proc) (delete-process proc))
       (setq claude-agent--active-queries saved-active-queries)
-      (setq claude-agent--active-states saved-active-states))))
+      (setf (claude-agent--registry-active-states claude-agent--registry) saved-active-states))))
 
 (ert-deftest test-abnormal-exit-cleanup-parity-with-normal-exit ()
   "Both normal and abnormal exit paths should remove entries from active-queries.
@@ -153,7 +154,7 @@ The abnormal exit path (recovery) should do at least the same cleanup
 as the normal exit path regarding active-queries hash table."
   :tags '(:unit :fast :stable :isolated :state-management)
   (let* ((saved-active-queries (copy-hash-table claude-agent--active-queries))
-         (saved-active-states (copy-sequence claude-agent--active-states))
+         (saved-active-states (copy-sequence (claude-agent-registry-active-states)))
          ;; Create two processes with identical setup
          (proc-normal (start-process "test-parity-normal" nil "sleep" "10"))
          (state-normal (claude-agent--make-process-state
@@ -171,8 +172,10 @@ as the normal exit path regarding active-queries hash table."
           ;; Register both
           (claude-agent--register-query "test-parity-normal-001" state-normal)
           (claude-agent--register-query "test-parity-abnormal-001" state-abnormal)
-          (push state-normal claude-agent--active-states)
-          (push state-abnormal claude-agent--active-states)
+          (setf (claude-agent--registry-active-states claude-agent--registry)
+                (cons state-normal (claude-agent-registry-active-states)))
+          (setf (claude-agent--registry-active-states claude-agent--registry)
+                (cons state-abnormal (claude-agent-registry-active-states)))
 
           ;; Normal exit path
           (setf (claude-agent--process-state-closed state-normal) t)
@@ -190,7 +193,7 @@ as the normal exit path regarding active-queries hash table."
       (when (process-live-p proc-normal) (delete-process proc-normal))
       (when (process-live-p proc-abnormal) (delete-process proc-abnormal))
       (setq claude-agent--active-queries saved-active-queries)
-      (setq claude-agent--active-states saved-active-states))))
+      (setf (claude-agent--registry-active-states claude-agent--registry) saved-active-states))))
 
 ;;; Bug 3: complete-callback fires after cancel
 

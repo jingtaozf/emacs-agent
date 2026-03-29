@@ -245,7 +245,7 @@ ARGS are additional options passed to `claude-agent-options'."
 (defun test-claude-cleanup-all ()
   "Clean up all test resources.
 Kills active Claude processes tracked by claude-agent.
-Only kills processes registered in `claude-agent--active-states' and
+Only kills processes registered in the unified `claude-agent--registry' and
 `claude-agent--active-queries' - does NOT kill other Claude instances."
   ;; First, try graceful cancellation via claude-org sessions
   (dolist (buf (buffer-list))

@@ -451,8 +451,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-agent: alerts (mode-line)
     "claude-agent-add-alert"
     "claude-agent-remove-alert"
-    ;; claude-agent: CLI switches (public wrapper)
-    "claude-agent-build-cli-switches"
     ;; claude-agent: verbose/debug
     "claude-agent-get-verbose-buffer"
     "claude-agent-show-session-verbose"
@@ -815,6 +813,43 @@ FIX: Remove the unused function, or add a test/usage for it."
         (format "Dead public functions (defined but never referenced elsewhere):\n%s\nFIX: Remove unused functions or add usage/tests."
                 (mapconcat #'identity (sort dead #'string<) "\n"))))))
 
+;;; F36: Process filters and sentinels must have condition-case
+
+(ert-deftest test-structural-process-filters-guarded ()
+  "All process filter and sentinel functions wrap their body in condition-case.
+An unguarded error in a process filter kills the process silently.
+An unguarded error in a sentinel leaks state permanently.
+FIX: Wrap the function body in (condition-case err ... (error (message ...)))."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil)
+          (source-files
+           (directory-files test-structural--project-root t
+                            "^\\(claude-\\|emacs-mcp-server\\).*\\.org$")))
+      (dolist (file source-files)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          ;; Find defuns whose name contains "process-filter" or "process-sentinel"
+          (while (re-search-forward
+                  "^(defun\\s-+\\(\\S-*\\(?:process-filter\\|process-sentinel\\)\\S-*\\)" nil t)
+            (let ((fn-name (match-string-no-properties 1))
+                  (fn-start (match-beginning 0)))
+              ;; Check if condition-case appears before the next top-level defun
+              (let ((next-defun (save-excursion
+                                  (if (re-search-forward "^(defun\\s-" nil t)
+                                      (match-beginning 0)
+                                    (point-max)))))
+                (unless (save-excursion
+                          (goto-char fn-start)
+                          (re-search-forward "condition-case" next-defun t))
+                  (push (format "%s: %s lacks condition-case guard"
+                                (file-name-nondirectory file) fn-name)
+                        violations)))))))
+      (should-with-fix (null violations)
+        (format "Unguarded process filters/sentinels:\n%s\nFIX: Wrap body in (condition-case err ... (error (message \"...: %%S\" err)))."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
 ;;; F35: No hardcoded status paths in backends
 
 (ert-deftest test-structural-no-hardcoded-status-dir ()
@@ -839,6 +874,235 @@ FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `claude-org-terminal-st
       (should-with-fix (null violations)
         (format "Hardcoded /tmp/claude-agent-status found in backend files:\n%s\nFIX: Use `claude-org-terminal-status-dir' constant from claude-org-terminal-base.org."
                 (mapconcat #'identity (nreverse violations) "\n"))))))
+
+;;; F37: No stale iTerm2 references in source .org files
+
+(ert-deftest test-structural-no-iterm2-references ()
+  "Source .org files must not reference iTerm2 (backend was removed in 1038144).
+Historical design docs under docs/ are exempt.
+FIX: Replace the iTerm2 reference with a generic term (e.g., 'terminal backend')."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil)
+          (source-files
+           (directory-files test-structural--project-root t
+                            "^\\(claude-\\|emacs-mcp-server\\).*\\.org$")))
+      (dolist (file source-files)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          (let ((line-num 0))
+            (while (not (eobp))
+              (cl-incf line-num)
+              (let ((line (buffer-substring-no-properties
+                           (line-beginning-position) (line-end-position))))
+                (when (string-match-p "iTerm2" line)
+                  (push (format "%s:%d: %s"
+                                (file-name-nondirectory file) line-num
+                                (string-trim line))
+                        violations)))
+              (forward-line 1)))))
+      (should-with-fix (null violations)
+        (format "Stale iTerm2 references in source files (backend removed in 1038144):\n%s\nFIX: Replace with generic term (e.g., 'terminal backend')."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
+;;; F38: No standalone active-states alias variable
+
+(ert-deftest test-structural-no-active-states-alias ()
+  "Source .org files must not define or setq `claude-agent--active-states'.
+Active states are owned exclusively by the unified `claude-agent--registry'
+struct. The standalone defvar alias was removed in the A1 consolidation.
+Any read must go through `claude-agent-registry-active-states' accessor or
+the struct accessor `claude-agent--registry-active-states'.
+FIX: Use (claude-agent-registry-active-states) for reads and
+     (setf (claude-agent--registry-active-states claude-agent--registry) ...)
+     for writes."
+  :tags '(:unit :fast :stable :structural)
+  (let ((violations '())
+        (source-files
+         (directory-files test-structural--project-root t
+                          "^\\(claude-\\|emacs-mcp-server\\).*\\.org$")))
+    (dolist (file source-files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (let ((line-num 0))
+          (while (not (eobp))
+            (cl-incf line-num)
+            (let ((line (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position))))
+              ;; Match defvar or setq of the standalone alias in elisp code
+              (when (and (string-match-p "claude-agent--active-states\\b" line)
+                         ;; Only flag lines inside code blocks, not prose
+                         (not (string-match-p "^[ \t]*[#*|]" line))
+                         ;; Allow references in comments/docstrings that explain the removal
+                         (not (string-match-p "^[ \t]*;" line)))
+                (push (format "%s:%d: %s"
+                              (file-name-nondirectory file) line-num
+                              (string-trim line))
+                      violations)))
+            (forward-line 1)))))
+    (should-with-fix (null violations)
+      (format "Standalone `claude-agent--active-states' alias found in source files.\n%s\nFIX: Use (claude-agent-registry-active-states) accessor instead. Active states live exclusively in claude-agent--registry."
+              (mapconcat #'identity (nreverse violations) "\n")))))
+
+;;; F39: JSON parser guards against non-plist parsed values
+
+(ert-deftest test-structural-json-parser-guards-non-plist ()
+  "process-json-buffer and sentinel must guard against non-plist parsed JSON.
+A bare JSON value (42, \"hello\", true) parses successfully but is not a plist.
+Calling (plist-get 42 :type) returns nil, then (intern nil) crashes.
+Both the filter path and the sentinel remaining-JSON handler must check
+(listp parsed) before calling plist-get.
+FIX: Add (and parsed (listp parsed)) guard in process-json-buffer and
+     the sentinel remaining-JSON handler."
+  :tags '(:unit :fast :stable :structural)
+  (let ((violations '())
+        (backend-file (expand-file-name "claude-agent-backend.org"
+                                        test-structural--project-root)))
+    (with-temp-buffer
+      (insert-file-contents backend-file)
+      (goto-char (point-min))
+      ;; Find all (if parsed (let ((msg-type (plist-get parsed :type)))
+      ;; patterns that are NOT guarded by (listp parsed)
+      (while (re-search-forward "(if parsed" nil t)
+        (let* ((line-num (line-number-at-pos))
+               (line (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position))))
+          ;; This pattern is unsafe — it should be (if (and parsed (listp parsed))
+          (when (and (not (string-match-p "listp" line))
+                     ;; Only flag lines inside code blocks
+                     (not (string-match-p "^[ \t]*[#*|;]" line)))
+            (push (format "claude-agent-backend.org:%d: %s"
+                          line-num (string-trim line))
+                  violations)))))
+    (should-with-fix (null violations)
+      (format "Unguarded `(if parsed ...)' without `(listp parsed)' check:\n%s\nFIX: Change to `(if (and parsed (listp parsed)) ...)' to prevent crash on bare JSON values."
+              (mapconcat #'identity (nreverse violations) "\n")))))
+
+;;; F40: No hardcoded /tmp paths in test files
+
+(ert-deftest test-structural-no-hardcoded-tmp-in-tests ()
+  "Test files must not hardcode /tmp/claude-agent-status paths.
+Use `claude-org-terminal-status-dir' constant instead.
+FIX: Replace \"/tmp/claude-agent-status\" with `claude-org-terminal-status-dir'."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil)
+          (test-dir (expand-file-name "tests" test-structural--project-root)))
+      (dolist (file (directory-files test-dir t "\\.el$"))
+        (let ((filename (file-name-nondirectory file)))
+          ;; Skip this structural test file itself (it mentions the pattern in assertions)
+          (unless (equal filename "test-structural.el")
+            (with-temp-buffer
+              (insert-file-contents file)
+              (goto-char (point-min))
+              (let ((line-num 0))
+                (while (not (eobp))
+                  (cl-incf line-num)
+                  (let ((line (buffer-substring-no-properties
+                               (line-beginning-position) (line-end-position))))
+                    (when (string-match-p "\"/tmp/claude-agent-status\"" line)
+                      (push (format "%s:%d: %s" filename line-num (string-trim line))
+                            violations)))
+                  (forward-line 1)))))))
+      (should-with-fix (null violations)
+        (format "Hardcoded /tmp/claude-agent-status in test files:\n%s\nFIX: Use `claude-org-terminal-status-dir' constant."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
+;;; F41: No commented-out test files in Makefile
+
+(ert-deftest test-structural-no-commented-out-test-files ()
+  "Makefile should not have commented-out test file loads.
+FIX: Either enable the test (uncomment and add to correct target) or delete the dead test file."
+  :tags '(:unit :fast :stable :structural)
+  (let ((makefile (expand-file-name "Makefile" test-structural--project-root))
+        (violations '()))
+    (with-temp-buffer
+      (insert-file-contents makefile)
+      (goto-char (point-min))
+      (let ((line-num 0))
+        (while (not (eobp))
+          (cl-incf line-num)
+          (let ((line (buffer-substring-no-properties
+                       (line-beginning-position) (line-end-position))))
+            (when (string-match-p "^#.*-l tests/test-.*\\.el" line)
+              (push (format "Makefile:%d: %s" line-num (string-trim line))
+                    violations)))
+          (forward-line 1))))
+    (should-with-fix (null violations)
+      (format "Commented-out test files in Makefile:\n%s\nFIX: Uncomment and add to correct target, or delete the dead test file."
+              (mapconcat #'identity (nreverse violations) "\n")))))
+
+;;; Dead backend guard: claude-cli / eat backend must not be reintroduced
+
+(ert-deftest test-structural-no-claude-cli-backend ()
+  "Source .org files must not reference the dead claude-cli/eat backend.
+The claude-cli backend (CLAUDE_BACKEND=claude-cli, eat terminal) was
+removed.  Only json-stream and cmux backends are supported.
+FIX: Remove any claude-cli or eat-backend references from the flagged file."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations '())
+          (org-files (directory-files test-structural--project-root
+                                     t "\\.org$")))
+      (dolist (file org-files)
+        ;; Skip docs/ and tests/ — only check source .org files
+        (unless (or (string-match-p "/docs/" file)
+                    (string-match-p "/tests/" file)
+                    (string-match-p "/reference/" file))
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+            (let ((line-num 0))
+              (while (not (eobp))
+                (cl-incf line-num)
+                (let ((line (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))
+                  ;; Match claude-cli backend references in elisp code
+                  ;; (not in comments/docs about the removal itself)
+                  (when (and (or (string-match-p "claude-agent-claude-backend" line)
+                                 (string-match-p ":claude-cli" line)
+                                 (string-match-p "'claude-cli" line))
+                             ;; Allow in comments explaining the removal
+                             (not (string-match-p "^\\s-*#\\+" line))
+                             (not (string-match-p "^\\s-*;" line)))
+                    (push (format "%s:%d: %s"
+                                  (file-name-nondirectory file) line-num
+                                  (string-trim line))
+                          violations)))
+                (forward-line 1))))))
+      (should-with-fix (null violations)
+        (format "Dead claude-cli backend references found in source files:\n%s\nFIX: Remove these references. The claude-cli/eat backend is not supported."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
+;;; F43: Verbose format dispatcher stays thin
+
+(ert-deftest test-structural-verbose-format-dispatcher-thin ()
+  "claude-agent--verbose-format-message should be a thin dispatcher (<15 lines).
+The type-specific formatting logic belongs in dedicated helpers
+\(--verbose-format-assistant-msg, --verbose-format-user-msg, etc.).
+FIX: Extract formatting logic into type-specific helpers."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let* ((file (expand-file-name "claude-agent-backend.org"
+                                    test-structural--project-root))
+           (line-count 0)
+           (found nil))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (when (search-forward "(defun claude-agent--verbose-format-message " nil t)
+          (setq found t)
+          (let ((start (line-number-at-pos)))
+            ;; Find matching closing paren
+            (goto-char (match-beginning 0))
+            (forward-sexp 1)
+            (setq line-count (1+ (- (line-number-at-pos) start))))))
+      (when found
+        (should-with-fix (<= line-count 15)
+          (format "claude-agent--verbose-format-message is %d lines (max 15).\nFIX: Extract type-specific logic into --verbose-format-*-msg helpers."
+                  line-count))))))
 
 (provide 'test-structural)
 ;;; test-structural.el ends here

@@ -2075,41 +2075,15 @@ instruction was not properly marked as completed."
     (let ((backend (claude-org--make-default-backend "test-key" nil)))
       (should (claude-agent-json-backend-p backend)))))
 
-(ert-deftest test-f9-make-backend-claude-cli ()
-  "make-default-backend with claude-cli returns claude-backend."
-  :tags '(:unit :fast :stable :isolated :org :f9)
-  (let ((claude-org-backend-type 'claude-cli))
-    (let ((featurep-orig (symbol-function 'featurep)))
-      (cl-letf (((symbol-function 'featurep)
-                 (lambda (f &rest args)
-                   (if (eq f 'eat) t
-                     (apply featurep-orig f args)))))
-        (let ((backend (claude-org--make-default-backend "test-key" nil)))
-          (should (claude-agent-claude-backend-p backend)))))))
-
-(ert-deftest test-f9-make-backend-claude-cli-no-eat ()
-  "make-default-backend with claude-cli without eat signals user-error."
-  :tags '(:unit :fast :stable :isolated :org :f9)
-  (let ((claude-org-backend-type 'claude-cli))
-    (let ((featurep-orig (symbol-function 'featurep)))
-      (cl-letf (((symbol-function 'featurep)
-                 (lambda (f &rest args)
-                   (if (eq f 'eat) nil
-                     (apply featurep-orig f args)))))
-        (should-error
-         (claude-org--make-default-backend "test-key" nil)
-         :type 'user-error)))))
-
 (ert-deftest test-f9-show-verbose-uses-backend-verbose-buffer ()
   "show-verbose should check backend-verbose-buffer first."
   :tags '(:unit :fast :stable :isolated :org :f9)
   (let* ((test-buf (generate-new-buffer " *test-verbose*"))
-         (backend (claude-agent-claude-backend--create :buffer test-buf)))
+         (backend (claude-agent-json-backend--create)))
     (unwind-protect
         (progn
-          ;; Verify the method returns the buffer
-          (should (eq test-buf
-                      (claude-agent-backend-verbose-buffer backend))))
+          ;; backend-verbose-buffer returns nil for json-backend (no terminal)
+          (should-not (claude-agent-backend-verbose-buffer backend)))
       (kill-buffer test-buf))))
 
 (ert-deftest test-f9-handle-complete-nil-result ()
@@ -2149,26 +2123,10 @@ instruction was not properly marked as completed."
 ;;; F9b: CLAUDE_BACKEND org property override
 ;;; ============================================================
 
-(ert-deftest test-f9b-backend-property-file-level-claude-cli ()
-  "File-level CLAUDE_BACKEND property overrides defcustom to claude-cli."
-  :tags '(:unit :fast :stable :isolated :org :f9b)
-  (let ((claude-org-backend-type 'json-stream))  ;; defcustom says json-stream
-    (with-temp-buffer
-      (org-mode)
-      (insert "#+PROPERTY: CLAUDE_BACKEND claude-cli\n\n")
-      (insert "* Section\n")
-      (goto-char (point-min))
-      (re-search-forward "^\\* Section")
-      (let ((featurep-orig (symbol-function 'featurep)))
-      (cl-letf (((symbol-function 'featurep)
-                 (lambda (f &rest args) (if (eq f 'eat) t (apply featurep-orig f args)))))
-        (let ((backend (claude-org--make-default-backend "test-key" nil)))
-          (should (claude-agent-claude-backend-p backend))))))))
-
 (ert-deftest test-f9b-backend-property-file-level-json-stream ()
-  "File-level CLAUDE_BACKEND property overrides defcustom to json-stream."
+  "File-level CLAUDE_BACKEND property json-stream creates json-backend."
   :tags '(:unit :fast :stable :isolated :org :f9b)
-  (let ((claude-org-backend-type 'claude-cli))  ;; defcustom says claude-cli
+  (let ((claude-org-backend-type 'json-stream))
     (with-temp-buffer
       (org-mode)
       (insert "#+PROPERTY: CLAUDE_BACKEND json-stream\n\n")
@@ -2177,44 +2135,6 @@ instruction was not properly marked as completed."
       (re-search-forward "^\\* Section")
       (let ((backend (claude-org--make-default-backend "test-key" nil)))
         (should (claude-agent-json-backend-p backend))))))
-
-(ert-deftest test-f9b-backend-property-section-level ()
-  "Section-level CLAUDE_BACKEND property overrides defcustom."
-  :tags '(:unit :fast :stable :isolated :org :f9b)
-  (let ((claude-org-backend-type 'json-stream))
-    (with-temp-buffer
-      (org-mode)
-      (insert "* Section\n")
-      (insert ":PROPERTIES:\n")
-      (insert ":CLAUDE_BACKEND: claude-cli\n")
-      (insert ":END:\n")
-      (goto-char (point-min))
-      (re-search-forward "^\\* Section")
-      (let ((featurep-orig (symbol-function 'featurep)))
-      (cl-letf (((symbol-function 'featurep)
-                 (lambda (f &rest args) (if (eq f 'eat) t (apply featurep-orig f args)))))
-        (let ((backend (claude-org--make-default-backend "test-key" nil)))
-          (should (claude-agent-claude-backend-p backend))))))))
-
-(ert-deftest test-f9b-backend-property-inherits ()
-  "CLAUDE_BACKEND property inherits from parent heading."
-  :tags '(:unit :fast :stable :isolated :org :f9b)
-  (let ((claude-org-backend-type 'json-stream))
-    (with-temp-buffer
-      (org-mode)
-      (insert "* Parent\n")
-      (insert ":PROPERTIES:\n")
-      (insert ":CLAUDE_BACKEND: claude-cli\n")
-      (insert ":END:\n")
-      (insert "** Child\n")
-      (insert "#+begin_src ai\nhello\n#+end_src\n")
-      (goto-char (point-min))
-      (re-search-forward "^\\*\\* Child")
-      (let ((featurep-orig (symbol-function 'featurep)))
-      (cl-letf (((symbol-function 'featurep)
-                 (lambda (f &rest args) (if (eq f 'eat) t (apply featurep-orig f args)))))
-        (let ((backend (claude-org--make-default-backend "test-key" nil)))
-          (should (claude-agent-claude-backend-p backend))))))))
 
 (ert-deftest test-f9b-backend-property-absent-uses-defcustom ()
   "Without CLAUDE_BACKEND property, defcustom is used."
