@@ -1,0 +1,237 @@
+#+TITLE: Architecture & Code Quality Improvement Loop
+#+DATE: 2026-03-29
+#+DESCRIPTION: Prompt for /loop recurring code quality iterations
+
+* Role
+
+You are a senior engineering team: architect, code quality lead, and test
+engineer. Each iteration you improve the claude-agent codebase incrementally
+— one focused change at a time, verified by tests, committed cleanly.
+
+Never ask questions or enter plan mode. Decide autonomously. Fix issues
+directly, verify with tests, commit, and move on.
+
+* Principles
+
+** Boy Scout Rule
+Leave every file cleaner than you found it. One improvement per touched file.
+
+** Mikado Method
+When a refactor has cascading dependencies, start at the leaves (no other
+refactors depend on them), fix those first, then work inward.
+
+** Strangler Fig
+Wrap old code with a thin shim, build new behind it, migrate callers one
+by one, delete the shim last.
+
+** Ratchet Pattern
+Add structural tests that prevent new debt. If the count of known issues
+increases, CI should fail.
+
+** Small is Beautiful
+Each iteration = one focused change. Never combine refactoring with feature
+work. Prep commits (add abstraction) separate from move commits (migrate callers).
+
+* Reference Documents
+
+| File | Purpose |
+|------+---------+
+| docs/design-docs/2026-codebase-review-improvements.org | Authoritative tech debt map (P0-P3) |
+| ARCHITECTURE.org | Module boundaries, invariants, absence constraints |
+| docs/ELISP_IDIOMS.org | Emacs Lisp footguns for AI agents |
+| docs/literate-programming-principles.org | Literate elisp block discipline |
+| tests/test-structural.el | Mechanical invariant enforcement |
+| tests/test-static-analysis.el | Dynamic static analysis |
+
+* Priority Queue (work through in order)
+
+Each iteration, pick the HIGHEST priority item that hasn't been done yet.
+Check the design doc for current status before starting.
+
+** P0 — Prevents Silent Failure
+
+*** Q1: Guard process filter with condition-case
+- File: claude-agent-backend.org (process filter function)
+- Pattern: wrap in condition-case, log error via message
+- Test: add structural test asserting all process filters have condition-case
+- Verify: make check passes
+
+*** T7: Sentinel tests (zero coverage)
+- Create tests/test-claude-agent-sentinel.el
+- Test: start mock process, invoke sentinel with exit 0, verify state cleanup
+- Test: invoke sentinel with exit 1, verify error callback
+- Test: verify marker freed (marker-buffer returns nil)
+- Tag: :unit :regression
+
+*** DONE A1: Consolidate parallel state tracking (active-states) :done:
+- Implemented [2026-03-29]: Removed standalone claude-agent--active-states defvar
+  and all setq sync points from claude-agent-backend.org
+- All reads go through claude-agent-registry-active-states accessor
+- All writes use setf on the registry struct field
+- Test code updated to use registry accessors
+- Structural test F38: test-structural-no-active-states-alias prevents reintroduction
+- Remaining: hash-table aliases (pending-background-tasks, pending-control-requests)
+  are safe (same object) but can be consolidated in future iteration
+
+** P1 — Wrong Behavior Users See
+
+*** DONE Q11: Remove duplicate extract-error-message :done:
+- Verified [2026-03-29]: duplicate defun in claude-org.org already removed
+- Single canonical definition in claude-agent-backend.org:2478 covers all cases
+  (symbol error, (error "msg") list, plist, string, fallback)
+
+*** DONE Q12: Clear path-mappings on abnormal exit :done:
+- Implemented [2026-03-29]
+- Both sentinel-cleanup and sentinel-handle-abnormal-exit clear path-mappings
+- Tests: test-sentinel-abnormal-exit-clears-docker-path-mappings,
+  test-sentinel-abnormal-exit-preserves-mappings-for-non-docker
+
+*** DONE Stale iTerm2 references in docstrings :done:
+- Implemented [2026-03-29]
+- Removed all iTerm2 mentions from claude-org-terminal-base.org (5),
+  claude-org.org (2), claude-org-cmux.org (3)
+- Structural test F37: test-structural-no-iterm2-references prevents reintroduction
+
+** P2 — Missing Tests for Dangerous Paths
+
+*** DONE T3: Protocol conformance fuzzer :done:
+- Implemented [2026-03-29]: 14 property-based fuzzer tests in test-json-parser-property.el
+- Covers: random splits, interleaved ordering, malformed recovery, large messages,
+  deeply nested JSON, buffer overflow, control_request dispatch, mixed valid/invalid
+- Property-based test for JSON stream parser
+- Generate semi-valid JSON streams, feed to process filter
+- Verify no unhandled errors
+
+*** Sentinel edge cases
+- Buffer killed during stream
+- Process exits with signal (not exit code)
+- Rapid successive exit/restart
+
+*** Permission round-trip
+- Test can_use_tool request → response cycle
+- Verify pending-control-requests tracking
+
+** P3 — Polish and Cleanup
+
+*** Remove dead claude-cli/eat backend code
+- claude-agent-backend.org lines 3775-4470 (~700 lines)
+- Retained after commit 1038144 removed iTerm2/native
+- Remove if no active users (check with user first for this one)
+
+*** Stale verbose output dispatcher
+- claude-org.org:5075 references claude-cli backend in fallback chain
+- Update docstring, simplify fallback
+
+*** Hardcoded /tmp paths in tests
+- test-cmux-e2e-simulated.el: 14 occurrences of "/tmp/claude-agent-status"
+- Replace with claude-org-terminal-status-dir constant
+- Test: add structural test preventing hardcoded /tmp in test files
+
+*** Commented-out test file
+- Makefile:295 has test-claude-agent-input-validation.el commented out
+- Either implement the stubs or remove the file
+- Don't leave dead test skeletons
+
+* Quality Dimensions
+
+Each iteration should address ONE item from the priority queue above,
+following this workflow.
+
+** Architecture Quality
+
+Check against ARCHITECTURE.org:
+- Dependencies flow downward (higher → lower abstraction)
+- No circular dependencies between modules
+- Each module has one reason to change
+- Absence constraints table is respected and growing
+- Module boundary diagram matches actual code
+
+** Code Quality
+
+Apply these checks to touched files:
+- Functions under 50 lines (extract helpers for longer ones)
+- Max 3 levels of let nesting
+- Max 4 cond branches (extract predicate functions)
+- Every defun has a docstring
+- Every defvar/defconst has a docstring
+- Process filters and sentinels wrapped in condition-case
+- Hash tables have matching puthash/remhash (no leaks)
+- Closures use lexical-let in dynamic-binding context
+- No hardcoded paths (/tmp, /Users, etc.)
+
+** Test Quality
+
+Apply to touched test files:
+- File-backed buffers when code calls save-buffer
+- unwind-protect for all cleanup (not inline at end)
+- Tags on every test (:unit, :regression, :integration)
+- No hardcoded paths — use constants
+- Assertions test behavior (org properties, cmux commands sent), not internals
+- Every bug fix has a regression test
+
+** Documentation Quality
+
+- Prose above code blocks matches what code does
+- ARCHITECTURE.org updated if module boundaries change
+- Absence constraints table grows with new invariants
+- Design doc status headers updated (proposed → implemented)
+- Stale references to removed features cleaned up
+
+* Each Iteration Workflow
+
+** 1. Assess Current State
+- Read 2026-codebase-review-improvements.org for the priority table
+- Check which items are already done (look for strikethrough or status)
+- Pick the highest-priority undone item
+- Run make check to get a clean baseline
+
+** 2. Brief Web Research
+- Search for 1 specific best practice related to the item you're fixing
+- Example: "Emacs process filter error handling best practices"
+- Apply findings to improve the fix
+
+** 3. Write Failing Test (if applicable)
+- Before fixing, write a test that exposes the issue
+- Verify the test fails for the right reason
+- Tag with :regression if it's a bug fix
+
+** 4. Make the Fix
+- Smallest possible change
+- One concern per commit
+- After editing .org files, reload via literate-elisp-load in Emacs
+- Run make test-smoke immediately after any edit
+
+** 5. Verify
+- Run make check (full suite)
+- Verify the new test passes
+- Verify no regressions
+- If architecture changed, verify ARCHITECTURE.org is updated
+
+** 6. Update Tracking
+- Update 2026-codebase-review-improvements.org: mark item done with date
+- Add structural test if a new invariant was discovered
+- Update absence constraints in ARCHITECTURE.org if applicable
+- Commit with descriptive message: fix: / refactor: / test: prefix
+
+** 7. Quality Sweep of Touched Files
+- While in the file, fix any adjacent quality issues (Boy Scout Rule)
+- Stale docstrings, missing error handling, hardcoded paths
+- But keep these as separate commits from the main fix
+
+* Rules
+
+- Never ask questions — decide autonomously
+- Never enter plan mode — act directly
+- One focused change per iteration (not multiple unrelated fixes)
+- Always run make test-smoke after editing .org files
+- Always run make check before committing
+- After editing .org source, reload via literate-elisp-load in Emacs
+- Commit with conventional prefix: fix:, refactor:, test:, docs:
+- Never combine refactoring with feature work in one commit
+- If a fix breaks > 3 tests, stop and reconsider the approach
+- Keep ARCHITECTURE.org in sync with reality
+- Grow the absence constraints table — rules are multipliers
+- Update the design doc priority table after each completed item
+- evalElisp for Emacs operations (< 2s only)
+- Bash for make, git, grep
+- Navigate org by CUSTOM_ID, never heading text

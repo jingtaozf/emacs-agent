@@ -10,13 +10,21 @@ ranked by severity and grouped into actionable proposals.
 
 * Architecture Findings
 
-** A1. Parallel State Tracking Structures (HIGH)
+** A1. Parallel State Tracking Structures (HIGH) — active-states DONE
 
-=claude-agent--active-states= (module-level list at =claude-agent-backend.org:979=) exists
-alongside =claude-agent--registry= (struct at line 993) which has its own =active-states= field.
-The sentinel cleanup updates the module-level list; =claude-agent-registry-cleanup-process= updates
-the registry version. Similarly, =claude-agent--pending-background-tasks= (line 1853) and
-=claude-agent--pending-control-requests= (line 1914) duplicate the registry struct's fields.
+*Status (active-states)*: Implemented [2026-03-29]
+
+The standalone =claude-agent--active-states= defvar and all =setq= sync points have
+been removed from =claude-agent-backend.org=.  All reads go through
+=claude-agent-registry-active-states= (defsubst accessor) or the struct accessor
+=claude-agent--registry-active-states=.  All writes use =setf= on the struct field.
+Test code in =test-claude-agent-state-management.el= updated to use registry accessors.
+Structural test =test-structural-no-active-states-alias= (F38) prevents reintroduction.
+
+*Remaining*: =claude-agent--pending-background-tasks= and
+=claude-agent--pending-control-requests= still exist as hash-table aliases.
+These are safe (same object as registry fields — mutations are visible through
+both names) but should be consolidated in a future iteration for consistency.
 
 *Proposal*: Consolidate all state into the unified =claude-agent--registry=. Remove the standalone
 variables. All reads/writes go through registry accessors.
@@ -191,19 +199,26 @@ callers have no way to trigger save afterwards. Property is lost on unexpected E
 
 *Proposal*: Add =save-buffer= call (with =inhibit-message= t) inside the function.
 
-** Q11. Duplicate =claude-agent--extract-error-message= (MEDIUM)
+** DONE Q11. Duplicate =claude-agent--extract-error-message= (MEDIUM) :done:
 
-Both =claude-agent-backend.org:2417= and =claude-org.org:4260= define this function with
-overlapping but different behavior. The =claude-org.org= version silently shadows the backend
-version with two extra =cond= branches (symbol error and =(error "message" ...)= list).
+*Status*: Verified [2026-03-29]
+
+The =claude-org.org= duplicate has been removed. The single canonical definition
+in =claude-agent-backend.org:2478= covers all error shapes: plist with =:message=,
+string, symbol, =(error "msg")= list, and fallback with truncation.
 
 *Proposal*: Remove the =claude-org.org= duplicate. Extend the canonical backend version.
 
-** Q12. =emacs-mcp-server-path-mappings= Not Cleared on Abnormal Exit (MEDIUM)
+** DONE Q12. =emacs-mcp-server-path-mappings= Not Cleared on Abnormal Exit (MEDIUM) :done:
 
-=claude-agent--sentinel-cleanup= (normal exit) clears path mappings, but
-=claude-agent--sentinel-handle-abnormal-exit= does not. If a Docker query is OOM-killed, stale path
-mappings persist and corrupt the next MCP request.
+*Status*: Implemented [2026-03-29]
+
+Both =sentinel-cleanup= (normal exit) and =sentinel-handle-abnormal-exit= now
+clear =emacs-mcp-server-path-mappings= when the exiting process has =docker-mode=.
+Tests in =test-claude-agent-sentinel.el=:
+- =test-sentinel-abnormal-exit-clears-docker-path-mappings=: verifies cleanup on SIGKILL
+- =test-sentinel-abnormal-exit-preserves-mappings-for-non-docker=: verifies non-Docker
+  processes do not destroy concurrent Docker mappings
 
 *Proposal*: Clear path mappings in both exit paths, or extract a shared cleanup helper.
 
@@ -251,6 +266,22 @@ contract) but use the internal =--= prefix.
 
 *Proposal*: Promote to single-dash public names.
 
+** DONE Q19. Stale iTerm2 References in Source Files (MEDIUM) :done:
+
+*Status*: Implemented [2026-03-29]
+
+Removed all iTerm2 mentions from source =.org= file prose and docstrings:
+- =claude-org-terminal-base.org=: 5 references replaced with generic terms
+- =claude-org.org=: 2 references replaced
+- =claude-org-cmux.org=: 3 references replaced
+Design docs under =docs/= are historical and were left unchanged.
+
+Structural test =test-structural-no-iterm2-references= (F37 in =test-structural.el=)
+prevents reintroduction by scanning all source =.org= files for "iTerm2".
+
+*Proposal*: Remove all iTerm2 mentions from source .org file docstrings and prose.
+Add structural test to prevent reintroduction.
+
 * Test Harness Findings
 
 ** T1. No Error Injection in Mock CLI (HIGH)
@@ -277,14 +308,26 @@ error handling, timeout) are discovered only in production.
 3. Verifies Emacs state changes (buffer content, properties)
 4. Covers error cases (invalid session ID, read-only buffer, missing heading)
 
-** T3. Protocol Conformance Fuzzer for JSON Stream Parser (HIGH)
+** DONE T3. Protocol Conformance Fuzzer for JSON Stream Parser (HIGH) :done:
 
-The JSON stream parser (=claude-agent--process-json-buffer=) handles real-world protocol variations
-but is only tested with hand-crafted fixtures. No fuzz testing for:
-- Partial JSON split across process filter calls
-- Interleaved system/assistant/result messages in unexpected order
-- Unknown message types (forward compatibility)
-- Empty lines, whitespace-only lines
+*Status*: Implemented [2026-03-29]
+
+=tests/test-json-parser-property.el= now contains 14 property-based fuzzer tests
+covering all protocol conformance dimensions:
+- Random split positions (20 iterations per run): =test-json-random-splits-preserve-messages=
+- Empty/whitespace lines: =test-json-empty-lines-ignored=
+- Unicode content (CJK, emoji, combining marks): =test-json-unicode-survives=
+- Unknown message types (forward compat): =test-json-unknown-types-pass-through=
+- Interleaved message ordering (result before assistant, etc.): =test-json-interleaved-message-ordering=
+- Malformed JSON recovery (bad lines don't kill subsequent parsing): =test-json-malformed-recovery=
+- Truncated JSON completed in next chunk: =test-json-truncated-then-completed=
+- Large messages (100KB payloads): =test-json-large-message=
+- Large message split into 5-byte chunks: =test-json-large-message-many-chunks=
+- Rapid empty buffer processing (50 calls): =test-json-empty-buffer-repeated-calls=
+- Deeply nested JSON (10 levels): =test-json-deeply-nested=
+- Buffer overflow protection: =test-json-buffer-overflow-kills-process=
+- control_request dispatch: =test-json-control-request-dispatch=
+- Mixed valid/invalid lines with random splits (15 iterations): =test-json-mixed-valid-invalid-random-splits=
 
 *Proposal*: Create a protocol fuzzer that generates random valid and semi-valid JSON streams, feeds
 them to the parser, and verifies no errors are signalled.
@@ -373,16 +416,17 @@ Ranked by impact on reliability and developer productivity:
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
 | P0 | Q1: Guard process filter/sentinel/timer (DONE 2026-03-29) | S | Prevents silent process death |
-| P0 | A1: Consolidate parallel state tracking | M | Eliminates split-brain state |
+| P0 | A1: Consolidate parallel state tracking (active-states DONE 2026-03-29) | M | Eliminates split-brain state |
 | P0 | T7: Test process sentinel explicitly (DONE 2026-03-29) | S | Tests most dangerous untested path |
 | P1 | T1: Error injection in mock CLI | M | Catches failure-mode bugs |
 | P1 | Q2: Structured MCP error returns | S | Prevents silent Python failures |
 | P1 | Q3: Reorder query-completed after response | S | Correct mode-line state |
 | P1 | Q4: Reset status on MCP failure | S | Prevents permanent "busy" |
-| P1 | Q11: Remove duplicate extract-error-message | S | Eliminates shadow defun |
-| P1 | Q12: Clear path-mappings on abnormal exit | S | Prevents stale Docker paths |
+| P1 | Q11: Remove duplicate extract-error-message (DONE 2026-03-29) | S | Eliminates shadow defun |
+| P1 | Q12: Clear path-mappings on abnormal exit (DONE 2026-03-29) | S | Prevents stale Docker paths |
+| P1 | Q19: Remove stale iTerm2 refs from source (DONE 2026-03-29) | S | Clean up after backend removal |
 | P2 | T2: MCP round-trip test harness | L | Catches bridge bugs |
-| P2 | T3: JSON stream protocol fuzzer | M | Catches parser edge cases |
+| P2 | T3: JSON stream protocol fuzzer (DONE 2026-03-29) | M | Catches parser edge cases |
 | P2 | T8: Bidirectional mock CLI protocol | M | Tests permission round-trip |
 | P2 | T9: Buffer-killed-during-streaming test | S | Tests common user action |
 | P2 | A3: Single load path | S | Prevents double-init bugs |
