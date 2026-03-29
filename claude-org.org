@@ -3253,24 +3253,51 @@ property starting with 'story-'. Returns the level (integer) or nil if not found
         found-level))))
 
 (defun claude-org-insert-story ()
-  "Insert a new story section with unique CLAUDE_SESSION_ID.
-Prompts for story title and creates a section with session property.
-The story has its own isolated conversation context.
-Aligns section level with previous story if any exists, otherwise uses top level."
+  "Insert a new story under the current workspace.
+Prompts for story title and creates a sub-heading with Workflow and
+an empty ai block. The story inherits CLAUDE_SESSION_ID from the
+workspace heading — no per-story session ID needed.
+Sets ACTIVE_STORY on the workspace heading."
   (interactive)
-  (let* ((title (read-string "Story title: "))
-         (session-id (format "story-%s" (format-time-string "%Y%m%d-%H%M%S")))
-         ;; Align with previous story level, or use top level (1) if no story exists
-         (level (or (claude-org--find-previous-story-level) 1))
-         (stars (make-string level ?*)))
-    ;; Insert heading
-    (insert stars " " title "\n")
-    ;; Insert property drawer with session ID
-    (insert ":PROPERTIES:\n")
-    (insert ":CLAUDE_SESSION_ID: " session-id "\n")
-    (insert ":END:\n\n")
-    ;; Position cursor for content
-    (message "Created story '%s' with session ID: %s" title session-id)))
+  (let ((ws (claude-org--find-workspace-heading)))
+    (unless ws
+      (user-error "Not inside a workspace. Create one first with claude-org-insert-workspace"))
+    (let* ((title (read-string "Story title: "))
+           (ws-level (save-excursion
+                       (goto-char (cdr ws))
+                       (org-current-level)))
+           (story-level (1+ ws-level))
+           (wf-level (1+ story-level))
+           (instr-level (1+ wf-level))
+           (stars-story (make-string story-level ?*))
+           (stars-wf (make-string wf-level ?*))
+           (stars-instr (make-string instr-level ?*))
+           (file-base (when buffer-file-name (file-name-base buffer-file-name)))
+           (session-id (save-excursion
+                         (goto-char (cdr ws))
+                         (or (org-entry-get nil "CLAUDE_SESSION_ID") "new"))))
+      ;; Go to end of workspace subtree to insert new story
+      (save-excursion
+        (goto-char (cdr ws))
+        (org-end-of-subtree t t)
+        (insert "\n" stars-story " " title "\n")
+        (insert stars-wf " Workflow :sdd:\n")
+        (insert ":PROPERTIES:\n")
+        (insert ":CUSTOM_ID: " (claude-org--generate-custom-id session-id "Workflow" file-base) "\n")
+        (insert ":END:\n\n")
+        (insert stars-instr " Instruction 1 :" claude-org-heading-tag ":\n")
+        (insert ":PROPERTIES:\n")
+        (insert ":CUSTOM_ID: " (claude-org--generate-instruction-custom-id file-base 1 session-id) "\n")
+        (insert ":END:\n\n")
+        (insert "#+begin_src ai\n\n#+end_src\n"))
+      ;; Set ACTIVE_STORY
+      (claude-org--set-active-story title)
+      ;; Jump to the new ai block
+      (goto-char (cdr ws))
+      (org-end-of-subtree t t)
+      (re-search-backward "^#\\+begin_src ai" nil t)
+      (forward-line 1)
+      (message "Created story '%s' under workspace '%s'" title (car ws)))))
 
 (defun claude-org--find-previous-workspace-level ()
   "Find the level of the most recent workspace section before point.
@@ -5137,8 +5164,8 @@ Built into Emacs since v28, or install via =M-x package-install RET transient RE
 *** Unified Terminal Dispatchers
 
 Dispatchers called by workspace_bridge.py to route events to the correct
-backend (cmux or iTerm2). All use the same pattern: check if the
-session is known to cmux, otherwise fall back to iTerm2.
+terminal backend. All use the same pattern: check if the session is
+known to cmux, then dispatch accordingly.
 
 #+BEGIN_SRC elisp
 (defun claude-org--terminal-query-completed (workspace-session-id)
