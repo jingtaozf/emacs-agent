@@ -1,0 +1,334 @@
+#+TITLE: E2E Test Strategy
+#+DATE: 2026-03-28
+#+STATUS: active
+
+* Test Taxonomy
+
+Tests are organized by user journey groups, not by function groups.
+Each journey simulates a real developer workflow end-to-end.
+
+| Journey | Priority | Description |
+|---------+----------+-------------|
+| J1: New Project Setup | HIGH | Create workspace, set color, execute first query |
+| J2: Multi-Story Development | HIGH | Multiple stories in one workspace, switch between them |
+| J3: Session Continuity | HIGH | --resume reuses CLI session across executions |
+| J4: Workspace Color Palette | MEDIUM | Named colors, hex colors, clear-color |
+| J5: Error Recovery | HIGH | Cancel, stale ref recovery, orphan cleanup |
+| J6: Status and Sidebar | MEDIUM | set-status, clear-status, sidebar-state readback |
+| J7: Verbose Output | MEDIUM | Verbose buffer populated with Claude Code output |
+| J8: Scaffold and Navigation | LOW | insert-workspace, insert-story, goto-story |
+
+* Naming Convention
+
+=T<N>-<journey>-<scenario>=
+
+Examples:
+- T40-session-continuity-resume
+- T41-color-palette-named
+- T42-sidebar-status-set
+
+Existing tests (T1-T28) keep their original names for backward compatibility.
+
+* Workspace Design
+
+Each test workspace simulates a real project:
+
+| Workspace | Simulates | Color |
+|-----------+-----------+-------|
+| e2e-webapp-dev | Web application project | blue |
+| e2e-fullstack | Full-stack development | green |
+| e2e-infra-ops | Infrastructure operations | orange |
+| e2e-color-palette | Color feature testing | (varies) |
+| e2e-recovery | Error recovery scenarios | red |
+
+* Property Oracle Pattern
+
+Org properties are ground truth for test assertions:
+
+- CMUX_WORKSPACE_ID: cmux workspace UUID
+- CMUX_SURFACE_ID: cmux surface ref
+- CLAUDE_CLI_SESSION: Claude Code conversation ID (for --resume)
+- ACTIVE_STORY: current story name
+- WORKSPACE_COLOR: sidebar color
+- CLAUDE_SESSION_ID: Emacs session key
+
+After each execution, verify:
+1. Org properties match expected values
+2. cmux CLI output matches org properties
+3. Phoenix spans reference correct session IDs
+
+* Phoenix Trace Tree
+
+For a standard AI block execution:
+
+#+begin_example
+execute-ai-block (root, parentId=null, kind=SERVER)
++-- cmux-ensure-session (kind=INTERNAL)
++-- cmux-execute (kind=INTERNAL)
+|   +-- cmux-send-text (kind=CLIENT)
++-- cmux-wait-for-ready
++-- cmux-query-completed
++-- handle-complete (has duration-sec, tool-call-count attrs)
+#+end_example
+
+* Fixture Rules
+
+- Append-only: never delete existing test stories
+- Every heading gets a unique CUSTOM_ID
+- Every workspace: CLAUDE_SESSION_ID, CLAUDE_BACKEND: cmux
+- System prompts describe realistic project contexts
+- AI queries are practical developer tasks (not "say hello")
+- No duplicate CUSTOM_IDs across the file
+
+* Priority Tiers
+
+| Tier | Definition | Action on failure |
+|------+------------+-------------------|
+| HIGH | Blocks release -- core workflow broken | Fix immediately |
+| MEDIUM | Regression risk -- secondary features | Fix before next release |
+| LOW | Nice-to-have -- cosmetic or rare paths | Track, fix when convenient |
+
+* Anti-Flakiness Principles
+
+Based on industry research (2025-2026), these principles guide test reliability:
+
+1. *Explicit wait conditions over fixed sleeps*: Never assert immediately after
+   an action. Wait for the state to be reachable. ~45% of all E2E flakiness
+   comes from async wait issues (timers instead of condition polling).
+
+2. *Stable selectors*: Navigate org by CUSTOM_ID, never heading text. CUSTOM_IDs
+   are unique stable identifiers; heading text can match multiple sections.
+
+3. *Test isolation*: Each test uses its own session-key and temp buffer. No
+   shared state leaks between tests. Mock only the external gateway
+   (=claude-org-cmux--call=), never Emacs internals.
+
+4. *Deterministic assertions*: Assert on org properties and function return
+   values, not on timing-dependent output. Properties are ground truth.
+
+5. *Guard against timer-based flakiness*: Loop iterations use cancel guards
+   (check exec-status before firing). Tests verify guards work for both
+   "cancelled" and "error" states.
+
+* Iteration Log
+
+** 2026-03-28: Iteration 1
+
+- Created this design doc
+- Focused on Journey 3 (Session Continuity) and Journey 6 (Status/Sidebar)
+- Added T30-session-resume-live and T31-sidebar-status tests
+- Web research: E2E best practice is to limit E2E to 5-10% of test suite,
+  focus on critical user journeys. Applied: we focus on HIGH priority journeys first.
+
+** 2026-03-28: Iteration 2
+
+- Focused on Journey 1 (New Project Setup), Journey 2 (Multi-Story Dev),
+  Journey 5 (Error Recovery)
+- Added T34 (webapp dev), T35 (stale ref recovery), T36 (cancel), T37 (fullstack),
+  T38 (Phoenix traces for J1)
+- BUG FOUND: cmux capture-pane silently falls back to focused surface for invalid
+  surface refs (exit 0, returns content). This broke stale-ref detection in
+  ensure-session. Fixed by switching liveness check to =tree --workspace UUID=
+  which correctly rejects invalid UUIDs with exit 1.
+- Fix applied: claude-org-cmux.org (ensure-session liveness check)
+- Test updated: test-cmux-ensure-session-reuse, test-cmux-ensure-session-relaunches-dead
+- FINDING: workspace creation + Claude Code initialization takes 15-30s, which can
+  exceed evalElisp timeout and wait-for-ready fallback timeout (10s). This is a
+  timing characteristic, not a code bug. Split ensure-session and execute into
+  separate steps as a workaround for tests.
+- All unit tests pass (37/37), make check passes.
+- Coverage update: J1 DONE, J2 DONE, J3 DONE (iter 1), J5 partial (cancel + stale ref),
+  J6 DONE (iter 1). Remaining: J4 (color palette), J5 (live cancel timing),
+  J7 (verbose), J8 (scaffold).
+
+** 2026-03-28: Iteration 3
+
+- Focused on Journey 4 (Color Palette) and Journey 7 (Verbose Output)
+- Added T39 (cmux CLI named colors), T40 (Emacs resolve-color), T41 (apply-color),
+  T42 (verbose content), T43 (verbose keymap), T44 (verbose registration)
+- BUG FOUND: =claude-org-cmux--color-presets= used =defvar=, which does not
+  override an already-bound variable on reload. The .org file had 16 colors
+  matching cmux upstream palette, but running Emacs still had old 9-color Apple
+  palette. Fix: changed =defvar= to =defconst= for both =color-presets= and
+  =icon-presets=. After reload, all 16 colors resolve correctly and match cmux.
+- Fix applied: claude-org-cmux.org (defvar -> defconst for color/icon presets)
+- Verified: all 16 named colors match cmux's actual resolution, hex colors pass
+  through unchanged, clear-color works, apply-color sets both status pill and
+  workspace tab color
+- Verbose verification: 6 verbose buffers inspected across all E2E sessions, all
+  have correct mode, content, surface association, and registration
+- FINDING: cmux surface recycling can cause send-key failures on surfaces created
+  from manually-closed workspaces. The =send-key --surface= command fails with
+  "Surface is not a terminal" even though =tree= shows it as terminal. Workaround:
+  use =send --workspace= instead. Not a code bug -- a cmux behavior.
+- All unit tests pass (37/37), smoke tests pass.
+- Coverage update: J1 DONE, J2 DONE, J3 DONE, J4 DONE, J5 partial,
+  J6 DONE, J7 DONE. Remaining: J5 (live cancel timing), J8 (scaffold).
+
+** 2026-03-28: Iteration 4
+
+- Focused on Journey 8 (Scaffold and Navigation) and Journey 5 completion
+  (live cancel timing)
+- Added T45 (insert-workspace scaffold, 14 assertions), T46 (insert-story
+  level alignment, 7 assertions), T47 (goto-story navigation, 10 assertions),
+  T48 (slug/CUSTOM_ID/uniqueness, 9 assertions)
+- All scaffold/navigation functions verified in temp buffers:
+  - insert-workspace produces correct 4-level structure (workspace > story >
+    system-prompt/workflow > instruction) with all required properties
+  - insert-story aligns with previous story level, defaults to 1 when none exists
+  - goto-story correctly collects workspaces (14), stories per workspace,
+    and navigates to last ai block in each story
+  - Slug generation, CUSTOM_ID generation, and uniqueness all verified
+  - 45 CUSTOM_IDs in workspace-test.org, all unique
+- T49 SKIP: cmux workspace creation succeeded but all surfaces are in a
+  broken state ("Surface is not a terminal"). This affects ALL surfaces
+  including those from iterations 1-3. The cmux production app has entered
+  a degraded state after many workspace create/close cycles.
+- T50 SKIP: live cancel timing blocked by same cmux surface degradation.
+  Previous T36 verified cancel state management without live execution.
+- FINDING: cmux surface state degrades after many E2E test iterations
+  creating and closing workspaces. All surfaces report as "[terminal]" in
+  tree output but fail for capture-pane and send-key operations. Recovery
+  requires restarting the cmux app. This is a cmux-level issue, not a
+  code bug in claude-agent.
+- Added 2 new workspaces to workspace-test.org:
+  - "E2E Scaffold Verification (Journey 8)" with 2 stories
+  - "E2E Cancel Timing (Journey 5 completion)" with 1 story
+- Smoke tests pass (2/2).
+- Coverage update: J1 DONE, J2 DONE, J3 DONE, J4 DONE, J5 partial
+  (state mgmt done, live cancel blocked by cmux), J6 DONE, J7 DONE,
+  J8 DONE (scaffold/navigation verified in temp buffers, live execution
+  blocked by cmux surface degradation).
+
+** 2026-03-29: Iteration 5
+
+- Priority: complete T49 (scaffold cmux creation) and T50 (live cancel timing),
+  both previously SKIP due to cmux surface degradation
+- cmux was restarted fresh -- only workspace:5 (Emacs-claude dev2) remained.
+  All previous E2E workspaces cleaned up. This is expected behavior, not a bug.
+- FINDING: =cmux new-workspace= (without =--command=) creates workspaces whose
+  surfaces report "Surface is not a terminal" for capture-pane/read-screen.
+  Using =cmux new-workspace --command "exec zsh"= forces terminal initialization
+  and produces working surfaces. This is a cmux CLI quirk, not a code bug.
+- T49 PASS: scaffold workspace (workspace:10) created by ensure-session with
+  Claude Code running. Query "What org-mode heading level uses three asterisks?"
+  returned "3" correctly. All properties (CMUX_SURFACE_ID, CMUX_WORKSPACE_ID,
+  CLAUDE_CLI_SESSION) saved. Hash tables properly populated from org properties.
+- T50 PARTIAL_PASS: workspace created, cmux-specific cancel (claude-org-cmux-cancel)
+  confirmed working -- sends Escape via send-key. However, the generic cancel
+  (claude-org-cancel) does NOT work for cmux workspace-bridge sessions because
+  :backend is never set by the workspace-bridge prompt handler. The cancel code
+  checks =(and backend busy)= which always fails for cmux sessions.
+- FINDING: Race condition in cancel timing -- the workspace bridge sets :busy
+  asynchronously via MCP prompt hook. For fast queries, the response arrives
+  before :busy is ever set (or within the same Emacs event loop iteration),
+  making timer-based cancel impossible. For slower queries (essay generation),
+  multiple executions queued prompts in Claude Code's input buffer.
+- FINDING: =capture-pane= (tmux compat API) fails on workspace-bridge-created
+  surfaces while =read-screen= (native API) works. Use =read-screen= instead
+  of =capture-pane= for liveness checks in future iterations.
+- Quality review: 68 unique CUSTOM_IDs (no duplicates), heading structure
+  consistent across all 14 workspaces.
+- make check: PASS (static analysis + 37 unit tests + 116 Python tests)
+- Coverage update: J1-J8 all DONE. J5 live cancel is PARTIAL (cmux-cancel
+  works, generic cancel needs :backend fix for cmux sessions).
+
+** 2026-03-29: Iteration 6
+
+- Priority: verify T50c fix, quality review, new edge cases
+- T50c FIX VERIFIED: =:backend "cmux"= now set in =claude-org-cmux.org= line
+  748 during execute. Generic cancel correctly dispatches to cmux cancel.
+  3 unit tests confirm: execute-sets-backend, generic-cancel-dispatches,
+  cancel-noop-when-not-busy.
+- E2E verification of T50c BLOCKED: Emacs MCP server unreachable (port 9999
+  listening but connection timeout). Fix confirmed via unit tests only.
+  Live E2E deferred to next iteration.
+- NEW TEST T51: edge case -- cancel noop when session has :backend but is
+  not :busy. Verifies no side effects (no cmux send-key calls).
+- QUALITY: workspace-test.org trimmed from 1581 to 685 lines (57% reduction).
+  Cancel timing essay response (~900 lines of computing history in 3 drafts)
+  replaced with 5-line summary note. File is now well under 500-line
+  target for active test content.
+- make check: PASS (6 static + 224 unit + 111 Python tests)
+- Coverage update: J1-J8 all DONE, J5 complete (code fix + 3 unit tests).
+  All journeys covered. No new code bugs found.
+- LESSON: AI queries for cancel timing tests should use short, predictable
+  queries (not "write a 2000-word essay") to avoid bloating the org file
+  with massive response content.
+
+** 2026-03-29: Iteration 7
+
+- Priority: T50c live E2E verify, new edge case tests, quality review
+- T50c LIVE E2E: STILL BLOCKED -- Emacs MCP server unreachable (port 9999
+  connection timeout persists across iterations 6-7). Fix remains confirmed
+  by unit tests only.
+- NEW TESTS (5 tests added to test-cmux-e2e-simulated.el):
+  - T52: file-level #+PROPERTY: CLAUDE_BACKEND cmux dispatch -- verifies
+    that backend dispatch works from file-level property, not just
+    section-level property drawers. 2 tests:
+    a. test-cmux-file-level-backend-dispatch (dispatch to cmux)
+    b. test-cmux-file-level-backend-sets-backend-property (:backend set for cancel)
+  - T53: ensure-session hash table restore on reconnect -- clears all 3
+    hash tables, calls ensure-session on alive workspace, verifies all
+    mappings restored from org properties. 1 test:
+    test-cmux-ensure-session-restores-hash-tables
+  - T54: permission mode display with file-level property -- verifies
+    header-line shows correct RO/ED/PL/BP from #+PROPERTY, and that
+    section-level overrides file-level. 2 tests:
+    a. test-cmux-permission-mode-from-file-level (bypass -> BP)
+    b. test-cmux-permission-section-overrides-file (section readonly > file bypass)
+- FINDING: CLAUDE_PERMISSION_MODE is display-only for cmux backend.
+  The cmux backend launches Claude Code in a terminal, so permission
+  mode is handled interactively by the user (not via CLI flags).
+  The json-stream backend uses :cli values from permission-mode-map.
+  This is by design, not a bug.
+- FINDING: CLAUDE_CLI_SESSION cross-contamination already prevented by
+  iteration 5 test (test-cmux-build-launch-ignores-file-level-cli-session).
+  The build-launch-command reads CLI session with nil inheritance (not t),
+  so file-level #+PROPERTY: CLAUDE_CLI_SESSION cannot contaminate new stories.
+- make check: PASS (6 static + 223 + 568 + 168 + 45 cmux unit + 111 Python
+  = 1121 total tests). cmux tests 40 -> 45 (+5 new).
+- No new code bugs found.
+- Coverage: all 8 journeys (J1-J8) remain DONE. New edge cases covered:
+  file-level backend dispatch, reconnect hash table restore, permission
+  mode inheritance with override.
+
+** 2026-03-29: Iteration 8
+
+- Priority: quality/consolidation, remaining edge cases, web research
+- T50c LIVE E2E: STILL BLOCKED -- Emacs MCP server port 9999 has CLOSED
+  TCP state (stale connection). Process Emacs-rea PID 791 is listening but
+  not accepting new connections. Fix confirmed by unit tests only across
+  iterations 6-8.
+- NEW TESTS (4 tests added to test-cmux-e2e-simulated.el):
+  - T55: archive-workflow lifecycle -- 2 tests:
+    a. test-cmux-archive-workflow-clears-cli-session: verifies
+       CLAUDE_CLI_SESSION removed from workspace heading after archive
+    b. test-cmux-archive-workflow-creates-fresh-workflow: verifies new
+       Workflow :sdd: heading with CUSTOM_ID and empty AI block created,
+       old response content gone
+  - T56: loop cancel/error guard -- 2 tests:
+    a. test-cmux-loop-cancel-guard-skips-iteration: cancelled session's
+       next iteration silently returns nil (no send-request call)
+    b. test-cmux-loop-error-guard-skips-iteration: errored session's
+       next iteration silently returns nil
+- WEB RESEARCH: "E2E test flakiness prevention strategies 2025-2026"
+  Key finding: 45% of all E2E flakiness comes from async wait issues
+  (fixed sleeps vs condition polling). Added "Anti-Flakiness Principles"
+  section to this design doc covering: explicit waits, stable selectors,
+  test isolation, deterministic assertions, timer guard testing.
+- GAP ANALYSIS review:
+  - Loop execution (T29): already covered by 11 existing tests in
+    test-claude-org-loop.el (header parsing, continuation, section
+    placement, query-id routing, cancel guards). No new tests needed.
+  - Archive workflow: now covered by T55 (2 tests).
+  - System prompt on story switch (T31): by design, system prompt is
+    re-read fresh on each execution from workspace bridge. Not a
+    separate feature to test -- already implicitly tested by T37
+    (multi-story execution reads different system prompts per story).
+- make check: PASS (6 static + 223 + 568 + 168 + 49 cmux + 111 Python
+  = 1125 total). cmux tests 45 -> 49 (+4 new).
+- No new code bugs found.
+- Coverage: all 8 journeys DONE. Edge cases covered: archive-workflow
+  lifecycle, loop cancel/error guards, file-level backend dispatch,
+  hash table restore, permission mode inheritance.

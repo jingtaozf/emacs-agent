@@ -15,3 +15,4 @@
 | 2026-03-15 | cmux Backend — Architecture, Integration, and Roadmap | Phase 1 implemented |
 | 2026-03-15 | SDD Story Worktrees | draft |
 | 2026-03-17 | Migrate AI Block Templates to yasnippet | draft |
+| 2026-03-28 | E2E Test Strategy | active |

@@ -79,6 +79,8 @@ Records the call and returns fixture-based responses."
      ((string= subcommand "notify") "ok")
      ((string= subcommand "capture-pane")
       (test-cmux--read-fixture "capture-pane-ready.txt"))
+     ((string= subcommand "tree")
+      "workspace workspace:mock-1 \"Test\"\n  pane pane:1\n    surface surface:existing-123 [terminal]")
      (t (format "mock-response-for-%s" subcommand)))))
 
 (defun test-cmux--mock-calls-for (subcommand)
@@ -140,6 +142,7 @@ What is 2+2?
 :PROPERTIES:
 :CLAUDE_SESSION_ID: test-cmux-session-003
 :CMUX_SURFACE_ID: surface:existing-123
+:CMUX_WORKSPACE_ID: mock-workspace-uuid-123
 :CUSTOM_ID: test-cmux-story-existing
 :END:
 
@@ -152,7 +155,7 @@ What is 2+2?
 Explain Emacs.
 #+end_src
 "
-  "Org content with existing CMUX_SURFACE_ID.")
+  "Org content with existing CMUX_SURFACE_ID and CMUX_WORKSPACE_ID.")
 
 (defmacro test-cmux--with-org-buffer (content &rest body)
   "Create a temp org buffer with CONTENT and execute BODY.
@@ -293,8 +296,8 @@ Returns values from BODY. Cleans up buffer afterwards."
         (should (equal surface-id "surface:existing-123"))
         ;; Should NOT have called new-workspace
         (should-not (test-cmux--mock-calls-for "new-workspace"))
-        ;; Should have called capture-pane to check liveness
-        (should (test-cmux--mock-calls-for "capture-pane"))))))
+        ;; Should have called tree to check workspace liveness
+        (should (test-cmux--mock-calls-for "tree"))))))
 
 (ert-deftest test-cmux-ensure-session-relaunches-dead ()
   "Ensure-session relaunches when existing surface is dead."
@@ -304,10 +307,10 @@ Returns values from BODY. Cleans up buffer afterwards."
                  (lambda (subcmd &rest args)
                    (push (cons subcmd args) test-cmux--mock-calls)
                    (cond
-                    ;; capture-pane on dead surface → error
-                    ((and (string= subcmd "capture-pane")
-                          (member "surface:existing-123" args))
-                     (error "cmux capture-pane failed: surface not found"))
+                    ;; tree on dead workspace UUID → error
+                    ((and (string= subcmd "tree")
+                          (member "mock-workspace-uuid-123" args))
+                     (error "cmux tree failed: invalid workspace handle"))
                     ;; capture-pane on new surface → ready screen
                     ((string= subcmd "capture-pane") ready-screen)
                     ((string= subcmd "new-workspace") "OK workspace:mock-1")
@@ -500,6 +503,54 @@ Returns values from BODY. Cleans up buffer afterwards."
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
       (should-error (claude-org-cmux-cancel) :type 'user-error))))
+
+(ert-deftest test-cmux-execute-sets-backend ()
+  "Execute sets :backend to \"cmux\" on session so generic cancel can dispatch."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-basic
+      (test-cmux--goto-ai-block)
+      (claude-org-cmux--execute-ai-block)
+      (let* ((session-key (claude-org--current-session-key))
+             (backend (claude-org--session-get session-key :backend)))
+        (should (equal backend "cmux"))
+        ;; Clean up
+        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
+          (when req-id
+            (claude-agent--unregister-query req-id)))))))
+
+(ert-deftest test-cmux-generic-cancel-dispatches-to-cmux ()
+  "Generic claude-org-cancel dispatches to claude-org-cmux-cancel for cmux sessions."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-with-surface
+      (test-cmux--goto-ai-block)
+      ;; Set up session state as if execute had run
+      (let ((session-key (claude-org--current-session-key)))
+        (claude-org--session-put session-key :backend "cmux")
+        (claude-org--session-put session-key :busy t)
+        ;; Mock cleanup functions
+        (cl-letf (((symbol-function 'claude-org--cleanup-session) #'ignore)
+                  ((symbol-function 'claude-org--queue-count) (lambda (_) 0)))
+          (claude-org-cancel)
+          ;; Should have sent escape via cmux cancel
+          (let ((key-calls (test-cmux--mock-calls-for "send-key")))
+            (should key-calls)
+            (should (member "escape" (cdar key-calls)))))))))
+
+(ert-deftest test-cmux-generic-cancel-noop-when-not-busy ()
+  "Generic cancel does not error when session has :backend but is not :busy."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-with-surface
+      (test-cmux--goto-ai-block)
+      (let ((session-key (claude-org--current-session-key)))
+        (claude-org--session-put session-key :backend "cmux")
+        ;; :busy is NOT set -- cancel should be a no-op message, not an error
+        (claude-org-cancel)
+        ;; No send-key calls should have been made
+        (let ((key-calls (test-cmux--mock-calls-for "send-key")))
+          (should-not key-calls))))))
 
 ;;; ============================================================================
 ;;; Tests: Launch Command Building
@@ -752,6 +803,384 @@ the same session."
 ;;; ============================================================================
 ;;; Tests: Focus Terminal (P1)
 ;;; ============================================================================
+
+;;; ============================================================================
+;;; Tests: File-level CLAUDE_BACKEND dispatch (T52)
+;;; ============================================================================
+
+(defvar test-cmux--org-file-level-backend
+  "#+PROPERTY: CLAUDE_BACKEND cmux
+* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-file-backend
+:CUSTOM_ID: test-cmux-file-backend-story
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-file-backend-instr-1
+:END:
+
+#+begin_src ai
+What is 3+3?
+#+end_src
+"
+  "Org content with file-level CLAUDE_BACKEND (no section-level property).")
+
+(ert-deftest test-cmux-file-level-backend-dispatch ()
+  "File-level #+PROPERTY: CLAUDE_BACKEND cmux dispatches to cmux backend.
+T52: Regression — section-level CLAUDE_BACKEND was always tested, but
+file-level #+PROPERTY must also dispatch correctly."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-file-level-backend
+      (test-cmux--goto-ai-block)
+      ;; Verify the file-level property is accessible
+      (let ((backend (claude-org--get-org-property "CLAUDE_BACKEND" t)))
+        (should (equal backend "cmux")))
+      ;; Execute should dispatch to cmux backend
+      (claude-org-execute)
+      ;; Verify cmux calls were made
+      (should (or (test-cmux--mock-calls-for "new-workspace")
+                  (test-cmux--mock-calls-for "identify")))
+      ;; Verify prompt was sent
+      (should (test-cmux--mock-calls-for "send"))
+      ;; Clean up
+      (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-file-backend")))
+        (when req-id
+          (claude-agent--unregister-query req-id)
+          (ignore-errors
+            (delete-file (expand-file-name
+                          "test-cmux-session-file-backend.request-id"
+                          "/tmp/claude-agent-status")))
+          (ignore-errors
+            (delete-file (expand-file-name
+                          "test-cmux-session-file-backend.from-emacs"
+                          "/tmp/claude-agent-status"))))))))
+
+(ert-deftest test-cmux-file-level-backend-sets-backend-property ()
+  "File-level CLAUDE_BACKEND=cmux sets :backend on session after execute.
+T52b: Ensures generic cancel works for file-level backend dispatch."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-file-level-backend
+      (test-cmux--goto-ai-block)
+      (claude-org-execute)
+      (let* ((session-key (claude-org--current-session-key))
+             (backend (claude-org--session-get session-key :backend)))
+        (should (equal backend "cmux"))
+        ;; Clean up
+        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-file-backend")))
+          (when req-id
+            (claude-agent--unregister-query req-id)
+            (ignore-errors
+              (delete-file (expand-file-name
+                            "test-cmux-session-file-backend.request-id"
+                            "/tmp/claude-agent-status")))
+            (ignore-errors
+              (delete-file (expand-file-name
+                            "test-cmux-session-file-backend.from-emacs"
+                            "/tmp/claude-agent-status")))))))))
+
+;;; ============================================================================
+;;; Tests: Ensure-session hash table restore on reconnect (T53)
+;;; ============================================================================
+
+(ert-deftest test-cmux-ensure-session-restores-hash-tables ()
+  "Ensure-session restores hash table mappings when workspace is alive.
+T53: Simulates Emacs restart — hash tables cleared but org properties intact.
+On reconnect, ensure-session must repopulate all three hash tables."
+  :tags '(:unit :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-with-surface
+      (test-cmux--goto-ai-block)
+      ;; Verify properties exist
+      (should (equal "surface:existing-123"
+                     (org-entry-get nil "CMUX_SURFACE_ID" t)))
+      (should (equal "mock-workspace-uuid-123"
+                     (org-entry-get nil "CMUX_WORKSPACE_ID" t)))
+      ;; Clear all hash tables to simulate Emacs restart
+      (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
+      (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+      (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+      ;; Verify cleared
+      (should-not (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
+      (should-not (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface))
+      (should-not (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id))
+      ;; Call ensure-session — should restore mappings from org properties
+      (let ((surface (claude-org-cmux--ensure-session)))
+        (should (equal surface "surface:existing-123"))
+        ;; All three hash tables should be repopulated
+        (should (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
+        (should (equal "surface:existing-123"
+                       (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)))
+        (should (equal "mock-workspace-uuid-123"
+                       (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)))))))
+
+;;; ============================================================================
+;;; Tests: Permission mode display with file-level property (T54)
+;;; ============================================================================
+
+(defvar test-cmux--org-file-level-permission
+  "#+PROPERTY: CLAUDE_PERMISSION_MODE bypass
+#+PROPERTY: CLAUDE_BACKEND cmux
+* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-perm
+:CUSTOM_ID: test-cmux-perm-story
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-perm-instr-1
+:END:
+
+#+begin_src ai
+What is 4+4?
+#+end_src
+"
+  "Org content with file-level CLAUDE_PERMISSION_MODE bypass.")
+
+(defvar test-cmux--org-section-override-permission
+  "#+PROPERTY: CLAUDE_PERMISSION_MODE bypass
+#+PROPERTY: CLAUDE_BACKEND cmux
+* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-perm-override
+:CLAUDE_PERMISSION_MODE: readonly
+:CUSTOM_ID: test-cmux-perm-override-story
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-perm-override-instr-1
+:END:
+
+#+begin_src ai
+What is 5+5?
+#+end_src
+"
+  "Org content where section-level permission overrides file-level.")
+
+(ert-deftest test-cmux-permission-mode-from-file-level ()
+  "Permission mode reads file-level #+PROPERTY: CLAUDE_PERMISSION_MODE.
+T54: Ensures cmux sessions show correct permission mode in header-line
+when mode is set at file level."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-file-level-permission
+    (test-cmux--goto-ai-block)
+    ;; Should read file-level permission
+    (should (equal "bypass" (claude-org--get-permission-mode-property)))
+    (should (equal "BP" (claude-org--permission-mode-short)))
+    (should (equal "bypassPermissions" (claude-org--get-permission-mode)))))
+
+(ert-deftest test-cmux-permission-section-overrides-file ()
+  "Section-level CLAUDE_PERMISSION_MODE overrides file-level.
+T54b: Org inheritance — section property takes priority over #+PROPERTY."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-section-override-permission
+    (test-cmux--goto-ai-block)
+    ;; Section-level readonly should override file-level bypass
+    (should (equal "readonly" (claude-org--get-permission-mode-property)))
+    (should (equal "RO" (claude-org--permission-mode-short)))
+    (should (equal "default" (claude-org--get-permission-mode)))))
+
+;;; ============================================================================
+;;; Tests: Archive Workflow (T55)
+;;; ============================================================================
+
+(defvar test-cmux--org-archive-workflow
+  "* Test Workspace
+:PROPERTIES:
+:CLAUDE_SESSION_ID: sdd-archive-test
+:CLAUDE_CLI_SESSION: old-session-uuid-123
+:CMUX_WORKSPACE: test-archive
+:CUSTOM_ID: test-archive-ws
+:END:
+
+** Test Story
+:PROPERTIES:
+:CUSTOM_ID: test-archive-story
+:END:
+
+*** System Prompt :system_prompt:
+:PROPERTIES:
+:CUSTOM_ID: test-archive-sysprompt
+:END:
+
+You are a test assistant.
+
+*** Workflow :sdd:
+:PROPERTIES:
+:CUSTOM_ID: test-archive-workflow
+:END:
+
+**** Instruction 1 :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: test-archive-instr-1
+:END:
+
+#+begin_src ai
+What is 2+2?
+#+end_src
+
+**** Response 1 :ai_output:
+:PROPERTIES:
+:QUERY_ID: test-q-archive
+:END:
+
+4
+"
+  "Org content for archive-workflow test with CLI session and response.")
+
+(ert-deftest test-cmux-archive-workflow-clears-cli-session ()
+  "Archive-workflow clears CLAUDE_CLI_SESSION on workspace heading.
+T55: When archiving a workflow, the CLI session must be cleared so the
+next terminal launch starts a fresh conversation. Verifies the archive
+function removes CLAUDE_CLI_SESSION from the workspace heading."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-archive-workflow
+    ;; Verify CLI session exists before archive
+    (goto-char (point-min))
+    (re-search-forward ":CLAUDE_SESSION_ID: sdd-archive-test")
+    (org-back-to-heading t)
+    (should (equal "old-session-uuid-123"
+                   (org-entry-get nil "CLAUDE_CLI_SESSION")))
+    ;; Navigate into the workflow (archive-workflow needs point inside workspace)
+    (goto-char (point-min))
+    (re-search-forward "What is 2\\+2")
+    ;; Mock org-archive-subtree to avoid actually archiving
+    (cl-letf (((symbol-function 'org-archive-subtree)
+               (lambda ()
+                 ;; Simulate: delete the workflow subtree at point
+                 (let ((beg (save-excursion (org-back-to-heading t) (point)))
+                       (end (save-excursion (org-end-of-subtree t t) (point))))
+                   (delete-region beg end)))))
+      (claude-org-workspace-archive-workflow))
+    ;; CLI session should be cleared
+    (goto-char (point-min))
+    (re-search-forward ":CLAUDE_SESSION_ID: sdd-archive-test")
+    (org-back-to-heading t)
+    (should-not (org-entry-get nil "CLAUDE_CLI_SESSION"))))
+
+(ert-deftest test-cmux-archive-workflow-creates-fresh-workflow ()
+  "Archive-workflow inserts a new Workflow section with empty AI block.
+T55b: After archiving, a fresh Workflow heading with :sdd: tag and an
+empty Instruction 1 AI block must be present at the correct level."
+  :tags '(:unit :stable)
+  (test-cmux--with-org-buffer test-cmux--org-archive-workflow
+    ;; Navigate into the workflow
+    (goto-char (point-min))
+    (re-search-forward "What is 2\\+2")
+    ;; Mock org-archive-subtree
+    (cl-letf (((symbol-function 'org-archive-subtree)
+               (lambda ()
+                 (let ((beg (save-excursion (org-back-to-heading t) (point)))
+                       (end (save-excursion (org-end-of-subtree t t) (point))))
+                   (delete-region beg end)))))
+      (claude-org-workspace-archive-workflow))
+    ;; Verify new Workflow heading exists with :sdd: tag
+    (goto-char (point-min))
+    (should (re-search-forward "^\\*\\*\\* Workflow.*:sdd:" nil t))
+    ;; Verify new Workflow has CUSTOM_ID
+    (org-back-to-heading t)
+    (should (org-entry-get nil "CUSTOM_ID"))
+    ;; Verify new Instruction 1 with AI block
+    (should (re-search-forward "Instruction 1" nil t))
+    (should (re-search-forward "#\\+begin_src ai" nil t))
+    ;; Verify old response is gone (it was in the archived subtree)
+    (goto-char (point-min))
+    (should-not (re-search-forward "Response 1.*:ai_output:" nil t))))
+
+;;; ============================================================================
+;;; Tests: Loop Cancel Guard (T56)
+;;; ============================================================================
+
+(ert-deftest test-cmux-loop-cancel-guard-skips-iteration ()
+  "Cancelled session's loop iteration is skipped.
+T56: When a loop session is cancelled between iterations, the next
+execute-loop-iteration call should silently return nil, not execute.
+Guards against firing queued timers after user cancels."
+  :tags '(:unit :stable)
+  (let* ((buf (generate-new-buffer "*test-loop-cancel*"))
+         (session-key nil)
+         (send-called nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (org-mode)
+          (setq buffer-file-name (make-temp-file "test-loop-cancel-" nil ".org"))
+          (insert "* Test\n:PROPERTIES:\n:CUSTOM_ID: test-lc\n:END:\n\n")
+          (insert "** Instruction 1 :claude_chat:\n\n")
+          (insert "#+begin_src ai :loop 3\ntest\n#+end_src\n")
+          (write-region (point-min) (point-max) buffer-file-name nil 'silent)
+          (set-buffer-modified-p nil)
+
+          (setq session-key (concat buffer-file-name "::test-lc"))
+          ;; Set up loop state as if iteration 1 completed
+          (claude-org--session-put session-key :loop-current 2)
+          (claude-org--session-put session-key :loop-max 3)
+          (claude-org--session-put session-key :marker (point-marker))
+          (claude-org--session-put session-key :original-prompt "test")
+          (claude-org--session-put session-key :instruction-num 1)
+          (claude-org--session-put session-key :custom-id "test-lc")
+          (claude-org--session-put session-key :busy nil)
+
+          ;; Simulate: session was cancelled
+          (cl-letf (((symbol-function 'claude-org--get-exec-status-for-session)
+                     (lambda (&rest _) "cancelled"))
+                    ((symbol-function 'claude-org--send-request)
+                     (lambda (&rest _) (setq send-called t)))
+                    ((symbol-function 'claude-org--start-spinner) #'ignore)
+                    ((symbol-function 'claude-org--set-exec-status) #'ignore))
+            ;; Call execute-loop-iteration directly (as a timer would)
+            (claude-org--execute-loop-iteration
+             session-key 2 3 "test" 1 "test-lc" 0)
+            ;; send-request should NOT have been called
+            (should-not send-called)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when buffer-file-name
+            (ignore-errors (delete-file buffer-file-name))))
+        (kill-buffer buf)))))
+
+(ert-deftest test-cmux-loop-error-guard-skips-iteration ()
+  "Errored session's loop iteration is skipped.
+T56b: Same as T56 but for error status. An errored session should not
+continue its loop."
+  :tags '(:unit :stable)
+  (let* ((buf (generate-new-buffer "*test-loop-error*"))
+         (session-key nil)
+         (send-called nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (org-mode)
+          (setq buffer-file-name (make-temp-file "test-loop-error-" nil ".org"))
+          (insert "* Test\n:PROPERTIES:\n:CUSTOM_ID: test-le\n:END:\n\n")
+          (insert "** Instruction 1 :claude_chat:\n\n")
+          (insert "#+begin_src ai :loop 3\ntest\n#+end_src\n")
+          (write-region (point-min) (point-max) buffer-file-name nil 'silent)
+          (set-buffer-modified-p nil)
+
+          (setq session-key (concat buffer-file-name "::test-le"))
+          (claude-org--session-put session-key :loop-current 2)
+          (claude-org--session-put session-key :loop-max 3)
+          (claude-org--session-put session-key :marker (point-marker))
+          (claude-org--session-put session-key :original-prompt "test")
+
+          (cl-letf (((symbol-function 'claude-org--get-exec-status-for-session)
+                     (lambda (&rest _) "error"))
+                    ((symbol-function 'claude-org--send-request)
+                     (lambda (&rest _) (setq send-called t)))
+                    ((symbol-function 'claude-org--start-spinner) #'ignore)
+                    ((symbol-function 'claude-org--set-exec-status) #'ignore))
+            (claude-org--execute-loop-iteration
+             session-key 2 3 "test" 1 "test-le" 0)
+            (should-not send-called)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when buffer-file-name
+            (ignore-errors (delete-file buffer-file-name))))
+        (kill-buffer buf)))))
 
 (provide 'test-cmux-e2e-simulated)
 
