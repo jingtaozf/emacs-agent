@@ -108,13 +108,14 @@ validates new backends declare capabilities.
 
 * Code Quality Findings
 
-** Q1. Process Filter Has No =condition-case= (HIGH)
+** DONE Q1. Process Filter Has No =condition-case= (HIGH) :done:
 
-=claude-agent--process-filter= at =claude-agent-backend.org:1506= is unguarded. Any error in
-=claude-agent--process-json-buffer= or callbacks will kill the process silently. The process
-sentinel (line 1608) and cleanup timer callback (line 2978) have the same gap.
+*Status*: Implemented [2026-03-29]
 
-ARCHITECTURE.org line 73 states this invariant but it is not enforced.
+Both =claude-agent--process-filter= and =claude-agent--process-sentinel= now have
+=condition-case= guards. Structural test =test-structural-process-filters-guarded=
+(F36 in =test-structural.el=) enforces that all functions named =*process-filter*=
+or =*process-sentinel*= in source .org files contain =condition-case=.
 
 *Proposal*: Wrap process filter, sentinel, and cleanup timer in =condition-case= with error
 logging. Add a structural test that verifies all process filters are guarded.
@@ -316,10 +317,22 @@ exists.
 3. Run headless Emacs with =make test-integration=
 4. Record session transcripts for debugging failures
 
-** T7. Process Sentinel Has Zero Explicit Tests (HIGH)
+** DONE T7. Process Sentinel Has Zero Explicit Tests (HIGH) :done:
 
-No test exercises sentinel callbacks directly. The sentinel is critical for cleanup, error state
-transitions, and marker freeing. Sentinel errors are silent and leave permanent state leaks.
+*Status*: Implemented [2026-03-29]
+
+=tests/test-claude-agent-sentinel.el= now has 19 tests covering all sentinel paths:
+- Normal exit (exit 0): state cleanup, complete callback fires with nil
+- Crash exit (mock crash-mid-stream): state closed, process dead
+- OOM kill (SIGKILL): state fully cleaned up after signal death
+- Filter error recovery: malformed JSON handled gracefully
+- Error exit code: rate-limited scenario with exit code 1
+- Output buffer killed: sentinel-cleanup kills process output buffer
+- Error plist structure: verifies =:message= and =:exit-code= in error plist
+- Cancelled query: sentinel skips complete callback for cancelled queries
+- Docker path-mappings: cleared on Docker exit, preserved on non-Docker exit
+- Full sentinel dispatch: direct invocation of =claude-agent--process-sentinel=
+  for both normal (exit 0) and abnormal (exit 1) events
 
 *Proposal*: Create tests that start a mock CLI process, kill it, and verify session state
 transitions (=:busy → nil=), marker freeing, and error callback invocation.
@@ -359,9 +372,9 @@ Ranked by impact on reliability and developer productivity:
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
-| P0 | Q1: Guard process filter/sentinel/timer | S | Prevents silent process death |
+| P0 | Q1: Guard process filter/sentinel/timer (DONE 2026-03-29) | S | Prevents silent process death |
 | P0 | A1: Consolidate parallel state tracking | M | Eliminates split-brain state |
-| P0 | T7: Test process sentinel explicitly | S | Tests most dangerous untested path |
+| P0 | T7: Test process sentinel explicitly (DONE 2026-03-29) | S | Tests most dangerous untested path |
 | P1 | T1: Error injection in mock CLI | M | Catches failure-mode bugs |
 | P1 | Q2: Structured MCP error returns | S | Prevents silent Python failures |
 | P1 | Q3: Reorder query-completed after response | S | Correct mode-line state |
