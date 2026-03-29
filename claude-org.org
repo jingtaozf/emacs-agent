@@ -222,6 +222,7 @@ Response will appear here after pressing C-c C-c inside the ai block.
 ;; Forward declarations for extracted backends (loaded after claude-org.org)
 (declare-function claude-org-cmux--execute-ai-block "claude-org-cmux" ())
 (declare-function claude-org-cmux-open-tab "claude-org-cmux" ())
+(declare-function claude-org-cmux-cancel "claude-org-cmux" ())
 (defvar claude-org-terminal--workspace-to-session-key)
 #+END_SRC
 
@@ -4227,9 +4228,11 @@ Markers hold references to buffers; must be explicitly freed."
   "Cancel and clean up the active query for SESSION-KEY.
 This ensures the mode-line spinner and *Claude Queries* buffer reflect the
 terminal state immediately, without waiting for the CLI process to exit."
-  (when-let* ((backend (claude-org--session-get session-key :backend))
-              (handle (claude-org--session-get session-key :query-handle)))
-    (claude-agent-backend-cancel backend handle)))
+  (when-let* ((backend (claude-org--session-get session-key :backend)))
+    (if (equal backend "cmux")
+        (ignore-errors (claude-org-cmux-cancel))
+      (when-let* ((handle (claude-org--session-get session-key :query-handle)))
+        (claude-agent-backend-cancel backend handle)))))
 
 (defun claude-org--cleanup-queued-blocks (session-key)
   "Clear pending queue for SESSION-KEY, reset exec-status on queued blocks, free markers.
@@ -4990,8 +4993,10 @@ Uses centralized `claude-org--cleanup-session' for complete cleanup (F19)."
           ;; Stop loop by setting current = max
           (when (and loop-max (> loop-max 1))
             (claude-org--session-put session-key :loop-current loop-max))
-          ;; Cancel via backend protocol
-          (claude-agent-backend-cancel backend query-handle)
+          ;; Cancel via backend protocol (cmux uses its own cancel path)
+          (if (equal backend "cmux")
+              (claude-org-cmux-cancel)
+            (claude-agent-backend-cancel backend query-handle))
           ;; Insert cancellation message BEFORE cleanup (needs :query-id and :marker)
           (let ((cancel-text (if (and loop-max (> loop-max 1))
                                  (format "\n[Cancelled at iteration %d/%d]\n"
@@ -5037,9 +5042,11 @@ Uses centralized `claude-org--cleanup-session' for complete cleanup."
                            (> (length (claude-org--session-state-get state :pending-queue)) 0))
                    ;; Cancel active query via backend protocol
                    (when (claude-org--session-state-get state :busy)
-                     (when-let* ((backend (claude-org--session-state-get state :backend))
-                                 (handle (claude-org--session-state-get state :query-handle)))
-                       (claude-agent-backend-cancel backend handle))
+                     (when-let* ((backend (claude-org--session-state-get state :backend)))
+                       (if (equal backend "cmux")
+                           (ignore-errors (claude-org-cmux-cancel))
+                         (when-let* ((handle (claude-org--session-state-get state :query-handle)))
+                           (claude-agent-backend-cancel backend handle))))
                      (cl-incf cancelled))
                    ;; Full cleanup via centralized function
                    (claude-org--cleanup-session key "cancelled" t))))

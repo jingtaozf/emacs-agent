@@ -76,21 +76,28 @@ Color the cmux sidebar status pill based on the =WORKSPACE_COLOR= org property.
 Supports hex colors (=#4CAF50=) or named presets (=green=).
 
 #+BEGIN_SRC elisp
-(defvar claude-org-cmux--color-presets
-  '(("red"    . "#FF3B30")
-    ("orange" . "#FF9500")
-    ("yellow" . "#FFCC00")
-    ("green"  . "#34C759")
-    ("blue"   . "#007AFF")
-    ("purple" . "#AF52DE")
-    ("pink"   . "#FF2D55")
-    ("gray"   . "#8E8E93")
-    ("cyan"   . "#5AC8FA"))
-  "Named color presets for WORKSPACE_COLOR property.
+(defconst claude-org-cmux--color-presets
+  '(("red"      . "#C0392B")
+    ("crimson"  . "#922B21")
+    ("orange"   . "#A04000")
+    ("amber"    . "#7D6608")
+    ("olive"    . "#4A5C18")
+    ("green"    . "#196F3D")
+    ("teal"     . "#006B6B")
+    ("aqua"     . "#0E6B8C")
+    ("blue"     . "#1565C0")
+    ("navy"     . "#1A5276")
+    ("indigo"   . "#283593")
+    ("purple"   . "#6A1B9A")
+    ("magenta"  . "#AD1457")
+    ("rose"     . "#880E4F")
+    ("brown"    . "#7B3F00")
+    ("charcoal" . "#3E4B5E"))
+  "Named color presets matching cmux upstream palette.
 Use in org files: #+PROPERTY: WORKSPACE_COLOR green
 Or per-section:   :WORKSPACE_COLOR: #custom-hex")
 
-(defvar claude-org-cmux--icon-presets
+(defconst claude-org-cmux--icon-presets
   '(("dev"        . "hammer")
     ("debug"      . "bug")
     ("deploy"     . "flame")
@@ -146,60 +153,16 @@ No-op if WORKSPACE_COLOR is not set."
                  (when workspace-ref
                    (list "--workspace" workspace-ref)))
         (error nil))
-      ;; Workspace tab color — send raw v1 socket command directly
-      ;; (the CLI binary may not support set-workspace-color yet)
-      ;; Resolve fresh UUID via sidebar-state (stored UUIDs go stale on cmux restart)
+      ;; Workspace tab color via upstream workspace-action CLI
       (when workspace-ref
-        (let ((fresh-uuid
-               (condition-case nil
-                   (let ((state (claude-org-cmux--call
-                                 "sidebar-state" "--workspace" workspace-ref)))
-                     (when (string-match "^tab=\\([0-9A-F-]+\\)" state)
-                       (match-string 1 state)))
-                 (error nil))))
-          (when fresh-uuid
-            (claude-org-cmux--send-socket-command
-             (format "set_workspace_color %s --tab=%s" color fresh-uuid))))))))
+        (condition-case nil
+            (claude-org-cmux--call
+             "workspace-action" "set-color"
+             "--color" (or color-raw color)
+             "--workspace" workspace-ref)
+          (error nil))))))
 #+END_SRC
 
-* Raw Socket Command
-
-Send a v1 command directly to the cmux Unix socket, bypassing the CLI binary.
-Used for commands that the installed CLI may not support yet (e.g. =set_workspace_color=
-from our dev build).
-
-#+BEGIN_SRC elisp
-(defun claude-org-cmux--send-socket-command (command)
-  "Send v1 COMMAND string directly to the cmux Unix socket.
-Returns the response string, or nil on error.
-Bypasses the CLI binary — useful for commands not yet in the released CLI."
-  (let ((socket-path (or claude-org-cmux-socket-path
-                         (condition-case nil
-                             (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
-                           (error nil))
-                         ;; Default production socket
-                         (let ((default-sock (expand-file-name
-                                             "~/Library/Application Support/cmux/cmux.sock")))
-                           (when (file-exists-p default-sock) default-sock)))))
-    (when socket-path
-      (condition-case nil
-          (let* ((proc (make-network-process
-                        :name "cmux-socket"
-                        :family 'local
-                        :remote socket-path
-                        :buffer (generate-new-buffer " *cmux-sock*")
-                        :sentinel #'ignore))
-                 (buf (process-buffer proc)))
-            (unwind-protect
-                (progn
-                  (process-send-string proc (concat command "\n"))
-                  (accept-process-output proc 2)
-                  (with-current-buffer buf
-                    (string-trim (buffer-string))))
-              (delete-process proc)
-              (kill-buffer buf)))
-        (error nil)))))
-#+END_SRC
 
 * CLI Gateway
 
@@ -226,9 +189,22 @@ If ARGS contains :stdin KEY, that value is piped as stdin."
                 (condition-case nil
                     (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
                   (error nil))))
+           (effective-cli
+            (or (condition-case nil
+                    (claude-org-terminal--find-session-property "CMUX_CLI_PATH")
+                  (error nil))
+                "cmux"))
            (socket-args (when effective-socket
                           (list "--socket" effective-socket)))
            (flat-args (append socket-args (cons subcommand (flatten-tree cli-args))))
+           ;; When using a custom socket (dev app), clear production env vars
+           ;; so the CLI doesn't resolve workspaces from the wrong instance
+           (process-environment
+            (if effective-socket
+                (cl-remove-if
+                 (lambda (e) (string-match-p "^CMUX_WORKSPACE_ID=" e))
+                 process-environment)
+              process-environment))
            (stderr-file (make-temp-file "cmux-stderr-"))
            (buf (generate-new-buffer " *cmux-cli*"))
            (stdin-file (when stdin-text
@@ -236,7 +212,7 @@ If ARGS contains :stdin KEY, that value is piped as stdin."
                            (with-temp-file f (insert stdin-text))
                            f)))
            (exit-code (apply #'call-process
-                             "cmux" stdin-file
+                             effective-cli stdin-file
                              (list buf stderr-file) nil
                              flat-args)))
       (unwind-protect
@@ -502,13 +478,18 @@ Auto-starts the Emacs MCP server if not running."
          (workspace-session-id
           (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
          (project-root (or (claude-org--get-project-root) default-directory)))
-    ;; Check if saved surface is alive (saved-id is a clean ref like "surface:1")
+    ;; Check if saved workspace is alive via `tree --workspace UUID`
+    ;; NOTE: capture-pane silently falls back to the focused surface for
+    ;; invalid refs (cmux bug) — so we validate via the workspace UUID instead.
     (if (and saved-id
-             (condition-case nil
-                 (let ((result (claude-org-cmux--call "capture-pane"
-                                 "--surface" saved-id)))
-                   (not (string-empty-p result)))
-               (error nil)))
+             (let ((ws-id-check (claude-org-terminal--find-session-property
+                                 "CMUX_WORKSPACE_ID")))
+               (and ws-id-check
+                    (condition-case nil
+                        (let ((result (claude-org-cmux--call "tree"
+                                        "--workspace" ws-id-check)))
+                          (and result (not (string-empty-p result))))
+                      (error nil)))))
         ;; Existing workspace — restore mappings, re-apply color, rename tab, start verbose
         (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
           ;; Restore hash table mappings (lost on Emacs restart or session expiry)
@@ -763,6 +744,8 @@ Registers in `claude-agent--active-queries' for mode-line."
       (when workspace-session-id
         (puthash workspace-session-id (claude-org--current-session-key)
                  claude-org-terminal--workspace-to-session-key))
+      ;; Mark backend so generic claude-org-cancel can dispatch to cmux
+      (claude-org--session-put (claude-org--current-session-key) :backend "cmux")
       ;; Save org buffer + marker for loop-send
       (claude-org--session-put (claude-org--current-session-key)
                                :loop-org-buffer (current-buffer))
