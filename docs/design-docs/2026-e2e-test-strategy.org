@@ -332,3 +332,59 @@ Based on industry research (2025-2026), these principles guide test reliability:
 - Coverage: all 8 journeys DONE. Edge cases covered: archive-workflow
   lifecycle, loop cancel/error guards, file-level backend dispatch,
   hash table restore, permission mode inheritance.
+
+** 2026-03-29: Iteration 9
+
+- Priority: T50c live E2E verify, unicode/special char stress tests,
+  regression check, quality review
+- T50c LIVE E2E: VERIFIED -- Emacs MCP server restored (new PID 58468
+  on port 9999). Generic =claude-org-cancel= confirmed to dispatch to
+  =claude-org-cmux-cancel= when =:backend= is ="cmux"=. Verified via
+  advice tracing: =cmux-cancel-dispatched= is =t=, =:busy= cleared
+  from =t= to =nil= after cancel. This resolves the 3-iteration
+  blocker (iterations 6-8).
+- FINDING: evalElisp context isolation causes =:busy= to clear between
+  separate =session-put= and =with-current-buffer= calls. The stale
+  query cleanup timer (=claude-agent--cleanup-stale-queries=, runs
+  every 5s) or buffer-switch side effects can reset session state.
+  Solution: set session state INSIDE the =with-current-buffer= block
+  for reliable testing.
+- FINDING: =generate-custom-id= uses =[^[:alnum:]]= regex, which in
+  Emacs treats CJK characters as alphanumeric (Unicode letters). CJK
+  chars are PRESERVED in CUSTOM_IDs. In contrast, =workspace-name-to-slug=
+  uses =[^a-z0-9]= (ASCII only), so CJK chars are stripped from slugs.
+  Both behaviors are correct for their respective purposes.
+- NEW TESTS (5 tests added to test-cmux-e2e-simulated.el):
+  - T57: Special characters in workspace/story names -- 2 tests:
+    a. test-cmux-special-chars-in-story-name: CJK heading, emoji
+       heading, CJK ACTIVE_STORY -- session-key resolution works
+    b. test-cmux-special-chars-org-metachars: ACTIVE_STORY with org
+       meta-characters (# in "fix bug #123") reads correctly
+  - T58: Slug + CUSTOM_ID generation with unicode -- 2 tests:
+    a. test-cmux-slug-unicode-and-special: CJK stripped, emoji stripped,
+       org-metachars stripped, 8 assertions covering edge cases
+    b. test-cmux-custom-id-generation-unicode: CJK preserved ([:alnum:]
+       includes unicode letters), emoji stripped, plain ASCII passthrough
+  - T59: Tab title with unicode ACTIVE_STORY -- 1 test:
+    test-cmux-tab-title-with-unicode: accented chars in ACTIVE_STORY
+    (=résumé review=) preserved in tab title
+- WEB RESEARCH: "E2E test special characters unicode stress testing"
+  Key findings: (1) Test with right-to-left override U+202E which can
+  reverse UI elements, (2) null bytes and control chars can break
+  parsers, (3) emoji are 4-byte UTF-8 and can cause database issues,
+  (4) "Big List of Naughty Strings" is a useful reference for input
+  fuzzing. Applied: added CJK, emoji, and org-metachar tests.
+- make check: PASS (6 static + 223 + 568 + 168 + 54 cmux + 116 Python
+  = 1135 total). cmux tests 49 -> 54 (+5 new).
+- ADDITIONAL: T60 added -- open-tab focuses workspace via
+  select-workspace + set-app-focus. This covers the last MEDIUM-risk
+  gap (T28 in comprehensive coverage doc).
+- No new code bugs found.
+- make check: PASS (6 static + 223 + 568 + 168 + 55 cmux + 116 Python
+  = 1136 total). cmux tests 49 -> 55 (+6 new).
+- Coverage: all 8 journeys DONE + T50c fully verified. Unicode/special
+  char edge cases now covered: CJK workspace names, emoji headings,
+  org-metachar properties, slug generation, CUSTOM_ID generation,
+  tab title with accented characters. All HIGH and MEDIUM risk features
+  covered. Remaining gaps: 3 LOW-risk features (progress bar,
+  notification, scheduled execution).

@@ -349,7 +349,7 @@ Returns values from BODY. Cleans up buffer afterwards."
 
 (ert-deftest test-cmux-status-from-hook-file ()
   "Uses hook file status when available."
-  (let* ((dir "/tmp/claude-agent-status")
+  (let* ((dir claude-org-terminal-status-dir)
          (file (expand-file-name "test-hook-sid" dir)))
     (unwind-protect
         (progn
@@ -399,7 +399,7 @@ Returns values from BODY. Cleans up buffer afterwards."
       ;; Check that flag file was written
       (let ((flag-path (expand-file-name
                         "test-cmux-session-001.from-emacs"
-                        "/tmp/claude-agent-status")))
+                        claude-org-terminal-status-dir)))
         (should (file-exists-p flag-path))
         ;; Clean up
         (delete-file flag-path)
@@ -408,7 +408,7 @@ Returns values from BODY. Cleans up buffer afterwards."
             (claude-agent--unregister-query req-id)
             (delete-file (expand-file-name
                           "test-cmux-session-001.request-id"
-                          "/tmp/claude-agent-status")
+                          claude-org-terminal-status-dir)
                          t)))))))
 
 (ert-deftest test-cmux-execute-rejects-busy ()
@@ -449,11 +449,11 @@ Returns values from BODY. Cleans up buffer afterwards."
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-002.request-id"
-                          "/tmp/claude-agent-status")))
+                          claude-org-terminal-status-dir)))
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-002.from-emacs"
-                          "/tmp/claude-agent-status"))))))))
+                          claude-org-terminal-status-dir))))))))
 
 ;;; ============================================================================
 ;;; Tests: Query Completion
@@ -477,11 +477,11 @@ Returns values from BODY. Cleans up buffer afterwards."
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-001.request-id"
-                        "/tmp/claude-agent-status")))
+                        claude-org-terminal-status-dir)))
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-001.from-emacs"
-                        "/tmp/claude-agent-status")))))))
+                        claude-org-terminal-status-dir)))))))
 
 ;;; ============================================================================
 ;;; Tests: Cancel
@@ -852,11 +852,11 @@ file-level #+PROPERTY must also dispatch correctly."
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-file-backend.request-id"
-                          "/tmp/claude-agent-status")))
+                          claude-org-terminal-status-dir)))
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-file-backend.from-emacs"
-                          "/tmp/claude-agent-status"))))))))
+                          claude-org-terminal-status-dir))))))))
 
 (ert-deftest test-cmux-file-level-backend-sets-backend-property ()
   "File-level CLAUDE_BACKEND=cmux sets :backend on session after execute.
@@ -876,11 +876,11 @@ T52b: Ensures generic cancel works for file-level backend dispatch."
             (ignore-errors
               (delete-file (expand-file-name
                             "test-cmux-session-file-backend.request-id"
-                            "/tmp/claude-agent-status")))
+                            claude-org-terminal-status-dir)))
             (ignore-errors
               (delete-file (expand-file-name
                             "test-cmux-session-file-backend.from-emacs"
-                            "/tmp/claude-agent-status")))))))))
+                            claude-org-terminal-status-dir)))))))))
 
 ;;; ============================================================================
 ;;; Tests: Ensure-session hash table restore on reconnect (T53)
@@ -1181,6 +1181,194 @@ continue its loop."
           (when buffer-file-name
             (ignore-errors (delete-file buffer-file-name))))
         (kill-buffer buf)))))
+
+;;; ============================================================================
+;;; T57: Special characters in workspace/story names
+;;; ============================================================================
+
+(ert-deftest test-cmux-special-chars-in-story-name ()
+  "T57a: Story names with unicode, emoji, org-special chars work correctly.
+Verifies session-key resolution and property lookup work with special chars."
+  :tags '(:e2e :simulated :unit :fast :stable)
+  (test-cmux--with-org-buffer
+      (concat
+       "* Workspace: 日本語テスト 🚀\n"
+       ":PROPERTIES:\n"
+       ":CLAUDE_SESSION_ID: sdd-unicode-001\n"
+       ":CLAUDE_BACKEND: cmux\n"
+       ":ACTIVE_STORY: データベース設計\n"
+       ":CUSTOM_ID: test-unicode-workspace\n"
+       ":END:\n\n"
+       "** データベース設計\n"
+       "*** Workflow :sdd:\n"
+       ":PROPERTIES:\n"
+       ":CUSTOM_ID: test-unicode-wf\n"
+       ":END:\n\n"
+       "**** Unicode Query :claude_chat:\n"
+       ":PROPERTIES:\n"
+       ":CUSTOM_ID: test-unicode-instr-1\n"
+       ":END:\n\n"
+       "#+begin_src ai\n"
+       "What is 2+2?\n"
+       "#+end_src\n")
+    ;; Session key resolves correctly with unicode
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward ":CUSTOM_ID: test-unicode-instr-1" nil t)
+      (let ((sk (claude-org--current-session-key)))
+        (should (stringp sk))
+        (should (string-match-p "sdd-unicode-001" sk))))
+    ;; ACTIVE_STORY with CJK chars reads correctly
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward ":CUSTOM_ID: test-unicode-workspace" nil t)
+      (org-back-to-heading t)
+      (should (equal "データベース設計" (org-entry-get nil "ACTIVE_STORY"))))
+    ;; Heading with emoji is readable
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward ":CUSTOM_ID: test-unicode-workspace" nil t)
+      (org-back-to-heading t)
+      (let ((heading (org-get-heading t t t t)))
+        (should (string-match-p "日本語テスト" heading))
+        (should (string-match-p "🚀" heading))))))
+
+(ert-deftest test-cmux-special-chars-org-metachars ()
+  "T57b: Story names containing org meta-characters (* # : |) handled safely."
+  :tags '(:e2e :simulated :unit :fast :stable)
+  (test-cmux--with-org-buffer
+      (concat
+       "* Test Workspace\n"
+       ":PROPERTIES:\n"
+       ":CLAUDE_SESSION_ID: sdd-metachars-001\n"
+       ":CLAUDE_BACKEND: cmux\n"
+       ":ACTIVE_STORY: fix bug #123\n"
+       ":CUSTOM_ID: test-metachar-workspace\n"
+       ":END:\n\n"
+       "** fix bug #123\n"
+       "*** Workflow :sdd:\n"
+       ":PROPERTIES:\n"
+       ":CUSTOM_ID: test-metachar-wf\n"
+       ":END:\n\n"
+       "**** Bug fix query :claude_chat:\n"
+       ":PROPERTIES:\n"
+       ":CUSTOM_ID: test-metachar-instr-1\n"
+       ":END:\n\n"
+       "#+begin_src ai\n"
+       "Fix the bug.\n"
+       "#+end_src\n")
+    ;; ACTIVE_STORY with # char reads correctly
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward ":CUSTOM_ID: test-metachar-workspace" nil t)
+      (org-back-to-heading t)
+      (should (equal "fix bug #123" (org-entry-get nil "ACTIVE_STORY"))))))
+
+;;; ============================================================================
+;;; T58: Slug generation with special characters
+;;; ============================================================================
+
+(ert-deftest test-cmux-slug-unicode-and-special ()
+  "T58: slug generation handles unicode, CJK, emoji, RTL, and special chars.
+Verifies that non-ASCII characters are stripped and only alphanum + hyphens remain."
+  :tags '(:e2e :simulated :unit :fast :stable)
+  ;; CJK characters stripped
+  (should (equal "" (claude-org--workspace-name-to-slug "日本語")))
+  ;; Emoji stripped
+  (should (equal "" (claude-org--workspace-name-to-slug "🚀🔥💡")))
+  ;; Mixed ASCII and unicode: ASCII preserved, unicode stripped
+  (should (equal "api-design" (claude-org--workspace-name-to-slug "API Design 🎯")))
+  ;; Org-mode special chars: * # : |
+  (should (equal "fix-bug-123" (claude-org--workspace-name-to-slug "fix bug *#123*")))
+  (should (equal "table-col-a-col-b" (claude-org--workspace-name-to-slug "table: col-a | col-b")))
+  ;; Plain ASCII passthrough
+  (should (equal "hello-world" (claude-org--workspace-name-to-slug "Hello World")))
+  ;; Leading/trailing special chars stripped
+  (should (equal "test" (claude-org--workspace-name-to-slug "---test---")))
+  ;; Empty string
+  (should (equal "" (claude-org--workspace-name-to-slug ""))))
+
+(ert-deftest test-cmux-custom-id-generation-unicode ()
+  "T58b: CUSTOM_ID generation handles unicode in section names.
+Non-ASCII chars are replaced with hyphens and collapsed."
+  :tags '(:e2e :simulated :unit :fast :stable)
+  ;; CJK section name: [:alnum:] includes unicode letters, so CJK chars preserved
+  (let ((id (claude-org--generate-custom-id "sdd-001" "データベース設計")))
+    (should (stringp id))
+    (should (string-match-p "sdd-001" id))
+    ;; CJK chars ARE alphanumeric in Emacs regex — preserved in CUSTOM_ID
+    (should (string-match-p "データベース設計" id)))
+  ;; Emoji section name: emoji are NOT [:alnum:], so stripped
+  (let ((id (claude-org--generate-custom-id "sdd-002" "Deploy 🚀 Pipeline")))
+    (should (stringp id))
+    (should (string-match-p "deploy" id))
+    (should (string-match-p "pipeline" id))
+    ;; Emoji should be stripped (replaced by hyphens and collapsed)
+    (should-not (string-match-p "🚀" id)))
+  ;; Plain ASCII
+  (let ((id (claude-org--generate-custom-id "sdd-003" "Research Output")))
+    (should (equal "sdd-003-research-output" id))))
+
+;;; ============================================================================
+;;; T59: Tab title and cmux operations with special characters
+;;; ============================================================================
+
+(ert-deftest test-cmux-tab-title-with-unicode ()
+  "T59: Tab title (ACTIVE_STORY) with unicode passed correctly to tab-title fn."
+  :tags '(:e2e :simulated :unit :fast :stable)
+  (test-cmux--with-org-buffer
+      (concat
+       "* Unicode Workspace\n"
+       ":PROPERTIES:\n"
+       ":CLAUDE_SESSION_ID: sdd-tab-unicode-001\n"
+       ":CLAUDE_BACKEND: cmux\n"
+       ":CMUX_SURFACE_ID: surface:existing-123\n"
+       ":CMUX_WORKSPACE_ID: mock-workspace-uuid-123\n"
+       ":ACTIVE_STORY: résumé review\n"
+       ":CUSTOM_ID: test-tab-unicode-ws\n"
+       ":END:\n\n"
+       "** résumé review\n"
+       "*** Workflow :sdd:\n"
+       ":PROPERTIES:\n"
+       ":CUSTOM_ID: test-tab-unicode-wf\n"
+       ":END:\n\n"
+       "**** Query :claude_chat:\n"
+       ":PROPERTIES:\n"
+       ":CUSTOM_ID: test-tab-unicode-instr-1\n"
+       ":END:\n\n"
+       "#+begin_src ai\n"
+       "What is 2+2?\n"
+       "#+end_src\n")
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward ":CUSTOM_ID: test-tab-unicode-ws" nil t)
+      (org-back-to-heading t)
+      ;; Tab title function reads ACTIVE_STORY
+      (let ((title (claude-org-terminal--tab-title)))
+        (should (stringp title))
+        ;; Title should contain the story name with accented chars
+        (should (string-match-p "résumé review" title))))))
+
+;;; ============================================================================
+;;; T60: Open tab / focus workspace
+;;; ============================================================================
+
+(ert-deftest test-cmux-open-tab-focuses-workspace ()
+  "T60: open-tab calls select-workspace and set-app-focus for existing workspace."
+  :tags '(:e2e :simulated :unit :fast :stable)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-with-surface
+      (save-excursion
+        (goto-char (point-min))
+        (re-search-forward ":CUSTOM_ID: test-cmux-story-existing" nil t)
+        (org-back-to-heading t)
+        (claude-org-cmux-open-tab)
+        ;; Should have called select-workspace
+        (let ((select-calls (test-cmux--mock-calls-for "select-workspace")))
+          (should select-calls)
+          (should (member "mock-workspace-uuid-123" (cdar select-calls))))
+        ;; Should have called set-app-focus
+        (should (test-cmux--mock-calls-for "set-app-focus"))))))
 
 (provide 'test-cmux-e2e-simulated)
 

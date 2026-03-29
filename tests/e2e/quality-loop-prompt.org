@@ -102,14 +102,20 @@ Check the design doc for current status before starting.
 - Generate semi-valid JSON streams, feed to process filter
 - Verify no unhandled errors
 
-*** Sentinel edge cases
-- Buffer killed during stream
-- Process exits with signal (not exit code)
-- Rapid successive exit/restart
+*** DONE Sentinel edge cases + non-object JSON bug fix :done:
+- Implemented [2026-03-29]: 7 new tests in test-claude-agent-sentinel.el
+- Buffer killed during stream: sentinel handles dead output buffer
+- Process exits with signal: hangup and killed:9 events handled via fallback
+- Rapid successive exit: double sentinel fire is idempotent
+- Non-object JSON: bare values (42, "string") no longer crash plist-get/intern
+- Bug fix in claude-agent-backend.org: both process-json-buffer and sentinel
+  remaining-JSON handler guard with (listp parsed) and (stringp msg-type)
 
-*** Permission round-trip
-- Test can_use_tool request → response cycle
-- Verify pending-control-requests tracking
+*** DONE Permission round-trip :done:
+- Implemented [2026-03-29]: 10 unit tests in test-permission-round-trip.el
+- Allow/deny/error round-trips, tracking lifecycle, hook_callback, unsupported
+  subtype, dead process, context propagation, updated input, concurrent requests
+- Integration test already existed in test-harness-phase2.el
 
 ** P3 — Polish and Cleanup
 
@@ -118,19 +124,64 @@ Check the design doc for current status before starting.
 - Retained after commit 1038144 removed iTerm2/native
 - Remove if no active users (check with user first for this one)
 
-*** Stale verbose output dispatcher
-- claude-org.org:5075 references claude-cli backend in fallback chain
-- Update docstring, simplify fallback
+*** DONE Stale verbose output dispatcher :done:
+- Implemented [2026-03-29]: Updated claude-org-show-verbose docstring to
+  accurately describe the 3-level fallback (cmux capture, backend-specific,
+  shared session). The fallback chain itself is correct; only the docstring
+  was stale.
 
-*** Hardcoded /tmp paths in tests
-- test-cmux-e2e-simulated.el: 14 occurrences of "/tmp/claude-agent-status"
-- Replace with claude-org-terminal-status-dir constant
-- Test: add structural test preventing hardcoded /tmp in test files
+*** DONE Extract ensure-session (154 lines) :done:
+- Implemented [2026-03-29]: Extracted 4 helpers from claude-org-cmux--ensure-session
+  (workspace-alive-p, restore-workspace, resolve-workspace-uuid, launch-workspace)
+- Orchestrator reduced from 154 to 30 lines
+- All 963 unit tests + 116 Python tests pass
 
-*** Commented-out test file
-- Makefile:295 has test-claude-agent-input-validation.el commented out
-- Either implement the stubs or remove the file
-- Don't leave dead test skeletons
+*** DONE Hardcoded /tmp paths in tests :done:
+- Implemented [2026-03-29]: Replaced all 14 occurrences in test-cmux-e2e-simulated.el
+  with `claude-org-terminal-status-dir' constant
+- Structural test F40: test-structural-no-hardcoded-tmp-in-tests prevents reintroduction
+- 573 unit tests + 116 Python tests pass
+
+*** DONE Commented-out test file :done:
+- Implemented [2026-03-29]: Validation functions already exist in claude-agent-backend.org
+  (claude-agent--validate-answer, validate-file-path, validate-command) and
+  claude-org.org (claude-org--parse-env-file-safe). All 20 tests pass.
+- Uncommented and added to test-org-unit target (needs LOAD_ALL for env parsing tests)
+- Removed stale "TDD stubs" comment from Makefile
+- Updated test file header to reflect implemented status
+- Structural test F41: test-structural-no-commented-out-test-files prevents reintroduction
+- 259 agent unit + 593 org unit tests pass (20 newly enabled)
+
+** P4 — Discovered in Fresh Scan (Iteration 12+)
+
+*** DONE Extract verbose-format-message (69 lines) :done:
+- Implemented [2026-03-29]: Extracted 5 helpers from claude-agent--verbose-format-message
+  (--verbose-format-content-blocks, --verbose-format-assistant-msg,
+   --verbose-format-user-msg, --verbose-format-system-msg, --verbose-format-result-msg)
+- Dispatcher reduced from 69 to 9 lines
+- 16 new unit tests in test-verbose-formatter.el
+- Structural test F43: test-structural-verbose-format-dispatcher-thin prevents regrowth
+- 979 unit tests + 116 Python tests pass
+
+*** Long functions remaining (>60 lines)
+- claude-agent--start-process (100 lines, claude-agent-backend.org:2111) [sequential setup — low ROI]
+- claude-org-execute (91 lines, claude-org.org:4489)
+- claude-agent-list-queries (76 lines, claude-agent.org:449)
+- claude-org-cmux--launch-workspace (73 lines, claude-org-cmux.org:512)
+- claude-agent--update-activity-string (70 lines, claude-agent.org:301)
+- claude-org--workspace-create-docs-files (70 lines, claude-org.org:3336)
+- claude-agent--process-sentinel (69 lines, claude-agent-backend.org:1645)
+- claude-org--recover-session (68 lines, claude-org.org:1082)
+- claude-org--send-request (65 lines, claude-org.org:4678)
+- claude-agent-generate-title (65 lines, claude-agent.org:1445)
+- claude-agent--verbose-insert-query-header (64 lines, claude-agent-backend.org:3133)
+- claude-org-cmux--execute-ai-block (63 lines, claude-org-cmux.org:732)
+- claude-org--handle-complete (63 lines, claude-org.org:4296)
+- claude-org-cmux--build-launch-command (62 lines, claude-org-cmux.org:355)
+- claude-org--execute-core (62 lines, claude-org.org:4426)
+- claude-agent--handle-control-request (61 lines, claude-agent-backend.org:2806)
+- Not all need extraction — some are intrinsically sequential.
+  Focus on those with clear phase boundaries.
 
 * Quality Dimensions
 
