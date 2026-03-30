@@ -499,7 +499,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-org: navigation & insertion
     "claude-org-insert-ai-block"
     "claude-org-insert-block"
-    "claude-org-insert-block-menu"
     "claude-org-insert-session-block"
     "claude-org-insert-template"
     "claude-org-insert-story"
@@ -509,7 +508,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-goto-custom-id"
     ;; claude-org: workspace workflow
     "claude-org-insert-workspace"
-    "claude-org-tag-prompt"
     ;; claude-org: refine
     "claude-org-refine"
     "claude-org-refine-block"

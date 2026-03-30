@@ -61,15 +61,10 @@
   - [[#pending-block-queue-see-claude-org-queueorg][Pending Block Queue (see claude-org-queue.org)]]
   - [[#execution-status-property][Execution Status Property]]
 - [[#behavior-prompts][Behavior Prompts]]
-  - [[#tag-prompt-lookup][Tag Prompt Lookup]]
-    - [[#generic-function][Generic Function]]
-    - [[#default-method-file-based-loading][Default Method (File-Based Loading)]]
-    - [[#workspace-root-detection][Workspace Root Detection]]
+  - [[#workspace-root-detection][Workspace Root Detection]]
     - [[#custom_id-generation][CUSTOM_ID Generation]]
     - [[#workspace-link-generation][Workspace Link Generation]]
-  - [[#header-prompt-lookup][Header Prompt Lookup]]
   - [[#collect-current-context][Collect Current Context]]
-  - [[#build-behavior-prompt][Build Behavior Prompt]]
 - [[#block-detection][Block Detection]]
   - [[#section-level-detection][Section Level Detection]]
   - [[#ai-block-boundary-detection][AI Block Boundary Detection]]
@@ -79,9 +74,6 @@
 - [[#block-insertion][Block Insertion]]
   - [[#instruction-numbering][Instruction Numbering]]
   - [[#standard-block-insertion][Standard Block Insertion]]
-    - [[#tag-selection-state][Tag Selection State]]
-    - [[#tag-toggle-functions][Tag Toggle Functions]]
-    - [[#transient-tag-selection-menu][Transient Tag Selection Menu]]
     - [[#core-block-insertion][Core Block Insertion]]
   - [[#session-and-story-blocks][Session and Story Blocks]]
   - [[#prompt-refinement][Prompt Refinement]]
@@ -1588,20 +1580,18 @@ This applies in both host and Docker sandbox modes.")
 Combines:
 1. System prompts from prompts/system/*.org (loaded in sorted order)
 2. :system_prompt: tagged org sections in the current file
-3. Behavior prompts from tags and header arguments
-4. Line width instruction based on `claude-org-line-width'
-5. Elisp reload instruction"
+3. Line width instruction based on `claude-org-line-width'
+4. Elisp reload instruction"
   (claude-agent-with-span "build-system-prompt" nil nil
   (let ((file-prompts (claude-org--load-system-prompts))
         (org-prompts (claude-org--collect-system-prompts))
-        (behavior-prompt (claude-org--build-behavior-prompt))
         (line-width-hint (when (and claude-org-line-width (> claude-org-line-width 0))
                            (format "Keep output lines under %d characters, break long lines naturally."
                                    claude-org-line-width)))
         (elisp-hint (claude-org--build-elisp-reload-hint)))
-    ;; Combine all parts: file prompts + org-prompts + behaviors + line-width + elisp-reload
+    ;; Combine all parts: file prompts + org-prompts + line-width + elisp-reload
     (let ((parts (append file-prompts
-                         (delq nil (list org-prompts behavior-prompt line-width-hint elisp-hint)))))
+                         (delq nil (list org-prompts line-width-hint elisp-hint)))))
       (when parts
         (string-join parts "\n\n"))))))
 #+END_SRC
@@ -2068,45 +2058,9 @@ Returns non-nil if status was successfully set."
 
 * Behavior Prompts
 
-Tag and header argument based behavior injection system.
-Prompts are loaded from =prompts/= directory at runtime.
+Workspace-related context detection functions.
 
-** Tag Prompt Lookup
-
-Tag-based prompt generation using =cl-defgeneric= / =cl-defmethod=.
-This allows specialized behavior per tag (e.g., workspace injects dynamic links).
-
-*** Generic Function
-
-#+BEGIN_SRC elisp
-(cl-defgeneric claude-org-tag-prompt (tag context)
-  "Generate prompt content for TAG with CONTEXT.
-TAG is a symbol (e.g., 'sdd, 'research).
-CONTEXT is a plist with keys:
-  :file-path   - Absolute path to the org file
-  :workspace-root - Workspace root section name (e.g., \"Feature Name\") or nil
-  :current-tags - List of all inherited tags
-Returns a prompt string or nil.")
-#+END_SRC
-
-*** Default Method (File-Based Loading)
-
-Default method uses =claude-org--extract-summary-section= for progressive disclosure.
-Only the Summary section is loaded into system prompt; Claude reads full file via
-org link when the tag is active.
-
-#+BEGIN_SRC elisp
-(cl-defmethod claude-org-tag-prompt (tag _context)
-  "Default: load Summary section from prompts/tags/TAG.org.
-Uses progressive disclosure - only Summary is loaded into system prompt.
-Claude reads full file via org link when tag is active.
-Falls back to full file if no Summary section exists."
-  (claude-org--extract-summary-section
-   (expand-file-name (format "tags/%s.org" (symbol-name tag))
-                     claude-org-prompts-directory)))
-#+END_SRC
-
-*** Workspace Root Detection
+** Workspace Root Detection
 
 #+BEGIN_SRC elisp
 (defun claude-org--find-workspace-root ()
@@ -2415,39 +2369,6 @@ Returns a slug like \"claude-agent-dev-research-output-sdd-20251227-180147\"."
         (format "%s-%s" session-id slug)))))
 #+END_SRC
 
-** Header Prompt Lookup
-
-Loads prompt from =prompts/headers/=. Supports:
-- Enum-style: =headers/phase/code.org= for =:phase code=
-- Template-style: =headers/coverage.org= with =%s= placeholder
-
-#+BEGIN_SRC elisp
-(defun claude-org--header-prompt (header value)
-  "Get behavior prompt for HEADER keyword with VALUE.
-Loads from prompts/headers/ at runtime.
-
-Supports two patterns:
-- Enum: headers/HEADER/VALUE.org (e.g., headers/phase/code.org)
-- Template: headers/HEADER.org with %s placeholder"
-  (when value
-    (let* ((name (substring (symbol-name header) 1))  ; strip leading :
-           (dir (expand-file-name "headers" claude-org-prompts-directory))
-           ;; Try enum-style first: headers/phase/code.org
-           (enum-file (expand-file-name (format "%s/%s.org" name value) dir))
-           ;; Fallback to template: headers/coverage.org
-           (template-file (expand-file-name (format "%s.org" name) dir)))
-      (cond
-       ;; Enum-style: subdirectory with value files
-       ((file-readable-p enum-file)
-        (claude-org--load-prompt-file enum-file))
-       ;; Template-style: single file with %s placeholder
-       ((file-readable-p template-file)
-        (let ((tpl (claude-org--load-prompt-file template-file)))
-          (if (and tpl (string-match-p "%s" tpl))
-              (format tpl value)
-            tpl)))))))
-#+END_SRC
-
 ** Collect Current Context
 
 #+BEGIN_SRC elisp
@@ -2499,63 +2420,6 @@ Returns plist of header arguments, e.g. (:phase \"code\" :tests t)."
                       (push (or val t) result)))))
               ;; Result is (val2 key2 val1 key1), reverse to get (key1 val1 key2 val2)
               (nreverse result))))))))
-#+END_SRC
-
-** Build Behavior Prompt
-
-#+BEGIN_SRC elisp
-(defun claude-org--collect-behavior-config ()
-  "Collect current behavior configuration.
-Returns plist with :tags and :header-args."
-  (list :tags (claude-org--get-current-tags)
-        :header-args (claude-org--get-block-header-args)))
-
-(defun claude-org--sdd-tag-priority (tag)
-  "Return priority for TAG in SDD workflow (lower = first).
-Container tags come before phase tags."
-  (pcase tag
-    ("sdd" 0)        ; Container first
-    ("research" 10)  ; Phases in order
-    ("design" 11)
-    ("planning" 12)
-    ("implementation" 13)
-    (_ 50)))          ; Other tags last
-
-(defun claude-org--build-behavior-context ()
-  "Build context plist for tag prompt generation.
-Returns plist with :file-path, :workspace-root, :session-id, :current-tags."
-  (list :file-path (buffer-file-name)
-        :workspace-root (claude-org--find-workspace-root)
-        :session-id (claude-org--get-session-id)
-        :current-tags (claude-org--get-current-tags)))
-
-(defun claude-org--build-behavior-prompt ()
-  "Build behavior prompt from current tags and header arguments.
-Returns combined prompt string or nil if no behaviors active.
-
-For workspace workflow, tags are ordered: container (sdd) first, then phase tags.
-This ensures the workflow context is established before phase-specific behavior.
-Context is passed to tag methods for dynamic prompt generation (e.g., workspace links)."
-  (let* ((config (claude-org--collect-behavior-config))
-         (tags (plist-get config :tags))
-         (header-args (plist-get config :header-args))
-         (context (claude-org--build-behavior-context))
-         (parts '()))
-    ;; Collect tag prompts (ordered by SDD priority for proper context)
-    (dolist (tag-str (sort (copy-sequence tags)
-                           (lambda (a b)
-                             (< (claude-org--sdd-tag-priority a)
-                                (claude-org--sdd-tag-priority b)))))
-      (when-let* ((prompt (claude-org-tag-prompt (intern tag-str) context)))
-        (push prompt parts)))
-    ;; Collect header argument prompts
-    (cl-loop for (header value) on header-args by #'cddr
-             when (keywordp header)
-             do (when-let* ((prompt (claude-org--header-prompt header value)))
-                  (push prompt parts)))
-    ;; Combine (reverse to maintain order: tags first, then headers)
-    (when parts
-      (string-join (nreverse parts) "\n\n"))))
 #+END_SRC
 
 * Block Detection
@@ -2930,168 +2794,7 @@ The primary insertion command. Key behaviors:
 - Skips past output sections to maintain the flat Instruction/Response pattern
 - Matches heading level of existing instructions (or uses current level)
 - Auto-generates the next instruction number
-- Optionally prompts for workflow tags via transient menu
-
-*** Tag Selection State
-
-#+NAME: block-insert-tag-state
-#+BEGIN_SRC elisp
-(defvar claude-org--selected-tags nil
-  "Currently selected workflow tags for block insertion.")
-
-(defvar claude-org--discovered-tags-cache nil
-  "Cache of discovered tags: (timestamp . tag-list).
-Each tag is (key tag description).")
-
-(defconst claude-org--discovered-tags-cache-ttl 5
-  "Seconds to cache discovered tags before re-scanning.")
-
-(defun claude-org--discover-tags ()
-  "Discover available tags from prompts/tags/ directory.
-Returns list of (key tag description) for each tag file.
-Results are cached for `claude-org--discovered-tags-cache-ttl' seconds."
-  (let* ((now (float-time))
-         (cache-time (car claude-org--discovered-tags-cache))
-         (cached-tags (cdr claude-org--discovered-tags-cache)))
-    (if (and cache-time
-             (< (- now cache-time) claude-org--discovered-tags-cache-ttl))
-        cached-tags
-      ;; Rebuild cache
-      (let* ((tag-dir (expand-file-name "tags" claude-org-prompts-directory))
-             (files (when (file-directory-p tag-dir)
-                      (directory-files tag-dir nil "\\.org$")))
-             (tags '())
-             (used-keys '()))
-        (dolist (file files)
-          (let* ((tag-name (file-name-sans-extension file))
-                 (file-path (expand-file-name file tag-dir))
-                 (desc (claude-org--extract-tag-description file-path))
-                 (key (claude-org--assign-tag-key tag-name used-keys)))
-            (push key used-keys)
-            (push (list key tag-name (or desc (capitalize tag-name))) tags)))
-        (setq tags (nreverse tags))
-        (setq claude-org--discovered-tags-cache (cons now tags))
-        tags))))
-
-(defun claude-org--extract-tag-description (file-path)
-  "Extract #+DESCRIPTION: from tag FILE-PATH, or nil if not found."
-  (when (file-readable-p file-path)
-    (with-temp-buffer
-      (insert-file-contents file-path nil 0 500)  ; Read first 500 chars
-      (goto-char (point-min))
-      (when (re-search-forward "^#\\+DESCRIPTION:\\s-*\\(.+\\)$" nil t)
-        (string-trim (match-string 1))))))
-
-(defun claude-org--assign-tag-key (tag-name used-keys)
-  "Assign a single-char key for TAG-NAME avoiding USED-KEYS.
-Tries first letter, then subsequent letters, then digits."
-  (let ((candidates (append (string-to-list (downcase tag-name))
-                            (string-to-list "1234567890"))))
-    (catch 'found
-      (dolist (char candidates)
-        (let ((key (char-to-string char)))
-          (unless (member key used-keys)
-            (throw 'found key))))
-      ;; Fallback: use full tag name (shouldn't happen)
-      tag-name)))
-
-(defun claude-org--workflow-tags ()
-  "Get available workflow tags (dynamic discovery).
-Returns list of (key tag description)."
-  (claude-org--discover-tags))
-#+END_SRC
-
-*** Tag Toggle Functions
-
-#+NAME: block-insert-tag-toggle
-#+BEGIN_SRC elisp
-(defun claude-org--toggle-tag (tag)
-  "Toggle TAG in selected tags list."
-  (if (member tag claude-org--selected-tags)
-      (setq claude-org--selected-tags (delete tag claude-org--selected-tags))
-    (push tag claude-org--selected-tags)))
-
-(defun claude-org--tag-selected-p (tag)
-  "Return non-nil if TAG is currently selected."
-  (member tag claude-org--selected-tags))
-
-(defun claude-org--make-tag-toggler (tag-name)
-  "Create a toggle function for TAG-NAME."
-  (lexical-let ((tn tag-name))
-    (lambda ()
-      (interactive)
-      (claude-org--toggle-tag tn))))
-#+END_SRC
-
-*** Transient Tag Selection Menu
-
-The menu is built dynamically from discovered tags in =prompts/tags/=.
-
-#+NAME: block-insert-transient-menu
-#+BEGIN_SRC elisp
-(require 'transient)
-
-(defun claude-org--make-tag-description (tag-name description)
-  "Create a description function for TAG-NAME with DESCRIPTION."
-  (lexical-let ((tn tag-name)
-                (desc description))
-    (lambda ()
-      (concat (if (claude-org--tag-selected-p tn) "[X] " "[ ] ")
-              desc))))
-
-(defun claude-org--build-tag-menu-items ()
-  "Build transient menu items from discovered tags.
-Returns a vector suitable for transient group."
-  (let ((items '()))
-    (dolist (tag-spec (claude-org--workflow-tags))
-      (let* ((key (nth 0 tag-spec))
-             (tag-name (nth 1 tag-spec))
-             (description (nth 2 tag-spec)))
-        (push (list key
-                    (claude-org--make-tag-toggler tag-name)
-                    :transient t
-                    :description
-                    (claude-org--make-tag-description tag-name description))
-              items)))
-    (apply #'vector (nreverse items))))
-
-(defun claude-org-insert-block-menu ()
-  "Show transient menu to select workflow tags for new AI block.
-Tags are discovered dynamically from prompts/tags/ directory."
-  (interactive)
-  (declare-function claude-org--insert-block-menu-dynamic "claude-org")
-  (let ((tag-items (claude-org--build-tag-menu-items)))
-    (transient-define-prefix claude-org--insert-block-menu-dynamic ()
-      "Select workflow tags for new AI block."
-      :value (lambda () claude-org--selected-tags)
-      [:description "Workflow Tags (toggle to select)"
-       :setup-children
-       (lambda (_)
-         (mapcar (lambda (item)
-                   (transient-parse-suffix
-                    (oref transient--prefix command)
-                    item))
-                 (append tag-items nil)))]
-      ["Actions"
-       ("RET" "Create block with tags" claude-org--insert-block-with-tags)
-       ("n" "Create block (no tags)" claude-org--insert-block-no-tags)
-       ("q" "Cancel" transient-quit-one)])
-    (claude-org--insert-block-menu-dynamic)))
-
-(defun claude-org--insert-block-with-tags ()
-  "Insert block with currently selected tags, then clear selection."
-  (interactive)
-  (let ((tags claude-org--selected-tags))
-    (setq claude-org--selected-tags nil)
-    (claude-org--do-insert-block tags)))
-
-(defun claude-org--insert-block-no-tags ()
-  "Insert block without any workflow tags."
-  (interactive)
-  (setq claude-org--selected-tags nil)
-  (claude-org--do-insert-block nil))
-#+END_SRC
-
+- Tags the heading with =claude-org-heading-tag=
 *** Core Block Insertion
 
 **** Finding Previous Chat Level
@@ -3126,9 +2829,9 @@ Returns the level (integer) or nil if not found."
 
 #+NAME: block-insert-standard
 #+BEGIN_SRC elisp
-(defun claude-org--do-insert-block (workflow-tags)
-  "Insert an AI block with optional WORKFLOW-TAGS.
-WORKFLOW-TAGS is a list of tag strings like (\"research\" \"design\").
+(defun claude-org--do-insert-block (_workflow-tags)
+  "Insert an AI block at point.
+_WORKFLOW-TAGS is ignored (kept for call-site compatibility).
 Automatically generates a CUSTOM_ID for stable navigation."
   ;; If inside an output section, skip to after it
   (claude-org--skip-to-after-output-section)
@@ -3138,10 +2841,8 @@ Automatically generates a CUSTOM_ID for stable navigation."
                     1))
          (stars (make-string level ?*))
          (num (claude-org--next-instruction-number))
-         ;; Build tag string: workflow tags + claude-org-heading-tag
-         ;; Org format is :tag1:tag2:tag3: - single colons between tags
-         (all-tags (append workflow-tags (list claude-org-heading-tag)))
-         (tag-str (concat ":" (mapconcat #'identity all-tags ":") ":"))
+         (tag-string claude-org-heading-tag)
+         (tag-str (concat ":" tag-string ":"))
          ;; Generate CUSTOM_ID for stable navigation
          (file-base (when buffer-file-name (file-name-base buffer-file-name)))
          ;; Wrap session-id lookup to handle edge cases in batch testing
@@ -3178,12 +2879,9 @@ If that ID already exists in the buffer, appends -2, -3, etc. until unique."
         candidate))))
 
 (defun claude-org-insert-block ()
-  "Insert an AI query block with optional workflow tags.
-Shows a transient menu to select tags (research, design, planning, implementation).
-Press RET to create with selected tags, or 'n' for no tags."
+  "Insert a new AI block at point."
   (interactive)
-  (setq claude-org--selected-tags nil)
-  (claude-org-insert-block-menu))
+  (claude-org--do-insert-block nil))
 #+END_SRC
 
 ** Session and Story Blocks

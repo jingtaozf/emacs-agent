@@ -169,77 +169,26 @@ The workspace has: * Workspace > ** Story > *** System Prompt + *** Workflow."
         (setq count (1+ count)))
       (should (= 1 count)))))
 
-;;; Unit Tests - Tag Selection
+;;; Unit Tests - Block Insertion
 
-(ert-deftest test-workspace-tag-toggle ()
-  "Test tag toggling for block insertion."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  ;; Clear any previous state
-  (setq claude-org--selected-tags nil)
-  ;; Toggle on
-  (claude-org--toggle-tag "research")
-  (should (member "research" claude-org--selected-tags))
-  ;; Toggle off
-  (claude-org--toggle-tag "research")
-  (should-not (member "research" claude-org--selected-tags))
-  ;; Multiple tags
-  (claude-org--toggle-tag "research")
-  (claude-org--toggle-tag "design")
-  (should (member "research" claude-org--selected-tags))
-  (should (member "design" claude-org--selected-tags))
-  ;; Cleanup
-  (setq claude-org--selected-tags nil))
-
-(ert-deftest test-workspace-block-with-workflow-tags ()
-  "Test inserting block with workflow tags."
+(ert-deftest test-workspace-block-insert ()
+  "Test inserting block with only the heading tag."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
     (insert "* Feature\n** Workflow :sdd:\n")
     (goto-char (point-max))
-    ;; Insert block with research and design tags
-    (claude-org--do-insert-block '("research" "design"))
-    (goto-char (point-min))
-    ;; Verify tags are present
-    (should (re-search-forward ":research:" nil t))
-    (goto-char (point-min))
-    (should (re-search-forward ":design:" nil t))
-    (goto-char (point-min))
-    (should (re-search-forward (format ":%s:" claude-org-heading-tag) nil t))))
-
-(ert-deftest test-workspace-block-without-tags ()
-  "Test inserting block without workflow tags."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-sdd.org")
-    (insert "* Feature\n** Workflow :sdd:\n")
-    (goto-char (point-max))
-    ;; Insert block with no workflow tags
+    ;; Insert block
     (claude-org--do-insert-block nil)
     (goto-char (point-min))
-    ;; Should only have claude-org-heading-tag, not workflow tags
+    ;; Should only have claude-org-heading-tag
     (should (re-search-forward (format ":%s:" claude-org-heading-tag) nil t))
     (goto-char (point-min))
     (should-not (re-search-forward ":research:" nil t))
     (should-not (re-search-forward ":design:" nil t))))
 
 ;;; Unit Tests - Tag Inheritance
-
-(ert-deftest test-workspace-tag-priority-ordering ()
-  "Test that workspace tags are ordered correctly (container before phase)."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  ;; sdd should come before research
-  (should (< (claude-org--sdd-tag-priority "sdd")
-             (claude-org--sdd-tag-priority "research")))
-  ;; phases should be in order
-  (should (< (claude-org--sdd-tag-priority "research")
-             (claude-org--sdd-tag-priority "design")))
-  (should (< (claude-org--sdd-tag-priority "design")
-             (claude-org--sdd-tag-priority "planning")))
-  (should (< (claude-org--sdd-tag-priority "planning")
-             (claude-org--sdd-tag-priority "implementation"))))
 
 (ert-deftest test-workspace-tag-inheritance-in-workflow ()
   "Test that AI blocks in workspace phases inherit both :sdd: and phase tags."
@@ -257,27 +206,10 @@ The workspace has: * Workspace > ** Story > *** System Prompt + *** Workflow."
       (should (member "sdd" tags))
       (should (member "research" tags)))))
 
-;;; Unit Tests - Behavior Prompt Building
+;;; Unit Tests - Tag Inheritance
 
-(ert-deftest test-workspace-behavior-prompt-combines-tags ()
-  "Test that behavior prompt combines :sdd: tag and phase prompts."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Feature\n")
-    (insert "** Workflow :sdd:\n")
-    (insert "*** Research :research:\n")
-    (insert "#+begin_src ai\ntest query\n#+end_src\n")
-    (goto-char (point-min))
-    (re-search-forward "test query")
-    (let ((prompt (claude-org--build-behavior-prompt)))
-      (should (stringp prompt))
-      ;; Should contain content from both prompts
-      (should (string-match-p "SDD" prompt))
-      (should (string-match-p "RESEARCH" prompt)))))
-
-(ert-deftest test-workspace-tag-inheritance-for-behavior-prompt ()
-  "Test that tags are inherited from parent headings for behavior prompts.
+(ert-deftest test-workspace-tag-inheritance ()
+  "Test that tags are inherited from parent headings.
 This is the critical test for the bug where :sdd: and :research: tags
 were not inherited because org-get-tags was called with LOCAL=t."
   :tags '(:unit :fast :stable :isolated :org :sdd)
@@ -298,12 +230,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
       ;; and claude_chat (from Instruction 1)
       (should (member "sdd" tags))
       (should (member "research" tags))
-      (should (member "claude_chat" tags)))
-    ;; Verify behavior prompt includes both SDD and RESEARCH content
-    (let ((prompt (claude-org--build-behavior-prompt)))
-      (should (stringp prompt))
-      (should (string-match-p "SDD" prompt))
-      (should (string-match-p "RESEARCH" prompt)))))
+      (should (member "claude_chat" tags)))))
 
 ;;; Unit Tests - Find Previous Workspace Level
 
@@ -331,16 +258,6 @@ were not inherited because org-get-tags was called with LOCAL=t."
     ;; Should return nil
     (should-not (claude-org--find-previous-workspace-level))))
 
-;;; Unit Tests - Tag-Based Prompt Dispatch
-
-(ert-deftest test-workspace-tag-prompt-generic-dispatch ()
-  "Test that cl-defgeneric claude-org-tag-prompt dispatches correctly."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  ;; Default method should load from file
-  (let ((prompt (claude-org-tag-prompt 'explore nil)))
-    (should (or (null prompt)  ; File may not exist
-                (stringp prompt)))))
-
 (ert-deftest test-workspace-find-workspace-root ()
   "Test claude-org--find-workspace-root finds correct parent."
   :tags '(:unit :fast :stable :isolated :org :sdd)
@@ -364,23 +281,6 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (insert "** Subsection\n")
     (goto-char (point-max))
     (should-not (claude-org--find-workspace-root))))
-
-(ert-deftest test-workspace-build-behavior-context ()
-  "Test claude-org--build-behavior-context builds correct plist."
-  :tags '(:unit :fast :stable :isolated :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-context.org")
-    (insert "* Feature\n")
-    (insert "** Workflow :sdd:\n")
-    (insert "*** Research :research:\n")
-    (goto-char (point-max))
-    (let ((context (claude-org--build-behavior-context)))
-      (should (plistp context))
-      (should (equal "/tmp/test-context.org" (plist-get context :file-path)))
-      (should (equal "Feature" (plist-get context :workspace-root)))
-      (should (member "sdd" (plist-get context :current-tags)))
-      (should (member "research" (plist-get context :current-tags))))))
 
 ;;; Integration Tests (require API)
 
@@ -424,51 +324,6 @@ were not inherited because org-get-tags was called with LOCAL=t."
     ;; Cleanup
     (delete-file buffer-file-name)))
 
-;;; Integration Tests - Workspace Prompt Building
-
-(ert-deftest test-workspace-integration-behavior-prompt-with-tags ()
-  "Test that behavior prompt includes SDD and RESEARCH content from tags."
-  :tags '(:integration :fast :stable :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-workspace-links.org")
-    (insert "* My Feature\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":CLAUDE_SESSION_ID: sdd-test-12345\n")
-    (insert ":END:\n")
-    (insert "** Workflow :sdd:\n")
-    (insert "*** Research :research:\n")
-    (insert "**** Instruction 1 :claude_chat:\n")
-    (insert "#+begin_src ai\ntest query\n#+end_src\n")
-    (goto-char (point-min))
-    (re-search-forward "test query")
-    (let ((prompt (claude-org--build-behavior-prompt)))
-      (should (stringp prompt))
-      ;; Should have SDD content
-      (should (string-match-p "SDD" prompt))
-      ;; Should have RESEARCH content
-      (should (string-match-p "RESEARCH" prompt)))))
-
-(ert-deftest test-workspace-integration-multiple-tags-ordered ()
-  "Test that multiple tags are processed in correct order with context."
-  :tags '(:integration :fast :stable :org :sdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-workspace-order.org")
-    (insert "* Feature\n")
-    (insert "** Workflow :sdd:\n")
-    (insert "*** Research :research:\n")
-    (insert "#+begin_src ai\nquery\n#+end_src\n")
-    (goto-char (point-min))
-    (re-search-forward "query")
-    (let ((prompt (claude-org--build-behavior-prompt)))
-      (should (stringp prompt))
-      ;; SDD should appear before RESEARCH (sdd priority 0, research priority 10)
-      (let ((sdd-pos (string-match "SDD WORKFLOW" prompt))
-            (research-pos (string-match "RESEARCH" prompt)))
-        (when (and sdd-pos research-pos)
-          (should (< sdd-pos research-pos)))))))
-
 ;;; End-to-End Tests - Full Workspace Workflow
 
 (ert-deftest test-workspace-e2e-create-and-verify-structure ()
@@ -490,10 +345,8 @@ were not inherited because org-get-tags was called with LOCAL=t."
             (re-search-forward "^#\\+begin_src ai")
             (forward-line 1)
             ;; Verify context
-            (let ((context (claude-org--build-behavior-context)))
-              ;; Context should have correct values
-              (should (equal "E2E Test Feature" (plist-get context :workspace-root)))
-              (should (member "sdd" (plist-get context :current-tags))))
+            (should (equal "E2E Test Feature" (claude-org--find-workspace-root)))
+            (should (member "sdd" (claude-org--get-current-tags)))
             ;; Verify structure: workspace > story > system prompt + workflow
             (goto-char (point-min))
             (should (re-search-forward "^\\* E2E Test Feature" nil t))

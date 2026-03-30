@@ -330,7 +330,6 @@ test-org-unit:
 		-l tests/test-claude-org-query-id.el \
 		-l tests/test-claude-org-query-id-issues.el \
 		-l tests/test-claude-org-workspace.el \
-		-l tests/test-behavior-prompts.el \
 		-l tests/test-mcp-report-invocation.el \
 		-l tests/test-plugin-discovery.el \
 		-l tests/test-claude-org-edge-cases.el \
