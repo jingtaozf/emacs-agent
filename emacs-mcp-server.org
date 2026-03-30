@@ -201,6 +201,9 @@ Server state variables:
 (defvar emacs-mcp-server--spinner-timer nil
   "Timer for spinner animation.")
 
+(defvar emacs-mcp-server--spinner-delay-timer nil
+  "Delay timer — spinner only starts after 300ms of eval activity.")
+
 (defconst emacs-mcp-server--spinner-frames
   ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
   "Spinner animation frames.")
@@ -259,12 +262,18 @@ Sets `emacs-mcp-server-activity-string` directly like claude-agent does."
   (emacs-mcp-server--update-activity-string))
 
 (defun emacs-mcp-server--eval-start ()
-  "Called when eval starts. Updates mode-line immediately."
+  "Called when eval starts. Delays spinner by 300ms to avoid flicker on fast calls."
   (cl-incf emacs-mcp-server--eval-count)
   (setq emacs-mcp-server--eval-active t)
-  ;; Update string IMMEDIATELY before starting timer
-  (emacs-mcp-server--update-activity-string)
-  (emacs-mcp-server--start-spinner))
+  ;; Delay spinner start — fast hook calls (<300ms) won't show spinner
+  (unless emacs-mcp-server--spinner-delay-timer
+    (setq emacs-mcp-server--spinner-delay-timer
+          (run-at-time 0.3 nil
+            (lambda ()
+              (setq emacs-mcp-server--spinner-delay-timer nil)
+              (when emacs-mcp-server--eval-active
+                (emacs-mcp-server--update-activity-string)
+                (emacs-mcp-server--start-spinner)))))))
 
 (defun emacs-mcp-server--eval-end ()
   "Called when eval ends. Clears mode-line indicator."
@@ -272,6 +281,10 @@ Sets `emacs-mcp-server-activity-string` directly like claude-agent does."
   (when (<= emacs-mcp-server--eval-count 0)
     (setq emacs-mcp-server--eval-count 0)
     (setq emacs-mcp-server--eval-active nil)
+    ;; Cancel pending delay timer if eval finished before it fired
+    (when emacs-mcp-server--spinner-delay-timer
+      (cancel-timer emacs-mcp-server--spinner-delay-timer)
+      (setq emacs-mcp-server--spinner-delay-timer nil))
     (emacs-mcp-server--stop-spinner)
     (emacs-mcp-server--update-activity-string)))
 
