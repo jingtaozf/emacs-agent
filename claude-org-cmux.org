@@ -1189,6 +1189,43 @@ Always re-applies WORKSPACE_COLOR pill (status pills are transient in cmux)."
       (message "cmux surface: %s (focused app)" surface-id))
      (t (user-error "No cmux session for this story")))))
 
+(defun claude-org-cmux-restart ()
+  "Restart Claude Code in the current cmux tab.
+Quits the running Claude Code (sends /exit) and respawns the same
+launch command in the same pane. Does not destroy the workspace or
+affect other tabs."
+  (interactive)
+  (let ((surface-id (claude-org-terminal--find-session-property "CMUX_SURFACE_ID"))
+        (workspace-session-id (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID")))
+    (unless surface-id
+      (user-error "No cmux session for this story"))
+    (let ((launch-cmd (claude-org-cmux--build-launch-command
+                       (buffer-file-name)
+                       workspace-session-id
+                       (or (claude-org--get-project-root) default-directory))))
+      ;; Respawn the pane with the same launch command
+      (claude-org-cmux--call "respawn-pane"
+        "--surface" surface-id
+        "--command" launch-cmd)
+      ;; Re-apply color and restart verbose
+      (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
+        (when ws-id (claude-org-cmux--apply-color ws-id)))
+      (let ((sk (claude-org--current-session-key)))
+        (claude-org-cmux--stop-verbose sk)
+        (claude-org--session-put sk :verbose-surface-id nil)
+        (claude-org-cmux--start-verbose surface-id sk))
+      ;; Ensure IDE server and send /ide after ready
+      (when workspace-session-id
+        (claude-org-cmux--ensure-ide-server
+         (or (claude-org--get-project-root) default-directory) workspace-session-id)
+        (run-at-time 5 nil
+          (lexical-let ((sid surface-id))
+            (lambda ()
+              (condition-case nil
+                  (claude-org-cmux--call "send" "--surface" sid "/ide\n")
+                (error nil))))))
+      (message "Claude Code restarting in surface %s" surface-id))))
+
 (defun claude-org-cmux-cancel ()
   "Cancel the current Claude Code instruction in cmux.
 Sends Escape to the terminal."
