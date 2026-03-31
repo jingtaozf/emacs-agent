@@ -1191,9 +1191,9 @@ Always re-applies WORKSPACE_COLOR pill (status pills are transient in cmux)."
 
 (defun claude-org-cmux-restart ()
   "Restart Claude Code in the current cmux tab.
-Quits the running Claude Code (sends /exit) and respawns the same
-launch command in the same pane. Does not destroy the workspace or
-affect other tabs."
+Sends /exit to quit the running Claude Code, waits for shell prompt,
+then launches a fresh Claude Code in the same tab. Does not destroy
+the workspace or affect other tabs."
   (interactive)
   (let ((surface-id (claude-org-terminal--find-session-property "CMUX_SURFACE_ID"))
         (workspace-session-id (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID")))
@@ -1203,22 +1203,40 @@ affect other tabs."
                        (buffer-file-name)
                        workspace-session-id
                        (or (claude-org--get-project-root) default-directory))))
-      ;; Respawn the pane with the same launch command
-      (claude-org-cmux--call "respawn-pane"
-        "--surface" surface-id
-        "--command" launch-cmd)
-      ;; Re-apply color and restart verbose
+      ;; 1. Quit running Claude Code
+      (message "Sending /exit to Claude Code...")
+      (condition-case nil
+          (claude-org-cmux--call "send" "--surface" surface-id "/exit\n")
+        (error nil))
+      ;; 2. Wait for Claude Code to exit (poll for shell prompt)
+      (let ((attempts 0))
+        (while (< attempts 15)
+          (sleep-for 1)
+          (let ((screen (condition-case nil
+                            (claude-org-cmux--call "capture-pane" "--surface" surface-id "--lines" "3")
+                          (error ""))))
+            ;; Shell prompt visible = Claude Code has exited
+            (when (or (string-match-p "\\$\\s*$" screen)
+                      (string-match-p "❯\\s*$" screen)
+                      (string-match-p "%\\s*$" screen))
+              (setq attempts 100)))  ; break
+          (cl-incf attempts)))
+      ;; 3. Launch new Claude Code in the same tab
+      (message "Launching fresh Claude Code...")
+      (claude-org-cmux--call "send" "--surface" surface-id
+                             (concat launch-cmd "\n"))
+      ;; 4. Re-apply color and restart verbose
       (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
         (when ws-id (claude-org-cmux--apply-color ws-id)))
       (let ((sk (claude-org--current-session-key)))
         (claude-org-cmux--stop-verbose sk)
         (claude-org--session-put sk :verbose-surface-id nil)
         (claude-org-cmux--start-verbose surface-id sk))
-      ;; Ensure IDE server and send /ide after ready
+      ;; 5. Ensure IDE server and send /ide after ready
       (when workspace-session-id
         (claude-org-cmux--ensure-ide-server
          (or (claude-org--get-project-root) default-directory) workspace-session-id)
-        (run-at-time 5 nil
+        (run-at-time 8 nil
           (lexical-let ((sid surface-id))
             (lambda ()
               (condition-case nil
