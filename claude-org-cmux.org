@@ -490,8 +490,11 @@ verbose streaming.  Returns SAVED-ID."
       (condition-case nil
           (claude-org-cmux--call "rename-tab" "--workspace" ws-id tab-title)
         (error nil)))
-    ;; Start verbose so it's available even for direct cmux input
+    ;; Start verbose and ensure IDE server
     (claude-org-cmux--start-verbose saved-id (claude-org--current-session-key))
+    (when workspace-session-id
+      (claude-org-cmux--ensure-ide-server
+       (or (claude-org--get-project-root) default-directory) workspace-session-id))
     saved-id))
 
 (defun claude-org-cmux--resolve-workspace-uuid (workspace-ref)
@@ -576,10 +579,12 @@ to become ready, and returns the surface ref."
     (message "Claude Code in cmux (surface: %s) — waiting for TUI..." surface-id)
     ;; Wait for Claude Code TUI to be ready before returning
     (claude-org-cmux--wait-for-ready surface-id)
-    ;; Apply WORKSPACE_COLOR and start verbose streaming
+    ;; Apply WORKSPACE_COLOR, start verbose, and ensure IDE server
     (when (string-prefix-p "workspace:" workspace-ref)
       (claude-org-cmux--apply-color workspace-ref))
     (claude-org-cmux--start-verbose surface-id (claude-org--current-session-key))
+    (when workspace-session-id
+      (claude-org-cmux--ensure-ide-server project-root workspace-session-id))
     (message "Claude Code ready in cmux (surface: %s)" surface-id)
     surface-id))
 
@@ -1086,6 +1091,23 @@ since the timer fires in an arbitrary buffer context."
     (when timer
       (cancel-timer timer)
       (claude-org--session-put session-key :verbose-timer nil))))
+#+END_SRC
+
+* IDE Server
+
+#+BEGIN_SRC elisp
+(defun claude-org-cmux--ensure-ide-server (project-root workspace-session-id)
+  "Ensure IDE WebSocket server is running for cmux workspace.
+Creates a lockfile at ~/.claude/ide/ that Claude Code discovers via --ide flag."
+  (when (fboundp 'claude-ide--session-alive-p)
+    (unless (claude-ide--session-alive-p workspace-session-id)
+      (condition-case nil
+          (let ((session (claude-ide-start-server-in-directory
+                          workspace-session-id project-root)))
+            (message "IDE server started on port %d for %s"
+                     (claude-ide--session-port session)
+                     (file-name-nondirectory project-root)))
+        (error nil)))))
 #+END_SRC
 
 * Story Change Hook
