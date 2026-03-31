@@ -289,7 +289,7 @@ def main() -> None:
         try:
             mcp.eval_elisp(
                 '(let ((debug-on-error nil) (debug-on-quit nil))'
-                f'  (claude-org-iterm2--ensure-ide-server '
+                f'  (claude-org-cmux--ensure-ide-server '
                 f'"{_escape_elisp_string(project_root)}" '
                 f'"{_escape_elisp_string(session_id)}"))'
             )
