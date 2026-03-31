@@ -212,7 +212,7 @@ def main() -> None:
     )
 
     mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
-    mcp = McpClient(url=mcp_url)
+    mcp = McpClient(url=mcp_url, read_timeout=30.0)
 
     # Check MCP connection
     print(f"Checking Emacs MCP server at {mcp_url}...")
