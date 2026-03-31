@@ -1204,26 +1204,35 @@ the workspace or affect other tabs."
     (let ((launch-cmd (claude-org-cmux--build-launch-command
                        (buffer-file-name)
                        workspace-session-id
-                       (or (claude-org--get-project-root) default-directory))))
-      ;; 1. Quit running Claude Code
-      (message "Sending /exit to Claude Code...")
-      (condition-case nil
-          (claude-org-cmux--call "send" "--surface" surface-id "/exit\n")
-        (error nil))
-      ;; 2. Wait for Claude Code to exit (poll for shell prompt)
-      (let ((attempts 0))
-        (while (< attempts 15)
-          (sleep-for 1)
-          (let ((screen (condition-case nil
-                            (claude-org-cmux--call "capture-pane" "--surface" surface-id "--lines" "3")
-                          (error ""))))
-            ;; Shell prompt visible = Claude Code has exited
-            (when (or (string-match-p "\\$\\s*$" screen)
-                      (string-match-p "❯\\s*$" screen)
-                      (string-match-p "%\\s*$" screen))
-              (setq attempts 100)))  ; break
-          (cl-incf attempts)))
-      ;; 3. Launch new Claude Code in the same tab
+                       (or (claude-org--get-project-root) default-directory)))
+          (screen (condition-case nil
+                      (claude-org-cmux--call "capture-pane" "--surface" surface-id "--lines" "5")
+                    (error "")))
+          (at-shell nil))
+      ;; 1. Check if Claude Code is running or already at shell prompt
+      (setq at-shell (or (string-match-p "\\$\\s*$" screen)
+                         (string-match-p "❯\\s*$" screen)
+                         (string-match-p "%\\s*$" screen)))
+      (unless at-shell
+        ;; Claude Code is running — send /exit and wait
+        (message "Sending /exit to Claude Code...")
+        (condition-case nil
+            (progn
+              (claude-org-cmux--call "send" "--surface" surface-id "/exit")
+              (claude-org-cmux--call "send-key" "--surface" surface-id "Return"))
+          (error nil))
+        (let ((attempts 0))
+          (while (< attempts 15)
+            (sleep-for 1)
+            (let ((s (condition-case nil
+                         (claude-org-cmux--call "capture-pane" "--surface" surface-id "--lines" "3")
+                       (error ""))))
+              (when (or (string-match-p "\\$\\s*$" s)
+                        (string-match-p "❯\\s*$" s)
+                        (string-match-p "%\\s*$" s))
+                (setq attempts 100)))
+            (cl-incf attempts))))
+      ;; 2. Launch new Claude Code in the same tab
       (message "Launching fresh Claude Code...")
       (claude-org-cmux--call "send" "--surface" surface-id
                              (concat launch-cmd "\n"))
