@@ -46,7 +46,7 @@ workspace, streaming, mode-line, or verbose infrastructure.
 | System prompt | =--system-prompt <text>= | =.github/AGENTS.md= (file) |
 | IDE integration | =--ide= + WebSocket lock file | ✗ Not available |
 | Structured output | =--output-format stream-json= | ✗ TUI only |
-| Hook events | =SessionStart=, =Stop=, =Pre/PostToolUse= | =sessionStart=, =agentStop=, =pre/postToolUse= |
+| Hook events | =SessionStart=, =Stop=, =Pre/PostToolUse= | =sessionStart=, =sessionEnd=, =pre/postToolUse= |
 | Ready TUI prompt | ="type a message"= / insert mode | ="> "= / ="copilot>"= |
 | Cancel key | Escape | C-c or =/stop= |
 | Autonomous mode | Default | Requires =--allow-all-tools= |
@@ -336,7 +336,7 @@ EVENT_HANDLERS = {
     # GitHub Copilot CLI event names (aliases to same handlers)
     "sessionStart":        handle_session_start,
     "userPromptSubmitted": handle_prompt,
-    "agentStop":           handle_response,       # ← primary completion signal
+    "sessionEnd":           handle_response,       # ← primary completion signal
     "preToolUse":          handle_permission,
     "postToolUse":         handle_permission_clear,
 }
@@ -368,9 +368,9 @@ And a new hooks configuration file =hooks/copilot_hooks.json=:
                   "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge postToolUse",
                   "timeout": 5 }]
     }],
-    "agentStop": [{
+    "sessionEnd": [{
       "hooks": [{ "type": "command",
-                  "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge agentStop",
+                  "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge sessionEnd",
                   "timeout": 10 }]
     }]
   }
@@ -426,10 +426,10 @@ tool call parsing are unavailable.
 - *Mitigation*: The cmux backend already uses =pipe-pane= polling for
   response streaming (not =stream-json=). The =claude-org-cmux--stream-tick=
   function captures terminal output regardless of agent. Completion is
-  signaled by the =agentStop= hook → =workspace_bridge.py= → MCP →
+  signaled by the =sessionEnd= hook → =workspace_bridge.py= → MCP →
   =claude-org--terminal-query-completed=. This path is already agent-agnostic.
 - *Loss*: No per-token response streaming in the org response section for
-  Copilot. The response appears only after =agentStop= fires (batch, not live).
+  Copilot. The response appears only after =sessionEnd= fires (batch, not live).
   This is a known limitation of Copilot's TUI-only design.
 
 ** Gap 6: No IDE WebSocket Integration
@@ -547,6 +547,6 @@ To add a new agent (e.g., Cursor, Gemini CLI) in the future:
    session instructions may conflict with project-level instructions. Should we
    use a different mechanism (e.g., =--instructions= flag if available)?
 
-4. *Workspace bridge events*: The hook event names (=sessionStart=, =agentStop=,
+4. *Workspace bridge events*: The hook event names (=sessionStart=, =sessionEnd=,
    etc.) need verification against actual Copilot CLI output. The names listed
    are educated guesses from GitHub docs.

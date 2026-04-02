@@ -43,12 +43,26 @@ Use org property for per-file/per-story socket selection."
   "How to launch Claude Code in cmux.
   `claude-workspace' - Use the workspace bridge script (default)
   `claude'     - Use bare claude CLI
-  A string     - Custom shell command."
+  A string     - Custom shell command.
+Note: when `claude-org-cmux-agent-type' is non-nil, this variable is
+ignored and the agent profile's launch-fn is used instead."
   :type '(choice (const claude-workspace) (const claude) string)
   :group 'claude-org)
 
+(defcustom claude-org-cmux-agent-type nil
+  "Code agent to launch in cmux workspaces.
+When nil, uses `claude-org-cmux-launch-command' (Claude Code, default).
+  `claude'   - Claude Code via workspace bridge script
+  `copilot'  - GitHub Copilot CLI via copilot-workspace script
+Override per-session with the AGENT_TYPE org property:
+  :PROPERTIES:
+  :AGENT_TYPE: copilot
+  :END:"
+  :type '(choice (const nil) (const claude) (const copilot) string)
+  :group 'claude-org)
+
 (defcustom claude-org-cmux-extra-args nil
-  "Extra CLI arguments for Claude Code in cmux.
+  "Extra CLI arguments for the code agent in cmux.
 List of strings appended to the launch command."
   :type '(repeat string)
   :group 'claude-org)
@@ -64,6 +78,64 @@ Used when `claude-org-cmux-launch-command' is `claude-workspace'.
 Defaults to `uv run --project <pkg>/python claude-workspace'."
   :type 'string
   :group 'claude-org)
+
+(defcustom claude-org-cmux-copilot-workspace-script
+  (let* ((pkg-dir (file-name-directory
+                   (or load-file-name buffer-file-name "")))
+         (uv-cmd (format "uv run --project %s copilot-workspace"
+                         (expand-file-name "python" pkg-dir))))
+    uv-cmd)
+  "Command to launch the copilot-workspace launcher.
+Used when `claude-org-cmux-agent-type' is `copilot'.
+Defaults to `uv run --project <pkg>/python copilot-workspace'."
+  :type 'string
+  :group 'claude-org)
+#+END_SRC
+
+* Agent Profiles
+
+Each supported code agent is described by a profile struct.  The profile
+drives =build-launch-command=, ready/busy detection, cancel keys, and feature
+guards (IDE integration, session resume).  Adding a new agent requires only
+pushing a new profile onto =claude-org-cmux--agent-profiles= — no other elisp
+changes are needed.
+
+#+BEGIN_SRC elisp
+(cl-defstruct claude-org-cmux--agent-profile
+  "Describes how to launch and integrate with a code agent in cmux."
+  (name nil)                    ; Symbol: 'claude or 'copilot
+  (launch-fn nil)               ; (org-file session-id project-root) → shell-cmd string
+  (ready-patterns nil)          ; List of regexp strings: TUI is ready for input
+  (busy-patterns nil)           ; List of regexp strings: TUI is processing
+  (cancel-keys nil)             ; List of cmux key names to send for cancel
+  (supports-resume nil)         ; t if --resume SESSION_ID is supported
+  (supports-ide nil)            ; t if IDE WebSocket integration available
+  (supports-system-prompt nil)) ; t if system prompt flag injection is supported
+
+(defvar claude-org-cmux--agent-profiles nil
+  "Registry of known agent profiles.
+Populated below after the launch-fn helpers are defined.
+To register a third-party agent, push a `claude-org-cmux--agent-profile'
+struct onto this list from your own package or init file.")
+
+(defun claude-org-cmux--get-agent-profile (&optional agent-type-override)
+  "Return the agent profile to use, or nil to use legacy launch-command path.
+Resolution order:
+  1. AGENT_TYPE-OVERRIDE argument (for testing)
+  2. AGENT_TYPE org property on the session heading
+  3. `claude-org-cmux-agent-type' customization variable
+  4. nil → use legacy `claude-org-cmux-launch-command' (Claude Code default)"
+  (let* ((type-sym (or agent-type-override
+                       (let ((prop (condition-case nil
+                                       (claude-org-terminal--find-session-property "AGENT_TYPE")
+                                     (error nil))))
+                         (when (and prop (not (string-empty-p prop)))
+                           (intern (downcase prop))))
+                       claude-org-cmux-agent-type)))
+    (when type-sym
+      (cl-find type-sym claude-org-cmux--agent-profiles
+               :key #'claude-org-cmux--agent-profile-name))))
+
 #+END_SRC
 
 * Internal State
@@ -272,19 +344,25 @@ Falls back to capture-pane polling if signal times out."
        surface-id claude-org-cmux-ready-timeout)))))
 
 (defun claude-org-cmux--wait-for-ready-poll (surface-id timeout)
-  "Fallback: poll capture-pane for INSERT mode every 0.5s up to TIMEOUT seconds."
-  (let ((deadline (+ (float-time) timeout))
-        (ready nil))
+  "Fallback: poll capture-pane for agent ready state every 0.5s up to TIMEOUT seconds.
+Uses ready-patterns from the active agent profile, falling back to Claude Code patterns."
+  (let* ((profile (claude-org-cmux--get-agent-profile))
+         (patterns (if profile
+                       (claude-org-cmux--agent-profile-ready-patterns profile)
+                     '("type a message" "-- INSERT --" "-- insert --")))
+         (pattern-re (mapconcat #'regexp-quote patterns "\\|"))
+         (deadline (+ (float-time) timeout))
+         (ready nil))
     (while (and (not ready) (< (float-time) deadline))
       (condition-case nil
           (let ((screen (claude-org-cmux--call "capture-pane"
                           "--surface" surface-id)))
-            (when (string-match-p "-- INSERT --\\|-- insert --\\|type a message" screen)
+            (when (string-match-p pattern-re screen)
               (setq ready t)))
         (error nil))
       (unless ready (sleep-for 0.5)))
     (unless ready
-      (error "Timeout: Claude Code not ready in cmux after %ds" timeout))
+      (error "Timeout: agent not ready in cmux after %ds" timeout))
     t))
 #+END_SRC
 
@@ -353,7 +431,23 @@ we select the workspace first and use paste-buffer without --surface."
 
 #+BEGIN_SRC elisp
 (defun claude-org-cmux--build-launch-command (org-file workspace-session-id project-root)
-  "Build the shell command to launch Claude Code in cmux.
+  "Build the shell command to launch the configured code agent in cmux.
+ORG-FILE is the org notebook path, WORKSPACE-SESSION-ID the session,
+PROJECT-ROOT the working directory.
+
+Dispatches to the active agent profile's launch-fn.  Falls back to the
+legacy `claude-org-cmux-launch-command' path when no agent profile is set."
+  (let ((profile (claude-org-cmux--get-agent-profile)))
+    (if profile
+        (funcall (claude-org-cmux--agent-profile-launch-fn profile)
+                 org-file workspace-session-id project-root)
+      ;; Legacy fallback: original Claude Code logic via launch-command cond
+      (claude-org-cmux--build-claude-legacy-launch-command
+       org-file workspace-session-id project-root))))
+
+(defun claude-org-cmux--build-claude-legacy-launch-command
+    (org-file workspace-session-id project-root)
+  "Build Claude Code launch command using the legacy launch-command variable.
 ORG-FILE is the org notebook path, WORKSPACE-SESSION-ID the session,
 PROJECT-ROOT the working directory."
   (ignore project-root)
@@ -414,6 +508,140 @@ PROJECT-ROOT the working directory."
         claude-org-cmux-launch-command))
      (t (error "Invalid claude-org-cmux-launch-command: %S"
                claude-org-cmux-launch-command)))))
+
+(defun claude-org-cmux--build-claude-profile-launch-command
+    (org-file workspace-session-id project-root)
+  "Build Claude Code launch command via the agent profile path.
+ORG-FILE is the org notebook path, WORKSPACE-SESSION-ID the session,
+PROJECT-ROOT the working directory.
+Used when `claude-org-cmux-agent-type' is `claude'."
+  (ignore project-root)
+  (let* ((prop-args (claude-org-terminal--find-session-property "CLAUDE_EXTRA_ARGS"))
+         (all-extra (append claude-org-cmux-extra-args
+                            (when prop-args (split-string prop-args))))
+         (extra (mapconcat #'shell-quote-argument all-extra " "))
+         ;; Emacs is the state owner for --resume (reads CLAUDE_CLI_SESSION).
+         ;; Read directly from the session heading (no inheritance).
+         (cli-session
+          (ignore-errors
+            (save-excursion
+              (claude-org-terminal--goto-session-heading)
+              (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
+         (workspace-script claude-org-cmux-workspace-script)
+         (parts (list workspace-script
+                      (shell-quote-argument (or org-file ""))
+                      (shell-quote-argument (or workspace-session-id "")))))
+    (when cli-session
+      (setq parts (append parts
+                          (list "--"
+                                "--resume"
+                                (shell-quote-argument cli-session)))))
+    (when (and extra (not (string-empty-p extra)))
+      (unless cli-session
+        (setq parts (append parts (list "--"))))
+      (setq parts (append parts (list extra))))
+    (mapconcat #'identity parts " ")))
+
+(defvar claude-org-cmux--claude-only-args
+  '("--dangerously-skip-permissions"
+    "--permission-mode"
+    "--ide"
+    "--chrome"
+    "--plugin-dir"
+    "--mcp-config"
+    "--system-prompt"
+    "--name")
+  "CLI flags that are Claude Code-specific and must be filtered out for Copilot.
+Note: --resume is NOT listed here because Copilot CLI supports it.")
+
+(defvar claude-org-cmux--claude-args-with-value
+  '("--permission-mode"
+    "--plugin-dir"
+    "--mcp-config"
+    "--system-prompt"
+    "--name")
+  "Subset of `claude-org-cmux--claude-only-args' that consume the following argument as a value.")
+
+(defun claude-org-cmux--filter-copilot-args (args)
+  "Remove Claude Code-specific flags from ARGS list for Copilot compatibility.
+Flags in `claude-org-cmux--claude-only-args' are removed.
+Flags in `claude-org-cmux--claude-args-with-value' also consume their following value."
+  (let ((result nil)
+        (skip-next nil))
+    (dolist (arg args)
+      (cond
+       (skip-next
+        ;; This arg is the value of a removed flag — discard it
+        (setq skip-next nil))
+       ((member arg claude-org-cmux--claude-only-args)
+        ;; Remove the flag; if it takes a value, also remove the next arg
+        (when (member arg claude-org-cmux--claude-args-with-value)
+          (setq skip-next t)))
+       (t
+        (push arg result))))
+    (nreverse result)))
+
+(defun claude-org-cmux--build-copilot-launch-command
+    (org-file workspace-session-id project-root)
+  "Build GitHub Copilot CLI launch command.
+ORG-FILE is the org notebook path, WORKSPACE-SESSION-ID the session,
+PROJECT-ROOT the working directory.
+Reads CLAUDE_CLI_SESSION for --resume support (Copilot supports session resumption).
+Claude Code-specific flags (--dangerously-skip-permissions, --permission-mode,
+etc.) are automatically filtered from CLAUDE_EXTRA_ARGS and
+`claude-org-cmux-extra-args'."
+  (ignore project-root)
+  (let* ((prop-args (claude-org-terminal--find-session-property "CLAUDE_EXTRA_ARGS"))
+         (raw-extra (append claude-org-cmux-extra-args
+                            (when prop-args (split-string prop-args))))
+         ;; Strip Claude-only flags before passing to Copilot
+         (all-extra (claude-org-cmux--filter-copilot-args raw-extra))
+         (extra (mapconcat #'shell-quote-argument all-extra " "))
+         ;; Emacs is the state owner for --resume (reads CLAUDE_CLI_SESSION).
+         ;; Read directly from the session heading (no inheritance).
+         (cli-session
+          (ignore-errors
+            (save-excursion
+              (claude-org-terminal--goto-session-heading)
+              (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
+         (workspace-script claude-org-cmux-copilot-workspace-script)
+         (parts (list workspace-script
+                      (shell-quote-argument (or org-file ""))
+                      (shell-quote-argument (or workspace-session-id "")))))
+    (when cli-session
+      (setq parts (append parts
+                          (list "--"
+                                "--resume"
+                                (shell-quote-argument cli-session)))))
+    (when (and extra (not (string-empty-p extra)))
+      (unless cli-session
+        (setq parts (append parts (list "--"))))
+      (setq parts (append parts (list extra))))
+    (mapconcat #'identity parts " ")))
+
+;; Populate agent profile registry now that the launch-fn helpers are defined.
+;; Profiles are set here (not at defvar time) because the launch functions
+;; are defined after the profile struct in the same file.
+(setq claude-org-cmux--agent-profiles
+      (list
+       (make-claude-org-cmux--agent-profile
+        :name 'claude
+        :launch-fn #'claude-org-cmux--build-claude-profile-launch-command
+        :ready-patterns '("type a message" "-- INSERT --" "-- insert --")
+        :busy-patterns  '("Tool:" "Thinking" "esc to interrupt")
+        :cancel-keys    '("escape")
+        :supports-resume t
+        :supports-ide    t
+        :supports-system-prompt t)
+       (make-claude-org-cmux--agent-profile
+        :name 'copilot
+        :launch-fn #'claude-org-cmux--build-copilot-launch-command
+        :ready-patterns '("> " "copilot>")
+        :busy-patterns  '("Thinking..." "Running " "●")
+        :cancel-keys    '("C-c" "C-c")
+        :supports-resume t
+        :supports-ide    nil
+        :supports-system-prompt nil)))
 #+END_SRC
 
 * Session Management
@@ -490,11 +718,14 @@ verbose streaming.  Returns SAVED-ID."
       (condition-case nil
           (claude-org-cmux--call "rename-tab" "--workspace" ws-id tab-title)
         (error nil)))
-    ;; Start verbose and ensure IDE server
+    ;; Start verbose and ensure IDE server (IDE only for agents that support it)
     (claude-org-cmux--start-verbose saved-id (claude-org--current-session-key))
     (when workspace-session-id
-      (claude-org-cmux--ensure-ide-server
-       (or (claude-org--get-project-root) default-directory) workspace-session-id))
+      (let ((profile (claude-org-cmux--get-agent-profile)))
+        (when (or (null profile)
+                  (claude-org-cmux--agent-profile-supports-ide profile))
+          (claude-org-cmux--ensure-ide-server
+           (or (claude-org--get-project-root) default-directory) workspace-session-id))))
     saved-id))
 
 (defun claude-org-cmux--resolve-workspace-uuid (workspace-ref)
@@ -576,25 +807,28 @@ to become ready, and returns the surface ref."
       (puthash workspace-session-id workspace-ref
                claude-org-cmux--workspace-to-cmux-id))
     (save-buffer)
-    (message "Claude Code in cmux (surface: %s) — waiting for TUI..." surface-id)
-    ;; Wait for Claude Code TUI to be ready before returning
+    (message "Agent starting in cmux (surface: %s) — waiting for TUI..." surface-id)
+    ;; Wait for agent TUI to be ready before returning
     (claude-org-cmux--wait-for-ready surface-id)
-    ;; Apply WORKSPACE_COLOR, start verbose, ensure IDE, and connect
+    ;; Apply WORKSPACE_COLOR, start verbose, ensure IDE (profile-gated), and connect
     (when (string-prefix-p "workspace:" workspace-ref)
       (claude-org-cmux--apply-color workspace-ref))
     (claude-org-cmux--start-verbose surface-id (claude-org--current-session-key))
     (when workspace-session-id
-      (claude-org-cmux--ensure-ide-server project-root workspace-session-id)
-      ;; Send /ide to auto-connect (--ide flag alone doesn't work on --resume)
-      (run-at-time 5 nil
-        (lexical-let ((sid surface-id))
-          (lambda ()
-            (condition-case nil
-                (progn
-                  (claude-org-cmux--call "send" "--surface" sid "/ide")
-                  (claude-org-cmux--call "send-key" "--surface" sid "Return"))
-              (error nil))))))
-    (message "Claude Code ready in cmux (surface: %s)" surface-id)
+      (let ((profile (claude-org-cmux--get-agent-profile)))
+        (when (or (null profile)
+                  (claude-org-cmux--agent-profile-supports-ide profile))
+          (claude-org-cmux--ensure-ide-server project-root workspace-session-id)
+          ;; Send /ide to auto-connect (--ide flag alone doesn't work on --resume)
+          (run-at-time 5 nil
+            (lexical-let ((sid surface-id))
+              (lambda ()
+                (condition-case nil
+                    (progn
+                      (claude-org-cmux--call "send" "--surface" sid "/ide")
+                      (claude-org-cmux--call "send-key" "--surface" sid "Return"))
+                  (error nil))))))))
+    (message "Agent ready in cmux (surface: %s)" surface-id)
     surface-id))
 
 (defun claude-org-cmux--ensure-session ()
@@ -639,18 +873,30 @@ Auto-starts the Emacs MCP server if not running."
 
 #+BEGIN_SRC elisp
 (defun claude-org-cmux--get-status (workspace-session-id surface-id)
-  "Get Claude Code status.
-WORKSPACE-SESSION-ID keys the hook file; SURFACE-ID keys the cmux API."
+  "Get code agent status for WORKSPACE-SESSION-ID and SURFACE-ID.
+WORKSPACE-SESSION-ID keys the hook file; SURFACE-ID keys the cmux API.
+Uses ready/busy patterns from the active agent profile."
   (let ((hook-status (claude-org-terminal--read-hook-status workspace-session-id)))
     (if (member hook-status '("ready" "busy"))
         hook-status
-      ;; Fallback: read screen content from cmux
+      ;; Fallback: read screen content from cmux using profile patterns
       (condition-case nil
-          (let ((screen (claude-org-cmux--call "capture-pane"
-                          "--surface" surface-id)))
+          (let* ((profile (claude-org-cmux--get-agent-profile))
+                 (ready-re (if profile
+                               (mapconcat #'regexp-quote
+                                          (claude-org-cmux--agent-profile-ready-patterns profile)
+                                          "\\|")
+                             "-- INSERT --\\|type a message"))
+                 (busy-re (if profile
+                              (mapconcat #'regexp-quote
+                                         (claude-org-cmux--agent-profile-busy-patterns profile)
+                                         "\\|")
+                            "Tool:\\|Thinking"))
+                 (screen (claude-org-cmux--call "capture-pane"
+                           "--surface" surface-id)))
             (cond
-             ((string-match-p "-- INSERT --\\|type a message" screen) "ready")
-             ((string-match-p "Tool:\\|Thinking" screen) "busy")
+             ((string-match-p ready-re screen) "ready")
+             ((string-match-p busy-re screen) "busy")
              ((string-empty-p screen) "dead")
              (t "unknown")))
         (error "dead")))))
@@ -1258,15 +1504,21 @@ the workspace or affect other tabs."
       (message "Claude Code restarting in surface %s" surface-id))))
 
 (defun claude-org-cmux-cancel ()
-  "Cancel the current Claude Code instruction in cmux.
-Sends Escape to the terminal."
+  "Cancel the current code agent operation in cmux.
+Uses cancel keys from the active agent profile (Escape for Claude Code,
+C-c for GitHub Copilot CLI)."
   (interactive)
   (claude-agent-with-span "cmux-cancel" nil nil
-  (let ((surface-id (claude-org-terminal--find-session-property "CMUX_SURFACE_ID")))
+  (let* ((surface-id (claude-org-terminal--find-session-property "CMUX_SURFACE_ID"))
+         (profile (claude-org-cmux--get-agent-profile))
+         (cancel-keys (if profile
+                          (claude-org-cmux--agent-profile-cancel-keys profile)
+                        '("escape"))))
     (unless surface-id
       (user-error "No cmux session for this story"))
-    (claude-org-cmux--call "send-key" "--surface" surface-id "escape")
-    (message "Cancel sent to Claude Code (waiting for hook...)"))))
+    (dolist (key cancel-keys)
+      (claude-org-cmux--call "send-key" "--surface" surface-id key))
+    (message "Cancel sent to agent (waiting for hook...)"))))
 #+END_SRC
 
 * Sidebar Feedback

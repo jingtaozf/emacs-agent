@@ -157,6 +157,7 @@ test-cmux:
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
 		-l tests/test-cmux-e2e-simulated.el \
+		-l tests/test-cmux-e2e-agent-profiles.el \
 		-f ert-run-tests-batch-and-exit
 
 # Convenience target: run unit tests in parallel automatically

@@ -269,20 +269,49 @@ def handle_response(
     org_file: str,
     session_id: str,
 ) -> None:
-    """Handle Stop hook event."""
+    """Handle Stop hook event (Claude Code) or sessionEnd hook event (Copilot)."""
     write_status(session_id, "ready")
 
     custom_id = _read_custom_id(session_id)
 
+    # Accept both snake_case (Claude Code) and camelCase (Copilot) field names
+    transcript_path = input_data.get("transcript_path") or input_data.get("transcriptPath", "")
+
+    # Copilot sessionEnd may not provide transcript_path — auto-discover from session state
+    if not transcript_path:
+        copilot_session_id = input_data.get("sessionId", "")
+        if copilot_session_id:
+            candidate = os.path.expanduser(
+                f"~/.copilot/session-state/{copilot_session_id}/events.jsonl"
+            )
+            if os.path.isfile(candidate):
+                transcript_path = candidate
+
     with _span("handle-response", **_span_attrs(
             session_id, custom_id,
-            **{"transcript.path": input_data.get("transcript_path", "")},
+            **{"transcript.path": transcript_path},
     )) as span:
-        # Extract full response from transcript (skips intermediate tool-use turns)
         response = ""
-        transcript_path = input_data.get("transcript_path", "")
         if transcript_path and os.path.isfile(transcript_path):
-            response = _extract_full_response(transcript_path)
+            # Detect transcript format by reading first non-empty line
+            with open(transcript_path) as f:
+                first_line = ""
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        first_line = line
+                        break
+            try:
+                first_entry = json.loads(first_line) if first_line else {}
+            except json.JSONDecodeError:
+                first_entry = {}
+
+            if first_entry.get("type", "").startswith("session."):
+                # Copilot events.jsonl format: {type: "assistant.message", data: {content: ...}}
+                response = _extract_copilot_response(transcript_path)
+            else:
+                # Claude Code JSONL format: {type: "assistant", message: {content: [...]}}
+                response = _extract_full_response(transcript_path)
 
         # Fallback: last_assistant_message when no transcript available
         if not response:
@@ -299,7 +328,8 @@ def handle_response(
             return
 
         save_sexp = _build_save_cli_session_sexp(
-            org_file, session_id, input_data.get("session_id", "")
+            org_file, session_id,
+            input_data.get("session_id") or input_data.get("sessionId", "")
         )
 
         if not custom_id:
@@ -381,6 +411,64 @@ def _extract_full_response(transcript_path: str) -> str:
                     text = part.get("text", "").strip()
                     if text:
                         texts.append(text)
+
+        result = "\n\n".join(texts)
+        if span:
+            span.set_attribute("text_blocks.count", len(texts))
+            span.set_attribute("transcript.entries", len(entries))
+            span.set_attribute("output.value", result[:2000])
+            span.set_attribute("output.mime_type", "text/plain")
+
+        return result
+
+
+def _extract_copilot_response(transcript_path: str) -> str:
+    """Extract the last assistant message from a Copilot events.jsonl transcript.
+
+    Copilot's transcript format differs from Claude Code:
+    - Event type "assistant.message" with data.content (string, not list of blocks)
+    - Event type "user.message" marks the boundary between turns
+    Finds the last user.message, then collects all assistant.message content after it.
+    Skips turns that contain tool requests (toolRequests non-empty) to avoid
+    inserting intermediate tool-use narration.
+    """
+    with _span("extract-copilot-response", **{"transcript.path": transcript_path}) as span:
+        entries = []
+        with open(transcript_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning("Skipping malformed JSONL line in Copilot transcript")
+                    continue
+
+        if not entries:
+            return ""
+
+        # Find the last user.message index
+        last_user_idx = -1
+        for i, entry in enumerate(entries):
+            if entry.get("type") == "user.message":
+                last_user_idx = i
+
+        # Collect assistant.message content after last user.message.
+        # Skip messages with toolRequests (intermediate tool-use turns).
+        texts = []
+        start = last_user_idx + 1 if last_user_idx >= 0 else 0
+        for entry in entries[start:]:
+            if entry.get("type") != "assistant.message":
+                continue
+            data = entry.get("data", {})
+            # Skip tool-use turns (has tool requests) — collect only final answer
+            tool_requests = data.get("toolRequests", [])
+            if tool_requests:
+                continue
+            content = data.get("content", "").strip()
+            if content:
+                texts.append(content)
 
         result = "\n\n".join(texts)
         if span:

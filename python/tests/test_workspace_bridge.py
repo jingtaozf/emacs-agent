@@ -11,6 +11,7 @@ from claude_agent.mcp_client import McpConnectionError
 
 from claude_agent.workspace_bridge import (
     _escape_elisp_string,
+    _extract_copilot_response,
     _extract_full_response,
     _format_todos_as_elisp,
     _mcp_eval_with_trace,
@@ -206,6 +207,144 @@ class TestExtractFullResponse:
             {"type": "assistant", "message": {"content": None}},
         ])
         assert _extract_full_response(path) == ""
+
+
+class TestExtractCopilotResponse:
+    """Tests for Copilot events.jsonl transcript parsing."""
+
+    def _make_transcript(self, tmp_path, entries):
+        transcript = tmp_path / "events.jsonl"
+        lines = [json.dumps(e) for e in entries]
+        transcript.write_text("\n".join(lines))
+        return str(transcript)
+
+    def _session_start(self):
+        return {"type": "session.start", "data": {"sessionId": "abc-123"}}
+
+    def _user_msg(self, text):
+        return {"type": "user.message", "data": {"content": text}}
+
+    def _assistant_msg(self, text, tool_requests=None):
+        return {"type": "assistant.message", "data": {
+            "content": text,
+            "toolRequests": tool_requests or [],
+        }}
+
+    def test_single_turn(self, tmp_path):
+        path = self._make_transcript(tmp_path, [
+            self._session_start(),
+            self._user_msg("hello"),
+            self._assistant_msg("Hello there!"),
+        ])
+        assert _extract_copilot_response(path) == "Hello there!"
+
+    def test_skips_tool_use_turns(self, tmp_path):
+        """Turns with toolRequests are skipped — only final answer returned."""
+        path = self._make_transcript(tmp_path, [
+            self._session_start(),
+            self._user_msg("do X"),
+            self._assistant_msg("Let me check...", tool_requests=[{"tool": "bash"}]),
+            self._assistant_msg("Done! Here's the result."),
+        ])
+        assert _extract_copilot_response(path) == "Done! Here's the result."
+
+    def test_only_last_turn_after_user(self, tmp_path):
+        """Only collects text after the LAST user.message entry."""
+        path = self._make_transcript(tmp_path, [
+            self._session_start(),
+            self._user_msg("first question"),
+            self._assistant_msg("first answer"),
+            self._user_msg("second question"),
+            self._assistant_msg("second answer"),
+        ])
+        assert _extract_copilot_response(path) == "second answer"
+
+    def test_empty_transcript(self, tmp_path):
+        path = self._make_transcript(tmp_path, [])
+        assert _extract_copilot_response(path) == ""
+
+    def test_no_user_message(self, tmp_path):
+        path = self._make_transcript(tmp_path, [
+            self._session_start(),
+            self._assistant_msg("hello"),
+            self._assistant_msg("world"),
+        ])
+        assert _extract_copilot_response(path) == "hello\n\nworld"
+
+
+class TestHandleResponseCopilotFormat:
+    """handle_response handles Copilot's camelCase fields."""
+
+    def test_camelcase_transcript_path(self, tmp_path, monkeypatch):
+        """handle_response accepts camelCase transcriptPath from Copilot sessionEnd."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        transcript = tmp_path / "events.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "session.start", "data": {"sessionId": "abc"}
+        }) + "\n" + json.dumps({
+            "type": "user.message", "data": {"content": "q"}
+        }) + "\n" + json.dumps({
+            "type": "assistant.message", "data": {"content": "answer", "toolRequests": []}
+        }))
+        from claude_agent.workspace_bridge import _write_custom_id
+        _write_custom_id("sid", "cid")
+        mcp = MagicMock()
+        handle_response(
+            mcp,
+            {"transcriptPath": str(transcript), "sessionId": "abc"},
+            "/tmp/f.org",
+            "sid",
+        )
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
+        assert any("answer" in c for c in calls)
+
+    def test_camelcase_session_id_saved(self, tmp_path, monkeypatch):
+        """sessionId (camelCase) is used for save-cli-session when present."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        from claude_agent.workspace_bridge import _write_custom_id
+        _write_custom_id("sid", "cid")
+        mcp = MagicMock()
+        handle_response(
+            mcp,
+            {"last_assistant_message": "hi", "sessionId": "copilot-session-123"},
+            "/tmp/f.org",
+            "sid",
+        )
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
+        # At least one call should reference saving the session
+        assert len(calls) > 0
+
+
+    def test_auto_discover_copilot_events_jsonl(self, tmp_path, monkeypatch):
+        """When no transcript_path, discover events.jsonl from copilot session state."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        # Create copilot session state directory
+        copilot_session_id = "abc-123-def"
+        session_dir = tmp_path / ".copilot" / "session-state" / copilot_session_id
+        session_dir.mkdir(parents=True)
+        events_file = session_dir / "events.jsonl"
+        events_file.write_text(json.dumps({
+            "type": "session.start", "data": {"sessionId": copilot_session_id}
+        }) + "\n" + json.dumps({
+            "type": "user.message", "data": {"content": "q"}
+        }) + "\n" + json.dumps({
+            "type": "assistant.message",
+            "data": {"content": "discovered answer", "toolRequests": []},
+        }))
+        # Patch expanduser to use tmp_path as home
+        monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / p.lstrip("~/")))
+        from claude_agent.workspace_bridge import _write_custom_id
+        _write_custom_id("sid", "cid")
+        mcp = MagicMock()
+        # No transcript_path in input — only sessionId
+        handle_response(
+            mcp,
+            {"sessionId": copilot_session_id},
+            "/tmp/f.org",
+            "sid",
+        )
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
+        assert any("discovered answer" in c for c in calls)
 
 
 class TestFormatTodosAsElisp:
