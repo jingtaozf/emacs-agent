@@ -3355,6 +3355,17 @@ or extend the defaults."
   :type '(repeat directory)
   :group 'claude-org)
 
+(defun claude-org--ensure-extra-snippet-dirs ()
+  "Ensure all `claude-org-extra-snippet-dirs' are loaded into yasnippet.
+Idempotent — skips directories already in `yas-snippet-dirs'."
+  (when (bound-and-true-p yas-snippet-dirs)
+    (dolist (dir claude-org-extra-snippet-dirs)
+      (let ((expanded (expand-file-name dir)))
+        (when (and (file-directory-p expanded)
+                   (not (member expanded yas-snippet-dirs)))
+          (add-to-list 'yas-snippet-dirs expanded t)
+          (yas-load-directory expanded nil t))))))
+
 (defun claude-org--setup-yasnippet ()
   "Load claude-org snippet directories into yasnippet.
 Loads the built-in snippets/ directory and all directories in
@@ -3370,11 +3381,7 @@ Loads the built-in snippets/ directory and all directories in
       (add-to-list 'yas-snippet-dirs snippets-dir t)
       (yas-load-directory snippets-dir nil t)))
   ;; Extra user-configured snippet directories
-  (dolist (dir claude-org-extra-snippet-dirs)
-    (let ((expanded (expand-file-name dir)))
-      (when (file-directory-p expanded)
-        (add-to-list 'yas-snippet-dirs expanded t)
-        (yas-load-directory expanded nil t)))))
+  (claude-org--ensure-extra-snippet-dirs))
 
 (with-eval-after-load 'yasnippet
   (claude-org--setup-yasnippet))
@@ -3408,6 +3415,8 @@ If not inside an AI block, creates one first."
     (end-of-line))
   (unless (bound-and-true-p yas-minor-mode)
     (yas-minor-mode 1))
+  ;; Ensure extra snippet dirs are loaded (handles late setq timing)
+  (claude-org--ensure-extra-snippet-dirs)
   ;; Get all Claude AI snippets from the org-mode table
   (let* ((table (yas--table-get-create 'org-mode))
          (all-templates '())
