@@ -100,17 +100,28 @@ def _escape_elisp_string(s: str) -> str:
     )
 
 
+def _cli_session_property() -> str:
+    """Return the org property name for saving CLI session ID.
+    Copilot uses COPILOT_CLI_SESSION; Claude Code uses CLAUDE_CLI_SESSION."""
+    agent_type = os.environ.get("AGENT_TYPE", "")
+    if agent_type.lower() == "copilot":
+        return "COPILOT_CLI_SESSION"
+    return "CLAUDE_CLI_SESSION"
+
+
 def _build_save_cli_session_sexp(
     org_file: str, session_id: str, cli_session: str
 ) -> str:
     """Build elisp sexp to save CLI session ID, or empty string if no cli_session."""
     if not cli_session:
         return ""
+    prop = _cli_session_property()
     return (
         f'(claude-org-workspace-bridge-save-cli-session '
         f'"{_escape_elisp_string(org_file)}" '
         f'"{_escape_elisp_string(session_id)}" '
-        f'"{_escape_elisp_string(cli_session)}")'
+        f'"{_escape_elisp_string(cli_session)}" '
+        f'"{prop}")'
     )
 
 

@@ -272,6 +272,7 @@ def main() -> None:
     os.environ["WORKSPACE_SESSION_ID"] = session_id or ""
     os.environ["EMACS_MCP_URL"] = mcp_url
     os.environ["CLAUDE_PLUGIN_ROOT"] = plugin_dir
+    os.environ["AGENT_TYPE"] = "copilot"
 
     # Set terminal tab title
     file_base = os.path.splitext(os.path.basename(org_file))[0]
