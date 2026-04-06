@@ -778,6 +778,63 @@ the same session."
     (re-search-forward "Query B")
     (should-not (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
 
+(ert-deftest test-cmux-resume-lifecycle-first-then-second ()
+  "E07: First query has no --resume; bridge saves CLI session; second query resumes.
+Simulates the full session continuity lifecycle: first execution launches
+without --resume, workspace bridge saves CLAUDE_CLI_SESSION on the session
+heading (as the Python hook would), and the second launch command includes
+--resume with the saved session ID."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-resume-" nil ".org"))
+        (org-content "* Resume Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-resume-001
+:CLAUDE_BACKEND: cmux
+:CUSTOM_ID: test-cmux-resume-story
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-resume-instr-1
+:END:
+
+#+begin_src ai
+First query.
+#+end_src
+"))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (with-current-buffer buf
+                (org-mode)
+                (let ((claude-org-auto-start-mcp-server nil))
+                  (claude-org-mode 1))
+                (insert org-content)
+                (save-buffer)
+                (test-cmux--goto-ai-block)
+                ;; 1. First launch: no CLAUDE_CLI_SESSION → no --resume
+                (let ((cmd1 (claude-org-cmux--build-launch-command
+                             (buffer-file-name) "test-cmux-resume-001"
+                             default-directory)))
+                  (should (stringp cmd1))
+                  (should-not (string-match-p "--resume" cmd1)))
+                ;; 2. Simulate bridge saving CLI session (what Python hook does)
+                (save-excursion
+                  (claude-org-terminal--goto-session-heading)
+                  (org-set-property "CLAUDE_CLI_SESSION" "saved-cli-session-uuid"))
+                ;; 3. Verify property persisted
+                (should (equal "saved-cli-session-uuid"
+                               (org-entry-get nil "CLAUDE_CLI_SESSION" t)))
+                ;; 4. Second launch: has CLAUDE_CLI_SESSION → --resume
+                (let ((cmd2 (claude-org-cmux--build-launch-command
+                             (buffer-file-name) "test-cmux-resume-001"
+                             default-directory)))
+                  (should (stringp cmd2))
+                  (should (string-match-p "--resume" cmd2))
+                  (should (string-match-p "saved-cli-session-uuid" cmd2))))
+            (kill-buffer buf)))
+      (delete-file file))))
+
 ;;; ============================================================================
 ;;; Tests: Permission Routing (P0 fix)
 ;;; ============================================================================
