@@ -504,6 +504,42 @@ Returns values from BODY. Cleans up buffer afterwards."
       (test-cmux--goto-ai-block)
       (should-error (claude-org-cmux-cancel) :type 'user-error))))
 
+(ert-deftest test-cmux-execute-busy-lifecycle ()
+  "E05: Full busy lifecycle: execute → hook sets busy → complete clears busy.
+The :busy flag is set by the Python workspace bridge hook (handle-prompt),
+not by execute-ai-block directly. This test simulates the hook-driven
+lifecycle: execute sends prompt, bridge sets :busy t, query-completed
+clears :busy nil. The busy flag controls header-line display and prevents
+duplicate execution."
+  :tags '(:unit :stable :e2e)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-basic
+      (test-cmux--goto-ai-block)
+      (let ((session-key (claude-org--current-session-key)))
+        ;; Before execute: not busy
+        (should-not (claude-org--session-get session-key :busy))
+        ;; Execute sends prompt (does NOT set :busy — that's the bridge's job)
+        (claude-org-cmux--execute-ai-block)
+        (should-not (claude-org--session-get session-key :busy))
+        ;; Simulate Python workspace bridge hook: handle-prompt sets :busy t
+        (claude-org--session-put session-key :busy t)
+        (should (claude-org--session-get session-key :busy))
+        ;; get-status should now prevent duplicate execution
+        ;; (mock capture-pane doesn't show busy patterns, but :busy session flag
+        ;; would cause execute-ai-block to reject with "busy" error)
+        ;; Complete clears busy
+        (claude-org-cmux--query-completed "test-cmux-session-001")
+        (should-not (claude-org--session-get session-key :busy))
+        ;; Clean up files
+        (ignore-errors
+          (delete-file (expand-file-name
+                        "test-cmux-session-001.request-id"
+                        claude-org-terminal-status-dir)))
+        (ignore-errors
+          (delete-file (expand-file-name
+                        "test-cmux-session-001.from-emacs"
+                        claude-org-terminal-status-dir)))))))
+
 (ert-deftest test-cmux-execute-sets-backend ()
   "Execute sets :backend to \"cmux\" on session so generic cancel can dispatch."
   :tags '(:unit :stable)
