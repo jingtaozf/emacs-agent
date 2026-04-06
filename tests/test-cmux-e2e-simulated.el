@@ -1524,6 +1524,106 @@ Handles selected marker, leading whitespace, and multi-word names."
     ;; Missing name
     (should-not (claude-org-cmux--find-workspace-by-name "nonexistent"))))
 
+
+;;; ============================================================================
+;;; E01: Launch fresh workspace — full call sequence verification
+;;; ============================================================================
+
+(defvar test-cmux--org-launch-with-color
+  "* Launch Color Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-launch-001
+:CLAUDE_BACKEND: cmux
+:WORKSPACE_COLOR: Blue
+:CUSTOM_ID: test-cmux-launch-color
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-launch-instr-1
+:END:
+
+#+begin_src ai
+Hello world.
+#+end_src
+"
+  "Org content for E01: fresh workspace launch with color.")
+
+(ert-deftest test-cmux-launch-workspace-full-sequence ()
+  "E01: Fresh workspace launch verifies the complete call sequence.
+Color and verbose must be applied BEFORE wait-for-ready."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-launch-" nil ".org"))
+        (calls nil)
+        (call-order nil))
+    (unwind-protect
+        (progn
+          (let ((buf (find-file-noselect file)))
+            (unwind-protect
+                (progn
+                  (with-current-buffer buf
+                    (org-mode)
+                    (let ((claude-org-auto-start-mcp-server nil))
+                      (claude-org-mode 1))
+                    (insert test-cmux--org-launch-with-color)
+                    (save-buffer))
+                  ;; Mock cmux CLI, tracking call order
+                  (cl-letf (((symbol-function 'claude-org-cmux--call)
+                             (lambda (subcmd &rest args)
+                               (push (cons subcmd args) calls)
+                               (push subcmd call-order)
+                               (cond
+                                ((string= subcmd "new-workspace") "OK workspace:mock-42")
+                                ((string= subcmd "list-pane-surfaces")
+                                 "* surface:mock-77  Launch Color Story  [selected]")
+                                ((string= subcmd "sidebar-state")
+                                 "tab=AABB1122-3344-5566-7788-99AABBCCDDEE\ncolor=#1565C0")
+                                ((string= subcmd "capture-pane")
+                                 (test-cmux--read-fixture "capture-pane-ready.txt"))
+                                ((string= subcmd "tree")
+                                 "workspace workspace:mock-42 \"Launch Color Story\"")
+                                (t "ok")))))
+                    (with-current-buffer buf
+                      (test-cmux--goto-ai-block)
+                      (let ((surface (claude-org-cmux--ensure-session)))
+                        ;; 1. Returns the correct surface
+                        (should (equal surface "surface:mock-77"))
+                        ;; 2. new-workspace was called
+                        (should (cl-find "new-workspace" calls :key #'car :test #'equal))
+                        ;; 3. Both org properties persisted
+                        (save-excursion
+                          (claude-org-terminal--goto-session-heading)
+                          (should (equal "surface:mock-77"
+                                         (org-entry-get nil "CMUX_SURFACE_ID")))
+                          (should (equal "AABB1122-3344-5566-7788-99AABBCCDDEE"
+                                         (org-entry-get nil "CMUX_WORKSPACE_ID"))))
+                        ;; 4. Hash tables populated
+                        (should (equal "surface:mock-77"
+                                       (gethash "test-cmux-session-launch-001"
+                                                claude-org-cmux--workspace-to-surface)))
+                        (should (gethash "test-cmux-session-launch-001"
+                                         claude-org-terminal--workspace-to-session-key))
+                        ;; 5. rename-workspace and rename-tab called
+                        (should (cl-find "rename-workspace" calls :key #'car :test #'equal))
+                        (should (cl-find "rename-tab" calls :key #'car :test #'equal))
+                        ;; 6. Color applied (set-status called)
+                        (should (cl-find "set-status" calls :key #'car :test #'equal))
+                        ;; 7. Color applied BEFORE wait-for-ready (capture-pane)
+                        (let* ((order (nreverse call-order))
+                               (color-pos (cl-position "set-status" order :test #'equal))
+                               (wait-pos (cl-position "capture-pane" order :test #'equal)))
+                          (when (and color-pos wait-pos)
+                            (should (< color-pos wait-pos))))))))
+              ;; Inner cleanup: stop verbose, clear hash tables, kill buffer
+              (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+                (when sk (claude-org-cmux--stop-verbose sk)))
+              (remhash "test-cmux-session-launch-001" claude-org-terminal--workspace-to-session-key)
+              (remhash "test-cmux-session-launch-001" claude-org-cmux--workspace-to-surface)
+              (remhash "test-cmux-session-launch-001" claude-org-cmux--workspace-to-cmux-id)
+              (kill-buffer buf))))
+      ;; Outer cleanup: delete temp file
+      (delete-file file))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
