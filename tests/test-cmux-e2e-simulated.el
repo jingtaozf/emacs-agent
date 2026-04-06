@@ -1697,6 +1697,80 @@ Color and verbose must be applied BEFORE wait-for-ready."
       ;; Outer cleanup: delete temp file
       (delete-file file))))
 
+;;; ============================================================================
+;;; E04: Restart Claude Code in existing tab
+;;; ============================================================================
+
+(ert-deftest test-cmux-restart-sends-exit-then-relaunches ()
+  "E04: claude-org-cmux-restart sends /exit, waits for shell, relaunches.
+Verifies the restart sequence: ensure-session refreshes surface, /exit sent
+to running Claude Code, shell prompt detected via capture-pane, fresh
+launch command sent, verbose timer restarted."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-restart-" nil ".org"))
+        (calls nil)
+        (capture-count 0))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                ;; Mock: capture-pane returns Claude Code screen first,
+                ;; then shell prompt on retry (simulating /exit completing).
+                ;; sleep-for is no-op to avoid 15s wait.
+                ;; run-at-time is no-op to avoid /ide timer firing.
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest args)
+                             (push (cons subcmd args) calls)
+                             (cond
+                              ;; tree: workspace is alive
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ;; capture-pane: first call = Claude Code running,
+                              ;; subsequent = shell prompt ($ at end)
+                              ((string= subcmd "capture-pane")
+                               (setq capture-count (1+ capture-count))
+                               (if (<= capture-count 1)
+                                   "  Claude Code\n  -- INSERT --"
+                                 "jingtao@mac ~/projects $ "))
+                              (t "ok"))))
+                          ((symbol-function 'sleep-for) (lambda (&rest _) nil)))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (claude-org-cmux-restart)
+                    ;; 1. /exit was sent (Claude Code was running, not at shell)
+                    (should (cl-find "send" calls
+                                     :test (lambda (key cell)
+                                             (and (string= (car cell) key)
+                                                  (member "/exit" (cdr cell))))))
+                    ;; 2. Return key sent after /exit
+                    (should (cl-find "send-key" calls
+                                     :test (lambda (key cell)
+                                             (and (string= (car cell) key)
+                                                  (member "Return" (cdr cell))))))
+                    ;; 3. Launch command sent (contains newline = enter)
+                    (let ((send-calls (cl-remove-if-not
+                                       (lambda (c) (string= (car c) "send"))
+                                       calls)))
+                      ;; At least 2 send calls: /exit + launch-cmd
+                      (should (>= (length send-calls) 2)))
+                    ;; 4. Verbose timer restarted
+                    (let ((sk (claude-org--current-session-key)))
+                      (should (claude-org--session-get sk :verbose-timer))))))
+            ;; Cleanup
+            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+              (when sk (claude-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
