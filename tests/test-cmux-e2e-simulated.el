@@ -1370,6 +1370,160 @@ Non-ASCII chars are replaced with hyphens and collapsed."
         ;; Should have called set-app-focus
         (should (test-cmux--mock-calls-for "set-app-focus"))))))
 
+;;; ============================================================================
+;;; T61: Stale workspace UUID recovery after cmux restart
+;;; ============================================================================
+
+(defvar test-cmux--org-stale-workspace
+  "* Restart Recovery Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-recover-001
+:CMUX_SURFACE_ID: surface:stale-999
+:CMUX_WORKSPACE_ID: 00000000-57A1-0000-0000-000000000000
+:CUSTOM_ID: test-cmux-recover-story
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-recover-instr-1
+:END:
+
+#+begin_src ai
+Recover me.
+#+end_src
+"
+  "Org content with stale CMUX_WORKSPACE_ID and CMUX_SURFACE_ID simulating
+cmux restart: the UUID no longer exists in cmux but a workspace with
+the same name has been restored by cmux persistence.")
+
+(ert-deftest test-cmux-ensure-session-recovers-stale-uuid-via-name ()
+  "Ensure-session recovers stale workspace UUID by looking up workspace name.
+T61: After cmux restart, CMUX_WORKSPACE_ID is a UUID that no longer exists
+and CMUX_SURFACE_ID is also stale. cmux has restored the workspace under
+the same name (from its own persistence), but with a new ref, UUID, and
+surface. ensure-session must detect the stale UUID, find the live workspace
+by heading title, refresh the org properties, and return the fresh
+surface-id — without calling new-workspace."
+  :tags '(:unit :stable)
+  (let ((file (make-temp-file "test-cmux-recover-" nil ".org"))
+        (calls nil)
+        (new-workspace-count 0))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (with-current-buffer buf
+            (org-mode)
+            (let ((claude-org-auto-start-mcp-server nil))
+              (claude-org-mode 1))
+            (insert test-cmux--org-stale-workspace)
+            (save-buffer))
+          ;; Clear hash tables (simulate Emacs restart too — worst case)
+          (remhash "test-cmux-session-recover-001"
+                   claude-org-terminal--workspace-to-session-key)
+          (remhash "test-cmux-session-recover-001"
+                   claude-org-cmux--workspace-to-surface)
+          (remhash "test-cmux-session-recover-001"
+                   claude-org-cmux--workspace-to-cmux-id)
+          ;; Argument-aware cmux mock that simulates a cmux restart:
+          ;; - old UUID returns "not_found"
+          ;; - list-workspaces shows a workspace with the matching name
+          ;; - sidebar-state returns the fresh UUID
+          ;; - list-pane-surfaces returns the fresh surface
+          (cl-letf (((symbol-function 'claude-org-cmux--call)
+                     (lambda (subcmd &rest args)
+                       (push (cons subcmd args) calls)
+                       (cond
+                        ;; tree with stale UUID → error (cmux restart)
+                        ((and (string= subcmd "tree")
+                              (member "00000000-57A1-0000-0000-000000000000"
+                                      args))
+                         (error "not_found: Workspace not found"))
+                        ;; tree with fresh workspace/UUID → alive
+                        ((and (string= subcmd "tree")
+                              (or (member "workspace:7" args)
+                                  (member "11111111-FE51-0000-0000-000000000000"
+                                          args)))
+                         "workspace workspace:7 \"Restart Recovery Story\"")
+                        ;; list-workspaces → has matching name
+                        ((string= subcmd "list-workspaces")
+                         (concat "  workspace:1  Other Workspace\n"
+                                 "* workspace:7  Restart Recovery Story  [selected]\n"
+                                 "  workspace:9  Another\n"))
+                        ;; sidebar-state for workspace:7 → fresh UUID
+                        ((and (string= subcmd "sidebar-state")
+                              (member "workspace:7" args))
+                         (concat "tab=11111111-FE51-0000-0000-000000000000\n"
+                                 "color=#1565C0\n"))
+                        ;; list-pane-surfaces for workspace:7 → fresh surface
+                        ((and (string= subcmd "list-pane-surfaces")
+                              (member "workspace:7" args))
+                         "* surface:42  Restart Recovery Story  [selected]")
+                        ;; capture-pane (verbose start) → ready screen
+                        ((string= subcmd "capture-pane")
+                         "claude-code-ready")
+                        ;; new-workspace must NOT be called
+                        ((string= subcmd "new-workspace")
+                         (cl-incf new-workspace-count)
+                         "OK workspace:UNEXPECTED")
+                        (t "ok")))))
+            (with-current-buffer buf
+              (test-cmux--goto-ai-block)
+              (let ((surface (claude-org-cmux--ensure-session)))
+                ;; Returns the fresh surface, not the stale one
+                (should (equal surface "surface:42"))
+                ;; No new workspace was created
+                (should (zerop new-workspace-count))
+                ;; Org properties refreshed to fresh values
+                (save-excursion
+                  (claude-org-terminal--goto-session-heading)
+                  (should (equal "surface:42"
+                                 (org-entry-get nil "CMUX_SURFACE_ID")))
+                  (should (equal "11111111-FE51-0000-0000-000000000000"
+                                 (org-entry-get nil "CMUX_WORKSPACE_ID"))))
+                ;; Hash tables point to fresh workspace
+                (should (equal "surface:42"
+                               (gethash "test-cmux-session-recover-001"
+                                        claude-org-cmux--workspace-to-surface)))
+                (should (equal "11111111-FE51-0000-0000-000000000000"
+                               (gethash "test-cmux-session-recover-001"
+                                        claude-org-cmux--workspace-to-cmux-id))))))
+          ;; Cleanup
+          (let ((sk (with-current-buffer buf
+                      (claude-org--current-session-key))))
+            (when sk (claude-org-cmux--stop-verbose sk)))
+          (remhash "test-cmux-session-recover-001"
+                   claude-org-terminal--workspace-to-session-key)
+          (remhash "test-cmux-session-recover-001"
+                   claude-org-cmux--workspace-to-surface)
+          (remhash "test-cmux-session-recover-001"
+                   claude-org-cmux--workspace-to-cmux-id)
+          (kill-buffer buf))
+      (delete-file file))))
+
+(ert-deftest test-cmux-find-workspace-by-name-parses-list ()
+  "T61b: claude-org-cmux--find-workspace-by-name parses list-workspaces output.
+Handles selected marker, leading whitespace, and multi-word names."
+  :tags '(:unit :stable)
+  (cl-letf (((symbol-function 'claude-org-cmux--call)
+             (lambda (subcmd &rest _args)
+               (when (string= subcmd "list-workspaces")
+                 (concat "  workspace:1  deployment\n"
+                         "  workspace:9  PCR dev1\n"
+                         "  workspace:11  PCR dev2\n"
+                         "* workspace:13  Emacs-claude dev1  [selected]\n")))))
+    ;; Exact match wins
+    (should (equal "workspace:9"
+                   (claude-org-cmux--find-workspace-by-name "PCR dev1")))
+    (should (equal "workspace:11"
+                   (claude-org-cmux--find-workspace-by-name "PCR dev2")))
+    ;; Selected workspace parses correctly (strips [selected])
+    (should (equal "workspace:13"
+                   (claude-org-cmux--find-workspace-by-name "Emacs-claude dev1")))
+    ;; Single-word name
+    (should (equal "workspace:1"
+                   (claude-org-cmux--find-workspace-by-name "deployment")))
+    ;; Missing name
+    (should-not (claude-org-cmux--find-workspace-by-name "nonexistent"))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
