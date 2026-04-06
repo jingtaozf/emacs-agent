@@ -298,75 +298,75 @@ Shows details about all active queries."
       (push "  (no active queries)" lines))
     (mapconcat #'identity (nreverse lines) "\n")))
 
+(defun claude-agent--activity-alert-string ()
+  "Build mode-line string for pending alerts.
+Each alert entry becomes a clickable, propertized label."
+  (let ((segments '()))
+    (dolist (entry claude-agent-pending-alerts)
+      (let* ((id (car entry))
+             (props (cdr entry))
+             (label (or (plist-get props :label)
+                        (claude-agent--permission-label (format "%s" id))))
+             (tooltip (or (plist-get props :tooltip) "Alert"))
+             (face (or (plist-get props :face)
+                       '(:foreground "orange" :weight bold)))
+             (action (plist-get props :action)))
+        (push (propertize
+               label
+               'face face
+               'help-echo tooltip
+               'mouse-face 'mode-line-highlight
+               'local-map (when action
+                            (let ((map (make-sparse-keymap)))
+                              (define-key map [mode-line mouse-1]
+                                (lexical-let ((fn action))
+                                  (lambda (e)
+                                    (interactive "e")
+                                    (funcall fn))))
+                              map)))
+              segments)))
+    (concat " [C:⚠ " (string-join (nreverse segments) " ") "]")))
+
+(defun claude-agent--activity-queries-string (count)
+  "Build mode-line string for COUNT active queries.
+Shows a spinner with query identity (single) or count (multiple)."
+  (let* ((spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
+         (docker-p (claude-agent--any-docker-mode-p))
+         (docker-prefix (if docker-p "D:" "C:"))
+         (display (if (= count 1)
+                      (let* ((state (claude-agent--get-single-active-state))
+                             (identity (when state
+                                         (claude-agent--format-query-identity state))))
+                        (if identity
+                            (format " [%s%s %s]" docker-prefix spinner identity)
+                          (format " [%s%s]" docker-prefix spinner)))
+                    (format " [%s%s×%d]" docker-prefix spinner count))))
+    (setq claude-agent--spinner-index
+          (mod (1+ claude-agent--spinner-index)
+               (length claude-agent--spinner-frames)))
+    (propertize display
+                'face '(:weight bold)
+                'help-echo (claude-agent--format-activity-tooltip)
+                'mouse-face 'mode-line-highlight
+                'local-map (let ((map (make-sparse-keymap)))
+                             (define-key map [mode-line mouse-1]
+                                         #'claude-agent-list-queries)
+                             map))))
+
 (defun claude-agent--update-activity-string ()
   "Update the activity mode-line string based on active queries and pending alerts."
   (let ((count (claude-agent-active-query-count))
         (alert-count (length claude-agent-pending-alerts)))
     (cond
-     ;; Pending alerts — show ⚠ with clickable labels
      ((> alert-count 0)
-      (let ((segments '()))
-        (dolist (entry claude-agent-pending-alerts)
-          (let* ((id (car entry))
-                 (props (cdr entry))
-                 (label (or (plist-get props :label)
-                            (claude-agent--permission-label (format "%s" id))))
-                 (tooltip (or (plist-get props :tooltip) "Alert"))
-                 (face (or (plist-get props :face)
-                           '(:foreground "orange" :weight bold)))
-                 (action (plist-get props :action)))
-            (push (propertize
-                   label
-                   'face face
-                   'help-echo tooltip
-                   'mouse-face 'mode-line-highlight
-                   'local-map (when action
-                                (let ((map (make-sparse-keymap)))
-                                  (define-key map [mode-line mouse-1]
-                                    (lexical-let ((fn action))
-                                      (lambda (e)
-                                        (interactive "e")
-                                        (funcall fn))))
-                                  map)))
-                  segments)))
-        (setq claude-agent-activity-string
-              (concat " [C:⚠ " (string-join (nreverse segments) " ") "]")))
+      (setq claude-agent-activity-string (claude-agent--activity-alert-string))
       (setq claude-agent--spinner-index 0))
-     ;; Active queries — show spinner
      ((> count 0)
-      (let* ((spinner (nth claude-agent--spinner-index claude-agent--spinner-frames))
-             (docker-p (claude-agent--any-docker-mode-p))
-             ;; For single query, show identity; for multiple, show count
-             ;; Add Docker indicator if any query is in Docker mode
-             (docker-prefix (if docker-p "D:" "C:"))
-             (display (if (= count 1)
-                          (let* ((state (claude-agent--get-single-active-state))
-                                 (identity (when state
-                                             (claude-agent--format-query-identity state))))
-                            (if identity
-                                (format " [%s%s %s]" docker-prefix spinner identity)
-                              (format " [%s%s]" docker-prefix spinner)))
-                        (format " [%s%s×%d]" docker-prefix spinner count)))
-             ;; Use consistent bold face for all modes (e-ink friendly - no colors)
-             (face '(:weight bold)))
-        (setq claude-agent--spinner-index
-              (mod (1+ claude-agent--spinner-index)
-                   (length claude-agent--spinner-frames)))
-        (setq claude-agent-activity-string
-              (propertize display
-                          'face face
-                          'help-echo (claude-agent--format-activity-tooltip)
-                          'mouse-face 'mode-line-highlight
-                          'local-map (let ((map (make-sparse-keymap)))
-                                       (define-key map [mode-line mouse-1]
-                                                   #'claude-agent-list-queries)
-                                       map)))))
-     ;; Idle
+      (setq claude-agent-activity-string (claude-agent--activity-queries-string count)))
      (t
       (setq claude-agent-activity-string "")
       (setq claude-agent--spinner-index 0))))
   (force-mode-line-update t)
-  ;; Auto-refresh queries buffer if visible
   (claude-agent--maybe-refresh-queries-buffer))
 
 (defun claude-agent--permission-label (workspace-session-id)

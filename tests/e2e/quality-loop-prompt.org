@@ -50,18 +50,18 @@ Check the design doc for current status before starting.
 
 ** P0 — Prevents Silent Failure
 
-*** Q1: Guard process filter with condition-case
-- File: claude-agent-backend.org (process filter function)
-- Pattern: wrap in condition-case, log error via message
-- Test: add structural test asserting all process filters have condition-case
-- Verify: make check passes
+*** DONE Q1: Guard process filter with condition-case :done:
+- Already implemented: claude-agent--process-filter and claude-agent--process-sentinel
+  both wrap body in (condition-case err ... (error (message ...)))
+- Structural test: test-structural-process-filters-guarded (F34) prevents regression
+- Verified [2026-04-06]
 
-*** T7: Sentinel tests (zero coverage)
-- Create tests/test-claude-agent-sentinel.el
-- Test: start mock process, invoke sentinel with exit 0, verify state cleanup
-- Test: invoke sentinel with exit 1, verify error callback
-- Test: verify marker freed (marker-buffer returns nil)
-- Tag: :unit :regression
+*** DONE T7: Sentinel tests (zero coverage) :done:
+- Implemented: tests/test-claude-agent-sentinel.el (719 lines, 7+ tests)
+- Covers: normal exit, abnormal exit, buffer killed during stream,
+  signal kill, double sentinel fire, non-object JSON, Docker path-mapping cleanup
+- Tag: :unit :sentinel
+- Verified [2026-04-06]
 
 *** DONE A1: Consolidate parallel state tracking (active-states) :done:
 - Implemented [2026-03-29]: Removed standalone claude-agent--active-states defvar
@@ -163,12 +163,19 @@ Check the design doc for current status before starting.
 - Structural test F43: test-structural-verbose-format-dispatcher-thin prevents regrowth
 - 979 unit tests + 116 Python tests pass
 
+*** DONE Extract activity-string helpers (70 lines) :done:
+- Implemented [2026-04-06]: Extracted 2 helpers from claude-agent--update-activity-string
+  (--activity-alert-string, --activity-queries-string)
+- Dispatcher reduced from 70 to 15 lines
+- Structural test F44: test-structural-activity-string-dispatcher-thin prevents regrowth
+- All checks pass (lint + unit + python)
+
 *** Long functions remaining (>60 lines)
 - claude-agent--start-process (100 lines, claude-agent-backend.org:2111) [sequential setup — low ROI]
 - claude-org-execute (91 lines, claude-org.org:4489)
 - claude-agent-list-queries (76 lines, claude-agent.org:449)
 - claude-org-cmux--launch-workspace (73 lines, claude-org-cmux.org:512)
-- claude-agent--update-activity-string (70 lines, claude-agent.org:301)
+- claude-agent--update-activity-string (15 lines, claude-agent.org — DONE, extracted helpers)
 - claude-org--workspace-create-docs-files (70 lines, claude-org.org:3336)
 - claude-agent--process-sentinel (69 lines, claude-agent-backend.org:1645)
 - claude-org--recover-session (68 lines, claude-org.org:1082)
@@ -286,3 +293,214 @@ Apply to touched test files:
 - evalElisp for Emacs operations (< 2s only)
 - Bash for make, git, grep
 - Navigate org by CUSTOM_ID, never heading text
+- For Live E2E items: execute via evalElisp + cmux CLI, then add simulated test
+- If cmux is not running, fall back to simulated-only testing
+- Skip Phoenix trace assertions if localhost:6006 unreachable
+- Record live test results in tests/e2e/living-workspace-test.org
+- Append test workspaces to tests/e2e/org/workspace-test.org (never reset)
+
+* Live E2E Coverage (work through after P4)
+
+Each item produces TWO artifacts: a live E2E test (evalElisp + cmux CLI,
+recorded in living-workspace-test.org) and a simulated test (mock cmux,
+added to test-cmux-e2e-simulated.el for CI via make test-cmux).
+
+Live test discovers real-world issues. Simulated test locks in the fix.
+
+** P0-E2E — User-Facing Flows with Zero Test Coverage
+
+*** E01: Launch fresh workspace
+- Execute: create workspace via ensure-session on new story heading
+- Verify: new-workspace called, CMUX_SURFACE_ID + CMUX_WORKSPACE_ID set
+- Verify: color applied, verbose started, workspace visible in cmux list-workspaces
+- Simulated: assert mock calls for new-workspace, list-pane-surfaces, sidebar-state
+
+*** E02: Restore existing workspace (Emacs restart)
+- Execute: clear hash tables, call ensure-session on story with saved props
+- Verify: hash tables rebuilt, no new-workspace called, verbose restarted
+- Simulated: T53 exists — extend to verify verbose timer started
+
+*** E03: Recover stale UUID after cmux restart
+- Execute: store stale UUID in org, call ensure-session
+- Verify: list-workspaces queried, props refreshed, workspace reused
+- Simulated: T61 exists — extend to cover restart flow end-to-end
+
+*** E04: Restart Claude Code in existing tab
+- Execute: claude-org-cmux-restart on running workspace
+- Verify: /exit sent, shell prompt detected, fresh Claude Code launched
+- Verify: verbose restarted, IDE /ide sent
+- Simulated: mock capture-pane transitions (busy→shell→INSERT)
+
+*** E05: Execute simple query end-to-end
+- Execute: real AI block in workspace-test.org
+- Verify: prompt sent, response appears in org, busy→ready transition
+- Verify: cmux capture-pane shows Claude Code output
+- Simulated: extend existing execute tests with response verification
+
+*** E06: Cancel active query
+- Execute: start query, send escape via cmux-cancel
+- Verify: busy cleared, [Cancelled] text in org, no orphan state
+- Simulated: mock busy→cancel transition
+
+*** E07: Execute with --resume (session continuity)
+- Execute: two queries in same story
+- Verify: second launch uses --resume with CLAUDE_CLI_SESSION
+- Verify: org property persisted between queries
+- Simulated: assert --resume flag in build-launch-command output
+
+*** E08: Queue Block B while Block A runs
+- Execute: start Block A, immediately execute Block B
+- Verify: B queued, A completes, B auto-executes, responses in correct positions
+- Simulated: extend existing queue tests
+
+** P1-E2E — Verbose, Streaming, and Session Management
+
+*** E09: Verbose buffer created on session start
+- Execute: ensure-session on new workspace
+- Verify: buffer *cmux: <session-id>* exists, header-line set
+- Verify: verbose timer running (claude-org--session-get :verbose-timer)
+- Simulated: assert create-verbose-buffer called with correct args
+
+*** E10: Verbose tick captures screen changes
+- Execute: send text to surface, wait for verbose tick
+- Verify: verbose buffer contains the sent text (diff-based dedup)
+- Simulated: mock capture-pane returns changing content, verify buffer update
+
+*** E11: Verbose restart on surface change
+- Execute: relaunch workspace (new surface), check verbose
+- Verify: old timer cancelled, new timer started with fresh surface
+- Simulated: assert stop-verbose then start-verbose sequence
+
+*** E12: Stop verbose on session cleanup
+- Execute: close workspace or kill buffer
+- Verify: timer cancelled, no orphan timers in timer-list
+- Simulated: assert cancel-timer called
+
+*** E13: Session recovery from org buffer scan
+- Execute: clear hash tables, call recover-session with known session ID
+- Verify: scans buffers, finds matching CLAUDE_SESSION_ID, rebuilds mappings
+- Simulated: T50 exists — extend to verify surface + workspace-id restored
+
+*** E14: Story switch updates ACTIVE_STORY
+- Execute: switch from story A to story B via on-story-changed
+- Verify: ACTIVE_STORY property updated, tab renamed
+- Simulated: mock rename-tab call with correct title
+
+** P2-E2E — Color, Icon, Launch Command
+
+*** E15: Apply named color (Red, Blue, Teal, Purple)
+- Execute: set WORKSPACE_COLOR on heading, call apply-color
+- Verify: cmux sidebar-state shows color pill
+- Simulated: assert set-status called with correct color hex
+
+*** E16: Apply hex color (#C0392B)
+- Execute: WORKSPACE_COLOR: #C0392B, call apply-color
+- Verify: sidebar-state shows hex color
+- Simulated: assert hex passed through to set-status
+
+*** E17: Apply color + icon
+- Execute: WORKSPACE_COLOR + WORKSPACE_ICON set
+- Verify: both color and icon appear in sidebar-state
+- Simulated: assert set-status called with icon= parameter
+
+*** E18: Color applied early (before wait-for-ready)
+- Execute: launch workspace, check color before TUI ready
+- Verify: color visible while Claude Code still loading
+- Simulated: assert apply-color called before wait-for-ready in call order
+
+*** E19: Claude legacy launch command (no profile)
+- Execute: build-launch-command with default agent type
+- Verify: flags include --print, --output-format stream-json
+- Simulated: assert command string structure
+
+*** E20: Claude profile launch command
+- Execute: build-launch-command with CLAUDE_PROFILE set
+- Verify: CLAUDE_PROFILE env var in command, --resume if session exists
+- Simulated: assert profile flag and resume flag
+
+*** E21: Copilot launch command
+- Execute: build-launch-command with AGENT_TYPE=copilot
+- Verify: copilot CLI path used, COPILOT_CLI_SESSION read
+- Simulated: assert copilot-specific flags, no claude-only flags
+
+*** E22: System prompt injected in launch
+- Execute: build-launch-command with :system_prompt: section
+- Verify: --system-prompt flag present with bridge content
+- Simulated: assert workspace-bridge-system-prompt called
+
+*** E23: Permission mode bypass
+- Execute: CLAUDE_PERMISSION_MODE: bypass on heading
+- Verify: --dangerously-skip-permissions in launch command
+- Simulated: assert flag present in built command
+
+** P3-E2E — Loop, IDE, Wait, and Edge Cases
+
+*** E24: Loop send dispatches prompt
+- Execute: trigger loop-send with prompt text
+- Verify: from-emacs flag written, text sent to surface, enter pressed
+- Simulated: assert write-from-emacs-flag + send + send-key sequence
+
+*** E25: Loop cancel guard skips iteration
+- Execute: cancel session, trigger loop iteration
+- Verify: iteration skipped with "cancelled" message
+- Simulated: existing test — extend with property verification
+
+*** E26: IDE server starts for Claude Code
+- Execute: ensure-ide-server for workspace
+- Verify: lockfile exists in ~/.claude/ide/
+- Simulated: assert ide--session-alive-p or lockfile creation
+
+*** E27: IDE server skipped for Copilot
+- Execute: ensure-session with AGENT_TYPE=copilot
+- Verify: no IDE lockfile created, no /ide sent
+- Simulated: assert ensure-ide-server NOT called
+
+*** E28: Wait detects INSERT mode
+- Execute: wait-for-ready with capture-pane showing INSERT
+- Verify: returns promptly, no timeout
+- Simulated: mock capture-pane → ready pattern, assert quick return
+
+*** E29: Wait timeout on slow launch
+- Execute: wait-for-ready with capture-pane never showing ready
+- Verify: times out after configured seconds, returns anyway
+- Simulated: mock capture-pane → always "loading...", assert timeout
+
+*** E30: Unicode in story name
+- Execute: create workspace with unicode heading (e.g. "API 开发")
+- Verify: workspace created, slug generated, no crash
+- Simulated: existing test — extend with CJK characters
+
+*** E31: Org metacharacters in heading
+- Execute: heading with * and # characters
+- Verify: properties set correctly, no org corruption
+- Simulated: existing test covers this
+
+*** E32: File-level CLAUDE_BACKEND dispatch
+- Execute: #+PROPERTY: CLAUDE_BACKEND cmux at file level
+- Verify: ensure-session dispatches to cmux backend
+- Simulated: T52 exists — extend with property inheritance check
+
+*** E33: TabManager not available recovery
+- Execute: close all cmux tabs, then ensure-session
+- Verify: new-window created first, then new-workspace succeeds
+- Simulated: mock first new-workspace → TabManager error, retry succeeds
+
+*** E34: Concurrent permission + query
+- Execute: trigger permission-needed while query active
+- Verify: both handled, no crash, workspace focused
+- Simulated: call permission-needed mid-query, assert state consistency
+
+*** E35: Stale verbose timer after workspace relaunch
+- Execute: relaunch workspace (surface changes), check timers
+- Verify: old timer replaced, no double-tick, buffer updated
+- Simulated: assert stop-verbose then start-verbose, single timer
+
+*** E36: set-status / clear-status round-trip
+- Execute: set-status "test_key" "test_value", then clear-status "test_key"
+- Verify: sidebar-state shows key after set, key gone after clear
+- Simulated: assert set-status and clear-status mock calls
+
+*** E37: set-progress bar
+- Execute: set-progress "0.5" --label "Building..."
+- Verify: sidebar-state shows progress
+- Simulated: assert set-progress mock call with value and label

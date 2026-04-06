@@ -1103,5 +1103,32 @@ FIX: Extract formatting logic into type-specific helpers."
           (format "claude-agent--verbose-format-message is %d lines (max 15).\nFIX: Extract type-specific logic into --verbose-format-*-msg helpers."
                   line-count))))))
 
+;;; F44: Activity string dispatcher must stay thin
+
+(ert-deftest test-structural-activity-string-dispatcher-thin ()
+  "claude-agent--update-activity-string should be a thin dispatcher (<20 lines).
+The alert and query-spinner rendering logic belongs in dedicated helpers
+\(--activity-alert-string, --activity-queries-string).
+FIX: Extract rendering logic into helper functions."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let* ((file (expand-file-name "claude-agent.org"
+                                    test-structural--project-root))
+           (line-count 0)
+           (found nil))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (when (search-forward "(defun claude-agent--update-activity-string " nil t)
+          (setq found t)
+          (let ((start (line-number-at-pos)))
+            (goto-char (match-beginning 0))
+            (forward-sexp 1)
+            (setq line-count (1+ (- (line-number-at-pos) start))))))
+      (when found
+        (should-with-fix (<= line-count 20)
+          (format "claude-agent--update-activity-string is %d lines (max 20).\nFIX: Extract rendering logic into --activity-alert-string and --activity-queries-string helpers."
+                  line-count))))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here
