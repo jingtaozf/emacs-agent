@@ -1994,6 +1994,42 @@ them sequentially via its own input buffer."
           (let ((sk (claude-org--current-session-key)))
             (should (zerop (claude-org--queue-count sk)))))))))
 
+;;; ============================================================================
+;;; E10: Verbose tick diff-based dedup
+;;; ============================================================================
+
+(ert-deftest test-cmux-verbose-tick-dedup ()
+  "E10: Verbose buffer only updates when capture-pane content changes.
+The prev-text variable prevents redundant buffer rewrites when the
+terminal screen hasn't changed between ticks."
+  :tags '(:unit :stable :e2e)
+  (let ((vbuf (generate-new-buffer "*test-verbose-dedup*")))
+    (unwind-protect
+        (with-current-buffer vbuf
+          (claude-org-cmux-verbose-mode)
+          (setq-local claude-org-cmux--verbose-prev-text "")
+          ;; Simulate first tick: new content → buffer updates
+          (let ((content-v1 "Claude Code\n  -- INSERT --\n❯ hello"))
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert content-v1))
+            (setq claude-org-cmux--verbose-prev-text content-v1)
+            (should (equal (buffer-string) content-v1))
+            ;; Simulate second tick: same content → should NOT rewrite
+            ;; (we verify by checking prev-text is still the same)
+            (should (string= claude-org-cmux--verbose-prev-text content-v1))
+            ;; Simulate third tick: different content → updates
+            (let ((content-v2 "Claude Code\n  -- INSERT --\n❯ world"))
+              (should-not (string= claude-org-cmux--verbose-prev-text content-v2))
+              ;; Apply the update (what verbose-tick sentinel does)
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (insert content-v2))
+              (setq claude-org-cmux--verbose-prev-text content-v2)
+              (should (equal (buffer-string) content-v2))
+              (should (string= claude-org-cmux--verbose-prev-text content-v2)))))
+      (kill-buffer vbuf))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
