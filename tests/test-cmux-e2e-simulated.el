@@ -651,6 +651,29 @@ query-completed clears busy and unregisters query."
         (should (equal cmd "my-custom-command"))))))
 
 ;;; ============================================================================
+;;; E19: Claude bare launch command
+;;; ============================================================================
+
+(ert-deftest test-cmux-build-launch-cmd-claude-bare ()
+  "E19: Build launch command for bare 'claude mode includes --system-prompt."
+  :tags '(:unit :stable :e2e)
+  (test-cmux--with-org-buffer test-cmux--org-content-basic
+    (test-cmux--goto-ai-block)
+    (let ((claude-org-cmux-launch-command 'claude)
+          (claude-org-cmux-extra-args nil))
+      (cl-letf (((symbol-function 'claude-org-workspace-bridge-system-prompt)
+                 (lambda (&rest _) "test system prompt"))
+                ((symbol-function 'claude-org-workspace-bridge-get-cli-session)
+                 (lambda (&rest _) nil)))
+        (let ((cmd (claude-org-cmux--build-launch-command
+                    "/tmp/test.org" "sid-001" "/tmp")))
+          (should (stringp cmd))
+          ;; Starts with 'claude'
+          (should (string-match-p "\\`claude " cmd))
+          ;; Has --system-prompt
+          (should (string-match-p "--system-prompt" cmd)))))))
+
+;;; ============================================================================
 ;;; Tests: Sidebar Feedback (cmux-specific features)
 ;;; ============================================================================
 
