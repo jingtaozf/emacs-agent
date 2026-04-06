@@ -1903,6 +1903,71 @@ launch command sent, verbose timer restarted."
       (delete-file file))))
 
 ;;; ============================================================================
+;;; E09: Verbose buffer created on session start
+;;; ============================================================================
+
+(ert-deftest test-cmux-verbose-buffer-created-with-header ()
+  "E09: ensure-session creates verbose buffer named *cmux: <session-id>*
+with header-line containing the session ID and keybinding hints."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-verbose-" nil ".org")))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                (remhash "test-cmux-session-003"
+                         claude-org-terminal--workspace-to-session-key)
+                (remhash "test-cmux-session-003"
+                         claude-org-cmux--workspace-to-surface)
+                (remhash "test-cmux-session-003"
+                         claude-org-cmux--workspace-to-cmux-id)
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest _args)
+                             (cond
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane")
+                               (test-cmux--read-fixture "capture-pane-ready.txt"))
+                              (t "ok")))))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (claude-org-cmux--ensure-session)
+                    (let* ((sk (claude-org--current-session-key))
+                           (vbuf (gethash sk claude-agent--session-verbose-buffers)))
+                      ;; Buffer exists and is live
+                      (should vbuf)
+                      (should (buffer-live-p vbuf))
+                      ;; Buffer name contains session ID
+                      (should (string-match-p "test-cmux-session-003"
+                                              (buffer-name vbuf)))
+                      ;; Header-line is set
+                      (with-current-buffer vbuf
+                        (should header-line-format))
+                      ;; Timer is running
+                      (should (claude-org--session-get sk :verbose-timer))))))
+            ;; Cleanup
+            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+              (when sk
+                (claude-org-cmux--stop-verbose sk)
+                (let ((vbuf (gethash sk claude-agent--session-verbose-buffers)))
+                  (when (and vbuf (buffer-live-p vbuf))
+                    (kill-buffer vbuf)))))
+            (remhash "test-cmux-session-003"
+                     claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003"
+                     claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003"
+                     claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
+;;; ============================================================================
 ;;; E08: Sequential execution — cmux sends both, no Emacs-level queue
 ;;; ============================================================================
 
