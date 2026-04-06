@@ -2363,6 +2363,42 @@ test
             (kill-buffer buf)))
       (delete-file file))))
 
+;;; ============================================================================
+;;; E28: Wait-for-ready detects INSERT mode
+;;; ============================================================================
+
+(ert-deftest test-cmux-wait-for-ready-detects-insert-mode ()
+  "E28: wait-for-ready-poll returns quickly when capture-pane shows INSERT mode."
+  :tags '(:unit :stable :e2e)
+  (let ((poll-count 0))
+    (cl-letf (((symbol-function 'claude-org-cmux--call)
+               (lambda (subcmd &rest _args)
+                 (when (string= subcmd "capture-pane")
+                   (setq poll-count (1+ poll-count)))
+                 "Claude Code v2.1\n❯\n  -- INSERT --"))
+              ((symbol-function 'sleep-for) (lambda (&rest _) nil)))
+      ;; Should return t immediately (first poll matches)
+      (should (claude-org-cmux--wait-for-ready-poll "surface:test" 10))
+      ;; Only 1 poll needed (INSERT found on first capture)
+      (should (= 1 poll-count)))))
+
+(ert-deftest test-cmux-wait-for-ready-poll-timeout ()
+  "E28b: wait-for-ready-poll errors on timeout when screen never shows ready."
+  :tags '(:unit :stable :e2e)
+  (cl-letf (((symbol-function 'claude-org-cmux--call)
+             (lambda (subcmd &rest _args)
+               (when (string= subcmd "capture-pane")
+                 "Loading Claude Code...")))
+            ((symbol-function 'sleep-for) (lambda (&rest _) nil))
+            ;; Make float-time always exceed deadline after first check
+            ((symbol-function 'float-time)
+             (let ((call-count 0))
+               (lambda ()
+                 (setq call-count (1+ call-count))
+                 (if (= call-count 1) 0.0 999.0)))))
+    (should-error (claude-org-cmux--wait-for-ready-poll "surface:test" 1)
+                  :type 'error)))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
