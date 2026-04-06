@@ -2399,6 +2399,89 @@ test
     (should-error (claude-org-cmux--wait-for-ready-poll "surface:test" 1)
                   :type 'error)))
 
+;;; ============================================================================
+;;; E33-E37: Edge cases and sidebar API
+;;; ============================================================================
+
+(ert-deftest test-cmux-tabmanager-recovery ()
+  "E33: launch-workspace retries with new-window when TabManager unavailable."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-tabmgr-" nil ".org"))
+        (calls nil)
+        (new-workspace-attempt 0))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-backend)
+                  (save-buffer))
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest args)
+                             (push (cons subcmd args) calls)
+                             (cond
+                              ;; First new-workspace → TabManager error
+                              ((string= subcmd "new-workspace")
+                               (setq new-workspace-attempt (1+ new-workspace-attempt))
+                               (if (= new-workspace-attempt 1)
+                                   (error "TabManager not available")
+                                 "OK workspace:mock-recovery"))
+                              ((string= subcmd "new-window") "ok")
+                              ((string= subcmd "list-pane-surfaces")
+                               "* surface:mock-rcv  Test  [selected]")
+                              ((string= subcmd "sidebar-state")
+                               "tab=MOCK-UUID\ncolor=#000")
+                              ((string= subcmd "capture-pane")
+                               (test-cmux--read-fixture "capture-pane-ready.txt"))
+                              (t "ok"))))
+                          ((symbol-function 'sleep-for) (lambda (&rest _) nil)))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (let ((surface (claude-org-cmux--ensure-session)))
+                      ;; Should succeed after retry
+                      (should (equal surface "surface:mock-rcv"))
+                      ;; new-window was called (recovery)
+                      (should (cl-find "new-window" calls :key #'car :test #'equal))
+                      ;; Two new-workspace attempts
+                      (should (= 2 new-workspace-attempt))))))
+            ;; Cleanup
+            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+              (when sk (claude-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-002" claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-002" claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-002" claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
+(ert-deftest test-cmux-set-status-clear-status-round-trip ()
+  "E36: set-status then clear-status calls correct cmux commands."
+  :tags '(:unit :stable :e2e)
+  (test-cmux--with-mock
+    (claude-org-cmux-set-status "test_key" "test_value")
+    (claude-org-cmux-clear-status "test_key")
+    ;; set-status called
+    (let ((set-calls (test-cmux--mock-calls-for "set-status")))
+      (should set-calls)
+      (should (member "test_key" (cdar set-calls)))
+      (should (member "test_value" (cdar set-calls))))
+    ;; clear-status called
+    (let ((clear-calls (test-cmux--mock-calls-for "clear-status")))
+      (should clear-calls)
+      (should (member "test_key" (cdar clear-calls))))))
+
+(ert-deftest test-cmux-set-progress-bar ()
+  "E37: set-progress calls cmux with value and optional label."
+  :tags '(:unit :stable :e2e)
+  (test-cmux--with-mock
+    (claude-org-cmux-set-progress "0.5" "Building...")
+    (let ((calls (test-cmux--mock-calls-for "set-progress")))
+      (should calls)
+      (should (member "0.5" (cdar calls)))
+      (should (member "Building..." (cdar calls))))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
