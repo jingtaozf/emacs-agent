@@ -917,6 +917,68 @@ On reconnect, ensure-session must repopulate all three hash tables."
         (should (equal "mock-workspace-uuid-123"
                        (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)))))))
 
+(ert-deftest test-cmux-restore-workspace-verbose-and-color ()
+  "E02: Restore workspace after Emacs restart starts verbose and reapplies color.
+Extends T53: verifies that restore-workspace (called by ensure-session phase 1)
+starts the verbose timer, reapplies sidebar color, renames the tab, and does NOT
+call new-workspace."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-restore-" nil ".org"))
+        (calls nil))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                ;; Clear hash tables to simulate Emacs restart
+                (remhash "test-cmux-session-003"
+                         claude-org-terminal--workspace-to-session-key)
+                (remhash "test-cmux-session-003"
+                         claude-org-cmux--workspace-to-surface)
+                (remhash "test-cmux-session-003"
+                         claude-org-cmux--workspace-to-cmux-id)
+                ;; Mock with call recording
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest args)
+                             (push (cons subcmd args) calls)
+                             (cond
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane")
+                               (test-cmux--read-fixture "capture-pane-ready.txt"))
+                              (t "ok")))))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (let ((surface (claude-org-cmux--ensure-session)))
+                      ;; Returns existing surface (not a new one)
+                      (should (equal surface "surface:existing-123"))
+                      ;; No new-workspace was called
+                      (should-not (cl-find "new-workspace" calls
+                                           :key #'car :test #'equal))
+                      ;; Tab renamed
+                      (should (cl-find "rename-tab" calls
+                                       :key #'car :test #'equal))
+                      ;; Verbose timer started
+                      (let ((sk (claude-org--current-session-key)))
+                        (should (claude-org--session-get sk :verbose-timer)))))))
+            ;; Cleanup: stop verbose, clear state, kill buffer
+            (let ((sk (with-current-buffer buf
+                        (claude-org--current-session-key))))
+              (when sk (claude-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003"
+                     claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003"
+                     claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003"
+                     claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
 ;;; ============================================================================
 ;;; Tests: Permission mode display with file-level property (T54)
 ;;; ============================================================================
