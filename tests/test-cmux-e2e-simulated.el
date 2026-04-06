@@ -1547,7 +1547,18 @@ surface-id — without calling new-workspace."
                                         claude-org-cmux--workspace-to-surface)))
                 (should (equal "11111111-FE51-0000-0000-000000000000"
                                (gethash "test-cmux-session-recover-001"
-                                        claude-org-cmux--workspace-to-cmux-id))))))
+                                        claude-org-cmux--workspace-to-cmux-id)))
+                ;; E03 extensions: verify restore-workspace side effects
+                ;; after phase 2 recovery
+                ;; Verbose timer started
+                (let ((sk (claude-org--current-session-key)))
+                  (should (claude-org--session-get sk :verbose-timer)))
+                ;; list-workspaces was queried for name lookup
+                (should (cl-find "list-workspaces" calls
+                                 :key #'car :test #'equal))
+                ;; rename-tab was called (restore-workspace renames)
+                (should (cl-find "rename-tab" calls
+                                 :key #'car :test #'equal)))))
           ;; Cleanup
           (let ((sk (with-current-buffer buf
                       (claude-org--current-session-key))))
