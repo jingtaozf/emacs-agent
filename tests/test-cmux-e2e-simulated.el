@@ -911,18 +911,23 @@ First query.
               (claude-org-mode 1))
             (insert test-cmux--org-content-with-surface)
             (save-buffer))
-          ;; Clear hash tables to simulate Emacs restart
+          ;; Clear all 3 hash tables to simulate Emacs restart
           (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
           (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+          (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
           ;; Try recovery
           (let ((result (claude-org-cmux--recover-session "test-cmux-session-003")))
             (should result)
             (should (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
             (should (equal "surface:existing-123"
-                           (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface))))
+                           (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)))
+            ;; E13: also verify CMUX_WORKSPACE_ID restored
+            (should (equal "mock-workspace-uuid-123"
+                           (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id))))
           ;; Cleanup
           (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
           (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+          (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
           (kill-buffer buf))
       (delete-file file))))
 
