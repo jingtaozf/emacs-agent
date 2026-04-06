@@ -195,6 +195,31 @@ test query
         ;; Claude profile SHOULD include --resume or extra args
         (should-not (string-match-p "copilot" cmd))))))
 
+(ert-deftest test-ap-build-launch-command-claude-profile-with-resume ()
+  "E20: Claude profile launch includes --resume when CLAUDE_CLI_SESSION set."
+  :tags '(:unit :fast :agent-profiles :e2e)
+  (test-ap--with-org-buffer
+      "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: session-ap-resume
+:AGENT_TYPE: claude
+:CLAUDE_CLI_SESSION: saved-uuid-12345
+:CUSTOM_ID: story-ap-resume
+:END:
+
+#+begin_src ai
+test query
+#+end_src
+"
+    (let ((claude-org-cmux-agent-type 'claude))
+      (let ((cmd (claude-org-cmux--build-launch-command
+                  "/test/project" "session-ap-resume" nil)))
+        (should (stringp cmd))
+        (should (string-match-p "claude-workspace" cmd))
+        ;; --resume with the saved CLI session
+        (should (string-match-p "--resume" cmd))
+        (should (string-match-p "saved-uuid-12345" cmd))))))
+
 (ert-deftest test-ap-build-launch-command-copilot-profile ()
   "build-launch-command with 'copilot profile builds copilot-workspace command."
   :tags '(:unit :fast :agent-profiles)
