@@ -2301,6 +2301,64 @@ test
             (kill-buffer buf)))
       (delete-file file))))
 
+;;; ============================================================================
+;;; E24: Loop send dispatches prompt
+;;; ============================================================================
+
+(ert-deftest test-cmux-loop-send-writes-flag-and-sends ()
+  "E24: loop-send writes from-emacs flag, registers query, and sends prompt."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-loop-" nil ".org"))
+        (calls nil))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest args)
+                             (push (cons subcmd args) calls)
+                             (cond
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane") "screen")
+                              (t "ok")))))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (let ((sk (claude-org--current-session-key)))
+                      ;; Set up loop state
+                      (claude-org--session-put sk :loop-org-buffer buf)
+                      (claude-org--session-put sk :loop-block-marker
+                                               (copy-marker (point)))
+                      (claude-org--session-put sk :loop-current 2)
+                      (claude-org--session-put sk :loop-max 5)
+                      ;; Send
+                      (claude-org-cmux--loop-send
+                       "test-cmux-session-003" "surface:existing-123"
+                       "loop iteration prompt" sk)
+                      ;; from-emacs flag written
+                      (let ((flag-path (expand-file-name
+                                        "test-cmux-session-003.from-emacs"
+                                        claude-org-terminal-status-dir)))
+                        (should (file-exists-p flag-path))
+                        (ignore-errors (delete-file flag-path)))
+                      ;; Prompt sent via "send"
+                      (should (cl-find "send" calls :key #'car :test #'equal))
+                      ;; Enter pressed via "send-key"
+                      (should (cl-find "send-key" calls :key #'car :test #'equal))
+                      ;; Clean up request-id file
+                      (ignore-errors
+                        (delete-file (expand-file-name
+                                      "test-cmux-session-003.request-id"
+                                      claude-org-terminal-status-dir)))))))
+            (kill-buffer buf)))
+      (delete-file file))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
