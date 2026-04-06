@@ -1357,7 +1357,11 @@ Guards against firing queued timers after user cancels."
             (claude-org--execute-loop-iteration
              session-key 2 3 "test" 1 "test-lc" 0)
             ;; send-request should NOT have been called
-            (should-not send-called)))
+            (should-not send-called)
+            ;; E25: :busy stays nil (not set by cancelled iteration)
+            (should-not (claude-org--session-get session-key :busy))
+            ;; E25: :loop-current unchanged (still 2, not incremented)
+            (should (equal 2 (claude-org--session-get session-key :loop-current)))))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when buffer-file-name
