@@ -244,6 +244,60 @@ test query
         ;; Copilot MUST NOT include --resume
         (should-not (string-match-p "--resume" cmd))))))
 
+(ert-deftest test-ap-copilot-launch-resumes-with-copilot-cli-session ()
+  "E21: Copilot launch uses COPILOT_CLI_SESSION for --resume, not CLAUDE_CLI_SESSION."
+  :tags '(:unit :fast :agent-profiles :e2e)
+  (test-ap--with-org-buffer
+      "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: session-ap-copilot-resume
+:AGENT_TYPE: copilot
+:COPILOT_CLI_SESSION: copilot-uuid-abc
+:CLAUDE_CLI_SESSION: claude-uuid-xyz
+:CUSTOM_ID: story-ap-copilot-resume
+:END:
+
+#+begin_src ai
+test query
+#+end_src
+"
+    (let ((claude-org-cmux-agent-type 'copilot)
+          (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
+      (let ((cmd (claude-org-cmux--build-launch-command
+                  "/test/project" "session-ap-copilot-resume" nil)))
+        (should (stringp cmd))
+        (should (string-match-p "copilot-workspace" cmd))
+        ;; Uses COPILOT_CLI_SESSION for --resume
+        (should (string-match-p "--resume" cmd))
+        (should (string-match-p "copilot-uuid-abc" cmd))
+        ;; Does NOT use CLAUDE_CLI_SESSION
+        (should-not (string-match-p "claude-uuid-xyz" cmd))))))
+
+(ert-deftest test-ap-copilot-launch-filters-claude-only-flags ()
+  "E21b: Copilot launch filters out claude-only flags from extra args."
+  :tags '(:unit :fast :agent-profiles :e2e)
+  (test-ap--with-org-buffer
+      "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: session-ap-copilot-filter
+:AGENT_TYPE: copilot
+:CUSTOM_ID: story-ap-copilot-filter
+:END:
+
+#+begin_src ai
+test query
+#+end_src
+"
+    (let ((claude-org-cmux-agent-type 'copilot)
+          (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace")
+          (claude-org-cmux-extra-args '("--dangerously-skip-permissions" "--ide")))
+      (let ((cmd (claude-org-cmux--build-launch-command
+                  "/test/project" "session-ap-copilot-filter" nil)))
+        (should (stringp cmd))
+        ;; Claude-only flags must be filtered
+        (should-not (string-match-p "dangerously-skip-permissions" cmd))
+        (should-not (string-match-p "--ide" cmd))))))
+
 (ert-deftest test-ap-build-launch-command-nil-legacy ()
   "build-launch-command with nil agent-type falls back to legacy claude-workspace."
   :tags '(:unit :fast :agent-profiles)
