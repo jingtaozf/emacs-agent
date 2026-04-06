@@ -2143,6 +2143,79 @@ Ensures no orphan timers remain after cleanup."
             (kill-buffer buf)))
       (delete-file file))))
 
+;;; ============================================================================
+;;; E14: Story switch updates ACTIVE_STORY and renames tab
+;;; ============================================================================
+
+(defvar test-cmux--org-workspace-with-stories
+  "* Test Workspace
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-story-switch-001
+:CMUX_WORKSPACE: test-switch
+:CMUX_WORKSPACE_ID: mock-ws-uuid-switch
+:CUSTOM_ID: test-cmux-ws-switch
+:END:
+
+** Story Alpha
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-story-alpha
+:END:
+
+*** Workflow :sdd:
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-story-alpha-wf
+:END:
+
+**** Instruction :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-story-alpha-instr
+:END:
+
+#+begin_src ai
+Alpha query.
+#+end_src
+"
+  "Org content with CMUX_WORKSPACE property for story-switch test.")
+
+(ert-deftest test-cmux-story-switch-sets-active-and-renames-tab ()
+  "E14: set-active-story updates ACTIVE_STORY property and fires hook
+which calls rename-tab on the cmux workspace."
+  :tags '(:unit :stable :e2e)
+  (test-cmux--with-mock
+    ;; Set up workspace-to-cmux-id so on-story-changed can find the UUID
+    (puthash "test-cmux-story-switch-001" "mock-ws-uuid-switch"
+             claude-org-cmux--workspace-to-cmux-id)
+    (unwind-protect
+        (test-cmux--with-org-buffer test-cmux--org-workspace-with-stories
+          ;; Navigate inside the workspace
+          (goto-char (point-min))
+          (re-search-forward ":CUSTOM_ID: test-cmux-story-alpha-instr" nil t)
+          (forward-line 1)
+          ;; Verify workspace heading found
+          (should (claude-org--find-workspace-heading))
+          ;; No ACTIVE_STORY initially
+          (should-not (save-excursion
+                        (let ((ws (claude-org--find-workspace-heading)))
+                          (goto-char (cdr ws))
+                          (org-entry-get nil "ACTIVE_STORY"))))
+          ;; Set active story
+          (claude-org--set-active-story "Story Alpha")
+          ;; ACTIVE_STORY property set
+          (let ((active (save-excursion
+                          (let ((ws (claude-org--find-workspace-heading)))
+                            (goto-char (cdr ws))
+                            (org-entry-get nil "ACTIVE_STORY")))))
+            (should (equal active "Story Alpha")))
+          ;; rename-tab was called via the hook
+          (let ((tab-calls (test-cmux--mock-calls-for "rename-tab")))
+            (should tab-calls)
+            ;; Called with the workspace UUID
+            (should (member "mock-ws-uuid-switch" (cdar tab-calls)))
+            ;; Called with the story name
+            (should (member "Story Alpha" (cdar tab-calls)))))
+      ;; Cleanup
+      (remhash "test-cmux-story-switch-001" claude-org-cmux--workspace-to-cmux-id))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
