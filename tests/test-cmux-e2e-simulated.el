@@ -1902,6 +1902,33 @@ launch command sent, verbose timer restarted."
             (kill-buffer buf)))
       (delete-file file))))
 
+;;; ============================================================================
+;;; E08: Sequential execution — cmux sends both, no Emacs-level queue
+;;; ============================================================================
+
+(ert-deftest test-cmux-sequential-execute-sends-both-prompts ()
+  "E08: Two execute calls send both prompts — cmux has no Emacs-level queue.
+Unlike the JSON stream backend which queues Block B when :busy, the cmux
+backend sends both prompts directly to the terminal. Claude Code processes
+them sequentially via its own input buffer."
+  :tags '(:unit :stable :e2e)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-with-surface
+      (test-cmux--goto-ai-block)
+      ;; Execute Block A
+      (claude-org-cmux--execute-ai-block)
+      (let ((send-count-after-a (length (test-cmux--mock-calls-for "send"))))
+        ;; Execute again (Block B in same session) — should NOT error,
+        ;; just send another prompt
+        (claude-org-cmux--execute-ai-block)
+        (let ((send-count-after-b (length (test-cmux--mock-calls-for "send"))))
+          ;; Both prompts should have been sent (2 "send" calls total
+          ;; for prompt text, plus initial sends from ensure-session)
+          (should (> send-count-after-b send-count-after-a))
+          ;; No queue was used — cmux sends directly
+          (let ((sk (claude-org--current-session-key)))
+            (should (zerop (claude-org--queue-count sk)))))))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
