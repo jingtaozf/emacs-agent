@@ -2216,6 +2216,68 @@ which calls rename-tab on the cmux workspace."
       ;; Cleanup
       (remhash "test-cmux-story-switch-001" claude-org-cmux--workspace-to-cmux-id))))
 
+;;; ============================================================================
+;;; E15: Apply named color
+;;; ============================================================================
+
+(ert-deftest test-cmux-resolve-color-named-presets ()
+  "E15: resolve-color maps named colors to hex and passes hex through."
+  :tags '(:unit :stable :e2e)
+  ;; Named colors (case-insensitive)
+  (should (equal "#C0392B" (claude-org-cmux--resolve-color "Red")))
+  (should (equal "#1565C0" (claude-org-cmux--resolve-color "blue")))
+  (should (equal "#006B6B" (claude-org-cmux--resolve-color "Teal")))
+  (should (equal "#6A1B9A" (claude-org-cmux--resolve-color "PURPLE")))
+  ;; Hex passthrough
+  (should (equal "#C0392B" (claude-org-cmux--resolve-color "#C0392B")))
+  ;; Unknown returns nil
+  (should-not (claude-org-cmux--resolve-color "unknown-color"))
+  ;; Nil returns nil
+  (should-not (claude-org-cmux--resolve-color nil)))
+
+(ert-deftest test-cmux-apply-color-calls-set-status ()
+  "E15b: apply-color calls set-status with resolved hex color and icon."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-color-" nil ".org"))
+        (calls nil))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (insert "* Color Test
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-color-001
+:WORKSPACE_COLOR: Blue
+:WORKSPACE_ICON: bolt.fill
+:CUSTOM_ID: test-color-story
+:END:
+
+#+begin_src ai
+test
+#+end_src
+")
+                  (save-buffer))
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest args)
+                             (push (cons subcmd args) calls)
+                             "ok")))
+                  (with-current-buffer buf
+                    (goto-char (point-min))
+                    (re-search-forward "#+begin_src ai" nil t)
+                    (forward-line 1)
+                    (claude-org-cmux--apply-color "workspace:test")
+                    ;; set-status called with hex color
+                    (let ((status-call (cl-find "set-status" calls
+                                               :key #'car :test #'equal)))
+                      (should status-call)
+                      (should (member "#1565C0" (cdr status-call)))
+                      ;; Icon passed
+                      (should (member "bolt.fill" (cdr status-call)))))))
+            (kill-buffer buf)))
+      (delete-file file))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
