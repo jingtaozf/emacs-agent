@@ -555,6 +555,44 @@ duplicate execution."
           (when req-id
             (claude-agent--unregister-query req-id)))))))
 
+(ert-deftest test-cmux-cancel-during-active-query ()
+  "E06: Cancel during active query sends escape and clears state.
+Full lifecycle: execute → bridge sets busy → cancel sends escape →
+query-completed clears busy and unregisters query."
+  :tags '(:unit :stable :e2e)
+  (test-cmux--with-mock
+    (test-cmux--with-org-buffer test-cmux--org-content-with-surface
+      (test-cmux--goto-ai-block)
+      ;; 1. Execute sets up the query
+      (claude-org-cmux--execute-ai-block)
+      (let ((session-key (claude-org--current-session-key))
+            (req-id (claude-org-terminal--read-request-id "test-cmux-session-003")))
+        ;; Query should be registered
+        (should req-id)
+        (should (claude-agent--get-active-query req-id))
+        ;; 2. Simulate bridge setting busy (as hook would)
+        (claude-org--session-put session-key :busy t)
+        (should (claude-org--session-get session-key :busy))
+        ;; 3. Cancel sends escape
+        (claude-org-cmux-cancel)
+        (let ((key-calls (test-cmux--mock-calls-for "send-key")))
+          (should key-calls)
+          (should (member "escape" (cdar key-calls))))
+        ;; 4. query-completed fires (Python hook detects agent stopped)
+        (claude-org-cmux--query-completed "test-cmux-session-003")
+        ;; 5. Verify clean state: not busy, query unregistered
+        (should-not (claude-org--session-get session-key :busy))
+        (should-not (claude-agent--get-active-query req-id))
+        ;; Clean up files
+        (ignore-errors
+          (delete-file (expand-file-name
+                        "test-cmux-session-003.request-id"
+                        claude-org-terminal-status-dir)))
+        (ignore-errors
+          (delete-file (expand-file-name
+                        "test-cmux-session-003.from-emacs"
+                        claude-org-terminal-status-dir)))))))
+
 (ert-deftest test-cmux-generic-cancel-dispatches-to-cmux ()
   "Generic claude-org-cancel dispatches to claude-org-cmux-cancel for cmux sessions."
   :tags '(:unit :stable)
