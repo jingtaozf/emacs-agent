@@ -2090,6 +2090,54 @@ tracking the new surface."
             (kill-buffer buf)))
       (delete-file file))))
 
+;;; ============================================================================
+;;; E12: Stop verbose on session cleanup
+;;; ============================================================================
+
+(ert-deftest test-cmux-stop-verbose-cancels-timer ()
+  "E12: stop-verbose cancels timer and clears :verbose-timer session state.
+Ensures no orphan timers remain after cleanup."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-vstop-" nil ".org")))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest _args)
+                             (cond
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane") "screen")
+                              (t "ok")))))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (let ((sk (claude-org--current-session-key)))
+                      ;; Start verbose
+                      (claude-org-cmux--start-verbose "surface:test" sk)
+                      (should (claude-org--session-get sk :verbose-timer))
+                      ;; Stop verbose
+                      (claude-org-cmux--stop-verbose sk)
+                      ;; Timer cleared
+                      (should-not (claude-org--session-get sk :verbose-timer))
+                      ;; Stopping again is safe (no error)
+                      (claude-org-cmux--stop-verbose sk)
+                      (should-not (claude-org--session-get sk :verbose-timer))))))
+            ;; Cleanup
+            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+              (when sk (claude-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
