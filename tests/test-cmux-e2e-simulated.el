@@ -2030,6 +2030,66 @@ terminal screen hasn't changed between ticks."
               (should (string= claude-org-cmux--verbose-prev-text content-v2)))))
       (kill-buffer vbuf))))
 
+;;; ============================================================================
+;;; E11: Verbose restart on surface change
+;;; ============================================================================
+
+(ert-deftest test-cmux-verbose-restarts-on-surface-change ()
+  "E11: start-verbose stops old timer and starts new when surface changes.
+When a workspace is relaunched (new surface), calling start-verbose with
+the new surface-id must cancel the old timer and create a fresh one
+tracking the new surface."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-vrestart-" nil ".org")))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest _args)
+                             (cond
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane") "screen v1")
+                              (t "ok")))))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (let ((sk (claude-org--current-session-key)))
+                      ;; Start verbose with surface-A
+                      (claude-org-cmux--start-verbose "surface:A" sk)
+                      (let ((timer-a (claude-org--session-get sk :verbose-timer)))
+                        (should timer-a)
+                        (should (equal "surface:A"
+                                       (claude-org--session-get sk :verbose-surface-id)))
+                        ;; Start verbose with surface-B (surface changed)
+                        (claude-org-cmux--start-verbose "surface:B" sk)
+                        (let ((timer-b (claude-org--session-get sk :verbose-timer)))
+                          ;; Timer replaced (not the same object)
+                          (should timer-b)
+                          (should-not (eq timer-a timer-b))
+                          ;; Surface updated
+                          (should (equal "surface:B"
+                                         (claude-org--session-get sk :verbose-surface-id)))
+                          ;; Start verbose with SAME surface-B (no change)
+                          (claude-org-cmux--start-verbose "surface:B" sk)
+                          (let ((timer-b2 (claude-org--session-get sk :verbose-timer)))
+                            ;; Timer NOT replaced — same surface
+                            (should (eq timer-b timer-b2)))))))))
+            ;; Cleanup
+            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+              (when sk (claude-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
 (provide 'test-cmux-e2e-simulated)
 
 ;;; test-cmux-e2e-simulated.el ends here
