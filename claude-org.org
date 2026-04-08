@@ -4487,6 +4487,15 @@ Dynamic header line showing session status, IDE context, and thinking state.
     (define-key map [header-line mouse-1] #'claude-org-list-sessions)
     map)
   "Keymap for clicking on the session badge in the header line.")
+
+(defvar-local claude-org--header-workspace-name nil
+  "Cached workspace name for header line (updated on cursor movement).")
+
+(defvar-local claude-org--header-story-name nil
+  "Cached story name for header line (updated on cursor movement).")
+
+(defvar-local claude-org--header-cursor-timer nil
+  "Debounce timer for cursor-position-driven header updates.")
 #+END_SRC
 
 ** Spinner Control
@@ -4544,6 +4553,40 @@ Dynamic header line showing session status, IDE context, and thinking state.
   "Refresh the header line with current session status."
   (setq header-line-format (claude-org--header-line))
   (force-mode-line-update))
+#+END_SRC
+
+** Cursor-Position Tracking
+
+The header line shows which workspace and story the cursor is in.
+These update on a 0.2-second debounce after cursor movement — fast
+enough to feel responsive, slow enough to avoid unnecessary org tree
+walks on every keystroke.
+
+#+BEGIN_SRC elisp
+(defun claude-org--schedule-cursor-header-update ()
+  "Schedule a debounced header update after cursor movement.
+Added to `post-command-hook' by `claude-org-mode'."
+  (when claude-org--header-cursor-timer
+    (cancel-timer claude-org--header-cursor-timer))
+  (setq claude-org--header-cursor-timer
+        (run-at-time 0.2 nil #'claude-org--update-cursor-header
+                     (current-buffer))))
+
+(defun claude-org--update-cursor-header (buf)
+  "Update cached workspace/story names from cursor position in BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq claude-org--header-cursor-timer nil)
+      (when (bound-and-true-p claude-org-mode)
+        (let ((ws (ignore-errors (claude-org--find-workspace-heading)))
+              (story (ignore-errors (claude-org--find-story-heading))))
+          (let ((new-ws (and ws (substring-no-properties (car ws))))
+                (new-story (and story (substring-no-properties (car story)))))
+            (unless (and (equal new-ws claude-org--header-workspace-name)
+                         (equal new-story claude-org--header-story-name))
+              (setq claude-org--header-workspace-name new-ws
+                    claude-org--header-story-name new-story)
+              (claude-org--refresh-header-line))))))))
 #+END_SRC
 
 ** Tooltip Formatting
@@ -4655,6 +4698,20 @@ Shows thinking count and queue depth when sessions are active."
                     "")))
     (concat file-str sel-str)))
 
+(defun claude-org--header-location-badge ()
+  "Return workspace/story location badge for header line.
+Reads from cached values updated by `claude-org--update-cursor-header'."
+  (let ((ws claude-org--header-workspace-name)
+        (story claude-org--header-story-name))
+    (cond
+     ((and ws story)
+      (concat (propertize (format " %s" ws) 'face 'font-lock-type-face)
+              (propertize " / " 'face 'font-lock-comment-face)
+              (propertize story 'face 'font-lock-constant-face)))
+     (ws
+      (propertize (format " %s" ws) 'face 'font-lock-type-face))
+     (t ""))))
+
 (defun claude-org--header-line ()
   "Generate the header line content for Claude Org buffer.
 Assembles components from dedicated badge functions."
@@ -4663,6 +4720,7 @@ Assembles components from dedicated badge functions."
                      "untitled")))
     (concat " Claude Org: "
             (propertize file-name 'face 'font-lock-function-name-face)
+            (claude-org--header-location-badge)
             (claude-org--header-session-badge)
             (claude-org--header-docker-badge)
             (claude-org--header-permission-badge)
@@ -4981,6 +5039,9 @@ Key bindings:
         (setq truncate-lines nil)
         ;; Set up header line
         (claude-org--refresh-header-line)
+        ;; Track cursor position for workspace/story badge
+        (add-hook 'post-command-hook
+                  #'claude-org--schedule-cursor-header-update nil t)
         ;; Register exclusion
         (claude-org--register-exclusion)
         ;; Auto-start MCP server
@@ -5011,6 +5072,12 @@ Key bindings:
     (claude-org--remove-protection)
     ;; Stop header timer if no more claude-org buffers
     (claude-org--stop-header-timer)
+    ;; Cancel cursor-position debounce timer
+    (when claude-org--header-cursor-timer
+      (cancel-timer claude-org--header-cursor-timer)
+      (setq claude-org--header-cursor-timer nil))
+    (remove-hook 'post-command-hook
+                 #'claude-org--schedule-cursor-header-update t)
     ;; Cancel font-lock debounce timer (buffer-local)
     (when claude-org--fontlock-timer
       (cancel-timer claude-org--fontlock-timer)

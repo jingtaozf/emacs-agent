@@ -1130,5 +1130,32 @@ FIX: Extract rendering logic into helper functions."
           (format "claude-agent--update-activity-string is %d lines (max 20).\nFIX: Extract rendering logic into --activity-alert-string and --activity-queries-string helpers."
                   line-count))))))
 
+;;; F45: launch-workspace orchestrator must stay thin
+
+(ert-deftest test-structural-launch-workspace-thin ()
+  "claude-org-cmux--launch-workspace should stay under 65 lines.
+State persistence belongs in --persist-workspace-state, IDE setup
+in --setup-ide-after-ready.
+FIX: Extract phase-specific logic into helper functions."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let* ((file (expand-file-name "claude-org-cmux.org"
+                                    test-structural--project-root))
+           (line-count 0)
+           (found nil))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (when (search-forward "(defun claude-org-cmux--launch-workspace " nil t)
+          (setq found t)
+          (let ((start (line-number-at-pos)))
+            (goto-char (match-beginning 0))
+            (forward-sexp 1)
+            (setq line-count (1+ (- (line-number-at-pos) start))))))
+      (when found
+        (should-with-fix (<= line-count 65)
+          (format "claude-org-cmux--launch-workspace is %d lines (max 65).\nFIX: Extract state persistence into --persist-workspace-state and IDE setup into --setup-ide-after-ready."
+                  line-count))))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here

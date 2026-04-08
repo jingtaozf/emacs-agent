@@ -811,6 +811,52 @@ if resolution fails."
           (error nil)))
       workspace-ref))
 
+(defun claude-org-cmux--persist-workspace-state (workspace-session-id
+                                                  workspace-ref surface-id)
+  "Save workspace state to org properties and in-memory hash tables.
+WORKSPACE-SESSION-ID is the org session identifier, WORKSPACE-REF the
+cmux workspace ref (e.g. \"workspace:3\"), SURFACE-ID the terminal
+surface ref.  Persists CMUX_SURFACE_ID and CMUX_WORKSPACE_ID as org
+properties, updates session state, and populates the three mapping
+hash tables."
+  (let ((ws-uuid (claude-org-cmux--resolve-workspace-uuid workspace-ref))
+        (session-key (claude-org--current-session-key)))
+    (save-excursion
+      (save-restriction
+        (claude-org-terminal--goto-session-heading)
+        (org-set-property "CMUX_SURFACE_ID" surface-id)
+        (org-set-property "CMUX_WORKSPACE_ID" ws-uuid)))
+    (claude-org--session-put session-key :cmux-surface surface-id)
+    (claude-org--session-put session-key :workspace-session-id workspace-session-id)
+    (puthash workspace-session-id surface-id
+             claude-org-cmux--workspace-to-surface)
+    (puthash workspace-session-id session-key
+             claude-org-terminal--workspace-to-session-key)
+    (when (string-prefix-p "workspace:" workspace-ref)
+      (puthash workspace-session-id workspace-ref
+               claude-org-cmux--workspace-to-cmux-id))
+    (save-buffer)))
+
+(defun claude-org-cmux--setup-ide-after-ready (surface-id project-root
+                                                workspace-session-id)
+  "Start IDE server and send /ide command if the agent profile supports it.
+SURFACE-ID is the terminal surface, PROJECT-ROOT the working directory,
+WORKSPACE-SESSION-ID the org session identifier.  Skips IDE setup for
+agent profiles that explicitly disable it (e.g. copilot)."
+  (when workspace-session-id
+    (let ((profile (claude-org-cmux--get-agent-profile)))
+      (when (or (null profile)
+                (claude-org-cmux--agent-profile-supports-ide profile))
+        (claude-org-cmux--ensure-ide-server project-root workspace-session-id)
+        (run-at-time 5 nil
+          (lexical-let ((sid surface-id))
+            (lambda ()
+              (condition-case nil
+                  (progn
+                    (claude-org-cmux--call "send" "--surface" sid "/ide")
+                    (claude-org-cmux--call "send-key" "--surface" sid "Return"))
+                (error nil)))))))))
+
 (defun claude-org-cmux--launch-workspace (workspace-session-id tab-title
                                           workspace-title project-root)
   "Launch a new cmux workspace running Claude Code.
@@ -855,26 +901,9 @@ to become ready, and returns the surface ref."
             (claude-org-cmux--call "rename-tab"
               "--workspace" workspace-ref tab-title))
         (error nil)))
-    ;; Persist surface and workspace UUID as org properties
-    (let ((ws-uuid (claude-org-cmux--resolve-workspace-uuid workspace-ref)))
-      (save-excursion
-        (save-restriction
-          (claude-org-terminal--goto-session-heading)
-          (org-set-property "CMUX_SURFACE_ID" surface-id)
-          (org-set-property "CMUX_WORKSPACE_ID" ws-uuid))))
-    ;; Store in-memory mappings
-    (claude-org--session-put (claude-org--current-session-key)
-                             :cmux-surface surface-id)
-    (claude-org--session-put (claude-org--current-session-key)
-                             :workspace-session-id workspace-session-id)
-    (puthash workspace-session-id surface-id
-             claude-org-cmux--workspace-to-surface)
-    (puthash workspace-session-id (claude-org--current-session-key)
-             claude-org-terminal--workspace-to-session-key)
-    (when (string-prefix-p "workspace:" workspace-ref)
-      (puthash workspace-session-id workspace-ref
-               claude-org-cmux--workspace-to-cmux-id))
-    (save-buffer)
+    ;; Persist workspace state (org properties + in-memory hash tables)
+    (claude-org-cmux--persist-workspace-state
+     workspace-session-id workspace-ref surface-id)
     ;; Apply color and start verbose BEFORE waiting for agent TUI.
     ;; These are pure cmux sidebar ops that don't need Claude Code running.
     ;; If we wait first, a slow or stuck agent launch means color/verbose
@@ -886,20 +915,8 @@ to become ready, and returns the surface ref."
     ;; Wait for agent TUI to be ready before returning
     (claude-org-cmux--wait-for-ready surface-id)
     ;; IDE server and /ide command DO need the TUI ready.
-    (when workspace-session-id
-      (let ((profile (claude-org-cmux--get-agent-profile)))
-        (when (or (null profile)
-                  (claude-org-cmux--agent-profile-supports-ide profile))
-          (claude-org-cmux--ensure-ide-server project-root workspace-session-id)
-          ;; Send /ide to auto-connect (--ide flag alone doesn't work on --resume)
-          (run-at-time 5 nil
-            (lexical-let ((sid surface-id))
-              (lambda ()
-                (condition-case nil
-                    (progn
-                      (claude-org-cmux--call "send" "--surface" sid "/ide")
-                      (claude-org-cmux--call "send-key" "--surface" sid "Return"))
-                  (error nil))))))))
+    (claude-org-cmux--setup-ide-after-ready surface-id project-root
+                                            workspace-session-id)
     (message "Agent ready in cmux (surface: %s)" surface-id)
     surface-id))
 
@@ -1572,9 +1589,15 @@ surface rather than the stale one."
       (message "Launching fresh Claude Code...")
       (claude-org-cmux--call "send" "--surface" surface-id
                              (concat launch-cmd "\n"))
-      ;; 4. Re-apply color and restart verbose
-      (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
-        (when ws-id (claude-org-cmux--apply-color ws-id)))
+      ;; 3. Rename tab to active story (cmux may reset title on relaunch)
+      (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID"))
+            (tab-title (claude-org-terminal--tab-title)))
+        (when ws-id
+          (condition-case nil
+              (claude-org-cmux--call "rename-tab" "--workspace" ws-id tab-title)
+            (error nil))
+          ;; 4. Re-apply color
+          (claude-org-cmux--apply-color ws-id)))
       (let ((sk (claude-org--current-session-key)))
         (claude-org-cmux--stop-verbose sk)
         (claude-org--session-put sk :verbose-surface-id nil)
