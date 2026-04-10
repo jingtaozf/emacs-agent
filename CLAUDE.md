@@ -33,6 +33,72 @@ Before claiming code is buggy:
 - Evaluate the expression via `evalElisp` to confirm behavior
 - See `docs/ELISP_IDIOMS.org` for common Emacs Lisp traps
 
+## Environment: cmux + Emacs + Phoenix
+
+You are running inside a **cmux workspace** — a terminal multiplexer for AI agents.
+The full environment stack:
+
+| Layer | Tool | What It Provides |
+|-------|------|------------------|
+| Terminal | cmux CLI | Workspace/pane/surface management, terminal I/O, browser automation |
+| Editor | `evalElisp` MCP | Full Emacs control — org-mode, buffers, variables, arbitrary Elisp |
+| Tracing | Phoenix (`localhost:6006`) | Execution traces, spans, latency — the experience store |
+
+**cmux** — read any terminal, send commands, manage workspaces:
+- `cmux tree` / `cmux identify --json` — discover workspace topology
+- `cmux read-screen --surface <ref> --scrollback --lines N` — read terminal output
+- `cmux send --surface <ref> "cmd"` + `cmux send-key enter` — execute commands
+- `cmux browser <surface> snapshot --interactive` — browser DOM inspection
+- See `/cmux` and `/cmux-browser` skills for full reference
+
+**evalElisp** — read/modify Emacs state directly:
+- Org properties, headings, buffer contents
+- Session state, variables, function calls
+- Reload code: `(literate-elisp-load "file.org")`
+
+**Phoenix** — trace every AI block execution:
+- Every execution produces spans: execute-ai-block, cmux-execute, send-text
+- Query traces: `curl -s -X POST http://localhost:6006/graphql ...`
+- Use `/phoenix-span` skill or check Phoenix UI at `http://localhost:6006`
+- Traces are the experience store — inspect them to diagnose failures
+
+## Tool-Use Protocol
+
+### Core Rule: Real Execution Over Simulation
+
+You have access to cmux CLI, `evalElisp` MCP, Phoenix traces, and shell commands.
+**Use them.** Every claim must be backed by actual tool output.
+
+Violations (NEVER do these):
+- Writing "this should produce..." without running the command
+- Creating a mock test when real execution is available
+- Describing what `evalElisp` would return without calling it
+- Saying "the buffer should contain..." without reading it via `evalElisp`
+- Guessing cmux workspace state without running `cmux tree` or `cmux status`
+
+### Show Your Evidence
+
+In every response, include actual tool output supporting your claims.
+Format: "I ran `[command]` and got `[actual output]`" — not "this should work."
+
+### Greedy Debugging Protocol
+
+When investigating any issue:
+1. Reproduce with a real command (not by reading code alone)
+2. Inspect actual state: `evalElisp` for Emacs variables, `cmux` for terminals
+3. Form hypothesis, test it with another real command
+4. Fix and verify with real execution
+5. Never fix based on code reading alone
+
+### Verification Sequence (after every code change)
+
+1. Save the file
+2. `make test-smoke` — syntax check
+3. Reload in Emacs: `evalElisp` with `(literate-elisp-load "file.org")`
+4. Execute the actual feature to verify it works
+5. Inspect real results (buffer contents, cmux output, Phoenix traces)
+6. Only then report to user with actual output
+
 ## Architecture
 
 See `ARCHITECTURE.org` for module boundaries, invariants, and extension points.
@@ -162,3 +228,10 @@ The harness grows with each mistake — rules become multipliers.
 | Docker sandbox | `.devcontainer/` |
 | Prompt tags | `prompts/tags/` |
 | Reference SDK | `reference/claude-agent-sdk-python/` |
+
+## Final Reminder
+
+The single most important rule in this project: **always use real tools.**
+Run commands. Call `evalElisp`. Execute cmux operations. Check Phoenix traces.
+Never simulate, never mock when real execution is possible, never guess when
+you can check.
