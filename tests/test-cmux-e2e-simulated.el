@@ -2171,6 +2171,78 @@ Ensures no orphan timers remain after cleanup."
       (delete-file file))))
 
 ;;; ============================================================================
+;;; E13: Verbose buffer self-heals when user kills it
+;;; ============================================================================
+
+(ert-deftest test-cmux-verbose-buffer-self-heals-after-kill ()
+  "E13: If the user kills the verbose buffer, the timer must recreate it.
+Without self-healing, the timer closure holds a dead buffer reference and
+silently no-ops forever. The fix is to re-resolve the buffer each tick
+via `claude-org-cmux--create-verbose-buffer' (which is idempotent)."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-vheal-" nil ".org")))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((claude-org-auto-start-mcp-server nil))
+                    (claude-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                           (lambda (subcmd &rest _args)
+                             (cond
+                              ((string= subcmd "tree") "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane") "screen content")
+                              (t "ok")))))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (let ((sk (claude-org--current-session-key)))
+                      ;; Start verbose streaming
+                      (claude-org-cmux--start-verbose "surface:heal" sk)
+                      ;; Initial buffer should exist and be live
+                      (let ((buf1 (gethash sk claude-agent--session-verbose-buffers)))
+                        (should buf1)
+                        (should (buffer-live-p buf1))
+                        ;; User kills the verbose buffer
+                        (kill-buffer buf1)
+                        (should-not (buffer-live-p buf1))
+                        ;; Ensure function should return a fresh live buffer
+                        (let ((buf2 (claude-org-cmux--create-verbose-buffer sk "surface:heal")))
+                          (should buf2)
+                          (should (buffer-live-p buf2))
+                          (should-not (eq buf1 buf2))
+                          ;; Registry now points to the new buffer
+                          (should (eq buf2 (gethash sk claude-agent--session-verbose-buffers))))
+                        ;; Kill again and verify timer tick self-heals
+                        (let ((buf2 (gethash sk claude-agent--session-verbose-buffers)))
+                          (kill-buffer buf2)
+                          (should-not (buffer-live-p buf2))
+                          ;; Manually invoke the timer's work function (simulates one tick)
+                          (let ((timer (claude-org--session-get sk :verbose-timer)))
+                            (should timer)
+                            (funcall (timer--function timer)))
+                          ;; After tick, a fresh buffer should exist in the registry
+                          (let ((buf3 (gethash sk claude-agent--session-verbose-buffers)))
+                            (should buf3)
+                            (should (buffer-live-p buf3))
+                            (should-not (eq buf2 buf3)))))))))
+            ;; Cleanup
+            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+              (when sk
+                (claude-org-cmux--stop-verbose sk)
+                (when-let ((b (gethash sk claude-agent--session-verbose-buffers)))
+                  (when (buffer-live-p b) (kill-buffer b)))
+                (remhash sk claude-agent--session-verbose-buffers)))
+            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
+;;; ============================================================================
 ;;; E14: Story switch updates ACTIVE_STORY and renames tab
 ;;; ============================================================================
 

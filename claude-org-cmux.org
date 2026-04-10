@@ -1418,7 +1418,12 @@ Only auto-scrolls windows where the user is already at the end."
   "Start verbose output streaming for cmux session.
 Restarts if surface-id changed (workspace relaunched).
 Resolves socket path now (from org context) and closes over it,
-since the timer fires in an arbitrary buffer context."
+since the timer fires in an arbitrary buffer context.
+
+The timer is self-healing: if the user kills the verbose buffer, the
+next tick re-resolves it via `claude-org-cmux--create-verbose-buffer'
+\(which uses `get-buffer-create' and is idempotent), so the buffer
+always reappears within one tick interval."
   (let ((existing-timer (claude-org--session-get session-key :verbose-timer))
         (old-surface (claude-org--session-get session-key :verbose-surface-id)))
     ;; Restart if surface changed or surface-id was never tracked
@@ -1428,18 +1433,26 @@ since the timer fires in an arbitrary buffer context."
       (setq existing-timer nil))
     (unless existing-timer
       (claude-org--session-put session-key :verbose-surface-id surface-id)
-      (let ((buf (claude-org-cmux--create-verbose-buffer session-key surface-id))
-            (sock (or claude-org-cmux-socket-path
+      ;; Create the initial buffer so `*cmux: <session>*' exists immediately,
+      ;; before the first tick. The timer will re-resolve it every tick, so
+      ;; this is just for user-visible responsiveness.
+      (claude-org-cmux--create-verbose-buffer session-key surface-id)
+      (let ((sock (or claude-org-cmux-socket-path
                       (condition-case nil
                           (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
                         (error nil)))))
         (claude-org--session-put session-key :verbose-timer
           (run-at-time 1 1
-            (lexical-let ((sid surface-id) (sk session-key) (vb buf) (sp sock))
+            (lexical-let ((sid surface-id) (sk session-key) (sp sock))
               (lambda ()
                 (condition-case nil
-                    (when (buffer-live-p vb)
-                      (claude-org-cmux--verbose-tick sid sk vb sp))
+                    ;; Re-resolve the buffer each tick. If the user killed
+                    ;; it (or we're in a fresh Emacs session recovering),
+                    ;; `create-verbose-buffer' recreates it via
+                    ;; `get-buffer-create' and updates the registry.
+                    (let ((vb (claude-org-cmux--create-verbose-buffer sk sid)))
+                      (when (buffer-live-p vb)
+                        (claude-org-cmux--verbose-tick sid sk vb sp)))
                   (error nil))))))))))
 
 (defun claude-org-cmux--stop-verbose (session-key)
