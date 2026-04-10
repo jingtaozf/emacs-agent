@@ -711,10 +711,18 @@ does not clobber the other agent's session.")
   "Org property name for setting sources (comma-separated list).")
 
 (defconst claude-org-env-properties
-  '("ANTHROPIC_MODEL" "ANTHROPIC_BASE_URL" "ANTHROPIC_AUTH_TOKEN" "ANTHROPIC_API_KEY")
+  '("ANTHROPIC_MODEL" "ANTHROPIC_BASE_URL" "ANTHROPIC_AUTH_TOKEN" "ANTHROPIC_API_KEY"
+    "CLAUDE_CODE_EFFORT_LEVEL" "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" "CLAUDE_CODE_UNATTENDED_RETRY")
   "List of environment variable org properties to pass to Claude CLI.
 These can be set as org properties (file-level or section-level) and will
-be passed as environment variables when starting the Claude process.")
+be passed as environment variables when starting the Claude process.
+
+Claude Code specific variables:
+  CLAUDE_CODE_EFFORT_LEVEL     - Thinking effort: low, medium, high
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW - Context % before auto-compact (0-100)
+  CLAUDE_AUTOCOMPACT_PCT_OVERRIDE - Override compact threshold %
+  CLAUDE_CODE_UNATTENDED_RETRY - Number of retries for unattended mode")
 
 (defconst claude-org--permission-mode-map
   '(("readonly"      . (:cli "default"            :short "RO"))
@@ -1323,14 +1331,27 @@ Set NO-EXPAND to t to disable variable expansion."
         (claude-org--expand-env-vars raw-value env-alist)))))
 
 (defun claude-org--get-env-vars ()
-  "Collect environment variables from org properties.
+  "Collect environment variables from org properties and ai block header args.
 Returns an alist of (VAR-NAME . VALUE) for all properties in
-`claude-org-env-properties' that have values set."
+`claude-org-env-properties' that have values set.
+
+Also reads :effort header arg from current ai block:
+  #+begin_src ai :effort high
+maps to CLAUDE_CODE_EFFORT_LEVEL=high."
   (let (env-vars)
     (dolist (prop claude-org-env-properties)
       (let ((value (claude-org--get-org-property prop)))
         (when (and value (not (string-empty-p value)))
           (push (cons prop value) env-vars))))
+    ;; Check :effort header arg on the current ai block
+    (let* ((header-args (ignore-errors (claude-org--get-block-header-args)))
+           (effort (plist-get header-args :effort)))
+      (when (and effort (stringp effort))
+        ;; Header arg overrides org property
+        (setq env-vars (cl-remove-if
+                        (lambda (pair) (equal (car pair) "CLAUDE_CODE_EFFORT_LEVEL"))
+                        env-vars))
+        (push (cons "CLAUDE_CODE_EFFORT_LEVEL" effort) env-vars)))
     (nreverse env-vars)))
 #+END_SRC
 
@@ -1566,9 +1587,14 @@ Combines:
                            (format "Keep output lines under %d characters, break long lines naturally."
                                    claude-org-line-width)))
         (elisp-hint (claude-org--build-elisp-reload-hint)))
-    ;; Combine all parts: file prompts + org-prompts + line-width + elisp-reload
+    ;; Order by stability for prompt cache efficiency:
+    ;; 1. File prompts (static across sessions — from prompts/system/*.org)
+    ;; 2. Elisp reload hint (static per project)
+    ;; 3. Org section prompts (semi-stable — :system_prompt: sections)
+    ;; 4. Line width hint (dynamic — changes with window width)
+    ;; Stable prefix = better cache hit rate in Claude Code's prompt cache.
     (let ((parts (append file-prompts
-                         (delq nil (list org-prompts line-width-hint elisp-hint)))))
+                         (delq nil (list elisp-hint org-prompts line-width-hint)))))
       (when parts
         (string-join parts "\n\n"))))))
 #+END_SRC
@@ -4721,7 +4747,6 @@ Assembles components from dedicated badge functions."
     (concat " Claude Org: "
             (propertize file-name 'face 'font-lock-function-name-face)
             (claude-org--header-location-badge)
-            (claude-org--header-session-badge)
             (claude-org--header-docker-badge)
             (claude-org--header-permission-badge)
             (claude-org--header-activity-badge)
