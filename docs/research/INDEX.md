@@ -9,3 +9,9 @@
 | 2026-03-17 | cmux & Ghostty Best Practices Guide | complete |
 - [2026-cmux-sdd-enhancements](2026-cmux-sdd-enhancements.org) — cmux features for SDD story workflow
 - [2026-ghostty-features-for-sdd](2026-ghostty-features-for-sdd.org) — Ghostty features for SDD workflow (shell integration, OSC 133, semantic marks)
+| 2026-04-08 | Claude Code Source Review — Architecture | complete |
+| 2026-04-08 | Claude Code Source Review — AI Core | complete |
+| 2026-04-08 | Claude Code Source Review — Tools & Agents | complete |
+| 2026-04-08 | Claude Code Source Review — Security & Hooks | complete |
+| 2026-04-08 | Claude Code Source Review — UI & Memory | complete |
+| 2026-04-08 | Claude Code Source Review — Gap Analysis | complete |
