@@ -620,11 +620,25 @@ def handle_permission_clear(
     org_file: str,
     session_id: str,
 ) -> None:
-    """Handle PostToolUse hook — clear pending permission in Emacs."""
+    """Handle PostToolUse hook — clear pending permission in Emacs.
+
+    Only interactive tools (AskUserQuestion, ExitPlanMode) ever set a pending
+    permission in Emacs via `handle_permission`. For every other tool the
+    permission-clear MCP call clears nothing — but still blocks Emacs's
+    single-threaded main loop for ~30–1500ms. We skip the MCP call for
+    non-interactive tools, mirroring `handle_permission`'s early-return.
+
+    We still record the span so Phoenix shows the hook fired (count per tool
+    remains observable) — we just don't contact Emacs.
+    """
     tool_name = input_data.get("tool_name", "unknown")
+    is_interactive = tool_name in _INTERACTIVE_TOOLS
     with _span("handle-permission-clear", **{
             "session.id": session_id,
-            "tool.name": tool_name}):
+            "tool.name": tool_name,
+            "tool.is_interactive": is_interactive}):
+        if not is_interactive:
+            return
         try:
             _mcp_eval_with_trace(
                 mcp,

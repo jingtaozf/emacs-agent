@@ -474,19 +474,43 @@ class TestHandlePermission:
 
 
 class TestHandlePermissionClear:
-    """Tests for PostToolUse permission clear."""
+    """Tests for PostToolUse permission clear.
 
-    def test_clears_in_emacs(self):
+    Only interactive tools (AskUserQuestion, ExitPlanMode) trigger the MCP
+    call — non-interactive tools never set a pending permission in Emacs,
+    so clearing would block Emacs's main thread for nothing.
+    """
+
+    def test_clears_in_emacs_for_interactive_tool(self):
         mcp = MagicMock()
-        handle_permission_clear(mcp, {"tool_name": "Bash"}, "/tmp/f.org", "sid")
+        handle_permission_clear(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
         call_arg = mcp.eval_elisp.call_args[0][0]
         assert "claude-org--terminal-permission-resolved" in call_arg
         assert "sid" in call_arg
 
+    def test_clears_in_emacs_for_exit_plan_mode(self):
+        mcp = MagicMock()
+        handle_permission_clear(mcp, {"tool_name": "ExitPlanMode"}, "/tmp/f.org", "sid")
+        call_arg = mcp.eval_elisp.call_args[0][0]
+        assert "claude-org--terminal-permission-resolved" in call_arg
+
+    def test_skips_mcp_for_non_interactive_tool(self):
+        """Bash, Read, Grep, Edit, etc. never set a permission — skip MCP entirely."""
+        mcp = MagicMock()
+        handle_permission_clear(mcp, {"tool_name": "Bash"}, "/tmp/f.org", "sid")
+        mcp.eval_elisp.assert_not_called()
+
+    def test_skips_mcp_for_unknown_tool(self):
+        """Missing tool_name defaults to 'unknown' — not in _INTERACTIVE_TOOLS."""
+        mcp = MagicMock()
+        handle_permission_clear(mcp, {}, "/tmp/f.org", "sid")
+        mcp.eval_elisp.assert_not_called()
+
     def test_swallows_mcp_errors(self):
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = McpConnectionError("gone")
-        handle_permission_clear(mcp, {}, "/tmp/f.org", "sid")  # should not raise
+        # Use an interactive tool so the MCP call is attempted
+        handle_permission_clear(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
 
 
 class TestMcpEvalWithTrace:
