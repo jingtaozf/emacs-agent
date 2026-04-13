@@ -95,3 +95,47 @@ Ask and answer in the commit message:
 2. Will this hook fire per-tool-use, per-session, or once per conversation?
 3. If per-tool-use, is a matcher possible to limit which tools trigger it?
 4. Can the Python handler return early before any MCP call?
+
+## Sibling rule: no synchronous subprocess calls in periodic timers
+
+The same principle applies to Emacs's own periodic timers that shell out to
+CLI tools (`cmux`, `git`, `curl`, etc.). A timer that fires every N seconds
+and calls `call-process` synchronously blocks Emacs's main thread every N
+seconds for the full duration of the subprocess.
+
+### Rule
+
+**Timers that invoke external processes MUST use `start-process` + sentinel
+(async).** Never `call-process` from `run-at-time` or `run-with-timer`.
+
+### Historical case (April 2026)
+
+`claude-org-cmux--stream-tick` fired every 2 seconds while Claude was running,
+calling `cmux pipe-pane --command cat` synchronously via `call-process`. Each
+tick blocked Emacs 200–1500 ms. The user experienced this as Emacs "hanging"
+intermittently for the entire duration of every Claude query.
+
+Worse, the insertion marker (`claude-org-cmux--stream-marker`) was declared
+`defvar-local` but never initialised to an actual marker. The guard
+`(when (and claude-org-cmux--stream-marker ...))` was always nil, so every
+tick captured output, stripped ANSI, and then silently discarded the result.
+
+The whole subsystem was vestigial — response text was already being delivered
+via the `Stop` hook → `handle_response` → `insert-response` path. Deletion
+was the correct fix; the verbose buffer (separate subsystem, async,
+correctly implemented via `start-process` + sentinel) continued to show live
+terminal output.
+
+### Checklist before adding a new timer
+
+1. Does it spawn a subprocess? If so, it MUST use `start-process`, not
+   `call-process`.
+2. Is there already an async subsystem (like `verbose-tick`) doing a similar
+   job? If so, reuse or extend it rather than creating a parallel one.
+3. Does the callback actually do something? (If it writes to a marker/buffer,
+   verify that marker/buffer is ever initialised — not just declared.)
+4. Is there a cheaper event-driven alternative (hook, sentinel, watcher)
+   that doesn't need polling at all?
+
+The `Stop`-hook delivery path is usually the right answer for "I want the
+response in the org buffer" — structured, one-shot, no polling needed.

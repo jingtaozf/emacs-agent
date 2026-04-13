@@ -1026,16 +1026,14 @@ so an unhandled error would leave the session permanently :busy t."
                 (setf (claude-agent--process-state-closed state) t)
                 (claude-agent--unregister-query req-id)))))
         ;; Check loop continuation
-        (let ((surface-id (gethash workspace-session-id claude-org-cmux--workspace-to-surface))
-              (ws-id (gethash workspace-session-id claude-org-cmux--workspace-to-cmux-id)))
+        (let ((surface-id (gethash workspace-session-id claude-org-cmux--workspace-to-surface)))
           ;; Workspace mappings persist across queries (workspace outlives stories)
-          ;; Stop response streaming (verbose stays running — user may
-          ;; type more queries directly in cmux without going through
-          ;; execute-ai-block, so verbose must persist across queries)
-          (claude-org-cmux--stop-streaming)
-          ;; Update sidebar color back to Ready
-          (claude-org-cmux--apply-color ws-id)
-          ;; Clear busy state and check loop continuation
+          ;; No pipe-pane streaming to stop (removed — marker was never wired up,
+          ;; resulting in every-2s sync `cmux pipe-pane` calls with discarded output).
+          ;; No color to re-apply — WORKSPACE_COLOR is static per workspace and
+          ;; was already applied at session-creation time.
+          ;; Verbose output (separate subsystem) keeps running — user may type
+          ;; more queries directly in cmux without going through execute-ai-block.
           (when session-key
             (claude-org--session-put session-key :busy nil)
             (let ((loop-current (or (claude-org--session-get session-key :loop-current) 1))
@@ -1143,82 +1141,25 @@ Registers in `claude-agent--active-queries' for mode-line."
         (claude-org-terminal--write-from-emacs-flag workspace-session-id))
       ;; Send prompt via cmux
       (claude-org-cmux--send-text surface-id prompt)
-      ;; Update sidebar status and start streaming (both need workspace ref)
-      (let ((ws-id (condition-case nil
-                       (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")
-                     (error nil))))
-        (claude-org-cmux--apply-color ws-id)
-        (when ws-id
-          (claude-org-cmux--start-streaming
-           surface-id (claude-org--current-session-key) ws-id (current-buffer)))
-        ;; Start verbose output streaming (for claude-org-show-verbose)
-        (claude-org-cmux--start-verbose surface-id (claude-org--current-session-key)))
+      ;; Start verbose output mirror (async capture-pane polling into its own buffer)
+      (claude-org-cmux--start-verbose surface-id (claude-org--current-session-key))
       (message "Sent to cmux (%d chars)" (length prompt))))))
 #+END_SRC
 
-* Response Streaming
+* Response Delivery
 
-#+BEGIN_SRC elisp
-(defvar-local claude-org-cmux--stream-timer nil
-  "Timer for periodic pipe-pane streaming during active cmux queries.")
+Response text lands in the org buffer via the =Stop= hook →
+=workspace_bridge.handle_response= → =claude-org-workspace-bridge-insert-response=.
+No periodic polling from Emacs is needed.
 
-(defvar-local claude-org-cmux--stream-marker nil
-  "Marker where streaming output is inserted (in the response section).")
-
-(defvar-local claude-org-cmux--stream-last-len 0
-  "Length of text captured in the last stream tick (for detecting new output).")
-
-(defun claude-org-cmux--start-streaming (surface-id session-key ws-id org-buffer)
-  "Start periodic pipe-pane streaming for live response feedback."
-  (claude-org-cmux--stop-streaming)
-  (with-current-buffer org-buffer
-    (setq claude-org-cmux--stream-last-len 0)
-    (setq claude-org-cmux--stream-timer
-          (run-at-time 3 2  ;; start after 3s, repeat every 2s
-            (lexical-let ((sid surface-id) (sk session-key)
-                          (ws ws-id) (buf org-buffer))
-              (lambda ()
-                (condition-case nil
-                    (when (buffer-live-p buf)
-                      (with-current-buffer buf
-                        (claude-org-cmux--stream-tick sid sk ws)))
-                  (error (claude-org-cmux--stop-streaming)))))))))
-
-(defun claude-org-cmux--stop-streaming ()
-  "Stop the pipe-pane streaming timer."
-  (when claude-org-cmux--stream-timer
-    (cancel-timer claude-org-cmux--stream-timer)
-    (setq claude-org-cmux--stream-timer nil)))
-
-(defun claude-org-cmux--stream-tick (surface-id session-key ws-id)
-  "One tick: capture terminal output and insert new text into response section."
-  ;; Stop if query is no longer active
-  (when (not (claude-org--session-get session-key :busy))
-    (claude-org-cmux--stop-streaming))
-  (when (claude-org--session-get session-key :busy)
-  ;; Capture scrollback
-  (let ((output (condition-case nil
-                    (claude-org-cmux--call "pipe-pane"
-                      "--workspace" ws-id "--surface" surface-id
-                      "--command" "cat")
-                  (error nil))))
-    (when (and output (> (length output) claude-org-cmux--stream-last-len))
-      ;; Extract new content (skip what we already showed)
-      (let* ((new-text (substring output claude-org-cmux--stream-last-len))
-             ;; Strip ANSI escape sequences
-             (clean (replace-regexp-in-string "\\[[][0-9;]*[a-zA-Z]" "" new-text))
-             ;; Strip control chars except newline
-             (clean (replace-regexp-in-string "[[:cntrl:]]" ""
-                      (replace-regexp-in-string "\n" "\n" clean))))
-        (setq claude-org-cmux--stream-last-len (length output))
-        ;; Insert into response section if marker is valid
-        (when (and claude-org-cmux--stream-marker
-                   (marker-buffer claude-org-cmux--stream-marker))
-          (save-excursion
-            (goto-char claude-org-cmux--stream-marker)
-            (insert clean)
-            (set-marker claude-org-cmux--stream-marker (point)))))))))
-#+END_SRC
+(Historical note: there used to be a =claude-org-cmux--start-streaming= timer
+that fired =cmux pipe-pane= every 2 s to mirror terminal output into the org
+buffer.  Its insertion marker was never initialised, so every tick did a
+200–1500 ms synchronous subprocess call and silently discarded the result —
+a persistent Emacs hang for the full duration of every Claude query.  The
+subsystem was removed in favour of the =Stop=-hook path, which delivers the
+full structured response exactly once.  Live terminal echo is still available
+via the async =Verbose Output= mirror below.)
 
 * Verbose Output (Live Output Mirror)
 

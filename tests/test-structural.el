@@ -1157,5 +1157,42 @@ FIX: Extract phase-specific logic into helper functions."
           (format "claude-org-cmux--launch-workspace is %d lines (max 65).\nFIX: Extract state persistence into --persist-workspace-state and IDE setup into --setup-ide-after-ready."
                   line-count))))))
 
+;;; Regression: no synchronous cmux CLI calls in periodic timers
+;;
+;; History: `claude-org-cmux--stream-tick' ran every 2 seconds via
+;; `run-at-time' and called `cmux pipe-pane' synchronously via `call-process'.
+;; Each tick blocked Emacs 200–1500 ms for the entire duration of every Claude
+;; query.  Worse, its insertion marker was never initialised, so every tick
+;; silently discarded the captured output — pure waste.
+;;
+;; Rule: any new periodic timer that talks to `cmux' MUST use `start-process'
+;; + sentinel (async), not `claude-org-cmux--call' (which is sync).
+;; See `.claude/rules/minimize-emacs-mcp-calls.md'.
+(ert-deftest test-structural-no-dead-cmux-streaming-timer ()
+  "Ensure the dead pipe-pane streaming subsystem stays removed.
+The stream-tick timer was synchronous, hung Emacs every 2 s, and its
+insertion marker was never wired up.  Response text arrives via the
+Stop hook (handle_response → insert-response), not polling.
+FIX: Do not reintroduce `claude-org-cmux--start-streaming',
+`claude-org-cmux--stop-streaming', or `claude-org-cmux--stream-tick'.
+If you need live terminal echo, use the async verbose mirror."
+  :tags '(:unit :fast :stable :structural)
+  (let ((cmux-org (expand-file-name "claude-org-cmux.org"
+                                    test-structural--project-root)))
+    (with-temp-buffer
+      (insert-file-contents cmux-org)
+      (dolist (sym '("claude-org-cmux--start-streaming"
+                     "claude-org-cmux--stop-streaming"
+                     "claude-org-cmux--stream-tick"
+                     "claude-org-cmux--stream-timer"
+                     "claude-org-cmux--stream-marker"
+                     "claude-org-cmux--stream-last-len"))
+        (goto-char (point-min))
+        (should-with-fix
+         (not (re-search-forward (format "^(def\\(?:un\\|var-local\\|var\\) %s"
+                                         (regexp-quote sym))
+                                 nil t))
+         (format "Dead streaming symbol reintroduced: %s\nFIX: Remove the defun/defvar.  See rule minimize-emacs-mcp-calls.md." sym))))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here
