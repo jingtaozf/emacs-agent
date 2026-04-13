@@ -301,9 +301,25 @@ Used when wait-for signal is missed or unavailable."
 | Reliability | Pattern matching on screen text | Explicit signal from Claude Code |
 | Fallback | None (just timeout) | Falls back to short polling |
 
-* Phase 5 — =pipe-pane= Response Streaming (Planned)
+* Phase 5 — =pipe-pane= Response Streaming (REMOVED, 2026-04-13)
 
-** Problem
+*Status*: /Removed in commit 01b4143./ Previous design (kept below for
+archaeology) implemented a 2-second timer that polled =cmux pipe-pane= for
+incremental output. In production the insertion marker was never initialised,
+so every tick did 200–1500 ms of synchronous =call-process= work and silently
+discarded the captured text — a persistent Emacs hang for the duration of
+every Claude query.
+
+*Replacement*: Response text arrives via the =Stop= hook path exactly once
+(=workspace_bridge.handle_response= → =insert-response=). Live terminal
+echo is available in a separate buffer via the async /Verbose Output
+Mirror/ subsystem (=claude-org-cmux--start-verbose= + async
+=verbose-tick=), designed in =2026-cmux-live-output-mirror.org=.
+
+*Rule*: periodic timers must never call =call-process=; use =start-process=
++ sentinel.  See =.claude/rules/minimize-emacs-mcp-calls.md=.
+
+** Historical Problem Statement
 
 Currently, response text is extracted ONLY when the =Stop= hook fires.
 =sdd_bridge.py handle_response= reads the JSONL transcript and inserts

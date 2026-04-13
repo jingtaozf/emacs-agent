@@ -65,7 +65,7 @@ Placed after existing P4. Ordered by user impact.
 | E18 | Verbose menu key dispatch (cancel) | escape key sent to surface |
 | E19 | Verbose follow (scroll to end) | window-point at buffer end |
 | E20 | Stop verbose on session end | timer cancelled, no orphan timers |
-| E21 | Streaming start/stop lifecycle | start-streaming → timer → stop-streaming |
+| E21 | ~~Streaming start/stop lifecycle~~ | *REMOVED 2026-04-13* — streaming subsystem deleted (commit 01b4143); response delivery now uses Stop hook path |
 
 #### Group 4: Execute AI Block (P0-E2E, 6 items)
 | ID | Test | What it verifies |

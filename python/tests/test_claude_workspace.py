@@ -64,51 +64,73 @@ class TestIsValidSession:
 
 
 class TestBuildClaudeArgs:
-    def test_minimal(self):
-        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "", [])
+    # build_claude_args now writes workspace-hooks.json into the plugin dir,
+    # so tests need a real writable path (pytest's tmp_path fixture).
+
+    def test_minimal(self, tmp_path):
+        args = build_claude_args(str(tmp_path), "http://localhost:9999/mcp", "", [])
         assert args[0] == "claude"
         assert "--plugin-dir" in args
         assert "--mcp-config" in args
         assert "--system-prompt" not in args
         assert "--resume" not in args
 
-    def test_with_system_prompt(self):
-        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "You are helpful", [])
+    def test_with_system_prompt(self, tmp_path):
+        args = build_claude_args(
+            str(tmp_path), "http://localhost:9999/mcp", "You are helpful", []
+        )
         idx = args.index("--system-prompt")
         assert args[idx + 1] == "You are helpful"
 
-    def test_resume_via_extra_args(self):
+    def test_resume_via_extra_args(self, tmp_path):
         """--resume comes from Emacs via extra_args (state owner principle)."""
-        args = build_claude_args("/plugin", "http://localhost:9999/mcp", "", ["--resume", "cli-123"])
+        args = build_claude_args(
+            str(tmp_path), "http://localhost:9999/mcp", "", ["--resume", "cli-123"]
+        )
         idx = args.index("--resume")
         assert args[idx + 1] == "cli-123"
 
-    def test_no_resume_without_extra_args(self):
+    def test_no_resume_without_extra_args(self, tmp_path):
         """No --resume when extra_args is empty (new story)."""
-        args = build_claude_args("/p", "http://x", "", [])
+        args = build_claude_args(str(tmp_path), "http://x", "", [])
         assert "--resume" not in args
 
-    def test_extra_args(self):
-        args = build_claude_args("/p", "http://x", "", ["--verbose", "--model", "opus"])
+    def test_extra_args(self, tmp_path):
+        args = build_claude_args(
+            str(tmp_path), "http://x", "", ["--verbose", "--model", "opus"]
+        )
         assert "--verbose" in args and "opus" in args
 
-    def test_mcp_config_contains_url(self):
-        args = build_claude_args("/p", "http://custom:8080/mcp", "", [])
+    def test_mcp_config_contains_url(self, tmp_path):
+        args = build_claude_args(str(tmp_path), "http://custom:8080/mcp", "", [])
         config = json.loads(args[args.index("--mcp-config") + 1])
         assert config["mcpServers"]["emacs"]["url"] == "http://custom:8080/mcp"
+
+    def test_writes_workspace_hooks_json(self, tmp_path):
+        """build_claude_args writes workspace-hooks.json into plugin_dir.
+        Regression: tests previously passed fake paths like '/p' which broke
+        once _write_hooks_settings started touching disk."""
+        build_claude_args(str(tmp_path), "http://x", "", [])
+        hooks_file = tmp_path / "workspace-hooks.json"
+        assert hooks_file.exists()
+        data = json.loads(hooks_file.read_text())
+        # workspace-bridge hooks inject Stop/UserPromptSubmit/SessionStart
+        assert "Stop" in data["hooks"]
+        assert "UserPromptSubmit" in data["hooks"]
+        assert "SessionStart" in data["hooks"]
 
 
 class TestBuildClaudeArgsIde:
     """Tests for --ide flag in build_claude_args."""
 
-    def test_ide_flag_always_present(self):
+    def test_ide_flag_always_present(self, tmp_path):
         """build_claude_args always includes --ide."""
-        args = build_claude_args("/plugin", "http://mcp", "", [])
+        args = build_claude_args(str(tmp_path), "http://mcp", "", [])
         assert "--ide" in args
 
-    def test_ide_flag_with_extra_args(self):
+    def test_ide_flag_with_extra_args(self, tmp_path):
         """--ide coexists with extra args."""
-        args = build_claude_args("/plugin", "http://mcp", "", ["--verbose"])
+        args = build_claude_args(str(tmp_path), "http://mcp", "", ["--verbose"])
         assert "--ide" in args
         assert "--verbose" in args
 
@@ -154,13 +176,17 @@ class TestNormalizeName:
         """BUG PY-1: All-unicode name normalizes to empty string."""
         assert _normalize_name("混合中文") == ""
 
-    def test_empty_name_not_passed_to_cli(self):
+    def test_empty_name_not_passed_to_cli(self, tmp_path):
         """BUG PY-1: Empty normalized name must NOT produce --name ''."""
-        args = build_claude_args("/p", "http://x", "", [], story_name="混合中文")
+        args = build_claude_args(
+            str(tmp_path), "http://x", "", [], story_name="混合中文"
+        )
         assert "--name" not in args
 
-    def test_valid_name_passed_to_cli(self):
+    def test_valid_name_passed_to_cli(self, tmp_path):
         """Normal story name produces --name with normalized slug."""
-        args = build_claude_args("/p", "http://x", "", [], story_name="My Story")
+        args = build_claude_args(
+            str(tmp_path), "http://x", "", [], story_name="My Story"
+        )
         idx = args.index("--name")
         assert args[idx + 1] == "my-story"

@@ -169,11 +169,15 @@ agent system, task system, and MCP protocol implementation.
   =kill()= is polymorphic.
 - *Our current state*: We have a queue system for AI blocks
   (=claude-org--session-get :queue=) that serializes block execution within a
-  workspace.  There is no formal task state machine.  Background streaming uses
-  ad-hoc timer-based polling (=claude-org-cmux--stream-tick=).  Task lifecycle
-  is tracked implicitly via =:busy= flag and =:query-completed= callback.
-  There is no unified way to cancel, inspect, or get notifications from
-  background tasks.
+  workspace.  There is no formal task state machine.  Response text is
+  delivered by the =Stop= hook (=workspace_bridge.handle_response=), and live
+  terminal echo is available via the async verbose mirror
+  (=claude-org-cmux--start-verbose=).  (/Note:/ the ad-hoc
+  =claude-org-cmux--stream-tick= timer this review originally critiqued was
+  removed in commit 01b4143 — its insertion marker was never wired up.)
+  Task lifecycle is tracked implicitly via =:busy= flag and =:query-completed=
+  callback.  There is no unified way to cancel, inspect, or get notifications
+  from background tasks.
 - *Opportunity*: Introduce a lightweight task state machine:
 
   #+begin_src elisp
@@ -354,21 +358,22 @@ agent system, task system, and MCP protocol implementation.
   input), =later= (task notifications).  User input is never starved by
   system notifications.  Notifications use XML-based =<task-notification>=
   protocol with task-type-specific extensions.
-- *Our current state*: Response streaming uses timer-based polling
-  (=claude-org-cmux--stream-tick=) at a fixed interval.  There is no priority
-  system -- streaming updates and user interaction compete for the Emacs
-  single-threaded event loop.  When the user types during streaming, keystrokes
-  are processed between timer invocations.
-- *Opportunity*: Implement a simple priority queue for Emacs-side events:
+- *Our current state*: Response text lands in the org buffer once via the
+  =Stop= hook path (=handle_response= → =insert-response=); no polling on the
+  Emacs side.  Live terminal echo uses the async verbose mirror
+  (=verbose-tick= via =start-process= + sentinel), which does not block the
+  main loop.  (/Historical:/ the original =claude-org-cmux--stream-tick=
+  timer this review mentioned was sync =call-process= polling and was removed
+  in commit 01b4143 — see =.claude/rules/minimize-emacs-mcp-calls.md=.)
+- *Remaining opportunity*: User actions still occasionally compete with verbose
+  redraws and handle-response MCP calls.  A priority queue for Emacs-side
+  events could further smooth this:
   1. =high=: user-initiated actions (C-c C-c to execute, C-g to cancel)
-  2. =normal=: streaming output insertion
-  3. =low=: status bar updates, verbose logging
-
-  Concretely, make the stream-tick timer check for pending user commands
-  first (via =input-pending-p=) and yield if the user is typing.  This
-  prevents the "typing lag during streaming" problem.
+  2. =normal=: response insertion from =Stop= hook
+  3. =low=: verbose mirror redraws, status bar updates
 - *Effort*: S
-- *Impact*: medium -- improves responsiveness during long streaming responses
+- *Impact*: low–medium (the sync =stream-tick= was the dominant source of
+  lag; remaining competition is much smaller after its removal)
 
 * Priority Summary
 
