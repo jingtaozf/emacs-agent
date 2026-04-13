@@ -6,6 +6,7 @@ Usage: claude-workspace <org-file> [session-id] [-- extra-args...]
 """
 
 import atexit
+import json
 import os
 import signal
 import subprocess
@@ -150,6 +151,57 @@ def _normalize_name(name: str) -> str:
     return slug.strip("-")
 
 
+def _find_workspace_bridge_path() -> str:
+    """Find the workspace-bridge binary path in the current virtualenv."""
+    venv_bin = Path(sys.executable).parent
+    bridge = venv_bin / "workspace-bridge"
+    if bridge.exists():
+        return str(bridge)
+    return "workspace-bridge"  # fallback to PATH
+
+
+def _write_hooks_settings(plugin_dir: str) -> str:
+    """Write a temporary settings JSON with workspace-bridge hooks.
+
+    Returns the path to the settings file.  The file is placed in the
+    plugin directory so it persists across the session (Claude Code
+    reads it at startup).
+    """
+    bridge = _find_workspace_bridge_path()
+    hooks = {
+        "hooks": {
+            "Stop": [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{bridge} response",
+                    "timeout": 30,
+                }],
+            }],
+            "UserPromptSubmit": [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{bridge} prompt",
+                    "timeout": 10,
+                }],
+            }],
+            "SessionStart": [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{bridge} session-start",
+                    "timeout": 10,
+                }],
+            }],
+        }
+    }
+    settings_file = os.path.join(plugin_dir, "workspace-hooks.json")
+    with open(settings_file, "w") as f:
+        json.dump(hooks, f)
+    return settings_file
+
+
 def build_claude_args(
     plugin_dir: str,
     mcp_url: str,
@@ -171,6 +223,10 @@ def build_claude_args(
         f'{{"mcpServers":{{"emacs":{{"type":"http","url":"{mcp_url}"}}}}}}'
     )
     args.extend(["--mcp-config", mcp_config])
+
+    # Inject workspace-bridge hooks so responses are piped back to org buffer
+    hooks_file = _write_hooks_settings(plugin_dir)
+    args.extend(["--settings", hooks_file])
 
     # Set session name from workspace story name
     normalized = _normalize_name(story_name) if story_name else ""
