@@ -300,10 +300,12 @@ Translates 'Hello, world!' to Chinese and verifies output contains Chinese chara
   :tags '(:integration :slow :api :stable)
   (test-claude-skip-unless-cli-available)
 
-  ;; Clean up any previous translation state
+  ;; Clean up any previous translation state — each run now allocates its
+  ;; own buffer, so we just clear the "latest" pointer.
   (setq claude-agent-translate--active-state nil)
-  (when-let* ((buf (get-buffer claude-agent-translate-buffer-name)))
-    (kill-buffer buf))
+  (when (buffer-live-p claude-agent-translate--last-buffer)
+    (kill-buffer claude-agent-translate--last-buffer))
+  (setq claude-agent-translate--last-buffer nil)
 
   ;; Run translation (with setting-sources to skip slow plugin loading)
   (claude-agent-translate "Hello, world!" "Chinese"
@@ -315,9 +317,10 @@ Translates 'Hello, world!' to Chinese and verifies output contains Chinese chara
              (null claude-agent-translate--active-state))
            30))
 
-  ;; Check translation buffer has content
-  (let* ((buf (get-buffer claude-agent-translate-buffer-name))
-         (result-text (when buf (with-current-buffer buf (buffer-string)))))
+  ;; Check translation buffer has content (the run-specific one)
+  (let* ((buf claude-agent-translate--last-buffer)
+         (result-text (when (buffer-live-p buf)
+                        (with-current-buffer buf (buffer-string)))))
 
     (should buf)
     (should result-text)
