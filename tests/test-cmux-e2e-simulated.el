@@ -2063,6 +2063,77 @@ terminal screen hasn't changed between ticks."
       (kill-buffer vbuf))))
 
 ;;; ============================================================================
+;;; E10b: Regression — resolve-workspace-uuid falls back through three tiers
+;;; ============================================================================
+
+(ert-deftest test-cmux-resolve-workspace-uuid-fallbacks ()
+  "Regression for PCR dev1 stale-verbose bug.
+
+When `ensure-session' has not run in this Emacs lifecycle for a given
+session (e.g. fresh Emacs with old org properties, or session-state
+reset by a module reload), `:workspace-session-id' is nil in
+session-state.  The old `verbose-tick' silently fell back to the stale
+surface ref and called `cmux capture-pane --workspace <surface-ref>',
+which fails with \"not_found: Workspace not found\" every tick — the
+verbose buffer freezes forever with no user-visible error.
+
+`resolve-workspace-uuid' must chain through three tiers and return nil
+rather than a surface ref when no UUID is resolvable."
+  :tags '(:unit :stable :e2e)
+  (let* ((file (make-temp-file "verbose-resolve-" nil ".org"))
+         (session-id "sdd-resolve-test-12345")
+         (expected-uuid "TEST-UUID-ABCDEF-0001")
+         (hash-uuid "HASH-UUID-WINS-OVER-PROP")
+         (session-key (format "%s::%s" file session-id))
+         (sessions-backup claude-org--sessions)
+         (hash-backup (copy-hash-table claude-org-cmux--workspace-to-cmux-id)))
+    (unwind-protect
+        (progn
+          ;; Write the org fixture with a CMUX_WORKSPACE_ID property.
+          (with-temp-buffer
+            (insert (format "* Test story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: %s
+:CMUX_WORKSPACE_ID: %s
+:END:
+
+Body text.
+" session-id expected-uuid))
+            (write-region (point-min) (point-max) file))
+          ;; Clean slate: no session-state, no hash entry, no file open.
+          (setq claude-org--sessions (make-hash-table :test 'equal))
+          (remhash session-id claude-org-cmux--workspace-to-cmux-id)
+          ;; Tier 0: file not open anywhere → cannot resolve → nil.
+          (should-not (claude-org-cmux--verbose-workspace-uuid session-key))
+          ;; Tier 3: open the file → org property fallback resolves UUID.
+          (let ((buf (find-file-noselect file)))
+            (unwind-protect
+                (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
+                               expected-uuid))
+              (kill-buffer buf)))
+          ;; Tier 1/2: hash has UUID → takes precedence over org property
+          ;; (faster path, and session-state/hash are authoritative when set).
+          (let ((buf (find-file-noselect file)))
+            (unwind-protect
+                (progn
+                  (puthash session-id hash-uuid
+                           claude-org-cmux--workspace-to-cmux-id)
+                  (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
+                                 hash-uuid)))
+              (kill-buffer buf)))
+          ;; Nil session-key must not crash (defensive).
+          (should-not (claude-org-cmux--verbose-workspace-uuid nil))
+          ;; Session-key without "::" separator → no session-id, return nil.
+          (should-not (claude-org-cmux--verbose-workspace-uuid "/tmp/no-sep.org")))
+      ;; Cleanup
+      (setq claude-org--sessions sessions-backup)
+      (clrhash claude-org-cmux--workspace-to-cmux-id)
+      (maphash (lambda (k v)
+                 (puthash k v claude-org-cmux--workspace-to-cmux-id))
+               hash-backup)
+      (when (file-exists-p file) (delete-file file)))))
+
+;;; ============================================================================
 ;;; E11: Verbose restart on surface change
 ;;; ============================================================================
 

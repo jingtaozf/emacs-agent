@@ -1295,25 +1295,60 @@ Registers it so `claude-org-show-verbose' can find it."
     (puthash session-key buf claude-agent--session-verbose-buffers)
     buf))
 
+(defun claude-org-cmux--verbose-workspace-uuid (session-key)
+  "Resolve the cmux workspace UUID for SESSION-KEY.
+Three-tier lookup so a missing session-state slot doesn't break the
+verbose mirror (surface refs are unreliable — `capture-pane --workspace'
+rejects them with \"Workspace not found\"):
+  1. `:workspace-session-id' from session-state → `workspace-to-cmux-id' hash.
+  2. Session-id parsed out of SESSION-KEY (format `<file>::<session-id>')
+     → same hash (covers session-state wipes after reload).
+  3. `CMUX_WORKSPACE_ID' org property on the session heading
+     (persistent across Emacs restarts).
+Returns the UUID string or nil if the workspace cannot be resolved; callers
+must skip any `--workspace' CLI call when nil."
+  (let* ((ws-sid (or (claude-org--session-get session-key :workspace-session-id)
+                     (when (and session-key
+                                (string-match "::\\([^:]+\\)\\'" session-key))
+                       (match-string 1 session-key))))
+         (uuid-from-hash (when ws-sid
+                           (gethash ws-sid claude-org-cmux--workspace-to-cmux-id))))
+    (or uuid-from-hash
+        (when (and ws-sid session-key
+                   (string-match "\\`\\(.+\\)::[^:]+\\'" session-key))
+          (let* ((file-part (match-string 1 session-key))
+                 (buf (and file-part (find-buffer-visiting file-part))))
+            (when buf
+              (with-current-buffer buf
+                (save-excursion
+                  (save-restriction
+                    (widen)
+                    (goto-char (point-min))
+                    (when (re-search-forward
+                           (format "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+%s[ \t]*$"
+                                   (regexp-quote ws-sid))
+                           nil t)
+                      (org-back-to-heading t)
+                      (org-entry-get (point) "CMUX_WORKSPACE_ID")))))))))))
+
 (defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf socket-path)
   "Async capture-pane tick: capture screen, replace buffer with current view.
-SURFACE-ID is used as workspace ref fallback. Uses --workspace for reliability
-\(surface refs can go stale when cmux restructures tabs).
+Resolves the cmux workspace UUID via `claude-org-cmux--verbose-workspace-uuid'
+because `capture-pane --workspace' only accepts workspace refs/UUIDs — a
+surface ref gives \"not_found: Workspace not found\" and silently freezes the
+buffer.  Skips the tick entirely if no UUID can be resolved (next
+`ensure-session' will repopulate state).
+SURFACE-ID is unused for capture (kept in the signature for call-site parity).
 SOCKET-PATH is the cmux socket (resolved once at timer creation).
 Only auto-scrolls windows where the user is already at the end."
-  (when (buffer-live-p verbose-buf)
-    (let* (;; Use --workspace (resolves to focused surface) instead of --surface
-           ;; because surface refs can become stale when cmux restructures tabs.
-           ;; Look up workspace from workspace-to-cmux-id hash (set during ensure-session).
-           (workspace-id (claude-org--session-get session-key :workspace-session-id))
-           (ws-id (or (when workspace-id
-                        (gethash workspace-id claude-org-cmux--workspace-to-cmux-id))
-                      surface-id))
-           (cli (or claude-org-cmux-cli-path "cmux"))
-           (args (append (when socket-path (list "--socket" socket-path))
-                         (list "capture-pane" "--workspace" ws-id)))
-           (proc-buf (generate-new-buffer " *cmux-vcap*"))
-           (proc (apply #'start-process "cmux-verbose" proc-buf cli args)))
+  (ignore surface-id)
+  (let ((ws-uuid (claude-org-cmux--verbose-workspace-uuid session-key)))
+    (when (and ws-uuid (buffer-live-p verbose-buf))
+      (let* ((cli (or claude-org-cmux-cli-path "cmux"))
+             (args (append (when socket-path (list "--socket" socket-path))
+                           (list "capture-pane" "--workspace" ws-uuid)))
+             (proc-buf (generate-new-buffer " *cmux-vcap*"))
+             (proc (apply #'start-process "cmux-verbose" proc-buf cli args)))
       (set-process-sentinel proc
         (lexical-let ((vbuf verbose-buf) (pbuf proc-buf))
           (lambda (proc event)
@@ -1353,7 +1388,7 @@ Only auto-scrolls windows where the user is already at the end."
                                 (set-window-point win (min pt (point-max))))))))
                       (setq-local claude-org-cmux--verbose-prev-text cur-text))))))
             (when (buffer-live-p pbuf)
-              (kill-buffer pbuf))))))))
+              (kill-buffer pbuf)))))))))
 
 (defun claude-org-cmux--start-verbose (surface-id session-key)
   "Start verbose output streaming for cmux session.
