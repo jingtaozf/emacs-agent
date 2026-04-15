@@ -400,9 +400,9 @@ we select the workspace first and use paste-buffer without --surface."
         (claude-org-cmux--call "send" "--surface" surface-id clean-text)
       ;; Large text: select workspace first, then paste without --surface
       ;; (paste-buffer --surface is broken in cmux)
-      (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
-        (when ws-id
-          (claude-org-cmux--call "select-workspace" "--workspace" ws-id))
+      (let ((ws-ref (claude-org-cmux--session-workspace-ref)))
+        (when ws-ref
+          (claude-org-cmux--call "select-workspace" "--workspace" ws-ref))
         (claude-org-cmux--call "set-buffer" "--name" "emacs-prompt" clean-text)
         (claude-org-cmux--call "paste-buffer" "--name" "emacs-prompt")))
     ;; Send Enter to submit the prompt
@@ -682,27 +682,14 @@ Returns a clean surface ref like \"surface:1\"."
         (match-string 1 output)
       (error "No surface found in workspace %s" workspace-ref))))
 
-(defun claude-org-cmux--workspace-alive-p ()
-  "Check if the saved cmux workspace is still alive.
-Returns non-nil if CMUX_WORKSPACE_ID property exists and the workspace
-responds to a tree query.  Uses workspace UUID rather than surface ref
-because capture-pane silently falls back to the focused surface for
-invalid refs (cmux bug)."
-  (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
-    (and ws-id
-         (condition-case nil
-             (let ((result (claude-org-cmux--call "tree" "--workspace" ws-id)))
-               (and result (not (string-empty-p result))))
-           (error nil)))))
-
 (defun claude-org-cmux--find-workspace-by-name (name)
   "Return the current workspace ref (e.g. \"workspace:7\") for NAME.
 Parses `cmux list-workspaces' output, which has the form:
 
   [* ]  workspace:N  <name>  [selected]
 
-Used to recover from a stale CMUX_WORKSPACE_ID after cmux is restarted:
-cmux persists workspaces by name across restarts, but UUIDs and short
+The heading title is the cmux/emacs protocol for workspace identity:
+cmux persists workspaces by name across restarts while UUIDs and short
 refs are regenerated.  Returns nil if no workspace matches NAME."
   (when (and name (not (string-empty-p name)))
     (condition-case nil
@@ -725,76 +712,64 @@ refs are regenerated.  Returns nil if no workspace matches NAME."
                       (throw 'found ref))))))))
       (error nil))))
 
-(defun claude-org-cmux--recover-stale-workspace (workspace-session-id workspace-title)
-  "Recover a stale workspace by looking up WORKSPACE-TITLE in cmux.
-Called when `workspace-alive-p' returns nil but cmux may still have the
-workspace under the same name (typical after cmux restart).  Looks up
-the workspace by name, resolves its fresh UUID and surface, refreshes
-CMUX_WORKSPACE_ID and CMUX_SURFACE_ID org properties at point, and
-rebuilds hash table mappings.  Returns the fresh surface-id on success,
-nil if no matching workspace is found.  Point must be inside the
-workspace story; org properties are updated on the session heading."
-  (claude-agent-with-span "cmux-recover-stale-workspace"
-      (list :session-id workspace-session-id :title workspace-title) nil
-  (let ((fresh-ref (claude-org-cmux--find-workspace-by-name workspace-title)))
-    (when fresh-ref
-      (let ((fresh-uuid (claude-org-cmux--resolve-workspace-uuid fresh-ref))
-            (fresh-surface (condition-case nil
-                               (claude-org-cmux--get-workspace-surface fresh-ref)
-                             (error nil))))
-        (when fresh-surface
-          ;; Persist refreshed IDs on the session heading.
-          (save-excursion
-            (save-restriction
-              (claude-org-terminal--goto-session-heading)
-              (org-set-property "CMUX_SURFACE_ID" fresh-surface)
-              (org-set-property "CMUX_WORKSPACE_ID" fresh-uuid)))
-          (when (buffer-file-name) (save-buffer))
-          ;; Rebuild hash tables (mirrors restore-workspace).
-          (when workspace-session-id
-            (puthash workspace-session-id (claude-org--current-session-key)
-                     claude-org-terminal--workspace-to-session-key)
-            (puthash workspace-session-id fresh-surface
-                     claude-org-cmux--workspace-to-surface)
-            (puthash workspace-session-id fresh-uuid
-                     claude-org-cmux--workspace-to-cmux-id))
-          (message "cmux workspace recovered by name: %s → %s (%s)"
-                   workspace-title fresh-ref fresh-surface)
-          fresh-surface))))))
+(defun claude-org-cmux--session-workspace-title ()
+  "Return the stable cmux workspace name for the current session.
+The workspace name is the session heading title, truncated to 50 chars
+(matching `launch-workspace' when it calls `rename-workspace').  Point
+must be somewhere inside the session subtree."
+  (save-excursion
+    (save-restriction
+      (claude-org-terminal--goto-session-heading)
+      (truncate-string-to-width
+       (or (org-get-heading t t t t) "untitled") 50))))
 
-(defun claude-org-cmux--restore-workspace (saved-id workspace-session-id tab-title)
-  "Restore an existing cmux workspace identified by SAVED-ID.
-Rebuilds in-memory mappings for WORKSPACE-SESSION-ID (lost on Emacs
-restart), re-applies color, renames the tab to TAB-TITLE, and starts
-verbose streaming.  Returns SAVED-ID."
-  (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
-    ;; Restore hash table mappings (lost on Emacs restart or session expiry)
-    (when workspace-session-id
-      (puthash workspace-session-id (claude-org--current-session-key)
-               claude-org-terminal--workspace-to-session-key)
-      (puthash workspace-session-id saved-id
-               claude-org-cmux--workspace-to-surface)
-      (when ws-id
-        (puthash workspace-session-id ws-id
-                 claude-org-cmux--workspace-to-cmux-id)))
-    ;; Store workspace-session-id for verbose tick lookup
-    (claude-org--session-put (claude-org--current-session-key)
-                             :workspace-session-id workspace-session-id)
-    (when ws-id
-      (claude-org-cmux--apply-color ws-id)
-      ;; Rename tab to match active story (Claude Code overrides terminal title)
-      (condition-case nil
-          (claude-org-cmux--call "rename-tab" "--workspace" ws-id tab-title)
-        (error nil)))
-    ;; Start verbose and ensure IDE server (IDE only for agents that support it)
-    (claude-org-cmux--start-verbose saved-id (claude-org--current-session-key))
-    (when workspace-session-id
-      (let ((profile (claude-org-cmux--get-agent-profile)))
-        (when (or (null profile)
-                  (claude-org-cmux--agent-profile-supports-ide profile))
-          (claude-org-cmux--ensure-ide-server
-           (or (claude-org--get-project-root) default-directory) workspace-session-id))))
-    saved-id))
+(defun claude-org-cmux--session-workspace-ref ()
+  "Return the current session's cmux workspace ref, resolved by heading name.
+Returns a ref like \"workspace:7\" or nil.  This is the single source of
+truth for \"which cmux workspace owns this session\" — the heading title
+is stable across cmux restart while UUIDs/refs are regenerated.  Never
+reads a CMUX_WORKSPACE_ID org property (deprecated)."
+  (claude-org-cmux--find-workspace-by-name
+   (claude-org-cmux--session-workspace-title)))
+
+(defun claude-org-cmux--restore-workspace (saved-surface workspace-session-id
+                                                          tab-title workspace-ref)
+  "Restore in-memory state for a cmux workspace that already exists.
+SAVED-SURFACE is the surface ref; WORKSPACE-SESSION-ID the org session
+identifier; TAB-TITLE the active-story label; WORKSPACE-REF the cmux
+workspace ref (resolved by name in `ensure-session').  Rebuilds hash
+tables, re-applies color, renames the tab, and starts verbose streaming.
+Returns SAVED-SURFACE."
+  ;; Restore hash table mappings (lost on Emacs restart or session expiry)
+  (when workspace-session-id
+    (puthash workspace-session-id (claude-org--current-session-key)
+             claude-org-terminal--workspace-to-session-key)
+    (when saved-surface
+      (puthash workspace-session-id saved-surface
+               claude-org-cmux--workspace-to-surface))
+    (when workspace-ref
+      (let ((ws-uuid (claude-org-cmux--resolve-workspace-uuid workspace-ref)))
+        (when ws-uuid
+          (puthash workspace-session-id ws-uuid
+                   claude-org-cmux--workspace-to-cmux-id)))))
+  ;; Store workspace-session-id for verbose tick lookup
+  (claude-org--session-put (claude-org--current-session-key)
+                           :workspace-session-id workspace-session-id)
+  (when workspace-ref
+    (claude-org-cmux--apply-color workspace-ref)
+    ;; Rename tab to match active story (Claude Code overrides terminal title)
+    (condition-case nil
+        (claude-org-cmux--call "rename-tab" "--workspace" workspace-ref tab-title)
+      (error nil)))
+  ;; Start verbose and ensure IDE server (IDE only for agents that support it)
+  (claude-org-cmux--start-verbose saved-surface (claude-org--current-session-key))
+  (when workspace-session-id
+    (let ((profile (claude-org-cmux--get-agent-profile)))
+      (when (or (null profile)
+                (claude-org-cmux--agent-profile-supports-ide profile))
+        (claude-org-cmux--ensure-ide-server
+         (or (claude-org--get-project-root) default-directory) workspace-session-id))))
+  saved-surface)
 
 (defun claude-org-cmux--resolve-workspace-uuid (workspace-ref)
   "Resolve WORKSPACE-REF to a stable UUID via sidebar-state.
@@ -813,27 +788,26 @@ if resolution fails."
 
 (defun claude-org-cmux--persist-workspace-state (workspace-session-id
                                                   workspace-ref surface-id)
-  "Save workspace state to org properties and in-memory hash tables.
+  "Save workspace state to in-memory hash tables and session heading.
 WORKSPACE-SESSION-ID is the org session identifier, WORKSPACE-REF the
 cmux workspace ref (e.g. \"workspace:3\"), SURFACE-ID the terminal
-surface ref.  Persists CMUX_SURFACE_ID and CMUX_WORKSPACE_ID as org
-properties, updates session state, and populates the three mapping
-hash tables."
-  (let ((ws-uuid (claude-org-cmux--resolve-workspace-uuid workspace-ref))
-        (session-key (claude-org--current-session-key)))
+surface ref.  Persists only CMUX_SURFACE_ID as an org property — the
+workspace identity is the heading title (stable across cmux restart).
+Populates session state and the three mapping hash tables."
+  (let ((session-key (claude-org--current-session-key))
+        (ws-uuid (claude-org-cmux--resolve-workspace-uuid workspace-ref)))
     (save-excursion
       (save-restriction
         (claude-org-terminal--goto-session-heading)
-        (org-set-property "CMUX_SURFACE_ID" surface-id)
-        (org-set-property "CMUX_WORKSPACE_ID" ws-uuid)))
+        (org-set-property "CMUX_SURFACE_ID" surface-id)))
     (claude-org--session-put session-key :cmux-surface surface-id)
     (claude-org--session-put session-key :workspace-session-id workspace-session-id)
     (puthash workspace-session-id surface-id
              claude-org-cmux--workspace-to-surface)
     (puthash workspace-session-id session-key
              claude-org-terminal--workspace-to-session-key)
-    (when (string-prefix-p "workspace:" workspace-ref)
-      (puthash workspace-session-id workspace-ref
+    (when ws-uuid
+      (puthash workspace-session-id ws-uuid
                claude-org-cmux--workspace-to-cmux-id))
     (save-buffer)))
 
@@ -942,30 +916,33 @@ Auto-starts the Emacs MCP server if not running."
                              (message "Started Emacs MCP server for workspace bridge")
                            (message "WARNING: MCP server didn't start")))))
       (error (message "WARNING: MCP server start failed: %s" err))))
-  (let* ((saved-id (claude-org-terminal--find-session-property "CMUX_SURFACE_ID"))
+  (let* ((saved-surface (claude-org-terminal--find-session-property "CMUX_SURFACE_ID"))
          (tab-title (claude-org-terminal--tab-title))
-         (workspace-title (save-excursion
-                            (save-restriction
-                              (claude-org-terminal--goto-session-heading)
-                              (truncate-string-to-width
-                               (or (org-get-heading t t t t) "untitled") 50))))
+         (workspace-title (claude-org-cmux--session-workspace-title))
          (workspace-session-id
           (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
-         (project-root (or (claude-org--get-project-root) default-directory)))
+         (project-root (or (claude-org--get-project-root) default-directory))
+         ;; Single source of truth: resolve workspace by heading name.
+         ;; Names are stable across cmux restart; UUIDs and refs are not.
+         (ws-ref (claude-org-cmux--find-workspace-by-name workspace-title)))
     (cond
-     ;; Phase 1: saved workspace still alive — restore in place.
-     ((and saved-id (claude-org-cmux--workspace-alive-p))
-      (claude-org-cmux--restore-workspace saved-id workspace-session-id tab-title))
-     ;; Phase 2: saved UUID stale but cmux still has a workspace with
-     ;; the same name (cmux was restarted, re-hydrating workspaces from
-     ;; its own persistence with new refs/UUIDs).  Refresh IDs and
-     ;; restore using the fresh surface.
-     ((let ((recovered (claude-org-cmux--recover-stale-workspace
-                        workspace-session-id workspace-title)))
-        (when recovered
-          (claude-org-cmux--restore-workspace
-           recovered workspace-session-id tab-title))))
-     ;; Phase 3: no workspace exists — launch a fresh one.
+     ;; Workspace exists in cmux (possibly with a fresh surface after a
+     ;; cmux restart) — restore in-memory mappings and refresh the
+     ;; surface property if the old one went stale.
+     (ws-ref
+      (let* ((fresh-surface (condition-case nil
+                                (claude-org-cmux--get-workspace-surface ws-ref)
+                              (error nil)))
+             (surface-to-use (or fresh-surface saved-surface)))
+        (when (and fresh-surface (not (equal fresh-surface saved-surface)))
+          (save-excursion
+            (save-restriction
+              (claude-org-terminal--goto-session-heading)
+              (org-set-property "CMUX_SURFACE_ID" fresh-surface)))
+          (when (buffer-file-name) (save-buffer)))
+        (claude-org-cmux--restore-workspace
+         surface-to-use workspace-session-id tab-title ws-ref)))
+     ;; No workspace by this name — launch a fresh one.
      (t
       (claude-org-cmux--launch-workspace
        workspace-session-id tab-title workspace-title project-root))))))
@@ -1274,10 +1251,17 @@ because some TUI frameworks need the raw byte, not a key event."
 
 (defun claude-org-cmux--create-verbose-buffer (session-key surface-id)
   "Create a verbose output buffer for cmux terminal SESSION-KEY.
-Registers it so `claude-org-show-verbose' can find it."
+Registers it so `claude-org-show-verbose' can find it.  Derives the
+workspace identity from SESSION-KEY itself (format `<file>::<session-id>')
+so the buffer name stays stable even if `:workspace-session-id' session
+state has been wiped by a module reload — never falls back to the ambient
+current-buffer's `CLAUDE_SESSION_ID', which would collide with unrelated
+buffers."
   (let* ((workspace-id (or (claude-org--session-get session-key :workspace-session-id)
-                      (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID")
-                      "cmux"))
+                           (when (and session-key
+                                      (string-match "::\\([^:]+\\)\\'" session-key))
+                             (match-string 1 session-key))
+                           "cmux"))
          (buf-name (format "*cmux: %s*" workspace-id))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf
@@ -1296,40 +1280,19 @@ Registers it so `claude-org-show-verbose' can find it."
     buf))
 
 (defun claude-org-cmux--verbose-workspace-uuid (session-key)
-  "Resolve the cmux workspace UUID for SESSION-KEY.
-Three-tier lookup so a missing session-state slot doesn't break the
-verbose mirror (surface refs are unreliable — `capture-pane --workspace'
-rejects them with \"Workspace not found\"):
-  1. `:workspace-session-id' from session-state → `workspace-to-cmux-id' hash.
-  2. Session-id parsed out of SESSION-KEY (format `<file>::<session-id>')
-     → same hash (covers session-state wipes after reload).
-  3. `CMUX_WORKSPACE_ID' org property on the session heading
-     (persistent across Emacs restarts).
-Returns the UUID string or nil if the workspace cannot be resolved; callers
-must skip any `--workspace' CLI call when nil."
-  (let* ((ws-sid (or (claude-org--session-get session-key :workspace-session-id)
-                     (when (and session-key
-                                (string-match "::\\([^:]+\\)\\'" session-key))
-                       (match-string 1 session-key))))
-         (uuid-from-hash (when ws-sid
-                           (gethash ws-sid claude-org-cmux--workspace-to-cmux-id))))
-    (or uuid-from-hash
-        (when (and ws-sid session-key
-                   (string-match "\\`\\(.+\\)::[^:]+\\'" session-key))
-          (let* ((file-part (match-string 1 session-key))
-                 (buf (and file-part (find-buffer-visiting file-part))))
-            (when buf
-              (with-current-buffer buf
-                (save-excursion
-                  (save-restriction
-                    (widen)
-                    (goto-char (point-min))
-                    (when (re-search-forward
-                           (format "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+%s[ \t]*$"
-                                   (regexp-quote ws-sid))
-                           nil t)
-                      (org-back-to-heading t)
-                      (org-entry-get (point) "CMUX_WORKSPACE_ID")))))))))))
+  "Return the cmux workspace UUID for SESSION-KEY from the in-memory cache.
+Checks `:workspace-session-id' session slot first, then parses the
+session-id out of SESSION-KEY (format `<file>::<session-id>'); both feed
+into `workspace-to-cmux-id', which is populated by `restore-workspace'
+/ `launch-workspace' / `recover-session' when the workspace is resolved
+by heading name.  Returns nil on cache miss — callers must skip the
+tick; a subsequent `ensure-session' will repopulate the cache."
+  (let ((ws-sid (or (claude-org--session-get session-key :workspace-session-id)
+                    (when (and session-key
+                               (string-match "::\\([^:]+\\)\\'" session-key))
+                      (match-string 1 session-key)))))
+    (when ws-sid
+      (gethash ws-sid claude-org-cmux--workspace-to-cmux-id))))
 
 (defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf socket-path)
   "Async capture-pane tick: capture screen, replace buffer with current view.
@@ -1490,39 +1453,39 @@ Registered on `claude-org-active-story-changed-hook'."
 
 (defun claude-org-cmux-open-tab ()
   "Open (or focus) the cmux workspace for this workspace session.
-Launches Claude Code if no matching workspace exists.
-Always re-applies WORKSPACE_COLOR pill (status pills are transient in cmux)."
+Resolves the workspace by heading name.  Launches Claude Code if no
+matching workspace exists.  Always re-applies WORKSPACE_COLOR pill
+\(status pills are transient in cmux)."
   (interactive)
   (claude-org-cmux--ensure-session)
-  ;; Re-read properties AFTER ensure-session (it may have created a new workspace
-  ;; and updated the org properties with fresh refs)
-  (let ((workspace-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID"))
+  ;; Re-resolve by name AFTER ensure-session — it may have launched a
+  ;; fresh workspace.  The heading title is the stable identity.
+  (let ((ws-ref (claude-org-cmux--session-workspace-ref))
         (surface-id (claude-org-terminal--find-session-property "CMUX_SURFACE_ID")))
     (cond
-     (workspace-id
+     (ws-ref
       (condition-case nil
           (progn
-            (claude-org-cmux--call "select-workspace" "--workspace" workspace-id)
+            (claude-org-cmux--call "select-workspace" "--workspace" ws-ref)
             ;; Re-apply color (pills are lost on cmux restart)
-            (claude-org-cmux--apply-color workspace-id)
+            (claude-org-cmux--apply-color ws-ref)
             (claude-org-cmux--activate-app)
-            (message "cmux workspace focused (%s)" workspace-id))
+            (message "cmux workspace focused (%s)" ws-ref))
         (error
-         ;; Workspace ref is stale (e.g. switched from production to dev cmux).
-         ;; Clear stale refs and retry — ensure-session will create a new workspace.
+         ;; Workspace ref became stale between resolve and call (rare).
+         ;; Clear the surface marker and retry via ensure-session.
          (save-excursion
            (save-restriction
              (claude-org-terminal--goto-session-heading)
-             (org-delete-property "CMUX_WORKSPACE_ID")
              (org-delete-property "CMUX_SURFACE_ID")
              (save-buffer)))
          (claude-org-cmux--ensure-session)
-         (let ((new-ws (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID")))
-           (when new-ws
-             (claude-org-cmux--call "select-workspace" "--workspace" new-ws)
-             (claude-org-cmux--apply-color new-ws))
+         (let ((fresh-ref (claude-org-cmux--session-workspace-ref)))
+           (when fresh-ref
+             (claude-org-cmux--call "select-workspace" "--workspace" fresh-ref)
+             (claude-org-cmux--apply-color fresh-ref))
            (claude-org-cmux--activate-app)
-           (message "cmux workspace created and focused")))))
+           (message "cmux workspace recreated and focused")))))
      (surface-id
       (claude-org-cmux--activate-app)
       (message "cmux surface: %s (focused app)" surface-id))
@@ -1579,14 +1542,14 @@ surface rather than the stale one."
       (claude-org-cmux--call "send" "--surface" surface-id
                              (concat launch-cmd "\n"))
       ;; 3. Rename tab to active story (cmux may reset title on relaunch)
-      (let ((ws-id (claude-org-terminal--find-session-property "CMUX_WORKSPACE_ID"))
+      (let ((ws-ref (claude-org-cmux--session-workspace-ref))
             (tab-title (claude-org-terminal--tab-title)))
-        (when ws-id
+        (when ws-ref
           (condition-case nil
-              (claude-org-cmux--call "rename-tab" "--workspace" ws-id tab-title)
+              (claude-org-cmux--call "rename-tab" "--workspace" ws-ref tab-title)
             (error nil))
           ;; 4. Re-apply color
-          (claude-org-cmux--apply-color ws-id)))
+          (claude-org-cmux--apply-color ws-ref)))
       (let ((sk (claude-org--current-session-key)))
         (claude-org-cmux--stop-verbose sk)
         (claude-org--session-put sk :verbose-surface-id nil)
@@ -1722,8 +1685,11 @@ was skipped, the permission event proves a query is active)."
 #+BEGIN_SRC elisp
 (defun claude-org-cmux--recover-session (workspace-session-id)
   "Try to recover session mapping by scanning org buffers.
-Called when workspace-session-id is not found in the hash table after Emacs restart.
-Returns the session-key if found, nil otherwise."
+Called when WORKSPACE-SESSION-ID is not found in the hash tables after
+Emacs restart.  Finds the heading via `CLAUDE_SESSION_ID' property,
+resolves the current cmux workspace ref by heading name (the stable
+cmux/emacs identity), and repopulates hash tables.  Returns the
+session-key if found, nil otherwise."
   (claude-agent-with-span "cmux-recover-session"
       (list :session-id workspace-session-id) nil
   (cl-block recover
@@ -1740,16 +1706,21 @@ Returns the session-key if found, nil otherwise."
                              (regexp-quote workspace-session-id))
                      nil t)
                 (org-back-to-heading t)
-                (let ((surface (org-entry-get nil "CMUX_SURFACE_ID" nil))
-                      (workspace (org-entry-get nil "CMUX_WORKSPACE_ID" nil))
-                      (session-key (claude-org--current-session-key)))
+                (let* ((surface (org-entry-get nil "CMUX_SURFACE_ID" nil))
+                       (title (truncate-string-to-width
+                               (or (org-get-heading t t t t) "") 50))
+                       (ws-ref (and (not (string-empty-p title))
+                                    (claude-org-cmux--find-workspace-by-name title)))
+                       (ws-uuid (and ws-ref
+                                     (claude-org-cmux--resolve-workspace-uuid ws-ref)))
+                       (session-key (claude-org--current-session-key)))
                   (when (and surface session-key)
                     (puthash workspace-session-id session-key
                              claude-org-terminal--workspace-to-session-key)
                     (puthash workspace-session-id surface
                              claude-org-cmux--workspace-to-surface)
-                    (when workspace
-                      (puthash workspace-session-id workspace
+                    (when ws-uuid
+                      (puthash workspace-session-id ws-uuid
                                claude-org-cmux--workspace-to-cmux-id))
                     (cl-return-from recover session-key))))))))))))
 #+END_SRC

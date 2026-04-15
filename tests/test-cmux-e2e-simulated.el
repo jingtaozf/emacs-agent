@@ -81,6 +81,16 @@ Records the call and returns fixture-based responses."
       (test-cmux--read-fixture "capture-pane-ready.txt"))
      ((string= subcommand "tree")
       "workspace workspace:mock-1 \"Test\"\n  pane pane:1\n    surface surface:existing-123 [terminal]")
+     ;; Name-based workspace lookup — default returns a non-matching
+     ;; workspace so `find-workspace-by-name' returns nil and tests
+     ;; default to the LAUNCH path.  Tests that want RESTORE push a
+     ;; matching response via `test-cmux--mock-responses'.
+     ((string= subcommand "list-workspaces")
+      "  workspace:unrelated-1  Other Workspace\n")
+     ;; UUID resolution — default returns a stable UUID so tests
+     ;; asserting hash-table contents keep working.
+     ((string= subcommand "sidebar-state")
+      "tab=AABBCCDD-1111-2222-3333-444455556677\ncolor=#1565C0\n")
      (t (format "mock-response-for-%s" subcommand)))))
 
 (defun test-cmux--mock-calls-for (subcommand)
@@ -287,17 +297,23 @@ Returns values from BODY. Cleans up buffer afterwards."
           (should (equal stored test-cmux--mock-surface-id)))))))
 
 (ert-deftest test-cmux-ensure-session-reuse ()
-  "Ensure-session reuses existing surface when CMUX_SURFACE_ID exists and alive."
+  "Ensure-session reuses existing workspace resolved by heading name."
   (test-cmux--with-mock
+    ;; Workspace exists under the fixture heading title ("Test Story")
+    (push (cons "list-workspaces" "  workspace:mock-1  Test Story\n")
+          test-cmux--mock-responses)
+    ;; Mock the workspace's fresh surface (matches the fixture's saved one)
+    (push (cons "list-pane-surfaces" "* surface:existing-123  ~  [selected]")
+          test-cmux--mock-responses)
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
       (let ((surface-id (claude-org-cmux--ensure-session)))
-        ;; Should return existing surface ID
+        ;; Should return existing surface ID (fresh == saved)
         (should (equal surface-id "surface:existing-123"))
         ;; Should NOT have called new-workspace
         (should-not (test-cmux--mock-calls-for "new-workspace"))
-        ;; Should have called tree to check workspace liveness
-        (should (test-cmux--mock-calls-for "tree"))))))
+        ;; Should have looked up the workspace by heading name
+        (should (test-cmux--mock-calls-for "list-workspaces"))))))
 
 (ert-deftest test-cmux-ensure-session-relaunches-dead ()
   "Ensure-session relaunches when existing surface is dead."
@@ -922,36 +938,43 @@ First query.
 ;;; ============================================================================
 
 (ert-deftest test-cmux-recover-session-from-org-buffer ()
-  "Session recovery finds CMUX_SURFACE_ID from org buffer properties."
+  "Session recovery finds the heading via CLAUDE_SESSION_ID, resolves the
+cmux workspace by heading name, and repopulates hash tables."
   :tags '(:unit :stable)
   ;; Use file-backed buffer with claude-org-mode (recovery checks this)
   (let ((file (make-temp-file "test-recover-" nil ".org")))
     (unwind-protect
-        (let ((buf (find-file-noselect file)))
-          (with-current-buffer buf
-            (org-mode)
-            (let ((claude-org-auto-start-mcp-server nil))
-              (claude-org-mode 1))
-            (insert test-cmux--org-content-with-surface)
-            (save-buffer))
-          ;; Clear all 3 hash tables to simulate Emacs restart
-          (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-          (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-          (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
-          ;; Try recovery
-          (let ((result (claude-org-cmux--recover-session "test-cmux-session-003")))
-            (should result)
-            (should (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
-            (should (equal "surface:existing-123"
-                           (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)))
-            ;; E13: also verify CMUX_WORKSPACE_ID restored
-            (should (equal "mock-workspace-uuid-123"
-                           (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id))))
-          ;; Cleanup
-          (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-          (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-          (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
-          (kill-buffer buf))
+        (test-cmux--with-mock
+          ;; Workspace exists under the fixture heading title ("Test Story")
+          (push (cons "list-workspaces" "  workspace:mock-1  Test Story\n")
+                test-cmux--mock-responses)
+          (let ((buf (find-file-noselect file)))
+            (with-current-buffer buf
+              (org-mode)
+              (let ((claude-org-auto-start-mcp-server nil))
+                (claude-org-mode 1))
+              (insert test-cmux--org-content-with-surface)
+              (save-buffer))
+            ;; Clear all 3 hash tables to simulate Emacs restart
+            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            ;; Try recovery — list-workspaces resolves "Test Story" → mock-1;
+            ;; sidebar-state returns mock-workspace-uuid-123.
+            (let ((result (claude-org-cmux--recover-session "test-cmux-session-003")))
+              (should result)
+              (should (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
+              ;; Surface comes from the CMUX_SURFACE_ID property on the heading
+              (should (equal "surface:existing-123"
+                             (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)))
+              ;; UUID comes from name-based resolution (not an org property)
+              (should (equal "AABBCCDD-1111-2222-3333-444455556677"
+                             (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id))))
+            ;; Cleanup
+            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
       (delete-file file))))
 
 (ert-deftest test-cmux-recover-session-not-found ()
@@ -1046,18 +1069,23 @@ T52b: Ensures generic cancel works for file-level backend dispatch."
 ;;; ============================================================================
 
 (ert-deftest test-cmux-ensure-session-restores-hash-tables ()
-  "Ensure-session restores hash table mappings when workspace is alive.
-T53: Simulates Emacs restart — hash tables cleared but org properties intact.
-On reconnect, ensure-session must repopulate all three hash tables."
+  "Ensure-session restores hash table mappings when workspace name is alive.
+T53: Simulates Emacs restart — hash tables cleared but CMUX_SURFACE_ID
+property intact.  On reconnect, ensure-session must resolve the cmux
+workspace by heading name and repopulate all three hash tables."
   :tags '(:unit :stable)
   (test-cmux--with-mock
+    ;; Workspace exists under the fixture heading title ("Test Story")
+    (push (cons "list-workspaces" "  workspace:mock-1  Test Story\n")
+          test-cmux--mock-responses)
+    ;; Mock returns fresh surface matching the fixture's saved value
+    (push (cons "list-pane-surfaces" "* surface:existing-123  ~  [selected]")
+          test-cmux--mock-responses)
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
-      ;; Verify properties exist
+      ;; Verify CMUX_SURFACE_ID property exists (the only persisted cmux id)
       (should (equal "surface:existing-123"
                      (org-entry-get nil "CMUX_SURFACE_ID" t)))
-      (should (equal "mock-workspace-uuid-123"
-                     (org-entry-get nil "CMUX_WORKSPACE_ID" t)))
       ;; Clear all hash tables to simulate Emacs restart
       (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
       (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
@@ -1066,14 +1094,15 @@ On reconnect, ensure-session must repopulate all three hash tables."
       (should-not (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
       (should-not (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface))
       (should-not (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id))
-      ;; Call ensure-session — should restore mappings from org properties
+      ;; Call ensure-session — resolves workspace by heading name
       (let ((surface (claude-org-cmux--ensure-session)))
         (should (equal surface "surface:existing-123"))
         ;; All three hash tables should be repopulated
         (should (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
         (should (equal "surface:existing-123"
                        (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)))
-        (should (equal "mock-workspace-uuid-123"
+        ;; UUID resolved via sidebar-state (default mock returns a UUID)
+        (should (equal "AABBCCDD-1111-2222-3333-444455556677"
                        (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)))))))
 
 (ert-deftest test-cmux-restore-workspace-verbose-and-color ()
@@ -1106,8 +1135,12 @@ call new-workspace."
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
                              (cond
-                              ((string= subcmd "tree")
-                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "list-workspaces")
+                               "  workspace:mock-1  Test Story\n")
+                              ((string= subcmd "list-pane-surfaces")
+                               "* surface:existing-123  ~  [selected]")
+                              ((string= subcmd "sidebar-state")
+                               "tab=AABBCCDD-1111-2222-3333-444455556677\ncolor=#1565C0\n")
                               ((string= subcmd "capture-pane")
                                (test-cmux--read-fixture "capture-pane-ready.txt"))
                               (t "ok")))))
@@ -1579,19 +1612,26 @@ Non-ASCII chars are replaced with hyphens and collapsed."
 ;;; ============================================================================
 
 (ert-deftest test-cmux-open-tab-focuses-workspace ()
-  "T60: open-tab calls select-workspace and set-app-focus for existing workspace."
+  "T60: open-tab calls select-workspace and set-app-focus for existing workspace.
+The workspace is resolved by heading name; select-workspace receives the
+fresh workspace ref."
   :tags '(:e2e :simulated :unit :fast :stable)
   (test-cmux--with-mock
+    ;; Workspace exists under the fixture heading title ("Test Story")
+    (push (cons "list-workspaces" "  workspace:mock-1  Test Story\n")
+          test-cmux--mock-responses)
+    (push (cons "list-pane-surfaces" "* surface:existing-123  ~  [selected]")
+          test-cmux--mock-responses)
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (save-excursion
         (goto-char (point-min))
         (re-search-forward ":CUSTOM_ID: test-cmux-story-existing" nil t)
         (org-back-to-heading t)
         (claude-org-cmux-open-tab)
-        ;; Should have called select-workspace
+        ;; Should have called select-workspace with the ref from name lookup
         (let ((select-calls (test-cmux--mock-calls-for "select-workspace")))
           (should select-calls)
-          (should (member "mock-workspace-uuid-123" (cdar select-calls))))
+          (should (member "workspace:mock-1" (cdar select-calls))))
         ;; Should have called set-app-focus
         (should (test-cmux--mock-calls-for "set-app-focus"))))))
 
@@ -1621,14 +1661,14 @@ Recover me.
 cmux restart: the UUID no longer exists in cmux but a workspace with
 the same name has been restored by cmux persistence.")
 
-(ert-deftest test-cmux-ensure-session-recovers-stale-uuid-via-name ()
-  "Ensure-session recovers stale workspace UUID by looking up workspace name.
-T61: After cmux restart, CMUX_WORKSPACE_ID is a UUID that no longer exists
-and CMUX_SURFACE_ID is also stale. cmux has restored the workspace under
-the same name (from its own persistence), but with a new ref, UUID, and
-surface. ensure-session must detect the stale UUID, find the live workspace
-by heading title, refresh the org properties, and return the fresh
-surface-id — without calling new-workspace."
+(ert-deftest test-cmux-ensure-session-resolves-by-name-after-cmux-restart ()
+  "Ensure-session always resolves the workspace by heading name.
+T61: After cmux restart, refs and UUIDs are regenerated but cmux
+persists workspaces by name.  CMUX_SURFACE_ID on the heading is stale
+and CMUX_WORKSPACE_ID has never been written (deprecated property).
+ensure-session finds the live workspace by heading title, refreshes
+the surface property, and returns the fresh surface-id — without
+calling new-workspace."
   :tags '(:unit :stable)
   (let ((file (make-temp-file "test-cmux-recover-" nil ".org"))
         (calls nil)
@@ -1697,13 +1737,13 @@ surface-id — without calling new-workspace."
                 (should (equal surface "surface:42"))
                 ;; No new workspace was created
                 (should (zerop new-workspace-count))
-                ;; Org properties refreshed to fresh values
+                ;; CMUX_SURFACE_ID refreshed to the fresh value (only
+                ;; property we persist; workspace identity lives in
+                ;; the heading title)
                 (save-excursion
                   (claude-org-terminal--goto-session-heading)
                   (should (equal "surface:42"
-                                 (org-entry-get nil "CMUX_SURFACE_ID")))
-                  (should (equal "11111111-FE51-0000-0000-000000000000"
-                                 (org-entry-get nil "CMUX_WORKSPACE_ID"))))
+                                 (org-entry-get nil "CMUX_SURFACE_ID"))))
                 ;; Hash tables point to fresh workspace
                 (should (equal "surface:42"
                                (gethash "test-cmux-session-recover-001"
@@ -1826,19 +1866,21 @@ Color and verbose must be applied BEFORE wait-for-ready."
                         (should (equal surface "surface:mock-77"))
                         ;; 2. new-workspace was called
                         (should (cl-find "new-workspace" calls :key #'car :test #'equal))
-                        ;; 3. Both org properties persisted
+                        ;; 3. CMUX_SURFACE_ID persisted (only property we write;
+                        ;; workspace identity = heading title, not a UUID)
                         (save-excursion
                           (claude-org-terminal--goto-session-heading)
                           (should (equal "surface:mock-77"
-                                         (org-entry-get nil "CMUX_SURFACE_ID")))
-                          (should (equal "AABB1122-3344-5566-7788-99AABBCCDDEE"
-                                         (org-entry-get nil "CMUX_WORKSPACE_ID"))))
-                        ;; 4. Hash tables populated
+                                         (org-entry-get nil "CMUX_SURFACE_ID"))))
+                        ;; 4. Hash tables populated (UUID resolved from ref)
                         (should (equal "surface:mock-77"
                                        (gethash "test-cmux-session-launch-001"
                                                 claude-org-cmux--workspace-to-surface)))
                         (should (gethash "test-cmux-session-launch-001"
                                          claude-org-terminal--workspace-to-session-key))
+                        (should (equal "AABB1122-3344-5566-7788-99AABBCCDDEE"
+                                       (gethash "test-cmux-session-launch-001"
+                                                claude-org-cmux--workspace-to-cmux-id)))
                         ;; 5. rename-workspace and rename-tab called
                         (should (cl-find "rename-workspace" calls :key #'car :test #'equal))
                         (should (cl-find "rename-tab" calls :key #'car :test #'equal))
@@ -2063,64 +2105,45 @@ terminal screen hasn't changed between ticks."
       (kill-buffer vbuf))))
 
 ;;; ============================================================================
-;;; E10b: Regression — resolve-workspace-uuid falls back through three tiers
+;;; E10b: verbose-workspace-uuid resolves via session-state + hash cache
 ;;; ============================================================================
 
-(ert-deftest test-cmux-resolve-workspace-uuid-fallbacks ()
+(ert-deftest test-cmux-verbose-workspace-uuid-cache ()
   "Regression for PCR dev1 stale-verbose bug.
 
-When `ensure-session' has not run in this Emacs lifecycle for a given
-session (e.g. fresh Emacs with old org properties, or session-state
-reset by a module reload), `:workspace-session-id' is nil in
-session-state.  The old `verbose-tick' silently fell back to the stale
-surface ref and called `cmux capture-pane --workspace <surface-ref>',
-which fails with \"not_found: Workspace not found\" every tick — the
-verbose buffer freezes forever with no user-visible error.
-
-`resolve-workspace-uuid' must chain through three tiers and return nil
-rather than a surface ref when no UUID is resolvable."
+The verbose-tick reads the workspace UUID from the in-memory
+`workspace-to-cmux-id' hash — populated by `restore-workspace' /
+`launch-workspace' / `recover-session' when the workspace is resolved
+by heading name (stable cmux/emacs identity).  The helper must return
+nil on cache miss so `verbose-tick' skips the tick instead of passing a
+stale surface ref to `cmux capture-pane --workspace', which freezes the
+buffer forever with \"not_found: Workspace not found\"."
   :tags '(:unit :stable :e2e)
-  (let* ((file (make-temp-file "verbose-resolve-" nil ".org"))
-         (session-id "sdd-resolve-test-12345")
-         (expected-uuid "TEST-UUID-ABCDEF-0001")
-         (hash-uuid "HASH-UUID-WINS-OVER-PROP")
-         (session-key (format "%s::%s" file session-id))
+  (let* ((session-id "sdd-resolve-test-12345")
+         (hash-uuid "TEST-HASH-UUID-0001")
+         (session-key (format "/tmp/any.org::%s" session-id))
          (sessions-backup claude-org--sessions)
          (hash-backup (copy-hash-table claude-org-cmux--workspace-to-cmux-id)))
     (unwind-protect
         (progn
-          ;; Write the org fixture with a CMUX_WORKSPACE_ID property.
-          (with-temp-buffer
-            (insert (format "* Test story
-:PROPERTIES:
-:CLAUDE_SESSION_ID: %s
-:CMUX_WORKSPACE_ID: %s
-:END:
-
-Body text.
-" session-id expected-uuid))
-            (write-region (point-min) (point-max) file))
-          ;; Clean slate: no session-state, no hash entry, no file open.
+          ;; Clean slate
           (setq claude-org--sessions (make-hash-table :test 'equal))
           (remhash session-id claude-org-cmux--workspace-to-cmux-id)
-          ;; Tier 0: file not open anywhere → cannot resolve → nil.
+          ;; Cache miss: no session-state, no hash entry → nil.
           (should-not (claude-org-cmux--verbose-workspace-uuid session-key))
-          ;; Tier 3: open the file → org property fallback resolves UUID.
-          (let ((buf (find-file-noselect file)))
-            (unwind-protect
-                (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
-                               expected-uuid))
-              (kill-buffer buf)))
-          ;; Tier 1/2: hash has UUID → takes precedence over org property
-          ;; (faster path, and session-state/hash are authoritative when set).
-          (let ((buf (find-file-noselect file)))
-            (unwind-protect
-                (progn
-                  (puthash session-id hash-uuid
-                           claude-org-cmux--workspace-to-cmux-id)
-                  (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
-                                 hash-uuid)))
-              (kill-buffer buf)))
+          ;; Populate the hash (what restore-workspace / recover-session do
+          ;; after name-based lookup) → helper returns it via session-id
+          ;; parsed out of session-key.
+          (puthash session-id hash-uuid claude-org-cmux--workspace-to-cmux-id)
+          (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
+                         hash-uuid))
+          ;; Session-state slot populated → same lookup via different path.
+          (remhash session-id claude-org-cmux--workspace-to-cmux-id)
+          (should-not (claude-org-cmux--verbose-workspace-uuid session-key))
+          (claude-org--session-put session-key :workspace-session-id session-id)
+          (puthash session-id hash-uuid claude-org-cmux--workspace-to-cmux-id)
+          (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
+                         hash-uuid))
           ;; Nil session-key must not crash (defensive).
           (should-not (claude-org-cmux--verbose-workspace-uuid nil))
           ;; Session-key without "::" separator → no session-id, return nil.
@@ -2130,8 +2153,7 @@ Body text.
       (clrhash claude-org-cmux--workspace-to-cmux-id)
       (maphash (lambda (k v)
                  (puthash k v claude-org-cmux--workspace-to-cmux-id))
-               hash-backup)
-      (when (file-exists-p file) (delete-file file)))))
+               hash-backup))))
 
 ;;; ============================================================================
 ;;; E11: Verbose restart on surface change
