@@ -1297,19 +1297,20 @@ tick; a subsequent `ensure-session' will repopulate the cache."
 (defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf socket-path)
   "Async capture-pane tick: capture screen, replace buffer with current view.
 Resolves the cmux workspace UUID via `claude-org-cmux--verbose-workspace-uuid'
-because `capture-pane --workspace' only accepts workspace refs/UUIDs — a
-surface ref gives \"not_found: Workspace not found\" and silently freezes the
-buffer.  Skips the tick entirely if no UUID can be resolved (next
-`ensure-session' will repopulate state).
-SURFACE-ID is unused for capture (kept in the signature for call-site parity).
+and pins the capture to SURFACE-ID so the verbose buffer always shows the
+Claude Code terminal — even when the user switches to a different tab in the
+same cmux workspace.  Without `--surface', `capture-pane --workspace' returns
+the selected (active) surface, which may be a shell or other non-Claude tab.
 SOCKET-PATH is the cmux socket (resolved once at timer creation).
+Skips the tick entirely if no UUID can be resolved.
 Only auto-scrolls windows where the user is already at the end."
-  (ignore surface-id)
   (let ((ws-uuid (claude-org-cmux--verbose-workspace-uuid session-key)))
-    (when (and ws-uuid (buffer-live-p verbose-buf))
+    (when (and ws-uuid surface-id (buffer-live-p verbose-buf))
       (let* ((cli (or claude-org-cmux-cli-path "cmux"))
              (args (append (when socket-path (list "--socket" socket-path))
-                           (list "capture-pane" "--workspace" ws-uuid)))
+                           (list "capture-pane"
+                                 "--workspace" ws-uuid
+                                 "--surface" surface-id)))
              (proc-buf (generate-new-buffer " *cmux-vcap*"))
              (proc (apply #'start-process "cmux-verbose" proc-buf cli args)))
       (set-process-sentinel proc
