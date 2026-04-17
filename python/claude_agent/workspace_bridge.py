@@ -18,7 +18,10 @@ from claude_agent.mcp_client import McpClient, McpConnectionError, McpElispError
 
 try:
     from claude_agent.otel_setup import (
-        STATUS_DIR, setup_tracer, read_trace_context, write_trace_context,
+        STATUS_DIR,
+        setup_tracer,
+        read_trace_context,
+        write_trace_context,
     )
 except ImportError:
     STATUS_DIR = "/tmp/claude-agent-status"
@@ -64,6 +67,15 @@ def _write_custom_id(session_id: str, custom_id: str) -> None:
         f.write(custom_id)
 
 
+def _clear_custom_id(session_id: str) -> None:
+    """Remove the custom_id file so the next prompt starts fresh."""
+    path = os.path.join(STATUS_DIR, f"{session_id}.custom-id")
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
 def _read_custom_id(session_id: str) -> str | None:
     """Read the active instruction CUSTOM_ID, or None if not set."""
     path = os.path.join(STATUS_DIR, f"{session_id}.custom-id")
@@ -75,14 +87,16 @@ def _read_custom_id(session_id: str) -> str | None:
         return None
 
 
-def _notify_query_completed(mcp: McpClient, session_id: str, custom_id: str | None = None) -> None:
+def _notify_query_completed(
+    mcp: McpClient, session_id: str, custom_id: str | None = None
+) -> None:
     """Unregister query from Emacs active-queries (mode-line + *Claude Queries*)."""
     with _span("notify-query-completed", **_span_attrs(session_id, custom_id)):
         try:
             _mcp_eval_with_trace(
                 mcp,
-                f'(claude-org--terminal-query-completed '
-                f'"{_escape_elisp_string(session_id)}")'
+                f"(claude-org--terminal-query-completed "
+                f'"{_escape_elisp_string(session_id)}")',
             )
         except (McpConnectionError, McpElispError):
             logger.warning("Failed to notify query completed for %s", session_id)
@@ -117,7 +131,7 @@ def _build_save_cli_session_sexp(
         return ""
     prop = _cli_session_property()
     return (
-        f'(claude-org-workspace-bridge-save-cli-session '
+        f"(claude-org-workspace-bridge-save-cli-session "
         f'"{_escape_elisp_string(org_file)}" '
         f'"{_escape_elisp_string(session_id)}" '
         f'"{_escape_elisp_string(cli_session)}" '
@@ -138,9 +152,9 @@ def _mcp_eval_with_trace(mcp: McpClient, elisp: str) -> str | None:
         ctx = span.get_span_context()
         if ctx.is_valid:
             wrapped = (
-                f'(let ((claude-agent-trace--current-context '
+                f"(let ((claude-agent-trace--current-context "
                 f'(cons "{ctx.trace_id:032x}" "{ctx.span_id:016x}")))'
-                f' {elisp})'
+                f" {elisp})"
             )
     except Exception:
         pass  # Tracing unavailable, use original elisp
@@ -189,7 +203,8 @@ def handle_session_start(
         try:
             subprocess.run(
                 ["cmux", "wait-for", "-S", signal_name],
-                timeout=5, capture_output=True,
+                timeout=5,
+                capture_output=True,
             )
         except Exception:
             pass  # best-effort — Emacs falls back to polling
@@ -224,10 +239,16 @@ def handle_prompt(
         custom_id = _read_custom_id(session_id)
         with _span(
             "handle-prompt",
-            **_span_attrs(session_id, custom_id,
-                          **{"from.emacs": flag_exists, "prompt.length": len(prompt),
-                             "input.value": prompt[:2000],
-                             "input.mime_type": "text/plain"}),
+            **_span_attrs(
+                session_id,
+                custom_id,
+                **{
+                    "from.emacs": flag_exists,
+                    "prompt.length": len(prompt),
+                    "input.value": prompt[:2000],
+                    "input.mime_type": "text/plain",
+                },
+            ),
         ) as span:
             save_sexp = _build_save_cli_session_sexp(
                 org_file, session_id, input_data.get("session_id", "")
@@ -248,7 +269,7 @@ def handle_prompt(
                 # No flag — prompt was typed in terminal, insert into org
                 escaped_prompt = _escape_elisp_string(prompt)
                 elisp = (
-                    f'(claude-org-workspace-bridge-insert-prompt '
+                    f"(claude-org-workspace-bridge-insert-prompt "
                     f'"{_escape_elisp_string(org_file)}" '
                     f'"{_escape_elisp_string(session_id)}" '
                     f'"{escaped_prompt}")'
@@ -280,13 +301,15 @@ def handle_response(
     org_file: str,
     session_id: str,
 ) -> None:
-    """Handle Stop hook event (Claude Code) or sessionEnd hook event (Copilot)."""
+    """Handle Stop/sessionEnd/session.idle — insert prompt (if needed) and response."""
     write_status(session_id, "ready")
 
     custom_id = _read_custom_id(session_id)
 
     # Accept both snake_case (Claude Code) and camelCase (Copilot) field names
-    transcript_path = input_data.get("transcript_path") or input_data.get("transcriptPath", "")
+    transcript_path = input_data.get("transcript_path") or input_data.get(
+        "transcriptPath", ""
+    )
 
     # Copilot sessionEnd may not provide transcript_path — auto-discover from session state
     if not transcript_path:
@@ -298,10 +321,14 @@ def handle_response(
             if os.path.isfile(candidate):
                 transcript_path = candidate
 
-    with _span("handle-response", **_span_attrs(
-            session_id, custom_id,
+    with _span(
+        "handle-response",
+        **_span_attrs(
+            session_id,
+            custom_id,
             **{"transcript.path": transcript_path},
-    )) as span:
+        ),
+    ) as span:
         response = ""
         if transcript_path and os.path.isfile(transcript_path):
             # Detect transcript format by reading first non-empty line
@@ -339,34 +366,82 @@ def handle_response(
             return
 
         save_sexp = _build_save_cli_session_sexp(
-            org_file, session_id,
-            input_data.get("session_id") or input_data.get("sessionId", "")
+            org_file,
+            session_id,
+            input_data.get("session_id") or input_data.get("sessionId", ""),
         )
 
         if not custom_id:
-            # No instruction to attach response to — still mark query completed
-            _notify_query_completed(mcp, session_id)
-            return
+            # No custom_id — check if this is a terminal-typed prompt we need to insert.
+            # OpenCode's session.idle provides last_user_message but has no separate
+            # prompt hook, so we insert the prompt here to get a custom_id.
+            last_user_message = input_data.get("last_user_message", "")
+            if not last_user_message:
+                _notify_query_completed(mcp, session_id)
+                return
+
+            # Check from-emacs flag — if present, Emacs already inserted the prompt
+            # and wrote .custom-id. Re-read it after consuming the flag.
+            from_emacs_flag = os.path.join(STATUS_DIR, f"{session_id}.from-emacs")
+            flag_exists = os.path.exists(from_emacs_flag)
+            if not flag_exists:
+                flag_exists, from_emacs_flag = _check_any_recent_from_emacs_flag()
+
+            if flag_exists:
+                try:
+                    os.remove(from_emacs_flag)
+                except FileNotFoundError:
+                    pass
+                # Re-read custom_id — Emacs should have written it
+                custom_id = _read_custom_id(session_id)
+                if not custom_id:
+                    _notify_query_completed(mcp, session_id)
+                    return
+            else:
+                # Terminal-typed prompt — insert it into org to get custom_id
+                elisp = (
+                    f"(claude-org-workspace-bridge-insert-prompt "
+                    f'"{_escape_elisp_string(org_file)}" '
+                    f'"{_escape_elisp_string(session_id)}" '
+                    f'"{_escape_elisp_string(last_user_message)}")'
+                )
+                try:
+                    result = _mcp_eval_with_trace(mcp, elisp)
+                except (McpConnectionError, McpElispError):
+                    logger.warning("Failed to insert prompt for %s", session_id)
+                    _notify_query_completed(mcp, session_id)
+                    return
+                if not result:
+                    _notify_query_completed(mcp, session_id)
+                    return
+                custom_id = result
+                _write_custom_id(session_id, custom_id)
+                if span:
+                    span.set_attribute("org.custom_id", custom_id)
 
         elisp = (
-            f'(progn '
-            f'(claude-org-workspace-bridge-insert-response '
+            f"(progn "
+            f"(claude-org-workspace-bridge-insert-response "
             f'"{_escape_elisp_string(org_file)}" '
             f'"{_escape_elisp_string(session_id)}" '
             f'"{_escape_elisp_string(response)}" '
             f'"{_escape_elisp_string(custom_id)}") '
-            f'{save_sexp} '
-            f'(with-current-buffer (claude-org-workspace-bridge--ensure-buffer '
+            f"{save_sexp} "
+            f"(with-current-buffer (claude-org-workspace-bridge--ensure-buffer "
             f'"{_escape_elisp_string(org_file)}") '
-            f'(run-hook-with-args '
+            f"(run-hook-with-args "
             f"'claude-org-complete-hook "
-            f'(claude-org--current-session-key) nil '
+            f"(claude-org--current-session-key) nil "
             f"'completed)))"
         )
         try:
             _mcp_eval_with_trace(mcp, elisp)
         except (McpConnectionError, McpElispError):
             logger.warning("Failed to insert response for %s", session_id)
+
+        # Clear stale custom_id so the next terminal-typed prompt
+        # creates a fresh instruction heading instead of reusing this one.
+        _clear_custom_id(session_id)
 
         # Mark query completed AFTER response insertion attempt
         _notify_query_completed(mcp, session_id, custom_id)
@@ -443,7 +518,9 @@ def _extract_copilot_response(transcript_path: str) -> str:
     Skips turns that contain tool requests (toolRequests non-empty) to avoid
     inserting intermediate tool-use narration.
     """
-    with _span("extract-copilot-response", **{"transcript.path": transcript_path}) as span:
+    with _span(
+        "extract-copilot-response", **{"transcript.path": transcript_path}
+    ) as span:
         entries = []
         with open(transcript_path) as f:
             for line in f:
@@ -453,7 +530,9 @@ def _extract_copilot_response(transcript_path: str) -> str:
                 try:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
-                    logger.warning("Skipping malformed JSONL line in Copilot transcript")
+                    logger.warning(
+                        "Skipping malformed JSONL line in Copilot transcript"
+                    )
                     continue
 
         if not entries:
@@ -521,11 +600,18 @@ def handle_tool(
     tool_input = input_data.get("tool_input", {})
 
     custom_id = _read_custom_id(session_id)
-    with _span("handle-tool", **_span_attrs(
-            session_id, custom_id,
-            **{"tool.name": tool_name,
-               "input.value": json.dumps(tool_input, default=str)[:1000],
-               "input.mime_type": "application/json"})):
+    with _span(
+        "handle-tool",
+        **_span_attrs(
+            session_id,
+            custom_id,
+            **{
+                "tool.name": tool_name,
+                "input.value": json.dumps(tool_input, default=str)[:1000],
+                "input.mime_type": "application/json",
+            },
+        ),
+    ):
         if tool_name == "TodoWrite":
             _handle_todo_tool(mcp, tool_input, org_file, session_id, custom_id)
 
@@ -547,7 +633,7 @@ def _handle_todo_tool(
 
     elisp_todos = _format_todos_as_elisp(todos)
     elisp = (
-        f'(claude-org-workspace-bridge-update-todos '
+        f"(claude-org-workspace-bridge-update-todos "
         f'"{_escape_elisp_string(org_file)}" '
         f'"{_escape_elisp_string(session_id)}" '
         f"'{elisp_todos} "
@@ -578,12 +664,19 @@ def handle_permission(
 
     tool_input = input_data.get("tool_input", {})
     custom_id = _read_custom_id(session_id)
-    with _span("handle-permission", **_span_attrs(
-            session_id, custom_id,
-            **{"tool.name": tool_name,
-               "tool.is_interactive": tool_name in _INTERACTIVE_TOOLS,
-               "input.value": json.dumps(tool_input, default=str)[:1000],
-               "input.mime_type": "application/json"})):
+    with _span(
+        "handle-permission",
+        **_span_attrs(
+            session_id,
+            custom_id,
+            **{
+                "tool.name": tool_name,
+                "tool.is_interactive": tool_name in _INTERACTIVE_TOOLS,
+                "input.value": json.dumps(tool_input, default=str)[:1000],
+                "input.mime_type": "application/json",
+            },
+        ),
+    ):
         if tool_name in _INTERACTIVE_TOOLS:
             # Extract question text for richer notifications
             display_text = tool_name
@@ -598,20 +691,24 @@ def handle_permission(
             try:
                 _mcp_eval_with_trace(
                     mcp,
-                    f'(claude-org--terminal-permission-needed '
+                    f"(claude-org--terminal-permission-needed "
                     f'"{_escape_elisp_string(session_id)}" '
-                    f'"{_escape_elisp_string(display_text)}")'
+                    f'"{_escape_elisp_string(display_text)}")',
                 )
             except (McpConnectionError, McpElispError):
                 pass
 
             # Return "ask" so the terminal prompt appears
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "ask",
-                }
-            }))
+            print(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "ask",
+                        }
+                    }
+                )
+            )
 
 
 def handle_permission_clear(
@@ -633,17 +730,21 @@ def handle_permission_clear(
     """
     tool_name = input_data.get("tool_name", "unknown")
     is_interactive = tool_name in _INTERACTIVE_TOOLS
-    with _span("handle-permission-clear", **{
+    with _span(
+        "handle-permission-clear",
+        **{
             "session.id": session_id,
             "tool.name": tool_name,
-            "tool.is_interactive": is_interactive}):
+            "tool.is_interactive": is_interactive,
+        },
+    ):
         if not is_interactive:
             return
         try:
             _mcp_eval_with_trace(
                 mcp,
-                f'(claude-org--terminal-permission-resolved '
-                f'"{_escape_elisp_string(session_id)}")'
+                f"(claude-org--terminal-permission-resolved "
+                f'"{_escape_elisp_string(session_id)}")',
             )
         except (McpConnectionError, McpElispError):
             pass
@@ -682,10 +783,15 @@ def main() -> None:
     # Determine root vs child based on trace context existence
     custom_id = _read_custom_id(session_id)
     root_attrs = _span_attrs(
-        session_id, custom_id, event=event,
-        **{"org.file": org_file,
-           "input.has_data": bool(input_text.strip()),
-           "mcp.url": mcp_url})
+        session_id,
+        custom_id,
+        event=event,
+        **{
+            "org.file": org_file,
+            "input.has_data": bool(input_text.strip()),
+            "mcp.url": mcp_url,
+        },
+    )
 
     if ctx is None:
         # No Emacs parent — WE are the root (Flow B: direct mode)
@@ -700,13 +806,17 @@ def main() -> None:
 
     if tracer:
         root_span_ctx = tracer.start_as_current_span(
-            f"workspace-bridge-{event}", context=ctx,
-            kind=root_kind, attributes=root_attrs
+            f"workspace-bridge-{event}",
+            context=ctx,
+            kind=root_kind,
+            attributes=root_attrs,
         )
     else:
         root_span_ctx = _span(
-            f"workspace-bridge-{event}", kind=root_kind, oi_kind=root_oi_kind,
-            **root_attrs
+            f"workspace-bridge-{event}",
+            kind=root_kind,
+            oi_kind=root_oi_kind,
+            **root_attrs,
         )
 
     with root_span_ctx as root_span:
@@ -715,8 +825,8 @@ def main() -> None:
             span_ctx = root_span.get_span_context()
             write_trace_context(
                 session_id,
-                format(span_ctx.trace_id, '032x'),
-                format(span_ctx.span_id, '016x'),
+                format(span_ctx.trace_id, "032x"),
+                format(span_ctx.span_id, "016x"),
             )
 
         if event == "session-start":

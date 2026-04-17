@@ -141,7 +141,9 @@ Records the call and returns fixture-based or override responses."
     (should (claude-org-cmux--agent-profile-busy-patterns profile))
     (should (claude-org-cmux--agent-profile-cancel-keys profile))
     (should (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))))
+    (should (claude-org-cmux--agent-profile-supports-resume profile))
+    ;; Claude Code uses vi-mode TUI (sends "i" before text)
+    (should (claude-org-cmux--agent-profile-vi-mode profile))))
 
 (ert-deftest test-ap-profile-registry-copilot ()
   "Copilot profile is registered and has expected fields."
@@ -155,7 +157,9 @@ Records the call and returns fixture-based or override responses."
     (should (claude-org-cmux--agent-profile-cancel-keys profile))
     ;; Copilot does NOT support IDE but DOES support resume
     (should-not (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))))
+    (should (claude-org-cmux--agent-profile-supports-resume profile))
+    ;; Copilot does NOT use vi-mode
+    (should-not (claude-org-cmux--agent-profile-vi-mode profile))))
 
 (ert-deftest test-ap-profile-registry-nil ()
   "nil agent-type returns nil (triggers legacy path)."
@@ -571,5 +575,269 @@ Legacy query.
                         (claude-org-cmux-get-status "surface:ap-mock-001")
                       (error (format "error: %s" err)))))
         (should result)))))
+
+;;; ============================================================================
+;;; Tests: OpenCode Agent Profile
+;;; ============================================================================
+
+(ert-deftest test-ap-profile-registry-opencode ()
+  "OpenCode profile is registered and has expected fields."
+  :tags '(:unit :fast :agent-profiles)
+  (let ((profile (claude-org-cmux--get-agent-profile 'opencode)))
+    (should profile)
+    (should (equal (claude-org-cmux--agent-profile-name profile) 'opencode))
+    (should (functionp (claude-org-cmux--agent-profile-launch-fn profile)))
+    (should (claude-org-cmux--agent-profile-ready-patterns profile))
+    (should (claude-org-cmux--agent-profile-busy-patterns profile))
+    (should (claude-org-cmux--agent-profile-cancel-keys profile))
+    ;; OpenCode does NOT support IDE but DOES support resume and system-prompt
+    (should-not (claude-org-cmux--agent-profile-supports-ide profile))
+    (should (claude-org-cmux--agent-profile-supports-resume profile))
+    (should (claude-org-cmux--agent-profile-supports-system-prompt profile))
+    ;; OpenCode does NOT use vi-mode
+    (should-not (claude-org-cmux--agent-profile-vi-mode profile))))
+
+(ert-deftest test-ap-build-launch-command-opencode-profile ()
+  "build-launch-command with 'opencode profile builds opencode-workspace command."
+  :tags '(:unit :fast :agent-profiles)
+  (test-ap--with-org-buffer
+      "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: session-ap-oc-001
+:AGENT_TYPE: opencode
+:CUSTOM_ID: story-ap-oc-001
+:END:
+
+#+begin_src ai
+test query
+#+end_src
+"
+    (let ((claude-org-cmux-agent-type 'opencode)
+          (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
+      (let ((cmd (claude-org-cmux--build-launch-command
+                  "/test/project" "session-ap-oc-001" nil)))
+        (should (stringp cmd))
+        (should (string-match-p "opencode-workspace" cmd))
+        ;; Must NOT include claude or copilot workspace scripts
+        (should-not (string-match-p "claude-workspace" cmd))
+        (should-not (string-match-p "copilot-workspace" cmd))))))
+
+(ert-deftest test-ap-build-launch-command-opencode-with-resume ()
+  "OpenCode profile launch includes --resume when OPENCODE_SESSION_ID set."
+  :tags '(:unit :fast :agent-profiles :e2e)
+  (test-ap--with-org-buffer
+      "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: session-ap-oc-resume
+:AGENT_TYPE: opencode
+:OPENCODE_SESSION_ID: oc-uuid-abc123
+:CUSTOM_ID: story-ap-oc-resume
+:END:
+
+#+begin_src ai
+test query
+#+end_src
+"
+    (let ((claude-org-cmux-agent-type 'opencode)
+          (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
+      (let ((cmd (claude-org-cmux--build-launch-command
+                  "/test/project" "session-ap-oc-resume" nil)))
+        (should (stringp cmd))
+        (should (string-match-p "opencode-workspace" cmd))
+        ;; --resume with the saved OpenCode session
+        (should (string-match-p "--resume" cmd))
+        (should (string-match-p "oc-uuid-abc123" cmd))))))
+
+(ert-deftest test-ap-opencode-launch-filters-claude-only-flags ()
+  "OpenCode launch filters out claude-only flags from extra args."
+  :tags '(:unit :fast :agent-profiles :e2e)
+  (test-ap--with-org-buffer
+      "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: session-ap-oc-filter
+:AGENT_TYPE: opencode
+:CUSTOM_ID: story-ap-oc-filter
+:END:
+
+#+begin_src ai
+test query
+#+end_src
+"
+    (let ((claude-org-cmux-agent-type 'opencode)
+          (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace")
+          (claude-org-cmux-extra-args '("--dangerously-skip-permissions" "--ide")))
+      (let ((cmd (claude-org-cmux--build-launch-command
+                  "/test/project" "session-ap-oc-filter" nil)))
+        (should (stringp cmd))
+        ;; Claude-only flags must be filtered
+        (should-not (string-match-p "dangerously-skip-permissions" cmd))
+        (should-not (string-match-p "--ide" cmd))))))
+
+(ert-deftest test-ap-cancel-opencode-uses-ctrl-c ()
+  "Cancel for opencode profile sends C-c once."
+  :tags '(:unit :fast :agent-profiles)
+  (let ((profile (claude-org-cmux--get-agent-profile 'opencode)))
+    (should profile)
+    (let ((cancel-keys (claude-org-cmux--agent-profile-cancel-keys profile)))
+      ;; OpenCode TUI cancel is single C-c
+      (should (= 1 (length cancel-keys)))
+      (should (string= "C-c" (car cancel-keys))))))
+
+(ert-deftest test-ap-opencode-profile-has-ready-patterns ()
+  "OpenCode profile ready-patterns contain expected TUI strings."
+  :tags '(:unit :fast :agent-profiles)
+  (let* ((profile (claude-org-cmux--get-agent-profile 'opencode))
+         (patterns (claude-org-cmux--agent-profile-ready-patterns profile)))
+    (should (listp patterns))
+    (should (> (length patterns) 0))
+    ;; Must include the main OpenCode prompt symbol
+    (should (member "❯" patterns))))
+
+(ert-deftest test-ap-opencode-profile-has-busy-patterns ()
+  "OpenCode profile busy-patterns contain expected TUI strings."
+  :tags '(:unit :fast :agent-profiles)
+  (let* ((profile (claude-org-cmux--get-agent-profile 'opencode))
+         (patterns (claude-org-cmux--agent-profile-busy-patterns profile)))
+    (should (listp patterns))
+    (should (> (length patterns) 0))))
+
+(ert-deftest test-ap-opencode-profile-no-ide ()
+  "OpenCode profile does NOT support IDE server but supports resume."
+  :tags '(:unit :fast :agent-profiles)
+  (let ((profile (claude-org-cmux--get-agent-profile 'opencode)))
+    (should-not (claude-org-cmux--agent-profile-supports-ide profile))
+    (should (claude-org-cmux--agent-profile-supports-resume profile))))
+
+(ert-deftest test-ap-org-property-agent-type-opencode ()
+  "AGENT_TYPE org property is read correctly for opencode."
+  :tags '(:integration :agent-profiles)
+  (test-ap--with-org-buffer
+      "* Story with OpenCode
+:PROPERTIES:
+:CLAUDE_SESSION_ID: opencode-session-001
+:AGENT_TYPE: opencode
+:CUSTOM_ID: opencode-story-001
+:END:
+
+#+begin_src ai
+Do something with opencode.
+#+end_src
+"
+    (goto-char (point-min))
+    (re-search-forward ":AGENT_TYPE:" nil t)
+    (let ((prop-val (org-entry-get (point) "AGENT_TYPE")))
+      (should (equal prop-val "opencode")))))
+
+(ert-deftest test-ap-get-status-uses-opencode-patterns ()
+  "get-status uses opencode busy/ready patterns when agent is opencode."
+  :tags '(:integration :agent-profiles)
+  (test-ap--with-mock
+    (let ((claude-org-cmux-agent-type 'opencode))
+      ;; Override capture-pane to return an OpenCode-style ready prompt
+      (push (cons "capture-pane" "❯ ")
+            test-ap--mock-responses)
+      (let ((result (condition-case err
+                        (claude-org-cmux-get-status "surface:ap-mock-001")
+                      (error (format "error: %s" err)))))
+        (should result)))))
+
+(ert-deftest test-ap-opencode-cancel-sequence ()
+  "Mocked cancel for opencode profile sends C-c once via cmux."
+  :tags '(:integration :agent-profiles)
+  (test-ap--with-mock
+    (test-ap--with-org-buffer
+        (concat "* Story\n"
+                ":PROPERTIES:\n"
+                ":CLAUDE_SESSION_ID: session-cancel-opencode\n"
+                ":CMUX_SURFACE_ID: surface:ap-mock-001\n"
+                ":AGENT_TYPE: opencode\n"
+                ":CUSTOM_ID: cancel-opencode-story\n"
+                ":END:\n\n"
+                "#+begin_src ai\ntest\n#+end_src\n")
+      (goto-char (point-min))
+      (let ((claude-org-cmux-agent-type 'opencode))
+        (condition-case nil
+            (claude-org-cmux-cancel)
+          (error nil))
+        (let ((send-key-calls (test-ap--mock-calls-for "send-key")))
+          ;; One C-c for opencode
+          (should (>= (length send-key-calls) 1)))))))
+
+(ert-deftest test-ap-launch-command-structure-all-three-agents ()
+  "launch commands for claude, copilot, and opencode are structurally different."
+  :tags '(:integration :agent-profiles)
+  (let* ((claude-cmd
+          (let ((claude-org-cmux-agent-type 'claude))
+            (claude-org-cmux--build-launch-command
+             "/project" "session-001" nil)))
+         (copilot-cmd
+          (let ((claude-org-cmux-agent-type 'copilot)
+                (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
+            (claude-org-cmux--build-launch-command
+             "/project" "session-002" nil)))
+         (opencode-cmd
+          (let ((claude-org-cmux-agent-type 'opencode)
+                (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
+            (claude-org-cmux--build-launch-command
+             "/project" "session-003" nil))))
+    ;; Each uses its own workspace script
+    (should (string-match-p "claude-workspace" claude-cmd))
+    (should (string-match-p "copilot-workspace" copilot-cmd))
+    (should (string-match-p "opencode-workspace" opencode-cmd))
+    ;; All three commands must be distinct
+    (should-not (string= claude-cmd copilot-cmd))
+    (should-not (string= claude-cmd opencode-cmd))
+    (should-not (string= copilot-cmd opencode-cmd))))
+
+;;; ============================================================================
+;;; Tests: Multi-line text uses paste-buffer for non-vi-mode agents
+;;; ============================================================================
+
+(ert-deftest test-ap-send-text-multiline-opencode-uses-paste-buffer ()
+  "Multi-line text to opencode (non-vi-mode) uses set-buffer + paste-buffer, not send."
+  :tags '(:unit :fast :agent-profiles)
+  (test-ap--with-mock
+    (let ((claude-org-cmux-agent-type 'opencode))
+      (claude-org-cmux--send-text
+       test-ap--mock-surface-id "line one\nline two\nline three")
+      ;; Should NOT use 'send' for the text (send interprets \n as Enter)
+      (let ((send-calls (test-ap--mock-calls-for "send")))
+        (should (= 0 (length send-calls))))
+      ;; Should use set-buffer + paste-buffer
+      (let ((set-buf-calls (test-ap--mock-calls-for "set-buffer"))
+            (paste-buf-calls (test-ap--mock-calls-for "paste-buffer")))
+        (should (= 1 (length set-buf-calls)))
+        (should (= 1 (length paste-buf-calls))))
+      ;; Should still send Enter at the end
+      (let ((send-key-calls (test-ap--mock-calls-for "send-key")))
+        (should (>= (length send-key-calls) 1))))))
+
+(ert-deftest test-ap-send-text-singleline-opencode-uses-send ()
+  "Single-line text to opencode (non-vi-mode) can use send directly."
+  :tags '(:unit :fast :agent-profiles)
+  (test-ap--with-mock
+    (let ((claude-org-cmux-agent-type 'opencode))
+      (claude-org-cmux--send-text
+       test-ap--mock-surface-id "single line no newlines")
+      ;; Single-line: 'send' is fine (no \n to misinterpret)
+      (let ((send-calls (test-ap--mock-calls-for "send")))
+        (should (= 1 (length send-calls))))
+      ;; Should NOT use paste-buffer path for single-line
+      (let ((set-buf-calls (test-ap--mock-calls-for "set-buffer")))
+        (should (= 0 (length set-buf-calls)))))))
+
+(ert-deftest test-ap-send-text-multiline-claude-uses-send ()
+  "Multi-line text to claude (vi-mode) still uses send (vi-mode handles newlines)."
+  :tags '(:unit :fast :agent-profiles)
+  (test-ap--with-mock
+    ;; Mock capture-pane for ensure-insert-mode check
+    (push (cons "capture-pane" "-- INSERT --")
+          test-ap--mock-responses)
+    (let ((claude-org-cmux-agent-type 'claude))
+      (claude-org-cmux--send-text
+       test-ap--mock-surface-id "line one\nline two")
+      ;; Claude vi-mode: 'send' is used (INSERT mode handles newlines)
+      (let ((send-calls (test-ap--mock-calls-for "send")))
+        (should (>= (length send-calls) 1))))))
 
 ;;; test-cmux-e2e-agent-profiles.el ends here

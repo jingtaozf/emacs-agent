@@ -54,11 +54,12 @@ ignored and the agent profile's launch-fn is used instead."
 When nil, uses `claude-org-cmux-launch-command' (Claude Code, default).
   `claude'   - Claude Code via workspace bridge script
   `copilot'  - GitHub Copilot CLI via copilot-workspace script
+  `opencode' - OpenCode via opencode-workspace script
 Override per-session with the AGENT_TYPE org property:
   :PROPERTIES:
-  :AGENT_TYPE: copilot
+  :AGENT_TYPE: opencode
   :END:"
-  :type '(choice (const nil) (const claude) (const copilot) string)
+  :type '(choice (const nil) (const claude) (const copilot) (const opencode) string)
   :group 'claude-org)
 
 (defcustom claude-org-cmux-extra-args nil
@@ -90,6 +91,18 @@ Used when `claude-org-cmux-agent-type' is `copilot'.
 Defaults to `uv run --project <pkg>/python copilot-workspace'."
   :type 'string
   :group 'claude-org)
+
+(defcustom claude-org-cmux-opencode-workspace-script
+  (let* ((pkg-dir (file-name-directory
+                   (or load-file-name buffer-file-name "")))
+         (uv-cmd (format "uv run --project %s opencode-workspace"
+                         (expand-file-name "python" pkg-dir))))
+    uv-cmd)
+  "Command to launch the opencode-workspace launcher.
+Used when `claude-org-cmux-agent-type' is `opencode'.
+Defaults to `uv run --project <pkg>/python opencode-workspace'."
+  :type 'string
+  :group 'claude-org)
 #+END_SRC
 
 * Agent Profiles
@@ -110,7 +123,8 @@ changes are needed.
   (cancel-keys nil)             ; List of cmux key names to send for cancel
   (supports-resume nil)         ; t if --resume SESSION_ID is supported
   (supports-ide nil)            ; t if IDE WebSocket integration available
-  (supports-system-prompt nil)) ; t if system prompt flag injection is supported
+  (supports-system-prompt nil)  ; t if system prompt flag injection is supported
+  (vi-mode nil))                ; t if TUI uses vi-style INSERT mode (send "i" before text)
 
 (defvar claude-org-cmux--agent-profiles nil
   "Registry of known agent profiles.
@@ -383,47 +397,55 @@ If not already in INSERT mode, sends `i` to enter it and waits briefly."
 (defun claude-org-cmux--send-text (surface-id text)
   "Send TEXT to cmux SURFACE-ID.
 Strips Emacs text properties to prevent #(...) leaking into terminal.
-Ensures Claude Code TUI is in INSERT mode before sending.
-Uses `send --surface` which reliably targets a specific surface.
-Note: `paste-buffer --surface` has a cmux bug (\"Surface is not a terminal\")
-so we avoid it and use `send` directly. For very large text (>100KB),
-we select the workspace first and use paste-buffer without --surface."
+For agents with vi-mode TUI (Claude Code), ensures INSERT mode first.
+For non-vi-mode agents (OpenCode, Copilot), multi-line text is sent via
+set-buffer + paste-buffer (bracketed paste) so that newlines are preserved
+as literal characters rather than being interpreted as Enter keypresses.
+Note: `paste-buffer --surface` has a cmux bug so we select the workspace
+first and use paste-buffer without --surface."
   (claude-agent-with-span "cmux-send-text"
       (list :surface-id surface-id
             :text-length (length text)
             :input (truncate-string-to-width (or text "") 2000)) nil
-  (let ((clean-text (substring-no-properties text)))
-    ;; Ensure INSERT mode before sending text
-    (claude-org-cmux--ensure-insert-mode surface-id)
-    (if (< (length clean-text) 100000)
-        ;; Direct send — works reliably with --surface targeting
-        (claude-org-cmux--call "send" "--surface" surface-id clean-text)
-      ;; Large text: select workspace first, then paste without --surface
-      ;; (paste-buffer --surface is broken in cmux)
-      (let ((ws-ref (claude-org-cmux--session-workspace-ref)))
-        (when ws-ref
-          (claude-org-cmux--call "select-workspace" "--workspace" ws-ref))
-        (claude-org-cmux--call "set-buffer" "--name" "emacs-prompt" clean-text)
-        (claude-org-cmux--call "paste-buffer" "--name" "emacs-prompt")))
+  (let* ((clean-text (substring-no-properties text))
+         (profile (claude-org-cmux--get-agent-profile))
+         (vi-p (or (null profile)  ; legacy path = Claude Code
+                   (claude-org-cmux--agent-profile-vi-mode profile)))
+         ;; Non-vi-mode agents need paste-buffer for multi-line text because
+         ;; `cmux send` interprets \n as Enter, splitting the prompt.
+         (use-paste-p (or (>= (length clean-text) 100000)
+                          (and (not vi-p)
+                               (string-match-p "\n" clean-text)))))
+    ;; Only send "i" for vi-mode TUIs (Claude Code); others accept text directly
+    (when vi-p
+      (claude-org-cmux--ensure-insert-mode surface-id))
+    (if use-paste-p
+        ;; Paste-buffer path: preserves newlines as literal characters.
+        ;; paste-buffer --surface is broken in cmux, so select workspace first.
+        (let ((ws-ref (claude-org-cmux--session-workspace-ref)))
+          (when ws-ref
+            (claude-org-cmux--call "select-workspace" "--workspace" ws-ref))
+          (claude-org-cmux--call "set-buffer" "--name" "emacs-prompt" clean-text)
+          (claude-org-cmux--call "paste-buffer" "--name" "emacs-prompt"))
+      ;; Direct send — safe for single-line text or vi-mode agents
+      (claude-org-cmux--call "send" "--surface" surface-id clean-text))
     ;; Send Enter to submit the prompt
     (claude-org-cmux--call "send-key" "--surface" surface-id "enter")
-    ;; Retry-on-failure: if Claude Code didn't start working after 3s,
-    ;; the Enter may have been lost (race condition). Resend it.
-    ;; This adds zero overhead to the happy path.
-    (run-at-time 3 nil
-      (lexical-let ((sid surface-id))
-        (lambda ()
-          (condition-case nil
-              (let ((screen (claude-org-cmux--call "capture-pane"
-                              "--surface" sid)))
-                ;; If still showing INSERT mode prompt with no activity,
-                ;; Claude Code didn't receive the Enter — resend it
-                (when (and (string-match-p "-- INSERT --" screen)
-                           (not (string-match-p
-                                 "Thinking\\|Tool:\\|Reading\\|Searching\\|Running\\|Generating"
-                                 screen)))
-                  (claude-org-cmux--call "send-key" "--surface" sid "enter")))
-            (error nil))))))))
+    ;; Retry-on-failure: only for vi-mode TUIs where Enter can be lost
+    ;; if Claude Code is still in INSERT mode after 3s
+    (when vi-p
+      (run-at-time 3 nil
+        (lexical-let ((sid surface-id))
+          (lambda ()
+            (condition-case nil
+                (let ((screen (claude-org-cmux--call "capture-pane"
+                                "--surface" sid)))
+                  (when (and (string-match-p "-- INSERT --" screen)
+                             (not (string-match-p
+                                   "Thinking\\|Tool:\\|Reading\\|Searching\\|Running\\|Generating"
+                                   screen)))
+                    (claude-org-cmux--call "send-key" "--surface" sid "enter")))
+              (error nil)))))))))
 
 #+END_SRC
 
@@ -620,6 +642,40 @@ etc.) are automatically filtered from CLAUDE_EXTRA_ARGS and
       (setq parts (append parts (list extra))))
     (mapconcat #'identity parts " ")))
 
+(defun claude-org-cmux--build-opencode-launch-command
+    (org-file workspace-session-id project-root)
+  "Build OpenCode launch command for cmux workspace.
+ORG-FILE is the org notebook path, WORKSPACE-SESSION-ID the session,
+PROJECT-ROOT the working directory.
+Reads OPENCODE_SESSION_ID for --session resume support (separate from
+CLAUDE_CLI_SESSION so switching agent types does not clobber sessions).
+Claude Code-specific flags are automatically filtered from extra args."
+  (ignore project-root)
+  (let* ((prop-args (claude-org-terminal--find-session-property "CLAUDE_EXTRA_ARGS"))
+         (raw-extra (append claude-org-cmux-extra-args
+                            (when prop-args (split-string prop-args))))
+         ;; Reuse copilot's filter — same Claude-only flags to strip
+         (all-extra (claude-org-cmux--filter-copilot-args raw-extra))
+         (extra (mapconcat #'shell-quote-argument all-extra " "))
+         ;; Read OpenCode session ID for resume (Emacs owns state)
+         (cli-session
+          (ignore-errors
+            (save-excursion
+              (claude-org-terminal--goto-session-heading)
+              (org-entry-get nil "OPENCODE_SESSION_ID" nil))))
+         (workspace-script claude-org-cmux-opencode-workspace-script)
+         (parts (list workspace-script
+                      (shell-quote-argument (or org-file ""))
+                      (shell-quote-argument (or workspace-session-id "")))))
+    (when cli-session
+      (setq parts (append parts
+                          (list "--resume" (shell-quote-argument cli-session)))))
+    (when (and extra (not (string-empty-p extra)))
+      (unless cli-session
+        (setq parts (append parts (list "--"))))
+      (setq parts (append parts (list extra))))
+    (mapconcat #'identity parts " ")))
+
 ;; Populate agent profile registry now that the launch-fn helpers are defined.
 ;; Profiles are set here (not at defvar time) because the launch functions
 ;; are defined after the profile struct in the same file.
@@ -633,7 +689,8 @@ etc.) are automatically filtered from CLAUDE_EXTRA_ARGS and
         :cancel-keys    '("escape")
         :supports-resume t
         :supports-ide    t
-        :supports-system-prompt t)
+        :supports-system-prompt t
+        :vi-mode t)
        (make-claude-org-cmux--agent-profile
         :name 'copilot
         :launch-fn #'claude-org-cmux--build-copilot-launch-command
@@ -642,7 +699,16 @@ etc.) are automatically filtered from CLAUDE_EXTRA_ARGS and
         :cancel-keys    '("C-c" "C-c")
         :supports-resume t
         :supports-ide    nil
-        :supports-system-prompt nil)))
+        :supports-system-prompt nil)
+       (make-claude-org-cmux--agent-profile
+        :name 'opencode
+        :launch-fn #'claude-org-cmux--build-opencode-launch-command
+        :ready-patterns '("❯" "opencode>" "│ ❯")
+        :busy-patterns  '("thinking" "running" "Generating" "Tool:")
+        :cancel-keys    '("C-c")
+        :supports-resume t
+        :supports-ide    nil
+        :supports-system-prompt t)))
 #+END_SRC
 
 * Session Management

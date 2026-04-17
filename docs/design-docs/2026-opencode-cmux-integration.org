@@ -1,0 +1,813 @@
+#+TITLE: OpenCode Integration via cmux Backend
+#+DATE: 2026-04-17
+#+STATUS: draft
+
+* Overview
+
+This design adds OpenCode (https://opencode.ai) as a third agent in the cmux
+backend alongside Claude Code and GitHub Copilot CLI. OpenCode is an open-source,
+provider-agnostic AI coding agent with a client/server architecture, rich SDK,
+plugin system, and MCP support — making it a compelling complement to Claude Code.
+
+| Aspect | Value |
+|--------+-------|
+| Module | =claude-org-cmux.org=, =python/claude_agent/= |
+| Existing abstraction | =claude-org-cmux--agent-profile= struct |
+| New agent | OpenCode (=opencode=) |
+| Backward compatibility | Full — Claude Code and Copilot users see zero change |
+| Effort estimate | ~3 days (profile + launcher + dual-mode integration) |
+
+* Why OpenCode
+
+| Property | Value |
+|----------+-------|
+| License | MIT, 100% open source |
+| Provider agnostic | Claude, OpenAI, Gemini, local models — any provider |
+| Client/server split | =opencode serve= exposes HTTP + SSE; TUI is just one client |
+| Headless CLI | =opencode run "prompt" --format json= for non-interactive use |
+| SDK | =@opencode-ai/sdk= — type-safe JS/TS client for the server |
+| Plugins | JS/TS hooks for events, custom tools, env injection |
+| MCP support | Native, via =opencode.jsonc= config (local + remote servers) |
+| Session management | Server-side sessions with create/list/resume/fork/abort |
+| Permissions | Granular per-tool, per-command, per-agent permission config |
+| LSP integration | Built-in language server support |
+| Custom tools | =.opencode/tools/= directory, JS/TS tool definitions |
+| Rules | =AGENTS.md=, =.opencode/agents/=, inline =instructions= config |
+
+The key differentiator: OpenCode's server architecture (=opencode serve=) enables
+a *dual-mode* integration strategy — TUI mode via cmux (like Claude Code) AND
+headless API mode via HTTP (like our JSON stream backend). This gives us the
+best of both worlds.
+
+* Gap Analysis: Claude Code vs. OpenCode
+
+** Feature Comparison
+
+| Capability | Claude Code | OpenCode |
+|---------------------+------------------------------------+--------------------------------------|
+| Launch command | =claude= | =opencode= (TUI) / =opencode serve= (API) |
+| Session resume | =--resume <session-id>= | =--continue= / =--session <id>= |
+| MCP config | =--mcp-config '{"mcpServers":…}'= | =opencode.jsonc= =mcp= section (file-based) |
+| System prompt | =--system-prompt <text>= | =AGENTS.md= / =opencode.jsonc= =instructions= |
+| Structured output | =--output-format stream-json= | =opencode run --format json= (JSON events) |
+| Hook events | =SessionStart=, =Stop=, =Pre/PostToolUse= | Plugin events: =session.idle=, =tool.execute.before/after= |
+| Ready TUI prompt | ="type a message"= / insert mode | =❯= / input prompt area |
+| Cancel key | Escape | Ctrl-C / =session.abort()= API |
+| Non-interactive mode | ✗ (TUI only) | =opencode run "prompt"= returns result |
+| HTTP server | ✗ | =opencode serve= — full REST API + SSE |
+| IDE integration | =--ide= + WebSocket lock file | HTTP server + =opencode attach= |
+| Permission control | Accept/reject in TUI | =permission= config: allow/ask/deny per tool |
+| Custom tools | ✗ (MCP only) | =.opencode/tools/= + plugin =tool= export |
+| Provider flexibility | Anthropic only | Any provider (anthropic, openai, gemini, local) |
+| Auto-compaction | N/A (managed by Claude API) | =compaction= config (auto, prune, reserved) |
+
+** What Does NOT Change (Agent-Agnostic Infrastructure)
+
+Per the multi-agent design doc, these require zero modification:
+
+- =cmux new-workspace= / =send= / =pipe-pane= / =send-key=
+- Workspace color/icon (=WORKSPACE_COLOR=, =WORKSPACE_ICON= properties)
+- Verbose output buffer and streaming timer
+- Mode-line query tracking (=claude-agent--active-queries=)
+- Session state hash tables and org property persistence
+- Loop support and story-changed hook
+
+* Design: Two Integration Modes
+
+OpenCode's client/server architecture enables two complementary integration
+strategies. We implement both, letting users choose per-session.
+
+** Mode 1: TUI Mode (cmux pane — like Claude Code)
+
+Runs =opencode= TUI inside a cmux workspace. Interaction via =cmux send= /
+=cmux capture-pane=. This is the familiar pattern from Claude Code integration.
+
+#+begin_example
+┌──────────────────────────────────────┐
+│  cmux workspace: "my-story"          │
+│  ┌────────────────────────────────┐  │
+│  │  opencode TUI                  │  │
+│  │  ❯ [user types here]          │  │
+│  │                                │  │
+│  │  Agent response streams here   │  │
+│  └────────────────────────────────┘  │
+│  Emacs sends prompts via cmux send   │
+│  Emacs reads status via capture-pane │
+└──────────────────────────────────────┘
+#+end_example
+
+Advantages:
+- Visual terminal output (TUI themes, progress indicators)
+- User can interact with agent directly in cmux pane
+- Consistent with Claude Code / Copilot integration pattern
+
+Disadvantages:
+- Screen-scraping for status detection (fragile)
+- No structured response data (TUI-only rendering)
+- Response appears in org only after session becomes idle
+
+** Mode 2: Server Mode (HTTP API — headless)
+
+Runs =opencode serve= in background. Emacs communicates via HTTP REST API and
+SSE event stream. This is architecturally similar to the JSON stream backend
+but richer — full session CRUD, structured responses, real-time events.
+
+#+begin_example
+┌───────────────────────────────────────────────┐
+│  Emacs (claude-org)                           │
+│  ┌─────────────────────────────────────────┐  │
+│  │ HTTP Client (url-retrieve-synchronously)│  │
+│  │                                         │  │
+│  │ POST /session/:id/message               │  │
+│  │   → send prompt, get structured reply   │  │
+│  │                                         │  │
+│  │ GET /event (SSE)                        │  │
+│  │   → real-time: message.part.updated,    │  │
+│  │     session.idle, permission.asked      │  │
+│  └──────────────┬──────────────────────────┘  │
+│                 │ HTTP                         │
+│  ┌──────────────▼──────────────────────────┐  │
+│  │ opencode serve (localhost:4096)          │  │
+│  │   Sessions, tools, MCP, providers       │  │
+│  └─────────────────────────────────────────┘  │
+└───────────────────────────────────────────────┘
+#+end_example
+
+Advantages:
+- Structured JSON responses (no screen-scraping)
+- Real-time SSE events (token streaming, tool calls, permissions)
+- Full session management (create, resume, fork, abort)
+- Permission handling via API (=POST /session/:id/permissions/:permissionID=)
+- Any LLM provider (not locked to Anthropic)
+- Can run server on remote machine, control from Emacs
+
+Disadvantages:
+- No visual TUI (verbose buffer shows HTTP responses instead)
+- Requires =opencode serve= process management
+- New HTTP client code (not reusing cmux infrastructure)
+
+** Recommended Approach: TUI Mode First, Server Mode Later
+
+Phase 1 implements TUI mode — it plugs into the existing agent-profile system
+with minimal new code. Phase 2 adds server mode as an alternative backend that
+bypasses cmux entirely and talks HTTP.
+
+* Phase 1: TUI Mode via Agent Profile
+
+** Layer 1: Agent Profile Registration
+
+Push a new profile onto =claude-org-cmux--agent-profiles=:
+
+#+begin_src elisp
+(push (make-claude-org-cmux--agent-profile
+       :name 'opencode
+       :launch-fn #'claude-org-cmux--build-opencode-launch-command
+       :ready-patterns '("❯" "opencode>" "│ ❯")
+       :busy-patterns  '("thinking" "running" "Generating" "Tool:")
+       :cancel-keys    '("C-c")
+       :supports-resume t
+       :supports-ide    nil
+       :supports-system-prompt t)
+      claude-org-cmux--agent-profiles)
+#+end_src
+
+Key decisions:
+- =:supports-resume t= — OpenCode supports =--continue= and =--session <id>=
+- =:supports-ide nil= — No WebSocket IDE integration (but HTTP server exists)
+- =:supports-system-prompt t= — Via =AGENTS.md= or =opencode.jsonc= =instructions=
+- =:cancel-keys '("C-c")= — OpenCode's TUI cancel is Ctrl-C
+
+** Layer 2: Launch Command Builder
+
+#+begin_src elisp
+(defcustom claude-org-cmux-opencode-workspace-script
+  (let* ((pkg-dir (file-name-directory
+                   (or load-file-name buffer-file-name "")))
+         (uv-cmd (format "uv run --project %s opencode-workspace"
+                         (expand-file-name "python" pkg-dir))))
+    uv-cmd)
+  "Command to launch the opencode-workspace launcher."
+  :type 'string
+  :group 'claude-org)
+
+(defun claude-org-cmux--build-opencode-launch-command
+    (org-file workspace-session-id project-root)
+  "Build OpenCode launch command for cmux workspace."
+  (let* ((workspace-script claude-org-cmux-opencode-workspace-script)
+         (resume-id (when (claude-org-cmux--agent-profile-supports-resume
+                           (claude-org-cmux--get-agent-profile 'opencode))
+                      (condition-case nil
+                          (claude-org-terminal--find-session-property
+                           "OPENCODE_SESSION_ID")
+                        (error nil))))
+         (prop-args (condition-case nil
+                        (claude-org-terminal--find-session-property
+                         "CLAUDE_EXTRA_ARGS")
+                      (error nil)))
+         (all-extra (append claude-org-cmux-extra-args
+                            (when prop-args (split-string prop-args))))
+         (extra (mapconcat #'shell-quote-argument all-extra " "))
+         (parts (list workspace-script
+                      (shell-quote-argument (or org-file ""))
+                      (shell-quote-argument (or workspace-session-id "")))))
+    ;; Pass resume session ID if available
+    (when resume-id
+      (setq parts (append parts
+                          (list "--resume" (shell-quote-argument resume-id)))))
+    (when (and extra (not (string-empty-p extra)))
+      (setq parts (append parts (list "--" extra))))
+    (mapconcat #'identity parts " ")))
+#+end_src
+
+** Layer 3: Python Launcher — =opencode_workspace.py=
+
+Analogous to =claude_workspace.py= but OpenCode-specific:
+
+#+begin_src python
+"""OpenCode workspace launcher for cmux backend.
+
+Launches OpenCode TUI with Emacs MCP integration and workspace bridge hooks.
+Usage: opencode-workspace <org-file> [session-id] [--resume <id>] [-- extra-args...]
+
+Key differences from claude_workspace.py:
+  - MCP via opencode.jsonc mcp section (not --mcp-config flag)
+  - System prompt via AGENTS.md (not --system-prompt flag)
+  - Session resume via --continue or --session <id> (not --resume)
+  - Permissions configurable via opencode.jsonc
+  - Plugin hooks replace shell hook scripts
+  - Env var: OTUI_USE_ALTERNATE_SCREEN=main-screen (scrollback preservation)
+"""
+
+import json
+import os
+import sys
+import atexit
+from pathlib import Path
+
+
+def build_opencode_args(
+    mcp_url: str,
+    system_prompt: str | None,
+    resume_session_id: str | None,
+    extra_args: list[str],
+    model: str | None = None,
+) -> list[str]:
+    """Build args for OpenCode TUI."""
+    args = ["opencode"]
+
+    # MCP: inject Emacs server into project's opencode.jsonc
+    _inject_emacs_mcp(mcp_url)
+
+    # System prompt: write to AGENTS.md
+    if system_prompt:
+        _write_agents_md(system_prompt)
+
+    # Session resume
+    if resume_session_id:
+        args.extend(["--session", resume_session_id])
+    # else: fresh session (no --continue, start clean)
+
+    # Model override
+    if model:
+        args.extend(["--model", model])
+
+    # Permission: allow all tools for autonomous operation
+    os.environ["OPENCODE_PERMISSION"] = json.dumps("allow")
+
+    # Scrollback preservation
+    os.environ["OTUI_USE_ALTERNATE_SCREEN"] = "main-screen"
+
+    args.extend(extra_args)
+    return args
+
+
+def _inject_emacs_mcp(mcp_url: str) -> None:
+    """Merge Emacs MCP server entry into opencode.jsonc.
+
+    Saves original and restores via atexit.
+    """
+    config_path = Path("opencode.jsonc")
+    if not config_path.exists():
+        config_path = Path("opencode.json")
+
+    original = config_path.read_text() if config_path.exists() else None
+    config = _parse_jsonc(original) if original else {}
+
+    config.setdefault("mcp", {})["emacs"] = {
+        "type": "remote",
+        "url": mcp_url,
+        "enabled": True,
+    }
+
+    config_path = Path("opencode.jsonc")  # always write as jsonc
+    config_path.write_text(json.dumps(config, indent=2))
+    atexit.register(_restore_file, config_path, original)
+
+
+def _write_agents_md(system_prompt: str) -> None:
+    """Prepend session system prompt to AGENTS.md.
+
+    Restores original on exit.
+    """
+    agents_path = Path("AGENTS.md")
+    original = agents_path.read_text() if agents_path.exists() else None
+    header = f"<!-- emacs-agent session instructions -->\n{system_prompt}\n\n"
+    agents_path.write_text(header + (original or ""))
+    atexit.register(_restore_file, agents_path, original)
+
+
+def _parse_jsonc(text: str) -> dict:
+    """Minimal JSONC parser — strip // and /* */ comments."""
+    import re
+    stripped = re.sub(r'//.*?$', '', text, flags=re.MULTILINE)
+    stripped = re.sub(r'/\*.*?\*/', '', stripped, flags=re.DOTALL)
+    return json.loads(stripped) if stripped.strip() else {}
+
+
+def _restore_file(path: Path, original: str | None) -> None:
+    """Restore file to original content, or delete if it didn't exist."""
+    if original is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(original)
+#+end_src
+
+** Layer 4: OpenCode Plugin for Workspace Bridge Events
+
+OpenCode uses a JS/TS plugin system instead of shell hook scripts. Create a
+plugin that emits events compatible with the workspace bridge:
+
+#+begin_src javascript
+// .opencode/plugins/emacs-bridge.ts
+// Plugin that bridges OpenCode events to the Emacs workspace bridge.
+// Reads EMACS_BRIDGE_URL from environment, POSTs events to workspace_bridge.
+
+export const EmacsBridge = async ({ project, client, $, directory }) => {
+  const bridgeUrl = process.env.EMACS_BRIDGE_URL
+  if (!bridgeUrl) return {}
+
+  const notify = async (event, data = {}) => {
+    try {
+      await fetch(bridgeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event, ...data }),
+      })
+    } catch (e) {
+      // Bridge unavailable — non-fatal
+    }
+  }
+
+  return {
+    event: async ({ event }) => {
+      // Map OpenCode events to workspace bridge events
+      switch (event.type) {
+        case "session.idle":
+          await notify("response", { sessionId: event.properties?.sessionID })
+          break
+        case "session.error":
+          await notify("error", { error: event.properties?.message })
+          break
+        case "permission.asked":
+          await notify("permission", {
+            permissionId: event.properties?.permissionID,
+            tool: event.properties?.tool,
+          })
+          break
+        case "permission.replied":
+          await notify("permission-clear")
+          break
+      }
+    },
+    "tool.execute.before": async (input, output) => {
+      await notify("tool", { tool: input.tool, phase: "pre" })
+    },
+    "tool.execute.after": async (input, output) => {
+      await notify("tool", { tool: input.tool, phase: "post" })
+    },
+  }
+}
+#+end_src
+
+** Layer 5: Event Aliases in =workspace_bridge.py=
+
+Add OpenCode event name aliases to the dispatch table:
+
+#+begin_src python
+# In workspace_bridge.py EVENT_HANDLERS:
+
+EVENT_HANDLERS = {
+    # Claude Code events (existing)
+    "session-start":       handle_session_start,
+    "prompt":              handle_prompt,
+    "response":            handle_response,
+    "tool":                handle_tool,
+    "permission":          handle_permission,
+    "permission-clear":    handle_permission_clear,
+    # GitHub Copilot CLI events (existing)
+    "sessionStart":        handle_session_start,
+    "userPromptSubmitted": handle_prompt,
+    "sessionEnd":          handle_response,
+    "preToolUse":          handle_permission,
+    "postToolUse":         handle_permission_clear,
+    # OpenCode events (new — from emacs-bridge plugin)
+    # These arrive via HTTP POST from the plugin, same handler signatures
+    "error":               handle_error,
+}
+#+end_src
+
+** Layer 6: Session Resume via Org Property
+
+OpenCode supports session resume via =--session <id>=. Store the session ID
+in org properties (same pattern as Claude Code's =CLAUDE_CLI_SESSION=):
+
+#+begin_src elisp
+;; In workspace bridge session-start handler:
+;; Store OpenCode session ID when agent type is 'opencode
+(when (eq (claude-org-cmux--get-agent-profile) 'opencode)
+  (claude-org-terminal--set-session-property
+   "OPENCODE_SESSION_ID" session-id))
+#+end_src
+
+Org property usage:
+
+#+begin_src org
+* My OpenCode Story
+  :PROPERTIES:
+  :CLAUDE_SESSION_ID: my-opencode-workspace-xyz
+  :AGENT_TYPE: opencode
+  :OPENCODE_SESSION_ID: abc123-def456
+  :WORKSPACE_COLOR: green
+  :END:
+
+#+begin_src ai
+Add comprehensive error handling to the authentication module.
+#+end_src
+#+end_src
+
+* Phase 2: Server Mode via HTTP Backend (Future)
+
+Server mode runs =opencode serve= and communicates entirely via HTTP. This
+bypasses cmux — no TUI, no screen-scraping. This would be a new backend
+type (alongside =cmux= and =json-stream=), not a cmux agent profile.
+
+** Architecture
+
+#+begin_example
+claude-org.el dispatch
+    │
+    ├── backend = "cmux"    → claude-org-cmux.org (existing)
+    ├── backend = "stream"  → claude-org-json-stream.org (existing)
+    └── backend = "opencode-server"  → claude-org-opencode.org (NEW)
+            │
+            ├── POST /session           → create session
+            ├── POST /session/:id/message → send prompt
+            ├── GET /event              → SSE stream (real-time)
+            ├── POST /session/:id/abort → cancel
+            └── GET /session/:id/message → retrieve responses
+#+end_example
+
+** Key Server Endpoints to Use
+
+| Endpoint | Method | Purpose |
+|----------+--------+---------|
+| =/session= | POST | Create new session |
+| =/session/:id/message= | POST | Send prompt, get response (sync) |
+| =/session/:id/prompt_async= | POST | Send prompt, don't wait (async) |
+| =/session/:id/abort= | POST | Cancel running session |
+| =/session/:id/permissions/:pid= | POST | Respond to permission request |
+| =/event= | GET (SSE) | Real-time event stream |
+| =/session/:id= | GET | Get session details |
+| =/session/:id/message= | GET | List messages with parts |
+| =/global/health= | GET | Health check |
+
+** SSE Event Stream
+
+The =/event= SSE endpoint provides real-time events. Key events:
+
+| Event | When |
+|-------+------|
+| =session.idle= | Agent finished responding |
+| =session.status= | Status change (busy → idle) |
+| =message.part.updated= | Token/chunk streamed (live response) |
+| =permission.asked= | Tool needs user approval |
+| =permission.replied= | Permission was answered |
+| =tool.execute.before= | Tool call starting |
+| =tool.execute.after= | Tool call completed |
+| =session.error= | Error occurred |
+
+** Elisp HTTP Client Sketch
+
+#+begin_src elisp
+(defun claude-org-opencode--server-request (method path &optional body)
+  "Make HTTP request to OpenCode server.
+Returns parsed JSON response."
+  (let* ((url (format "http://%s:%d%s"
+                       claude-org-opencode-server-host
+                       claude-org-opencode-server-port
+                       path))
+         (url-request-method method)
+         (url-request-extra-headers
+          '(("Content-Type" . "application/json")))
+         (url-request-data (when body (json-encode body))))
+    (with-current-buffer (url-retrieve-synchronously url)
+      (goto-char url-http-end-of-headers)
+      (json-read))))
+
+(defun claude-org-opencode--send-prompt (session-id prompt)
+  "Send PROMPT to OpenCode session SESSION-ID."
+  (claude-org-opencode--server-request
+   "POST"
+   (format "/session/%s/message" session-id)
+   `((parts . [((type . "text") (text . ,prompt))]))))
+
+(defun claude-org-opencode--create-session (&optional title)
+  "Create a new OpenCode session."
+  (claude-org-opencode--server-request
+   "POST" "/session"
+   `((title . ,(or title "emacs-session")))))
+
+(defun claude-org-opencode--abort-session (session-id)
+  "Abort a running OpenCode session."
+  (claude-org-opencode--server-request
+   "POST" (format "/session/%s/abort" session-id) nil))
+#+end_src
+
+** Advantages of Server Mode
+
+1. *Structured data*: JSON responses, not screen-scraping
+2. *Real-time streaming*: SSE events for live token display
+3. *Permission handling*: API-based, not TUI prompt detection
+4. *Session management*: Full CRUD via REST API
+5. *Remote operation*: Server on remote machine, Emacs as client
+6. *Multi-client*: Same server can serve Emacs + web UI + mobile app
+
+** Why Not Server Mode First?
+
+Server mode requires significant new Elisp code (HTTP client, SSE parser,
+session lifecycle management). TUI mode plugs into the existing agent-profile
+system with ~50 lines of Elisp + a Python launcher. Ship TUI mode first
+to validate OpenCode integration, then invest in server mode.
+
+* MCP Integration: Emacs Tools for OpenCode
+
+OpenCode supports MCP natively via =opencode.jsonc=. The =opencode_workspace.py=
+launcher injects the Emacs MCP server entry:
+
+#+begin_src json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "emacs": {
+      "type": "remote",
+      "url": "http://localhost:PORT/mcp",
+      "enabled": true
+    }
+  }
+}
+#+end_src
+
+This exposes all Emacs MCP tools (=evalElisp=, =readOrgProperty=, etc.) to
+OpenCode's agents — same as Claude Code gets via =--mcp-config=.
+
+Note: OpenCode uses a =remote= MCP type (HTTP transport), whereas Claude Code
+uses =local= (stdio transport spawning a subprocess). Our Emacs MCP server
+already supports both transports via =emacs-mcp-server.org=.
+
+* Permission Handling
+
+OpenCode's permission system is more granular than Claude Code's TUI-based
+accept/reject. For autonomous operation in cmux:
+
+#+begin_src json
+{
+  "permission": "allow"
+}
+#+end_src
+
+Or via environment variable (set by =opencode_workspace.py=):
+=OPENCODE_PERMISSION='\"allow\"'=
+
+For interactive workflows where the user wants to approve dangerous actions,
+the workspace bridge plugin detects =permission.asked= events and routes them
+to the Emacs permission UI (same as Claude Code's permission flow).
+
+* Configuration
+
+** Per-Session (Org Properties)
+
+| Property | Purpose | Example |
+|----------+---------+---------|
+| =AGENT_TYPE= | Select OpenCode as agent | =opencode= |
+| =OPENCODE_SESSION_ID= | Resume specific session | =abc123-def456= |
+| =OPENCODE_MODEL= | Override model | =anthropic/claude-sonnet-4-5= |
+| =OPENCODE_SERVER_PORT= | Server mode port (Phase 2) | =4096= |
+| =WORKSPACE_COLOR= | cmux sidebar color | =green= |
+
+** Global (Emacs Custom)
+
+#+begin_src elisp
+;; Use OpenCode as default agent
+(setq claude-org-cmux-agent-type 'opencode)
+
+;; Or per-story via org property:
+;; :AGENT_TYPE: opencode
+#+end_src
+
+** OpenCode Config (=opencode.jsonc=)
+
+Project-level OpenCode config lives in the project root. The launcher
+injects Emacs MCP, but users can add their own providers, tools, etc.:
+
+#+begin_src json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-5",
+  "permission": "allow",
+  "mcp": {
+    "emacs": {
+      "type": "remote",
+      "url": "http://localhost:9876/mcp",
+      "enabled": true
+    }
+  }
+}
+#+end_src
+
+* File Change Summary
+
+** Phase 1 (TUI Mode)
+
+| File | Type | Change |
+|------+------+--------|
+| =claude-org-cmux.org= | modify | Push OpenCode agent profile onto registry; add =claude-org-cmux--build-opencode-launch-command=; add =claude-org-cmux-opencode-workspace-script= defcustom |
+| =python/claude_agent/opencode_workspace.py= | new | OpenCode launcher: build args, MCP injection into =opencode.jsonc=, AGENTS.md injection, session resume |
+| =hooks/opencode-plugin/emacs-bridge.ts= | new | OpenCode plugin for workspace bridge event forwarding |
+| =python/pyproject.toml= | modify | Add =opencode-workspace= entry point |
+| =python/tests/test_opencode_workspace.py= | new | Unit tests for OpenCode launcher (38 tests) |
+| =tests/test-cmux-e2e-agent-profiles.el= | modify | Add 12 OpenCode profile tests (ready patterns, launch command, cancel keys) |
+| =ARCHITECTURE.org= | modify | Add "New agent profile" to Extension Points table |
+
+** Phase 2 (Server Mode — Future)
+
+| File | Type | Change |
+|------+------+--------|
+| =claude-org-opencode.org= | new | New backend module: HTTP client, SSE consumer, session lifecycle |
+| =claude-org.org= | modify | Add =opencode-server= backend dispatch |
+| =tests/test-opencode-server.el= | new | Server mode unit tests |
+
+* Gap Handling
+
+** Gap 1: MCP Config is File-Based (=opencode.jsonc=, not CLI flag)
+
+Claude Code: =--mcp-config '{"mcpServers":…}'= (inline JSON on CLI).
+OpenCode: =mcp= section in =opencode.jsonc= (project config file).
+
+*Mitigation*: =opencode_workspace.py= reads existing =opencode.jsonc=, merges
+the Emacs MCP server entry, and restores on exit via =atexit=. Same pattern as
+Copilot's =.github/mcp.json= injection.
+
+*Risk*: If OpenCode caches the config at startup, runtime MCP injection may
+fail. Test: does OpenCode re-read =opencode.jsonc= or does it load once?
+Answer: Config is loaded at startup. Injection must happen before =opencode= runs.
+
+** Gap 2: System Prompt is File-Based (=AGENTS.md=)
+
+Claude Code: =--system-prompt <text>= (CLI flag).
+OpenCode: =AGENTS.md= in project root + =instructions= config array.
+
+*Mitigation*: =opencode_workspace.py= prepends session instructions to =AGENTS.md=,
+restores on exit. Identical to Copilot's =.github/AGENTS.md= approach.
+
+*Alternative*: Use =opencode.jsonc= =instructions= config to point to a temporary
+instruction file. This avoids modifying =AGENTS.md= but requires file creation.
+
+** Gap 3: Hook System is Plugin-Based (JS/TS, not shell scripts)
+
+Claude Code: Shell hook scripts in a =hooks/= directory.
+OpenCode: JS/TS plugins in =.opencode/plugins/=.
+
+*Mitigation*: Create =.opencode/plugins/emacs-bridge.ts= that maps OpenCode plugin
+events to workspace bridge HTTP POSTs. The plugin is injected by the launcher
+(copy to project's =.opencode/plugins/=, restore on exit).
+
+*Alternative*: Skip the plugin entirely for Phase 1 — rely solely on TUI
+screen-scraping for status detection (ready/busy/permission). This is simpler
+but less reliable. The plugin approach is preferred because it gives structured
+event data.
+
+** Gap 4: Session Resume Uses Different Flags
+
+Claude Code: =--resume <session-id>=.
+OpenCode: =--session <session-id>= or =--continue= (last session).
+
+*Mitigation*: Store =OPENCODE_SESSION_ID= org property. Pass =--session <id>= in
+launch command when available. Falls back to fresh session when no stored ID.
+
+** Gap 5: No IDE WebSocket Integration
+
+Claude Code: =--ide= flag activates WebSocket lock file for IDE features.
+OpenCode: No equivalent (but HTTP server provides similar functionality).
+
+*Mitigation*: =:supports-ide nil= in profile. Guard IDE code paths.
+In Phase 2 (server mode), the HTTP API replaces the IDE WebSocket.
+
+** Gap 6: TUI Ready Pattern Detection
+
+OpenCode's TUI shows =❯= as the input prompt. The exact patterns may vary
+across versions and themes.
+
+*Mitigation*: Profile =ready-patterns= include multiple variants. Add
+=OTUI_USE_ALTERNATE_SCREEN=main-screen= env var to preserve scrollback.
+If patterns drift, update the profile — no code changes needed.
+
+* Implementation Plan
+
+| Phase | Action | Effort |
+|-------+--------+--------|
+| P1.1 | Push OpenCode agent profile onto =claude-org-cmux--agent-profiles= | 1h |
+| P1.2 | Add =claude-org-cmux--build-opencode-launch-command= | 1h |
+| P1.3 | Create =python/claude_agent/opencode_workspace.py= (launcher) | 3h |
+| P1.4 | Create =opencode_bridge_plugin.ts= (event forwarding) | 2h |
+| P1.5 | Add OpenCode event aliases in =workspace_bridge.py= | 30m |
+| P1.6 | Add =opencode-workspace= entry point to =pyproject.toml= | 15m |
+| P1.7 | Unit tests: profile lookup, launch command, ready patterns | 2h |
+| P1.8 | E2E test: launch OpenCode workspace, send prompt, verify response | 3h |
+| P1.9 | Documentation: update ARCHITECTURE.org, add usage examples | 1h |
+
+* Risks and Mitigations
+
+| Risk | Likelihood | Impact | Mitigation |
+|------+------------+--------+------------|
+| OpenCode TUI patterns change between versions | Medium | Low | Patterns in profile; easy to update |
+| =opencode.jsonc= injection races with startup | Low | High | Inject before =opencode= process starts |
+| Plugin =.opencode/plugins/= may conflict with user plugins | Low | Medium | Use unique name =emacs-bridge.ts=; restore on exit |
+| OpenCode not installed on user's machine | High | Low | Clear error message from launcher |
+| MCP remote transport incompatible with Emacs MCP server | Low | High | Test HTTP MCP transport; fallback to stdio via local wrapper |
+| =AGENTS.md= restore races with OpenCode writes | Low | Medium | =atexit= handler; acceptable for dev use |
+
+* Verification Plan
+
+** Unit Tests
+- Profile lookup: correct profile for ='opencode=
+- Launch command: correct flags for fresh session vs. resume
+- Ready/busy detection: patterns match OpenCode TUI screenshots
+- Cancel: =C-c= keys sent via profile
+
+** E2E Tests (requires cmux + OpenCode installed)
+- Launch OpenCode workspace from org file
+- Verify workspace color/icon applied
+- Verify verbose buffer captures OpenCode output
+- Verify =opencode.jsonc= MCP injection and restore
+- Execute ai block, verify response appears in org
+- Resume session with stored =OPENCODE_SESSION_ID=
+
+* Design Principles Preserved
+
+| Principle | How preserved |
+|-----------+---------------|
+| Emacs owns all state | =OPENCODE_SESSION_ID= stored in org properties; Python receives as arg |
+| Python is stateless | =opencode_workspace.py= receives org-file and session-id as CLI args |
+| Zero regression for Claude Code | Existing profiles untouched; OpenCode profile is additive |
+| Additive architecture | Profile registry is open for extension — push a new struct |
+| Process filter safety | No changes to process filter or sentinel |
+
+* References
+
+| Resource | URL / Path |
+|----------+------------|
+| OpenCode docs | https://opencode.ai/docs |
+| OpenCode CLI reference | https://opencode.ai/docs/cli/ |
+| OpenCode SDK | https://opencode.ai/docs/sdk/ |
+| OpenCode Server API | https://opencode.ai/docs/server/ |
+| OpenCode Plugins | https://opencode.ai/docs/plugins/ |
+| OpenCode MCP | https://opencode.ai/docs/mcp-servers/ |
+| OpenCode Config | https://opencode.ai/docs/config/ |
+| OpenCode Permissions | https://opencode.ai/docs/permissions/ |
+| OpenCode Custom Tools | https://opencode.ai/docs/custom-tools/ |
+| ai-code-interface.el (OpenCode wrapper) | =reference/hermes-agent/ai-code-interface.el/ai-code-opencode.el= |
+| Multi-agent design doc | =docs/design-docs/2026-multi-agent-cmux-support.org= |
+| cmux backend design doc | =docs/design-docs/2026-cmux-support-backend.org= |
+| OpenCode GitHub | https://github.com/anomalyco/opencode |
+
+* Open Questions
+
+1. *TUI ready pattern stability*: OpenCode's TUI is theme-able. Do different themes
+   change the prompt symbol from =❯=? Need to test with default + custom themes.
+
+2. *Plugin injection path*: Should =opencode_workspace.py= copy the bridge plugin
+   into =.opencode/plugins/=? Or use a global plugin in =~/.config/opencode/plugins/=?
+   Global avoids per-project injection; project-local avoids global side effects.
+
+3. *MCP transport*: OpenCode's =remote= MCP type uses HTTP. Does our Emacs MCP
+   server support HTTP transport, or only stdio? If not, we need a thin HTTP
+   wrapper around the stdio MCP server (or use =local= type with a command).
+
+4. *Server mode session mapping*: In Phase 2, how do we map org session IDs to
+   OpenCode server session IDs? Direct 1:1 mapping via the =/session= API?
+   Or create sessions lazily on first prompt?
+
+5. *Multi-provider model selection*: OpenCode supports any provider. Should we
+   expose model selection per-session via an org property (=OPENCODE_MODEL=)?
+   This would let different stories use different models (Claude for complex tasks,
+   GPT-4o for fast iteration, local models for privacy-sensitive work).
