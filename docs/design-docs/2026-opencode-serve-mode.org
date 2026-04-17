@@ -1,0 +1,244 @@
+#+TITLE: Design: OpenCode Serve Mode (JSON Stream Backend)
+#+DATE: 2026-04-17
+#+STATUS: proposal
+
+* Goal
+
+Replace the cmux TUI-based OpenCode integration with a direct JSON stream
+backend using =opencode run --format json=.  This eliminates terminal
+emulation, screen scraping, Python bridge processes, and file-based IPC —
+giving us the same clean subprocess architecture we already have for Claude
+Code via =claude-agent-query=.
+
+* Motivation
+
+The current cmux-based OpenCode integration (shipped in =445037b=) works
+but has fundamental limitations:
+
+| Problem | Root Cause |
+|---------+------------|
+| No streaming — response arrives as one blob | =session.idle= fires only after completion |
+| ~30-1500ms latency per hook event | Python subprocess → MCP evalElisp round-trip |
+| Fragile status detection | Regex on rendered TUI screen (=❯=, =Thinking=) |
+| File-based IPC for prompt correlation | =.custom-id=, =.from-emacs= in =/tmp/= |
+| Complex multi-layer stack | cmux + plugin + Python bridge + MCP + Emacs |
+
+With =opencode run --format json=, we get structured newline-delimited JSON
+on stdout — the same pattern =claude-agent-query= already handles for Claude
+Code.  One Emacs subprocess, one process filter, real-time token streaming.
+
+* OpenCode JSON Stream Protocol
+
+=opencode run --format json= emits newline-delimited JSON.  Each line has a
+=type= field.  Observed message types from testing (OpenCode v1.4.6):
+
+** Message Types
+
+| Type | When | Key Fields |
+|------+------+------------|
+| =step_start= | Agent begins a reasoning step | =sessionID=, =part.messageID= |
+| =text= | Assistant text output (streamable) | =part.text=, =part.time= |
+| =tool_use= | Tool call with result | =part.tool=, =part.callID=, =part.state= |
+| =step_finish= | Step completes | =part.reason= (=stop= / =tool-calls=), =part.tokens=, =part.cost= |
+
+** Example: Simple Text Response
+
+#+begin_example
+{"type":"step_start","sessionID":"ses_xxx","part":{"type":"step-start",...}}
+{"type":"text","sessionID":"ses_xxx","part":{"type":"text","text":"Hi",...}}
+{"type":"step_finish","sessionID":"ses_xxx","part":{"type":"step-finish",
+  "reason":"stop","tokens":{"input":2,"output":4,"reasoning":0,
+  "cache":{"write":36877,"read":0}},"cost":0}}
+#+end_example
+
+** Example: Tool Use + Response
+
+#+begin_example
+{"type":"step_start",...}
+{"type":"tool_use","part":{"tool":"read","callID":"toolu_xxx",
+  "state":{"status":"completed","input":{...},"output":"..."}}}
+{"type":"step_finish","part":{"reason":"tool-calls",...}}
+{"type":"step_start",...}
+{"type":"text","part":{"text":"The file contains...",...}}
+{"type":"step_finish","part":{"reason":"stop","tokens":{...},"cost":0}}
+#+end_example
+
+** Session Resume
+
+Sessions are resumed via =--session <sessionID>=:
+
+#+begin_example
+opencode run --format json --session ses_26524183cffe9i6G6rQCP7XeUV "follow-up"
+#+end_example
+
+The =sessionID= is present in every message — captured from the first
+=step_start= event.
+
+** Key Differences from Claude Code JSON Stream
+
+| Aspect | Claude Code | OpenCode |
+|--------+-------------+----------|
+| CLI flags | =--print --output-format stream-json= | =run --format json= |
+| Session resume | =--resume <uuid>= | =--session <id>= |
+| Bidirectional stdin | Yes (=--input-format stream-json=) | No — one-shot per invocation |
+| Message types | =system=, =assistant=, =user=, =result= | =step_start=, =text=, =tool_use=, =step_finish= |
+| Text streaming | Token-by-token (multiple =assistant= msgs) | One =text= event per step (may change) |
+| Permission prompts | =control_request= on stdout | Not in JSON mode (use =--dangerously-skip-permissions= or plugin) |
+| System prompt | =--system-prompt= flag | =AGENTS.md= file |
+| MCP config | =--mcp-config= flag | =opencode.jsonc= file |
+
+** Critical Limitation: One-Shot Only
+
+=opencode run= is *not bidirectional* — it accepts a message, runs to
+completion, and exits.  Multi-turn conversation requires repeated
+invocations with =--session <id>= to resume.
+
+This means =claude-agent-client-send-message= (stdin pipe) won't work.
+Each turn spawns a new subprocess, similar to =claude-agent-client-send=
+(the =--resume= path).
+
+* Proposed Architecture
+
+** Backend Registration
+
+Register =opencode-json= as a new backend value for =CLAUDE_BACKEND=:
+
+| Value | Backend | Behavior |
+|-------+---------+----------|
+| =opencode-json= | OpenCode JSON Stream | Subprocess, =opencode run --format json= |
+| =opencode= | OpenCode TUI (cmux) | Existing cmux integration |
+
+** Process Flow
+
+1. User presses =C-c C-c= on a =#+begin_src ai= block
+2. =claude-org-execute= reads =CLAUDE_BACKEND= → =opencode-json=
+3. Dispatch to =opencode-json-backend-query=
+4. Build CLI args: =opencode run --format json [--session ID] [--model M]=
+   (no message arg — prompt goes via stdin)
+5. Start subprocess via =make-process= with =:connection-type 'pipe=
+6. Pipe prompt via =process-send-string= + =process-send-eof=
+   (multi-line AI block content with code, special chars, etc.)
+7. Process filter parses newline-delimited JSON
+8. Map OpenCode events to existing callback system:
+
+| OpenCode Event | Callback |
+|----------------+----------|
+| =step_start= | (internal — mark query active) |
+| =text= | =:on-token= with =part.text= |
+| =tool_use= | =:on-message= with tool-use struct |
+| =step_finish= (=reason: "stop"=) | =:on-message= with result, then =:on-complete= |
+| =step_finish= (=reason: "tool-calls"=) | (internal — more steps coming) |
+
+** Implementation Plan
+
+*** Phase 1: Core JSON Stream Handler
+
+New file: section in =claude-agent.org= (or separate =claude-agent-opencode.org=)
+
+- =opencode-json--build-args= — build CLI arg list
+- =opencode-json--process-filter= — parse NDJSON, dispatch events
+- =opencode-json--handle-message= — map OpenCode types to callbacks
+- =opencode-json-query= — public API, like =claude-agent-query= but for OpenCode
+
+Reuse from =claude-agent.org=:
+- =claude-agent--process-json-buffer= — NDJSON line splitting (same pattern)
+- Process state on process object via =process-put= / =process-get=
+- Verbose buffer logging
+
+*** Phase 2: Backend Protocol Implementation
+
+Implement =claude-agent-backend= generics for =opencode-json=:
+
+| Generic | Implementation |
+|---------+---------------|
+| =backend-query= | Call =opencode-json-query= |
+| =backend-cancel= | Kill subprocess (=delete-process=) |
+| =backend-cleanup= | Kill process, clear state |
+| =backend-active-p= | Check process alive |
+| =backend-session-id= | Return captured =sessionID= |
+| =backend-send-input= | Not supported (one-shot) — return error |
+| =backend-supports-p= | =:streaming t :multi-turn nil :permission-prompts nil= |
+
+*** Phase 3: Configuration & System Prompt
+
+- System prompt: Write =AGENTS.md= in =PROJECT_ROOT= before launch
+  (same as current =opencode_workspace.py= does)
+- MCP config: Write =opencode.jsonc= in =PROJECT_ROOT= (or pass via env)
+- Model selection: =--model provider/model= flag
+- Permission mode: =--dangerously-skip-permissions= initially
+  (permission prompts in JSON mode TBD)
+
+*** Phase 4: Multi-Turn via Session Resume
+
+Each new prompt in the same org session:
+1. Read =CLAUDE_CLI_SESSION= property (stores OpenCode =sessionID=)
+2. Pass =--session <id>= to resume
+3. Update =sessionID= from response (should be same)
+
+This is the =--resume= equivalent — each turn is a new process.
+
+* What Gets Eliminated
+
+| Component | Status |
+|-----------|--------|
+| cmux terminal surface for OpenCode | Not needed |
+| =capture-pane= polling / ready patterns | Not needed |
+| =send= / =send-key= / paste-buffer | Not needed |
+| =workspace_bridge.py= Python process | Not needed |
+| =opencode_workspace.py= Python launcher | Not needed |
+| =emacs-bridge.ts= plugin | Not needed |
+| =.from-emacs= / =.custom-id= / status files | Not needed |
+| JSONL post-hoc transcript parsing | Not needed |
+| MCP evalElisp round-trips from Python | Not needed |
+
+All response handling happens in Emacs process filter — same as Claude
+Code JSON stream backend.
+
+* What Remains Shared
+
+| Component | Shared with Claude Code |
+|-----------|------------------------|
+| =claude-org-execute= dispatch | Yes — reads =CLAUDE_BACKEND= |
+| System prompt assembly | Yes — =claude-org--build-system-prompt= |
+| Token streaming to org buffer | Yes — =:on-token= callback |
+| Session property management | Yes — =CLAUDE_CLI_SESSION= |
+| Backend protocol generics | Yes — same interface |
+
+* Open Questions
+
+1. *Text streaming granularity*: =opencode run --format json= emits
+   *one =text= event per step* with the complete text — confirmed with
+   both short and multi-paragraph responses.  Token-by-token streaming
+   is NOT available in this mode.  The response will appear all at once
+   in the org buffer (same as current cmux bridge behavior).  This may
+   improve in future OpenCode versions, or =opencode serve= HTTP
+   streaming may offer finer granularity.
+
+2. *Permission prompts*: How to handle permission requests in JSON mode?
+   Claude Code uses =control_request= on stdout.  OpenCode may need
+   plugin hooks or a different mechanism.  Initially use
+   =--dangerously-skip-permissions=.
+
+3. *Separate file vs section*: Should this be a section in
+   =claude-agent.org= or a new =claude-agent-opencode.org=?  Preference
+   for separate file to keep =claude-agent.org= focused on Claude Code.
+
+4. *=opencode serve= + HTTP*: An alternative to subprocess-per-turn is
+   running =opencode serve= as a persistent HTTP server and sending
+   requests via HTTP.  This would enable true multi-turn without
+   re-spawning.  Worth exploring if =serve= exposes a JSON streaming
+   endpoint.
+
+5. *MCP server injection*: OpenCode reads MCP config from
+   =opencode.jsonc=.  We need to ensure the Emacs MCP server is
+   configured before launching.  Options: write file, or pass via env.
+
+* Success Criteria
+
+- [ ] =C-c C-c= on AI block with =CLAUDE_BACKEND: opencode-json= works
+- [ ] Response streams token-by-token into org buffer (if OpenCode supports it)
+- [ ] Session resume works across multiple turns in same org session
+- [ ] Tool use events visible in verbose buffer
+- [ ] Usage/cost displayed in mode line
+- [ ] No cmux, no Python bridge, no plugin required
+- [ ] Existing cmux-based =opencode= backend still works (not broken)

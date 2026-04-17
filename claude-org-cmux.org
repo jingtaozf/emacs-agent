@@ -398,11 +398,9 @@ If not already in INSERT mode, sends `i` to enter it and waits briefly."
   "Send TEXT to cmux SURFACE-ID.
 Strips Emacs text properties to prevent #(...) leaking into terminal.
 For agents with vi-mode TUI (Claude Code), ensures INSERT mode first.
-For non-vi-mode agents (OpenCode, Copilot), multi-line text is sent via
-set-buffer + paste-buffer (bracketed paste) so that newlines are preserved
-as literal characters rather than being interpreted as Enter keypresses.
-Note: `paste-buffer --surface` has a cmux bug so we select the workspace
-first and use paste-buffer without --surface."
+For non-vi-mode agents (OpenCode, Copilot), multi-line text is sent line
+by line with shift-enter between lines, so newlines appear as literal
+characters in the TUI input box rather than submitting each line separately."
   (claude-agent-with-span "cmux-send-text"
       (list :surface-id surface-id
             :text-length (length text)
@@ -411,7 +409,7 @@ first and use paste-buffer without --surface."
          (profile (claude-org-cmux--get-agent-profile))
          (vi-p (or (null profile)  ; legacy path = Claude Code
                    (claude-org-cmux--agent-profile-vi-mode profile)))
-         ;; Non-vi-mode agents need paste-buffer for multi-line text because
+         ;; Non-vi-mode agents need shift-enter for multi-line text because
          ;; `cmux send` interprets \n as Enter, splitting the prompt.
          (use-paste-p (or (>= (length clean-text) 100000)
                           (and (not vi-p)
@@ -420,13 +418,15 @@ first and use paste-buffer without --surface."
     (when vi-p
       (claude-org-cmux--ensure-insert-mode surface-id))
     (if use-paste-p
-        ;; Paste-buffer path: preserves newlines as literal characters.
-        ;; paste-buffer --surface is broken in cmux, so select workspace first.
-        (let ((ws-ref (claude-org-cmux--session-workspace-ref)))
-          (when ws-ref
-            (claude-org-cmux--call "select-workspace" "--workspace" ws-ref))
-          (claude-org-cmux--call "set-buffer" "--name" "emacs-prompt" clean-text)
-          (claude-org-cmux--call "paste-buffer" "--name" "emacs-prompt"))
+        ;; Multi-line path: send lines with shift-enter between them.
+        ;; shift-enter inserts a literal newline in TUI input boxes.
+        ;; Replaces broken paste-buffer approach (cmux "Surface is not a terminal").
+        (let ((lines (split-string clean-text "\n")))
+          (claude-org-cmux--call "send" "--surface" surface-id (car lines))
+          (dolist (line (cdr lines))
+            (claude-org-cmux--call "send-key" "--surface" surface-id "shift-enter")
+            (when (> (length line) 0)
+              (claude-org-cmux--call "send" "--surface" surface-id line))))
       ;; Direct send — safe for single-line text or vi-mode agents
       (claude-org-cmux--call "send" "--surface" surface-id clean-text))
     ;; Send Enter to submit the prompt

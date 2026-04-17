@@ -17,3 +17,4 @@
 | 2026-03-17 | Migrate AI Block Templates to yasnippet | draft |
 | 2026-03-28 | E2E Test Strategy | active |
 | 2026-04-10 | cmux-Emacs-Phoenix System Improvements (Claude × Codex debate) | draft |
+| 2026-04-17 | OpenCode Serve Mode (JSON Stream Backend) | proposal |

@@ -793,24 +793,25 @@ Do something with opencode.
 ;;; Tests: Multi-line text uses paste-buffer for non-vi-mode agents
 ;;; ============================================================================
 
-(ert-deftest test-ap-send-text-multiline-opencode-uses-paste-buffer ()
-  "Multi-line text to opencode (non-vi-mode) uses set-buffer + paste-buffer, not send."
+(ert-deftest test-ap-send-text-multiline-opencode-uses-shift-enter ()
+  "Multi-line text to opencode (non-vi-mode) uses shift-enter between lines."
   :tags '(:unit :fast :agent-profiles)
   (test-ap--with-mock
     (let ((claude-org-cmux-agent-type 'opencode))
       (claude-org-cmux--send-text
        test-ap--mock-surface-id "line one\nline two\nline three")
-      ;; Should NOT use 'send' for the text (send interprets \n as Enter)
+      ;; Should use 'send' for each line (3 lines = 3 send calls)
       (let ((send-calls (test-ap--mock-calls-for "send")))
-        (should (= 0 (length send-calls))))
-      ;; Should use set-buffer + paste-buffer
-      (let ((set-buf-calls (test-ap--mock-calls-for "set-buffer"))
-            (paste-buf-calls (test-ap--mock-calls-for "paste-buffer")))
-        (should (= 1 (length set-buf-calls)))
-        (should (= 1 (length paste-buf-calls))))
-      ;; Should still send Enter at the end
+        (should (= 3 (length send-calls))))
+      ;; Should use send-key: 2x shift-enter (between lines) + 1x enter (submit)
+      ;; mock-calls are in reverse chronological order (push)
       (let ((send-key-calls (test-ap--mock-calls-for "send-key")))
-        (should (>= (length send-key-calls) 1))))))
+        (should (= 3 (length send-key-calls)))
+        ;; Last call is enter (submit), so it's first in reversed list
+        (should (member "enter" (nth 0 send-key-calls)))
+        ;; Previous two are shift-enter
+        (should (member "shift-enter" (nth 1 send-key-calls)))
+        (should (member "shift-enter" (nth 2 send-key-calls)))))))
 
 (ert-deftest test-ap-send-text-singleline-opencode-uses-send ()
   "Single-line text to opencode (non-vi-mode) can use send directly."
