@@ -1,0 +1,256 @@
+#+TITLE: Design: OpenCode ACP Backend (Direct Protocol Integration)
+#+DATE: 2026-04-19
+#+STATUS: proposal
+#+SUPERSEDES: 2026-opencode-serve-mode.org
+
+* Goal
+
+Replace the cmux TUI-based OpenCode integration with a direct ACP
+(Agent Client Protocol) backend using =opencode acp= over stdio.
+This eliminates terminal emulation, screen scraping, Python bridges,
+and file-based IPC -- giving us bidirectional, streaming communication
+with OpenCode using the same subprocess pattern as Claude Code.
+
+* Background
+
+** Previous Design (Superseded)
+
+=2026-opencode-serve-mode.org= proposed using =opencode run --format json=
+(one-shot NDJSON).  That approach has critical limitations:
+- One process per turn (no persistent session)
+- No permission prompt handling
+- No bidirectional communication
+- Coarse text streaming (one event per step, not token-by-token)
+
+** ACP Discovery
+
+ACP (Agent Client Protocol) is a JSON-RPC 2.0 protocol for editor-to-agent
+communication, analogous to LSP for language servers.  Spec:
+https://agentclientprotocol.com
+
+OpenCode supports ACP natively via =opencode acp= -- a single long-lived
+subprocess that handles multiple sessions and turns over stdin/stdout.
+
+=acp.el= (by xenodium, on MELPA, 776 lines) implements the Emacs client
+side of the protocol.  It's already installed in our Emacs via straight.
+
+** agent-shell Analysis
+
+=agent-shell= (by xenodium) uses =acp.el= as its transport.  Its backend
+files (opencode, anthropic, cursor, etc.) are all thin config wrappers
+(~150-200 lines).  The core protocol handling is generic.  Key insight:
+*ACP makes all agents interchangeable at the protocol level.*
+
+However, agent-shell's UI layer (shell-maker/comint, fragments, viewports)
+doesn't fit our org-mode notebook paradigm.  We need only the protocol,
+not the UI.
+
+* Architecture Decision
+
+** Use acp.el as transport, build thin adapter in claude-agent.org
+
+| Option | Verdict | Reason |
+|--------+---------+--------|
+| Use acp.el directly | *Chosen* | Clean, 776 lines, already installed, handles JSON-RPC plumbing |
+| Build own ACP client | Rejected | Duplicates work, no benefit |
+| Use agent-shell | Rejected | Too heavyweight, wrong UI paradigm |
+
+* ACP Protocol Flow
+
+#+begin_example
+Emacs (client)                        opencode acp (server)
+  |                                          |
+  |-- spawn "opencode acp" subprocess ------>|
+  |-- subscribe (notifications, requests) -->|
+  |-- initialize {protocolVersion: 1} ------>|
+  |<-- initialize response ------------------|  (capabilities, authMethods)
+  |-- authenticate {methodId: "..."} ------->|
+  |<-- authenticate response ----------------|  (success)
+  |-- session/new {cwd: "/path"} ----------->|
+  |<-- session/new response ------------------|  (sessionId)
+  |                                          |
+  |-- session/prompt {sessionId, prompt} ---->|
+  |<-- session/update (agent_message_chunk) --|  (streaming text)
+  |<-- session/update (tool_call) -----------|  (tool invocation)
+  |<-- session/request_permission -----------|  (server->client request)
+  |-- permission response ------------------>|  (user decision)
+  |<-- session/update (tool_call_update) ----|  (tool result)
+  |<-- session/update (agent_message_chunk) --|  (more text)
+  |<-- prompt response (stopReason) ---------|  (turn complete)
+  |                                          |
+  |-- session/cancel notification ---------->|  (interrupt)
+  |                                          |
+  |-- session/prompt (next turn) ----------->|  (reuse same process)
+#+end_example
+
+Key differences from Claude Code JSON stream:
+
+| Dimension | Claude Code (current) | OpenCode ACP |
+|-----------+-----------------------+--------------|
+| Transport | NDJSON over stdout | JSON-RPC 2.0 over stdio |
+| Direction | One-way (read stream) | Bidirectional |
+| Process lifetime | One process per query | One persistent process |
+| Session | CLI flag =--session-key= | Protocol =session/new= returns ID |
+| Streaming | Token-by-token deltas | Chunk-level =agent_message_chunk= |
+| Permissions | CLI handles (or hooks) | =session/request_permission= to client |
+| Cancellation | Kill process / SIGINT | =session/cancel= notification |
+| Multi-turn | New process per turn | Same process, new =session/prompt= |
+
+* Event Mapping
+
+| ACP Event | Our Callback | Notes |
+|-----------+--------------+-------|
+| =agent_message_chunk= | =:on-token= | Text chunks for streaming |
+| =tool_call= | =:on-message= | Tool invocation (name, input) |
+| =tool_call_update= | =:on-message= | Tool result (output, status) |
+| =agent_thought_chunk= | =:on-thought= (new) | Extended thinking content |
+| =turn_complete= | =:on-complete= | Final stop, usage stats |
+| =session/request_permission= | =:on-permission= (new) | Permission dialog |
+| =error= | =:on-error= (existing) | API/agent errors |
+
+* Implementation Plan
+
+** Phase 1: ACP Client Adapter
+
+New section in =claude-agent.org= (or =claude-agent-acp.org= if large):
+
+- =claude-agent-acp-make-client= -- wraps =acp-make-client= with our defaults
+- =claude-agent-acp-connect= -- start client, run handshake + auth + session/new
+- =claude-agent-acp-prompt= -- send =session/prompt=, wire ACP notifications
+  to our callback system (=:on-token=, =:on-message=, =:on-complete=)
+- =claude-agent-acp-cancel= -- send =session/cancel= notification
+- =claude-agent-acp-disconnect= -- shutdown client cleanly
+
+State management:
+- One ACP client per org session (stored in session plist)
+- Client survives across multiple turns (persistent subprocess)
+- Auto-reconnect on process death (restart handshake sequence)
+
+** Phase 2: Notification Handler
+
+A single function that receives ACP =session/update= notifications and
+dispatches to the appropriate callback:
+
+#+begin_example elisp
+(defun claude-agent-acp--on-notification (notification callbacks)
+  "Handle ACP session/update NOTIFICATION, dispatch to CALLBACKS."
+  (let* ((params (alist-get 'params notification))
+         (update (alist-get 'update params))
+         (session-update (alist-get 'sessionUpdate update)))
+    (cond
+     ((equal session-update "agent_message_chunk")
+      (funcall (plist-get callbacks :on-token)
+               (alist-get 'content update)))
+     ((equal session-update "tool_call")
+      (funcall (plist-get callbacks :on-message)
+               (claude-agent-acp--make-tool-use-message update)))
+     ((equal session-update "tool_call_update")
+      (funcall (plist-get callbacks :on-message)
+               (claude-agent-acp--make-tool-result-message update)))
+     ((equal session-update "turn_complete")
+      (funcall (plist-get callbacks :on-complete)
+               (claude-agent-acp--make-result update))))))
+#+end_example
+
+** Phase 3: Permission Request Handler
+
+When the ACP server sends =session/request_permission=, we need to:
+1. Show the permission prompt in Emacs (minibuffer or org buffer)
+2. Collect user's choice (allow / deny / always allow)
+3. Send =acp-make-session-request-permission-response= back
+
+This maps naturally to our existing permission system used for Claude Code.
+
+** Phase 4: Backend Registration
+
+Register =opencode-acp= as a new =CLAUDE_BACKEND= value:
+
+| Value | Backend | Behavior |
+|-------+---------+----------|
+| =opencode-acp= | OpenCode ACP | Direct stdio, persistent process |
+| =opencode= | OpenCode TUI (cmux) | Existing cmux integration (deprecated) |
+
+** Phase 5: Claude Code via ACP (Optional)
+
+Claude Code also has an ACP adapter: =@agentclientprotocol/claude-agent-acp=
+(npm package).  Once the ACP backend works for OpenCode, we could also
+support Claude Code through ACP, unifying both agents under one protocol.
+This is optional and lower priority.
+
+* What Gets Eliminated
+
+| Component | Status |
+|-----------|--------|
+| cmux terminal surface for OpenCode | Not needed |
+| =capture-pane= polling / ready patterns | Not needed |
+| =send= / =send-key= / paste-buffer for prompts | Not needed |
+| =workspace_bridge.py= Python process | Not needed |
+| =opencode_workspace.py= Python launcher | Not needed |
+| =emacs-bridge.ts= plugin | Not needed |
+| =.from-emacs= / =.custom-id= / status files | Not needed |
+| JSONL post-hoc transcript parsing | Not needed |
+| MCP evalElisp round-trips from Python | Not needed |
+| Multi-line paste workarounds (shift-enter) | Not needed |
+
+* What Remains Shared
+
+| Component | Shared with Claude Code |
+|-----------|------------------------|
+| =claude-org-execute= dispatch | Yes -- reads =CLAUDE_BACKEND= |
+| System prompt assembly | Yes -- =claude-org--build-system-prompt= |
+| Token streaming to org buffer | Yes -- =:on-token= callback |
+| Session property management | Yes -- org properties |
+| Permission system | Yes -- same UI |
+| Mode-line indicators | Yes -- activity + usage |
+
+* Dependencies
+
+| Package | Version | Source | Purpose |
+|---------+---------+--------+---------|
+| =acp.el= | 0.8.1 | straight/MELPA | ACP JSON-RPC client |
+| =opencode= | >= 1.4 | CLI | =opencode acp= server |
+
+No new dependencies needed.  =acp.el= is already installed.
+
+* Open Questions
+
+1. *Authentication*: Does =opencode acp= require explicit =authenticate=
+   RPC, or does it use pre-existing =opencode auth login= credentials?
+   Agent-shell's default is =:none t= suggesting pre-auth works.
+
+2. *MCP server injection*: How to pass our Emacs MCP server config to
+   =opencode acp=?  Via =session/new= =mcpServers= param, or via
+   =opencode.jsonc=?
+
+3. *Prompt format*: =acp-make-session-prompt-request= takes =:prompt= as
+   a vector of content blocks.  Need to verify what OpenCode expects
+   (plain text string vs structured blocks with type/text/image).
+
+4. *Session persistence*: Can we save/restore ACP session IDs across
+   Emacs restarts?  ACP has =session/load= for this.
+
+5. *File operations*: ACP supports =fs/read_text_file= and
+   =fs/write_text_file= requests from server to client.  Should we
+   implement these to let OpenCode read/write files through Emacs?
+
+* Success Criteria
+
+- [ ] =C-c C-c= on AI block with =CLAUDE_BACKEND: opencode-acp= executes
+- [ ] Response streams chunk-by-chunk into org buffer
+- [ ] Multi-turn conversation works (same ACP process, multiple prompts)
+- [ ] Permission prompts displayed and handled in Emacs
+- [ ] Tool use events visible in verbose buffer
+- [ ] Usage/cost displayed after turn completes
+- [ ] Session survives across multiple turns without re-auth
+- [ ] =session/cancel= cancels a running turn
+- [ ] No cmux, no Python bridge, no plugin, no TUI required
+- [ ] Existing cmux-based =opencode= backend still works (not broken)
+
+* References
+
+- ACP Spec: https://agentclientprotocol.com
+- ACP Schema: https://agentclientprotocol.com/protocol/schema
+- acp.el source: =~/.emacs.d/straight/repos/acp.el/acp.el=
+- agent-shell: =reference/agent-shell/=  (cloned for research)
+- OpenCode docs: https://opencode.ai/docs
+- Previous design: =docs/design-docs/2026-opencode-serve-mode.org=
