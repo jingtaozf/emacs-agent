@@ -1,0 +1,446 @@
+#+TITLE: Claude Agent ACP Backend
+#+PROPERTY: literate-load yes
+
+* Claude Agent ACP Backend
+
+An ACP (Agent Client Protocol) backend for =claude-agent=, enabling direct
+communication with OpenCode via JSON-RPC 2.0 over stdio. Uses =acp.el= as
+the transport layer — no terminal emulation, screen scraping, or file-based
+IPC needed.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'map)
+(require 'acp)
+(require 'claude-agent-backend)
+#+END_SRC
+
+** Backend Struct
+
+The ACP backend manages an =acp.el= client subprocess, a session, and maps
+ACP notifications to our standard callback protocol.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-acp-backend
+               (:include claude-agent-backend (type :opencode-acp))
+               (:constructor claude-agent-acp-backend--create)
+               (:copier nil))
+  "OpenCode ACP backend — communicates via JSON-RPC 2.0 over stdio."
+  (client nil :documentation "ACP client alist from `acp-make-client'")
+  (session-id nil :documentation "ACP session ID from session/new response")
+  (session-key nil :documentation "Org property session key for resume")
+  (cwd nil :documentation "Working directory for the session")
+  (active-query nil :documentation "Non-nil when a prompt is in-flight")
+  (callbacks nil :documentation "Current query callbacks plist")
+  (initialized nil :documentation "Non-nil after handshake + session/new"))
+#+END_SRC
+
+** ACP Client Lifecycle
+
+*** Create Client
+
+Creates the =acp.el= client for =opencode acp=. The client is not started
+until the first request is sent (=acp.el= handles lazy startup).
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-acp-command "opencode"
+  "Command to run the OpenCode ACP server.")
+
+(defvar claude-agent-acp-command-params '("acp")
+  "Parameters appended to `claude-agent-acp-command'.")
+
+(defvar claude-agent-acp-environment nil
+  "Extra environment variables for the OpenCode ACP process.
+Alist of (NAME . VALUE) strings.")
+
+(defun claude-agent-acp--make-client (backend)
+  "Create an ACP client for BACKEND."
+  (let* ((cwd (claude-agent-acp-backend-cwd backend))
+         (params (append claude-agent-acp-command-params
+                         (when cwd (list "--cwd" (expand-file-name cwd))))))
+    (acp-make-client
+     :command claude-agent-acp-command
+     :command-params params
+     :environment-variables claude-agent-acp-environment)))
+#+END_SRC
+
+*** Handshake
+
+Performs the ACP handshake: initialize -> authenticate -> session/new.
+This is a recursive state machine that advances through each step.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--connect (backend on-ready on-error)
+  "Connect BACKEND: handshake, auth, session/new, then call ON-READY.
+On failure, call ON-ERROR with an error message string."
+  ;; Step 1: create client if needed
+  (unless (claude-agent-acp-backend-client backend)
+    (setf (claude-agent-acp-backend-client backend)
+          (claude-agent-acp--make-client backend)))
+  (lexical-let ((backend backend)
+                (on-ready on-ready)
+                (on-error on-error))
+    ;; Subscribe to notifications and requests before handshake
+    (claude-agent-acp--subscribe backend)
+    ;; Step 2: initialize
+    (claude-agent-acp--initialize backend
+     (lambda ()
+       ;; Step 3: authenticate
+       (claude-agent-acp--authenticate backend
+        (lambda ()
+          ;; Step 4: session/new
+          (claude-agent-acp--new-session backend
+           (lambda ()
+             (setf (claude-agent-acp-backend-initialized backend) t)
+             (funcall on-ready))
+           on-error))
+        on-error))
+     on-error)))
+
+(defun claude-agent-acp--initialize (backend on-success on-error)
+  "Send ACP initialize request for BACKEND."
+  (lexical-let ((backend backend)
+                (on-success on-success)
+                (on-error on-error))
+    (acp-send-request
+     :client (claude-agent-acp-backend-client backend)
+     :request (acp-make-initialize-request
+               :protocol-version 1
+               :read-text-file-capability nil
+               :write-text-file-capability nil)
+     :on-success
+     (lambda (result)
+       ;; Store auth methods if server requires authentication
+       (let ((auth-methods (map-elt result 'authMethods)))
+         (if (and auth-methods (> (length auth-methods) 0))
+             ;; Auth needed — store first method ID and proceed
+             (progn
+               (setf (map-elt (claude-agent-acp-backend-client backend)
+                              :auth-method-id)
+                     (map-elt (aref auth-methods 0) 'id))
+               (funcall on-success))
+           ;; No auth needed
+           (funcall on-success))))
+     :on-failure
+     (lambda (err)
+       (funcall on-error
+                (format "ACP initialize failed: %s" err))))))
+
+(defun claude-agent-acp--authenticate (backend on-success on-error)
+  "Send ACP authenticate request for BACKEND, or skip if not needed."
+  (let ((auth-method-id (map-elt (claude-agent-acp-backend-client backend)
+                                 :auth-method-id)))
+    (if (not auth-method-id)
+        ;; No auth needed — skip
+        (funcall on-success)
+      (lexical-let ((on-success on-success)
+                    (on-error on-error))
+        (acp-send-request
+         :client (claude-agent-acp-backend-client backend)
+         :request (acp-make-authenticate-request
+                   :method-id auth-method-id)
+         :on-success (lambda (_result) (funcall on-success))
+         :on-failure (lambda (err)
+                       (funcall on-error
+                                (format "ACP authenticate failed: %s" err))))))))
+
+(defun claude-agent-acp--new-session (backend on-success on-error)
+  "Create a new ACP session for BACKEND."
+  (lexical-let ((backend backend)
+                (on-success on-success)
+                (on-error on-error))
+    (acp-send-request
+     :client (claude-agent-acp-backend-client backend)
+     :request (acp-make-session-new-request
+               :cwd (or (claude-agent-acp-backend-cwd backend)
+                        default-directory))
+     :on-success
+     (lambda (result)
+       (let ((session-id (map-elt result 'sessionId)))
+         (if session-id
+             (progn
+               (setf (claude-agent-acp-backend-session-id backend) session-id)
+               (funcall on-success))
+           (funcall on-error "ACP session/new: no sessionId in response"))))
+     :on-failure
+     (lambda (err)
+       (funcall on-error (format "ACP session/new failed: %s" err))))))
+#+END_SRC
+
+*** Notification and Request Subscriptions
+
+Subscribe to ACP notifications (session/update) and requests
+(session/request_permission) before the handshake, so we catch all events
+from the first prompt onward.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--subscribe (backend)
+  "Subscribe to ACP notifications and requests for BACKEND."
+  (lexical-let ((backend backend))
+    ;; Notifications: session/update events
+    (acp-subscribe-to-notifications
+     :client (claude-agent-acp-backend-client backend)
+     :on-notification
+     (lambda (notification)
+       (claude-agent-acp--handle-notification backend notification)))
+    ;; Requests: permission prompts from agent
+    (acp-subscribe-to-requests
+     :client (claude-agent-acp-backend-client backend)
+     :on-request
+     (lambda (request)
+       (claude-agent-acp--handle-request backend request)))))
+#+END_SRC
+
+** Notification Handler
+
+Maps ACP =session/update= notifications to our callback system.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--handle-notification (backend notification)
+  "Dispatch ACP NOTIFICATION to BACKEND callbacks."
+  (let* ((event-type (map-nested-elt notification
+                                      '(params update sessionUpdate)))
+         (callbacks (claude-agent-acp-backend-callbacks backend)))
+    (cond
+     ;; Streaming text from the agent
+     ((equal event-type "agent_message_chunk")
+      (let ((text (map-nested-elt notification
+                                   '(params update content text))))
+        (when (and text (plist-get callbacks :on-token))
+          (funcall (plist-get callbacks :on-token) text))))
+
+     ;; Tool invocation started
+     ((equal event-type "tool_call")
+      (let* ((title (map-nested-elt notification '(params update title)))
+             (status (map-nested-elt notification '(params update status)))
+             (formatted (format "\n[Tool: %s (%s)]\n" (or title "unknown") (or status ""))))
+        (when (plist-get callbacks :on-token)
+          (funcall (plist-get callbacks :on-token) formatted))))
+
+     ;; Tool result / update
+     ((equal event-type "tool_call_update")
+      (let* ((status (map-nested-elt notification '(params update status)))
+             (title (map-nested-elt notification '(params update title)))
+             (content-items (map-nested-elt notification '(params update content))))
+        ;; Only show completed/failed results, skip intermediate updates
+        (when (and (member status '("completed" "failed"))
+                   (plist-get callbacks :on-token))
+          (let ((output (claude-agent-acp--extract-content-text content-items)))
+            (when (and output (> (length output) 0))
+              (funcall (plist-get callbacks :on-token)
+                       (format "\n[%s: %s]\n%s\n"
+                               (if (equal status "failed") "Tool failed" "Tool result")
+                               (or title "")
+                               (truncate-string-to-width output 500 nil nil "..."))))))))
+
+     ;; Agent thinking/reasoning
+     ((equal event-type "agent_thought_chunk")
+      ;; Currently ignored — could map to :on-thought in future
+      nil)
+
+     ;; Usage update
+     ((equal event-type "usage_update")
+      ;; Currently ignored — could map to :on-usage in future
+      nil))))
+
+(defun claude-agent-acp--extract-content-text (content-items)
+  "Extract text from ACP CONTENT-ITEMS (vector of content objects)."
+  (when content-items
+    (let ((texts nil))
+      (seq-doseq (item content-items)
+        (when-let* ((text (map-elt item 'text)))
+          (push text texts)))
+      (when texts
+        (string-join (nreverse texts) "\n")))))
+#+END_SRC
+
+** Permission Request Handler
+
+Handles =session/request_permission= server-to-client requests.
+For now: auto-approve by selecting the first option.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--handle-request (backend request)
+  "Handle an ACP server-to-client REQUEST for BACKEND."
+  (let ((method (map-elt request 'method)))
+    (cond
+     ((equal method "session/request_permission")
+      (claude-agent-acp--handle-permission backend request))
+     (t
+      ;; Unknown request method — log and ignore
+      (message "claude-agent-acp: unknown request method: %s" method)))))
+
+(defun claude-agent-acp--handle-permission (backend request)
+  "Auto-approve permission REQUEST by selecting the first option."
+  (let* ((request-id (map-elt request 'id))
+         (options (map-nested-elt request '(params options)))
+         (first-option (when (and options (> (length options) 0))
+                         (aref options 0)))
+         (option-id (when first-option
+                      (map-elt first-option 'id))))
+    (when (and request-id option-id)
+      (acp-send-response
+       :client (claude-agent-acp-backend-client backend)
+       :response (acp-make-session-request-permission-response
+                  :request-id request-id
+                  :option-id option-id))
+      ;; Notify via :on-token so user sees what was approved
+      (let* ((callbacks (claude-agent-acp-backend-callbacks backend))
+             (title (map-nested-elt request '(params toolCall title))))
+        (when (and title (plist-get callbacks :on-token))
+          (funcall (plist-get callbacks :on-token)
+                   (format "\n[Approved: %s]\n" title)))))))
+#+END_SRC
+
+** Backend Protocol Implementation
+
+Implement all =cl-defgeneric= methods from =claude-agent-backend=.
+
+*** Query
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-query
+    ((backend claude-agent-acp-backend) prompt callbacks &rest args)
+  "Send PROMPT via ACP backend, invoking CALLBACKS.
+Returns BACKEND as the opaque handle."
+  (setf (claude-agent-acp-backend-callbacks backend) callbacks)
+  (setf (claude-agent-acp-backend-active-query backend) t)
+  (lexical-let ((backend backend)
+                (prompt prompt)
+                (callbacks callbacks))
+    (if (claude-agent-acp-backend-initialized backend)
+        ;; Already connected — send prompt directly
+        (claude-agent-acp--send-prompt backend prompt callbacks)
+      ;; Need to connect first
+      (claude-agent-acp--connect backend
+       (lambda ()
+         (claude-agent-acp--send-prompt backend prompt callbacks))
+       (lambda (err)
+         (setf (claude-agent-acp-backend-active-query backend) nil)
+         (when (plist-get callbacks :on-error)
+           (funcall (plist-get callbacks :on-error) err))
+         (when (plist-get callbacks :on-complete)
+           (funcall (plist-get callbacks :on-complete) nil))))))
+  backend)
+
+(defun claude-agent-acp--send-prompt (backend prompt callbacks)
+  "Send PROMPT to the ACP session on BACKEND."
+  (lexical-let ((backend backend)
+                (callbacks callbacks))
+    (let ((content-blocks (list `((type . "text") (content . ,prompt)))))
+      (acp-send-request
+       :client (claude-agent-acp-backend-client backend)
+       :request (acp-make-session-prompt-request
+                 :session-id (claude-agent-acp-backend-session-id backend)
+                 :prompt content-blocks)
+       :on-success
+       (lambda (result)
+         (setf (claude-agent-acp-backend-active-query backend) nil)
+         (setf (claude-agent-acp-backend-callbacks backend) nil)
+         (when (plist-get callbacks :on-complete)
+           (funcall (plist-get callbacks :on-complete) nil)))
+       :on-failure
+       (lambda (err)
+         (setf (claude-agent-acp-backend-active-query backend) nil)
+         (setf (claude-agent-acp-backend-callbacks backend) nil)
+         (when (plist-get callbacks :on-error)
+           (funcall (plist-get callbacks :on-error)
+                    (format "ACP prompt failed: %s" err)))
+         (when (plist-get callbacks :on-complete)
+           (funcall (plist-get callbacks :on-complete) nil)))))))
+#+END_SRC
+
+*** Cancel
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-cancel
+    ((backend claude-agent-acp-backend) handle)
+  "Cancel active query on BACKEND."
+  (when (and (claude-agent-acp-backend-active-query backend)
+             (claude-agent-acp-backend-session-id backend)
+             (claude-agent-acp-backend-client backend))
+    (acp-send-notification
+     :client (claude-agent-acp-backend-client backend)
+     :notification (acp-make-session-cancel-notification
+                    :session-id (claude-agent-acp-backend-session-id backend)
+                    :reason "User cancelled"))
+    (setf (claude-agent-acp-backend-active-query backend) nil)))
+#+END_SRC
+
+*** Cleanup
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-cleanup
+    ((backend claude-agent-acp-backend))
+  "Shut down ACP client and release resources."
+  (when-let* ((client (claude-agent-acp-backend-client backend)))
+    (condition-case nil
+        (acp-shutdown :client client)
+      (error nil))
+    (setf (claude-agent-acp-backend-client backend) nil))
+  (setf (claude-agent-acp-backend-session-id backend) nil)
+  (setf (claude-agent-acp-backend-initialized backend) nil)
+  (setf (claude-agent-acp-backend-active-query backend) nil)
+  (setf (claude-agent-acp-backend-callbacks backend) nil))
+#+END_SRC
+
+*** State Queries
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-active-p
+    ((backend claude-agent-acp-backend))
+  "Return non-nil if an ACP query is in-flight."
+  (claude-agent-acp-backend-active-query backend))
+
+(cl-defmethod claude-agent-backend-session-id
+    ((backend claude-agent-acp-backend))
+  "Return the ACP session ID."
+  (claude-agent-acp-backend-session-id backend))
+
+(cl-defmethod claude-agent-backend-ready-p
+    ((backend claude-agent-acp-backend))
+  "ACP backend is ready when no query is active."
+  (not (claude-agent-acp-backend-active-query backend)))
+
+(cl-defmethod claude-agent-backend-verbose-buffer
+    ((_backend claude-agent-acp-backend))
+  "ACP backend uses acp.el's own logging; no separate verbose buffer."
+  nil)
+#+END_SRC
+
+*** Capability Declaration
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-supports-p
+    ((_backend claude-agent-acp-backend) capability)
+  "ACP backend capabilities."
+  (memq capability '(:streaming-tokens :tool-use)))
+#+END_SRC
+
+*** Error Classification
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-classify-error
+    ((_backend claude-agent-acp-backend) error)
+  "Classify ERROR from ACP backend."
+  (let ((msg (cond
+              ((stringp error) error)
+              ((and (listp error) (map-elt error 'message))
+               (map-elt error 'message))
+              (t nil))))
+    (cond
+     ((null msg) 'unknown)
+     ((string-match-p "auth" msg) 'auth)
+     ((string-match-p "session.*expired\\|invalid.*session" msg) 'session-expired)
+     ((string-match-p "connect\\|timeout\\|ECONNREFUSED" msg) 'network)
+     (t 'unknown))))
+#+END_SRC
+
+** Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-acp)
+;;; claude-agent-acp.el ends here
+#+END_SRC

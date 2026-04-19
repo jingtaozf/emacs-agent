@@ -199,6 +199,12 @@ Response will appear here after pressing C-c C-c inside the ai block.
     (unless (featurep (intern module))
       (literate-elisp-load
        (expand-file-name (concat module ".org") module-dir))))
+  ;; Load ACP backend (requires acp.el package)
+  (when (require 'acp nil t)
+    (unless (featurep 'claude-agent-acp)
+      (let ((acp-file (expand-file-name "claude-agent-acp.org" module-dir)))
+        (when (file-exists-p acp-file)
+          (literate-elisp-load acp-file)))))
   ;; Load claude-ide conditionally (requires websocket package)
   (when (require 'websocket nil t)
     (unless (featurep 'claude-ide)
@@ -1713,15 +1719,22 @@ REASON is an optional string explaining why (for logging)."
 (defun claude-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
 Dispatches on CLAUDE_BACKEND org property (if set) or `claude-org-backend-type'.
-Returns a backend struct (json-backend)."
+Returns a backend struct."
   (let* ((prop-value (claude-org--get-org-property "CLAUDE_BACKEND" t))
          (backend-type (or (cond
                              ((equal prop-value "json-stream") 'json-stream)
+                             ((equal prop-value "opencode-acp") 'opencode-acp)
                              (t nil))
                            claude-org-backend-type)))
-    (claude-agent-json-backend--create
-     :session-key session-key
-     :persistent-p claude-org-persistent-sessions)))
+    (cond
+     ((eq backend-type 'opencode-acp)
+      (claude-agent-acp-backend--create
+       :session-key session-key
+       :cwd (plist-get options :cwd)))
+     (t
+      (claude-agent-json-backend--create
+       :session-key session-key
+       :persistent-p claude-org-persistent-sessions)))))
 
 #+END_SRC
 

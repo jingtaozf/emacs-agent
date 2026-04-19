@@ -20,13 +20,15 @@ WEB_SERVER_DIR ?= $(HOME)/.emacs.d/straight/build/web-server
 COMPANY_DIR ?= $(HOME)/.emacs.d/straight/build/company
 WEBSOCKET_DIR ?= $(HOME)/.emacs.d/straight/build/websocket
 YASNIPPET_DIR ?= $(HOME)/.emacs.d/straight/build/yasnippet
-LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR) -L $(YASNIPPET_DIR)
+ACP_DIR ?= $(HOME)/.emacs.d/straight/build/acp
+LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR) -L $(YASNIPPET_DIR) -L $(ACP_DIR)
 
 # Common literate-elisp load sequences (DRY — used by all test targets)
 # Load order: trace → agent (includes backend) → mcp → org
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
 LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
 LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")"
+LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/claude-org.org\")"
 # Presets for common combinations
@@ -146,7 +148,7 @@ test-smoke:
 
 # Unit test targets are independent — use 'make -j4 test-unit' for parallel
 .PHONY: test-unit
-test-unit: test-agent-unit test-org-unit test-backend-unit test-cmux
+test-unit: test-agent-unit test-org-unit test-backend-unit test-acp-unit test-cmux
 
 .PHONY: test-cmux
 test-cmux:
@@ -303,6 +305,15 @@ test-backend-unit:
 		-l tests/test-claude-agent-backend.el \
 		-l tests/test-claude-agent-backend-protocol.el \
 		-l tests/test-claude-agent-chat-backend.el \
+		-f ert-run-tests-batch-and-exit
+
+.PHONY: test-acp-unit
+test-acp-unit:
+	@echo "Running ACP backend unit tests..."
+	$(BATCH) $(LOAD_PATH) \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_ACP) \
+		-l tests/test-claude-agent-acp.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-org-unit
