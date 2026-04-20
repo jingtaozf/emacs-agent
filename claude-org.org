@@ -199,12 +199,16 @@ Response will appear here after pressing C-c C-c inside the ai block.
     (unless (featurep (intern module))
       (literate-elisp-load
        (expand-file-name (concat module ".org") module-dir))))
-  ;; Load ACP backend (requires acp.el package)
-  (when (require 'acp nil t)
-    (unless (featurep 'claude-agent-acp)
-      (let ((acp-file (expand-file-name "claude-agent-acp.org" module-dir)))
-        (when (file-exists-p acp-file)
-          (literate-elisp-load acp-file)))))
+  ;; Load ACP backend (our own JSON-RPC transport, no external deps)
+  (dolist (module '("claude-agent-jsonrpc"
+                    "claude-agent-acp"
+                    "claude-agent-acp-opencode"
+                    "claude-agent-acp-gemini"
+                    "claude-agent-acp-codex"))
+    (unless (featurep (intern module))
+      (let ((path (expand-file-name (concat module ".org") module-dir)))
+        (when (file-exists-p path)
+          (literate-elisp-load path)))))
   ;; Load claude-ide conditionally (requires websocket package)
   (when (require 'websocket nil t)
     (unless (featurep 'claude-ide)
@@ -1716,25 +1720,73 @@ REASON is an optional string explaining why (for logging)."
   "Return count of active persistent clients."
   (hash-table-count claude-org--persistent-clients))
 
+(defun claude-org--acp-session-persistence ()
+  "Read the stored ACP_SESSION_ID and return a (INITIAL-ID . SAVE-FN) pair.
+SAVE-FN writes the new session id back to the org entry at point.
+Captures the current marker so the save is bound to the block's heading
+even if point moves later.  `lexical-let' is required because literate-elisp
+does not honour the file header's lexical-binding directive — without it,
+`marker' would be looked up dynamically at callback time and trigger a
+void-variable error."
+  (let ((initial (claude-org--get-org-property "ACP_SESSION_ID" t)))
+    (lexical-let ((marker (point-marker)))
+      (cons initial
+            (lambda (session-id)
+              (when (and session-id (marker-buffer marker))
+                (condition-case err
+                    (with-current-buffer (marker-buffer marker)
+                      (save-excursion
+                        (goto-char marker)
+                        (org-entry-put nil "ACP_SESSION_ID" session-id)
+                        (save-buffer)))
+                  (error
+                   (message "claude-org: failed to persist ACP_SESSION_ID: %s"
+                            (error-message-string err))))))))))
+
+(defvar claude-org-backend-registry
+  `(("json-stream"   . ,(lambda (session-key _options)
+                          (claude-agent-json-backend--create
+                           :session-key session-key
+                           :persistent-p claude-org-persistent-sessions)))
+    ("opencode-acp"  . ,(lambda (session-key options)
+                          (let ((persist (claude-org--acp-session-persistence)))
+                            (claude-agent-acp-opencode-create
+                             :session-key session-key
+                             :cwd (plist-get options :cwd)
+                             :initial-session-id (car persist)
+                             :save-session-id-fn (cdr persist)))))
+    ("gemini-acp"    . ,(lambda (session-key options)
+                          (let ((persist (claude-org--acp-session-persistence)))
+                            (claude-agent-acp-gemini-create
+                             :session-key session-key
+                             :cwd (plist-get options :cwd)
+                             :initial-session-id (car persist)
+                             :save-session-id-fn (cdr persist)))))
+    ("codex-acp"     . ,(lambda (session-key options)
+                          (let ((persist (claude-org--acp-session-persistence)))
+                            (claude-agent-acp-codex-create
+                             :session-key session-key
+                             :cwd (plist-get options :cwd)
+                             :initial-session-id (car persist)
+                             :save-session-id-fn (cdr persist))))))
+  "Alist mapping CLAUDE_BACKEND string → constructor (session-key options).
+Each constructor returns a backend struct.  Add new agents by appending
+entries here; no code change in `claude-org--make-default-backend' needed.
+ACP entries auto-wire the ACP_SESSION_ID org property for persistence.")
+
 (defun claude-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
-Dispatches on CLAUDE_BACKEND org property (if set) or `claude-org-backend-type'.
-Returns a backend struct."
+Dispatches on the CLAUDE_BACKEND org property via `claude-org-backend-registry'.
+An unknown property value falls back to `claude-org-backend-type' (and then to
+\"json-stream\") so a typo never breaks the workspace."
   (let* ((prop-value (claude-org--get-org-property "CLAUDE_BACKEND" t))
-         (backend-type (or (cond
-                             ((equal prop-value "json-stream") 'json-stream)
-                             ((equal prop-value "opencode-acp") 'opencode-acp)
-                             (t nil))
-                           claude-org-backend-type)))
-    (cond
-     ((eq backend-type 'opencode-acp)
-      (claude-agent-acp-backend--create
-       :session-key session-key
-       :cwd (plist-get options :cwd)))
-     (t
-      (claude-agent-json-backend--create
-       :session-key session-key
-       :persistent-p claude-org-persistent-sessions)))))
+         (fallback-name (or (and claude-org-backend-type
+                                 (symbol-name claude-org-backend-type))
+                            "json-stream"))
+         (constructor (or (cdr (assoc prop-value claude-org-backend-registry))
+                          (cdr (assoc fallback-name claude-org-backend-registry))
+                          (cdr (assoc "json-stream" claude-org-backend-registry)))))
+    (funcall constructor session-key options)))
 
 #+END_SRC
 

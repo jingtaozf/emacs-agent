@@ -455,13 +455,7 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-get-verbose-buffer"
     "claude-agent-show-session-verbose"
     "claude-agent-list-session-verbose-buffers"
-    ;; claude-agent: usage & mode-line
-    "claude-agent-usage-callback"
-    "claude-agent-usage-fetch"
-    "claude-agent-usage-fetch-if-working-hours"
-    "claude-agent-usage-format-reset-time"
-    "claude-agent-usage-mode-line-start"
-    "claude-agent-usage-mode-line-stop"
+    ;; claude-agent: elapsed time helper
     "claude-agent-format-elapsed-time"
     ;; claude-agent: title generation
     "claude-agent-generate-title"
@@ -479,6 +473,18 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-queries-cancel-at-point"
     "claude-agent-queries-goto-source"
     "claude-agent-queries-show-verbose"
+    ;; claude-agent-jsonrpc (transport public API)
+    "claude-agent-jsonrpc-make-client"
+    "claude-agent-jsonrpc-send-request"
+    "claude-agent-jsonrpc-send-response"
+    "claude-agent-jsonrpc-send-notification"
+    "claude-agent-jsonrpc-add-notification-handler"
+    "claude-agent-jsonrpc-add-request-handler"
+    "claude-agent-jsonrpc-shutdown"
+    ;; claude-agent-acp (per-agent constructors)
+    "claude-agent-acp-opencode-create"
+    "claude-agent-acp-gemini-create"
+    "claude-agent-acp-codex-create"
     ;; claude-agent-backend public API
     "claude-agent-backend-register"
     "claude-agent-backend-get"

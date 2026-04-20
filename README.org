@@ -250,6 +250,149 @@ Per-file override via org property:
 ,#+PROPERTY: CMUX_CLI_PATH /usr/local/bin/cmux
 #+end_example
 
+*** ACP Backends (multi-agent: OpenCode, Gemini, Codex)
+:PROPERTIES:
+:CUSTOM_ID: acp-backends
+:END:
+
+The *ACP* (Agent Client Protocol) backends talk JSON-RPC 2.0 over stdio to
+any agent that speaks the ACP spec at https://agentclientprotocol.com.  One
+generic core (=claude-agent-acp.org=) + three thin per-agent profiles let
+you drive a different CLI from every org subtree:
+
+| Backend property | CLI | Auth |
+|------------------+-----+------|
+| =opencode-acp= | =opencode acp= | Uses =opencode auth login= — no ACP-level authenticate |
+| =gemini-acp= | =gemini --experimental-acp= | =gemini-api-key= / =vertex-ai= / =oauth-personal= |
+| =codex-acp= | =codex-acp= (shim, install separately) | =openai-api-key= / =codex-api-key= / =chatgpt= |
+
+**** Basic usage
+
+Pick the agent per org subtree:
+
+#+begin_example
+,* OpenCode chat
+:PROPERTIES:
+:CLAUDE_BACKEND: opencode-acp
+:END:
+
+,#+begin_src ai
+What does claude-agent-acp.org do? One sentence.
+,#+end_src
+#+end_example
+
+Press =C-c C-c= in the block.  The response streams into the verbose
+buffer (=C-c C-v=) and lands as a response section underneath.
+
+**** Gemini setup
+
+Pick an auth method (=gemini-api-key= is simplest) and set the env var
+before launching Emacs, or via =setenv=:
+
+#+begin_src elisp :load no
+(setq claude-agent-acp-gemini-auth-method 'gemini-api-key)
+(setq claude-agent-acp-gemini-environment
+      (list (format "GEMINI_API_KEY=%s" (getenv "GEMINI_API_KEY"))))
+#+end_src
+
+Then in your org file:
+
+#+begin_example
+,* Ask Gemini
+:PROPERTIES:
+:CLAUDE_BACKEND: gemini-acp
+:END:
+
+,#+begin_src ai
+Summarise the ACP spec.
+,#+end_src
+#+end_example
+
+**** Codex setup
+
+Install the shim first (ACP is not native to =codex=):
+
+#+begin_src bash :load no
+npm install -g @zed-industries/codex-acp
+# or follow instructions at https://github.com/zed-industries/codex-acp
+#+end_src
+
+Then configure auth and use:
+
+#+begin_src elisp :load no
+(setq claude-agent-acp-codex-auth-method 'openai-api-key)
+(setq claude-agent-acp-codex-environment
+      (list (format "OPENAI_API_KEY=%s" (getenv "OPENAI_API_KEY"))))
+#+end_src
+
+#+begin_example
+,* Ask Codex
+:PROPERTIES:
+:CLAUDE_BACKEND: codex-acp
+:END:
+,#+begin_src ai
+Refactor this function.
+,#+end_src
+#+end_example
+
+**** Session persistence (ACP_SESSION_ID)
+
+On the first successful connect, the ACP =sessionId= is written back to
+the subtree's =ACP_SESSION_ID= property and the file is saved.  On the
+next connect, =session/load= is attempted first, falling back to
+=session/new= silently if the agent rejects resume (e.g. stale id).  No
+manual bookkeeping needed — conversations survive Emacs restarts.
+
+#+begin_example
+,* Long-running session
+:PROPERTIES:
+:CLAUDE_BACKEND: opencode-acp
+:ACP_SESSION_ID: abc123-def456-...   ; written automatically after first run
+:END:
+#+end_example
+
+**** Permission prompts (safe by default)
+
+When the agent asks for permission to use a tool (=session/request_permission=),
+you get a =completing-read= prompt showing the sanitised tool title and
+the agent-offered options.  =C-g= sends =outcome: cancelled= to the
+agent.
+
+Flip =claude-agent-acp-auto-approve= to =t= to restore automatic
+approval of the first option (not recommended outside trusted sandboxes).
+
+**** File-system safety
+
+The ACP backend handles =fs/read_text_file= and =fs/write_text_file=
+requests from the agent.  Two opt-in sandboxes guard your filesystem:
+
+#+begin_src elisp :load no
+;; Restrict writes to your project directory.
+(setq claude-agent-acp-fs-write-root "~/projects/my-project")
+
+;; Restrict reads to an allow-list (symlink-safe).
+(setq claude-agent-acp-fs-read-roots
+      '("~/projects/my-project" "/tmp"))
+#+end_src
+
+Both checks resolve symlinks via =file-truename= before the prefix
+comparison, so an inside-the-sandbox symlink cannot escape to
+=~/.ssh/id_rsa=.  Defaults are =nil= (no restriction) for backward
+compatibility, but setting both to your project root is strongly
+recommended.
+
+**** Per-file convenience
+
+All settings can be set as org properties at the file or subtree level:
+
+#+begin_example
+,#+PROPERTY: CLAUDE_BACKEND opencode-acp
+#+end_example
+
+Individual subtrees override by adding their own =:CLAUDE_BACKEND:=
+property.  Mix and match — one subtree runs OpenCode, another Gemini,
+another the default json-stream Claude, all in the same file.
+
 * Tutorial
 :PROPERTIES:
 :CUSTOM_ID: tutorial
@@ -1513,32 +1656,6 @@ Shows when Claude queries are active.
 #+BEGIN_SRC elisp :load no
 ;; View active queries
 M-x claude-agent-list-queries
-#+END_SRC
-
-** Usage Mode-Line
-:PROPERTIES:
-:CUSTOM_ID: ref-usage-mode-line
-:END:
-
-Display Claude API usage statistics.
-
-*** Setup
-
-#+BEGIN_SRC elisp :load no
-;; Set your organization ID (from claude.ai URL)
-(setq claude-agent-usage-org-id "your-org-id-here")
-
-;; Set environment variable for session key
-;; Get from browser: DevTools > Application > Cookies > sessionKey
-;; export CLAUDE_SESSION_KEY="your-session-key"
-#+END_SRC
-
-*** Usage
-
-#+BEGIN_SRC elisp :load no
-M-x claude-agent-usage-mode-line-start  ; Start (auto-refresh every 5 min)
-M-x claude-agent-usage-mode-line-stop   ; Stop
-M-x claude-agent-usage-fetch            ; Manual refresh
 #+END_SRC
 
 ** Verbose Output Buffers

@@ -1,0 +1,96 @@
+#+TITLE: Claude Agent ACP — Codex Profile
+#+PROPERTY: literate-load yes
+
+* Codex ACP Profile
+
+Per-agent configuration for OpenAI's Codex CLI.  Codex does NOT speak
+ACP natively; it needs the =codex-acp= shim binary from
+https://github.com/zed-industries/codex-acp installed separately
+(e.g. =npm install -g @zed-industries/codex-acp= or equivalent).
+
+Three auth methods:
+
+| Method          | How                                              |
+|-----------------+--------------------------------------------------|
+| openai-api-key  | Set OPENAI_API_KEY, sent via authenticate RPC    |
+| codex-api-key   | Set CODEX_API_KEY, sent via authenticate RPC     |
+| chatgpt         | Interactive ChatGPT login                        |
+
+References:
+- https://github.com/zed-industries/codex-acp
+- reference/agent-shell/agent-shell-openai.el
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'claude-agent-acp)
+#+END_SRC
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defgroup claude-agent-acp-codex nil
+  "Codex ACP profile."
+  :group 'claude-agent-acp
+  :prefix "claude-agent-acp-codex-")
+
+(defcustom claude-agent-acp-codex-command '("codex-acp")
+  "Command to launch the codex-acp shim.
+The shim is separate from the =codex= CLI: install from
+https://github.com/zed-industries/codex-acp."
+  :type '(repeat string)
+  :group 'claude-agent-acp-codex)
+
+(defcustom claude-agent-acp-codex-auth-method 'openai-api-key
+  "Which authenticate method to advertise during the ACP handshake.
+- `openai-api-key': sends OPENAI_API_KEY (must be in environment)
+- `codex-api-key': sends CODEX_API_KEY (must be in environment)
+- `chatgpt': interactive ChatGPT login flow"
+  :type '(choice (const openai-api-key)
+                 (const codex-api-key)
+                 (const chatgpt))
+  :group 'claude-agent-acp-codex)
+
+(defcustom claude-agent-acp-codex-environment nil
+  "Extra environment variables for the codex-acp subprocess.
+List of \"NAME=VALUE\" strings.  Typical entries:
+  \"OPENAI_API_KEY=...\" for openai-api-key auth,
+  \"CODEX_API_KEY=...\" for codex-api-key auth."
+  :type '(repeat string)
+  :group 'claude-agent-acp-codex)
+#+END_SRC
+
+** Auth Request Maker
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp-codex--auth-request ()
+  "Build authenticate RPC params using `claude-agent-acp-codex-auth-method'."
+  `((methodId . ,(symbol-name claude-agent-acp-codex-auth-method))))
+#+END_SRC
+
+** Constructor
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp-codex-create (&rest args)
+  "Create an ACP backend configured for OpenAI Codex (via codex-acp shim).
+ARGS are forwarded to `claude-agent-acp-backend--create' after the
+codex-specific defaults.  Typical usage:
+
+  (claude-agent-acp-codex-create :cwd \"/path\" :session-key \"sdd-...\")
+
+Requires the `codex-acp' binary on PATH; install separately."
+  (apply #'claude-agent-acp-backend--create
+         :agent-name "codex"
+         :spawn-args claude-agent-acp-codex-command
+         :environment claude-agent-acp-codex-environment
+         :needs-authenticate t
+         :auth-request-maker #'claude-agent-acp-codex--auth-request
+         args))
+#+END_SRC
+
+** Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-acp-codex)
+;;; claude-agent-acp-codex.el ends here
+#+END_SRC

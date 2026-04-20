@@ -28,7 +28,11 @@ LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COM
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
 LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
 LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")"
-LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp.org\")"
+LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-jsonrpc.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-opencode.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-gemini.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-codex.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/claude-org.org\")"
 # Presets for common combinations
@@ -627,6 +631,15 @@ test-acp-local:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/test-acp-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :acp))"
+
+# ACP multi-agent E2E (opencode, gemini, codex — each auto-skipped if unavailable)
+.PHONY: test-acp-multi-local
+test-acp-multi-local:
+	@echo "Running multi-agent ACP E2E tests (skips agents not reachable)..."
+	$(BATCH) $(LOAD_PATH) \
+		$(LOAD_ALL) \
+		-l tests/test-acp-integration-multi.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :acp))"
 
 # Trace health check (requires Phoenix at localhost:6006)

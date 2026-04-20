@@ -36,12 +36,13 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
 (ert-deftest test-acp-backend-create ()
   "Test that the ACP backend struct can be created."
   :tags '(:local-e2e :acp)
-  (let ((backend (claude-agent-acp-backend--create
+  (let ((backend (claude-agent-acp-opencode-create
                   :session-key "test-key"
                   :cwd "/tmp")))
     (should (claude-agent-acp-backend-p backend))
     (should (equal (claude-agent-acp-backend-session-key backend) "test-key"))
     (should (equal (claude-agent-acp-backend-cwd backend) "/tmp"))
+    (should (equal (claude-agent-acp-backend-agent-name backend) "opencode"))
     (should-not (claude-agent-acp-backend-initialized backend))
     (should-not (claude-agent-acp-backend-active-query backend))))
 
@@ -55,7 +56,7 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
   (let ((tokens nil)
         (completed nil)
         (error-msg nil)
-        (backend (claude-agent-acp-backend--create
+        (backend (claude-agent-acp-opencode-create
                   :cwd (expand-file-name "."))))
     (unwind-protect
         (progn
@@ -95,7 +96,7 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
         (error-msg nil)
         (tokens-1 nil)
         (tokens-2 nil)
-        (backend (claude-agent-acp-backend--create
+        (backend (claude-agent-acp-opencode-create
                   :cwd (expand-file-name "."))))
     (unwind-protect
         (progn
@@ -140,7 +141,7 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
   (test-acp-skip-unless-opencode)
 
   (let ((completed nil)
-        (backend (claude-agent-acp-backend--create
+        (backend (claude-agent-acp-opencode-create
                   :cwd (expand-file-name "."))))
     ;; Connect by sending a prompt
     (claude-agent-backend-query
