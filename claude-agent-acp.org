@@ -4,193 +4,330 @@
 * Claude Agent ACP Backend
 
 An ACP (Agent Client Protocol) backend for =claude-agent=, enabling direct
-communication with OpenCode via JSON-RPC 2.0 over stdio. Uses =acp.el= as
-the transport layer — no terminal emulation, screen scraping, or file-based
-IPC needed.
+communication with OpenCode via JSON-RPC 2.0 over stdio.  Implements its
+own lightweight JSON-RPC client -- no external =acp.el= dependency.
+
+Reference: =reference/agent-shell/agent-shell.el= (xenodium's ACP integration)
+Spec: https://agentclientprotocol.com/protocol/schema
 
 ** Dependencies
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
+(require 'json)
 (require 'map)
-(require 'acp)
+(require 'seq)
 (require 'claude-agent-backend)
 #+END_SRC
 
-** Backend Struct
+** JSON-RPC 2.0 Transport
 
-The ACP backend manages an =acp.el= client subprocess, a session, and maps
-ACP notifications to our standard callback protocol.
+A minimal JSON-RPC 2.0 client over stdio.  Manages a subprocess, sends
+requests/notifications via stdin, and routes incoming messages (responses,
+notifications, server-to-client requests) from stdout.
+
+*** Client State
+
+The client is a plist holding process, pending requests, and handlers.
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-acp--next-id 0
+  "Monotonically increasing JSON-RPC request ID counter.")
+
+(defun claude-agent-acp--make-jsonrpc-client (process)
+  "Create a JSON-RPC client wrapping PROCESS."
+  (list :process process
+        :pending (make-hash-table :test 'equal)
+        :notification-handlers nil
+        :request-handlers nil
+        :stderr-buffer nil
+        :partial-line ""))
+#+END_SRC
+
+*** Process Management
+
+Start =opencode acp= as a subprocess with separate stderr.
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-acp-command "opencode"
+  "Command to run the OpenCode ACP server.")
+
+(defvar claude-agent-acp-command-args '("acp")
+  "Arguments appended to `claude-agent-acp-command'.")
+
+(defvar claude-agent-acp-environment nil
+  "Extra environment variables for the OpenCode ACP process.
+List of \"NAME=VALUE\" strings.")
+
+(defun claude-agent-acp--start-process (cwd)
+  "Start the opencode acp subprocess in CWD.  Return a jsonrpc client."
+  (let* ((default-directory (or cwd default-directory))
+         (args (append claude-agent-acp-command-args
+                       (when cwd (list "--cwd" (expand-file-name cwd)))))
+         (stderr-buf (generate-new-buffer " *acp-stderr*"))
+         (process-environment (append claude-agent-acp-environment
+                                      process-environment))
+         (proc (make-process
+                :name "opencode-acp"
+                :command (cons claude-agent-acp-command args)
+                :connection-type 'pipe
+                :coding 'utf-8-unix
+                :noquery t
+                :stderr stderr-buf))
+         (client (claude-agent-acp--make-jsonrpc-client proc)))
+    (plist-put client :stderr-buffer stderr-buf)
+    ;; Wire the process filter to route incoming JSON lines
+    (lexical-let ((client client))
+      (set-process-filter proc
+                          (lambda (_proc output)
+                            (claude-agent-acp--process-filter client output)))
+      (set-process-sentinel proc
+                            (lambda (_proc event)
+                              (claude-agent-acp--process-sentinel client event))))
+    (message "claude-agent-acp: started process pid=%d" (process-id proc))
+    client))
+#+END_SRC
+
+*** Sending Messages
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--send-request (client method params on-success on-failure)
+  "Send a JSON-RPC request via CLIENT.
+METHOD is the RPC method string.  PARAMS is an alist.
+ON-SUCCESS is called with the result on success.
+ON-FAILURE is called with the error object on failure."
+  (let* ((id (cl-incf claude-agent-acp--next-id))
+         (msg `((jsonrpc . "2.0")
+                (id . ,id)
+                (method . ,method)
+                (params . ,params)))
+         (json-str (json-encode msg))
+         (proc (plist-get client :process)))
+    ;; Register pending callback
+    (puthash id (list :on-success on-success :on-failure on-failure)
+             (plist-get client :pending))
+    (message "claude-agent-acp: -> %s (id=%d)" method id)
+    (process-send-string proc (concat json-str "\n"))))
+
+(defun claude-agent-acp--send-response (client id result &optional error-obj)
+  "Send a JSON-RPC response via CLIENT for request ID.
+Provide RESULT on success or ERROR-OBJ on failure."
+  (let* ((msg (if error-obj
+                  `((jsonrpc . "2.0") (id . ,id) (error . ,error-obj))
+                `((jsonrpc . "2.0") (id . ,id) (result . ,result))))
+         (json-str (json-encode msg))
+         (proc (plist-get client :process)))
+    (process-send-string proc (concat json-str "\n"))))
+
+(defun claude-agent-acp--send-notification (client method params)
+  "Send a JSON-RPC notification (no id, no response expected)."
+  (let* ((msg `((jsonrpc . "2.0")
+                (method . ,method)
+                (params . ,params)))
+         (json-str (json-encode msg))
+         (proc (plist-get client :process)))
+    (process-send-string proc (concat json-str "\n"))))
+#+END_SRC
+
+*** Receiving Messages
+
+The process filter accumulates partial lines then parses complete JSON
+lines, routing each to the appropriate handler.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--process-filter (client output)
+  "Handle OUTPUT from the ACP process, routing complete JSON lines."
+  (let ((partial (concat (plist-get client :partial-line) output)))
+    ;; Process complete lines
+    (while (string-match "\n" partial)
+      (let ((line (substring partial 0 (match-beginning 0))))
+        (setq partial (substring partial (match-end 0)))
+        (when (> (length line) 0)
+          (condition-case err
+              (let ((msg (json-read-from-string line)))
+                (claude-agent-acp--route-message client msg))
+            (error
+             (message "claude-agent-acp: JSON parse error: %s" err))))))
+    (plist-put client :partial-line partial)))
+
+(defun claude-agent-acp--route-message (client msg)
+  "Route incoming JSON-RPC MSG to the correct handler."
+  (let ((id (map-elt msg 'id))
+        (method (map-elt msg 'method))
+        (result (map-elt msg 'result))
+        (err (map-elt msg 'error)))
+    (cond
+     ;; Response to our request (has id, no method)
+     ((and id (not method))
+      (let ((pending (gethash id (plist-get client :pending))))
+        (when pending
+          (remhash id (plist-get client :pending))
+          (if err
+              (progn
+                (message "claude-agent-acp: <- error id=%s: %s"
+                         id (map-elt err 'message))
+                (when (plist-get pending :on-failure)
+                  (funcall (plist-get pending :on-failure) err)))
+            (message "claude-agent-acp: <- result id=%s" id)
+            (when (plist-get pending :on-success)
+              (funcall (plist-get pending :on-success) result))))))
+
+     ;; Server-to-client request (has id AND method)
+     ((and id method)
+      (message "claude-agent-acp: <- request %s (id=%s)" method id)
+      (dolist (handler (plist-get client :request-handlers))
+        (funcall handler msg)))
+
+     ;; Notification (has method, no id)
+     (method
+      (dolist (handler (plist-get client :notification-handlers))
+        (funcall handler msg)))
+
+     (t
+      (message "claude-agent-acp: unrecognized message: %S"
+               (truncate-string-to-width (format "%S" msg) 200))))))
+
+(defun claude-agent-acp--process-sentinel (client event)
+  "Handle process state change EVENT for CLIENT."
+  (condition-case err
+      (let ((event-clean (string-trim event)))
+        (message "claude-agent-acp: process %s" event-clean)
+        ;; Reject all pending requests
+        (maphash (lambda (id pending)
+                   (when (plist-get pending :on-failure)
+                     (funcall (plist-get pending :on-failure)
+                              `((code . -1)
+                                (message . ,(format "Process %s" event-clean))))))
+                 (plist-get client :pending))
+        (clrhash (plist-get client :pending)))
+    (error (message "claude-agent-acp: sentinel error: %S" err))))
+#+END_SRC
+
+*** Shutdown
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--shutdown (client)
+  "Shut down the ACP CLIENT process and clean up."
+  (when client
+    (let ((proc (plist-get client :process))
+          (stderr (plist-get client :stderr-buffer)))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (and stderr (buffer-live-p stderr))
+        (kill-buffer stderr)))
+    (clrhash (plist-get client :pending))))
+#+END_SRC
+
+** Backend Struct
 
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent-acp-backend
                (:include claude-agent-backend (type :opencode-acp))
                (:constructor claude-agent-acp-backend--create)
                (:copier nil))
-  "OpenCode ACP backend — communicates via JSON-RPC 2.0 over stdio."
-  (client nil :documentation "ACP client alist from `acp-make-client'")
+  "OpenCode ACP backend -- JSON-RPC 2.0 over stdio, no acp.el dependency."
+  (client nil :documentation "JSON-RPC client plist from our transport layer")
+  (session-key nil :documentation "File-based session key for resume")
   (session-id nil :documentation "ACP session ID from session/new response")
-  (session-key nil :documentation "Org property session key for resume")
   (cwd nil :documentation "Working directory for the session")
   (active-query nil :documentation "Non-nil when a prompt is in-flight")
   (callbacks nil :documentation "Current query callbacks plist")
   (initialized nil :documentation "Non-nil after handshake + session/new"))
 #+END_SRC
 
-** ACP Client Lifecycle
+** ACP Handshake
 
-*** Create Client
-
-Creates the =acp.el= client for =opencode acp=. The client is not started
-until the first request is sent (=acp.el= handles lazy startup).
-
-#+BEGIN_SRC elisp
-(defvar claude-agent-acp-command "opencode"
-  "Command to run the OpenCode ACP server.")
-
-(defvar claude-agent-acp-command-params '("acp")
-  "Parameters appended to `claude-agent-acp-command'.")
-
-(defvar claude-agent-acp-environment nil
-  "Extra environment variables for the OpenCode ACP process.
-Alist of (NAME . VALUE) strings.")
-
-(defun claude-agent-acp--make-client (backend)
-  "Create an ACP client for BACKEND."
-  (let* ((cwd (claude-agent-acp-backend-cwd backend))
-         (params (append claude-agent-acp-command-params
-                         (when cwd (list "--cwd" (expand-file-name cwd))))))
-    (acp-make-client
-     :command claude-agent-acp-command
-     :command-params params
-     :environment-variables claude-agent-acp-environment)))
-#+END_SRC
-
-*** Handshake
-
-Performs the ACP handshake: initialize -> authenticate -> session/new.
-This is a recursive state machine that advances through each step.
+Performs initialize -> session/new.  Authentication is skipped -- OpenCode
+uses pre-existing credentials from =opencode auth login=.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--connect (backend on-ready on-error)
-  "Connect BACKEND: handshake, auth, session/new, then call ON-READY.
+  "Connect BACKEND: start process, handshake, session/new, then call ON-READY.
 On failure, call ON-ERROR with an error message string."
-  ;; Step 1: create client if needed
+  ;; Start process if needed
   (unless (claude-agent-acp-backend-client backend)
     (setf (claude-agent-acp-backend-client backend)
-          (claude-agent-acp--make-client backend)))
-  (lexical-let ((backend backend)
-                (on-ready on-ready)
-                (on-error on-error))
-    ;; Subscribe to notifications and requests before handshake
+          (claude-agent-acp--start-process
+           (claude-agent-acp-backend-cwd backend))))
+  (let ((client (claude-agent-acp-backend-client backend)))
+    ;; Wire notification + request handlers
     (claude-agent-acp--subscribe backend)
-    ;; Step 2: initialize
-    (claude-agent-acp--initialize backend
-     (lambda ()
-       ;; Step 3: authenticate
-       (claude-agent-acp--authenticate backend
-        (lambda ()
-          ;; Step 4: session/new
-          (claude-agent-acp--new-session backend
-           (lambda ()
-             (setf (claude-agent-acp-backend-initialized backend) t)
-             (funcall on-ready))
-           on-error))
-        on-error))
-     on-error)))
+    ;; Step 1: initialize
+    (lexical-let ((backend backend)
+                  (on-ready on-ready)
+                  (on-error on-error))
+      (claude-agent-acp--initialize backend
+       (lambda ()
+         ;; Step 2: session/new (skip authenticate)
+         (claude-agent-acp--new-session backend
+          (lambda ()
+            (setf (claude-agent-acp-backend-initialized backend) t)
+            (message "claude-agent-acp: connected, session=%s"
+                     (claude-agent-acp-backend-session-id backend))
+            (funcall on-ready))
+          on-error))
+       on-error))))
 
 (defun claude-agent-acp--initialize (backend on-success on-error)
   "Send ACP initialize request for BACKEND."
-  (lexical-let ((backend backend)
-                (on-success on-success)
+  (lexical-let ((on-success on-success)
                 (on-error on-error))
-    (acp-send-request
-     :client (claude-agent-acp-backend-client backend)
-     :request (acp-make-initialize-request
-               :protocol-version 1
-               :read-text-file-capability nil
-               :write-text-file-capability nil)
-     :on-success
-     (lambda (result)
-       ;; Store auth methods if server requires authentication
-       (let ((auth-methods (map-elt result 'authMethods)))
-         (if (and auth-methods (> (length auth-methods) 0))
-             ;; Auth needed — store first method ID and proceed
-             (progn
-               (setf (map-elt (claude-agent-acp-backend-client backend)
-                              :auth-method-id)
-                     (map-elt (aref auth-methods 0) 'id))
-               (funcall on-success))
-           ;; No auth needed
-           (funcall on-success))))
-     :on-failure
+    (claude-agent-acp--send-request
+     (claude-agent-acp-backend-client backend)
+     "initialize"
+     `((protocolVersion . 1)
+       (clientCapabilities
+        . ((fs . ((readTextFile . :json-false)
+                  (writeTextFile . :json-false))))))
+     (lambda (_result)
+       (funcall on-success))
      (lambda (err)
        (funcall on-error
-                (format "ACP initialize failed: %s" err))))))
-
-(defun claude-agent-acp--authenticate (backend on-success on-error)
-  "Send ACP authenticate request for BACKEND, or skip if not needed."
-  (let ((auth-method-id (map-elt (claude-agent-acp-backend-client backend)
-                                 :auth-method-id)))
-    (if (not auth-method-id)
-        ;; No auth needed — skip
-        (funcall on-success)
-      (lexical-let ((on-success on-success)
-                    (on-error on-error))
-        (acp-send-request
-         :client (claude-agent-acp-backend-client backend)
-         :request (acp-make-authenticate-request
-                   :method-id auth-method-id)
-         :on-success (lambda (_result) (funcall on-success))
-         :on-failure (lambda (err)
-                       (funcall on-error
-                                (format "ACP authenticate failed: %s" err))))))))
+                (format "ACP initialize failed: %s"
+                        (map-elt err 'message)))))))
 
 (defun claude-agent-acp--new-session (backend on-success on-error)
   "Create a new ACP session for BACKEND."
   (lexical-let ((backend backend)
                 (on-success on-success)
                 (on-error on-error))
-    (acp-send-request
-     :client (claude-agent-acp-backend-client backend)
-     :request (acp-make-session-new-request
-               :cwd (or (claude-agent-acp-backend-cwd backend)
-                        default-directory))
-     :on-success
+    (claude-agent-acp--send-request
+     (claude-agent-acp-backend-client backend)
+     "session/new"
+     `((cwd . ,(expand-file-name
+                (or (claude-agent-acp-backend-cwd backend)
+                    default-directory)))
+       (mcpServers . []))
      (lambda (result)
        (let ((session-id (map-elt result 'sessionId)))
          (if session-id
              (progn
-               (setf (claude-agent-acp-backend-session-id backend) session-id)
+               (setf (claude-agent-acp-backend-session-id backend)
+                     session-id)
                (funcall on-success))
-           (funcall on-error "ACP session/new: no sessionId in response"))))
-     :on-failure
+           (funcall on-error
+                    "ACP session/new: no sessionId in response"))))
      (lambda (err)
-       (funcall on-error (format "ACP session/new failed: %s" err))))))
+       (funcall on-error
+                (format "ACP session/new failed: %s"
+                        (map-elt err 'message)))))))
 #+END_SRC
 
-*** Notification and Request Subscriptions
-
-Subscribe to ACP notifications (session/update) and requests
-(session/request_permission) before the handshake, so we catch all events
-from the first prompt onward.
+** Notification and Request Subscriptions
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--subscribe (backend)
-  "Subscribe to ACP notifications and requests for BACKEND."
-  (lexical-let ((backend backend))
-    ;; Notifications: session/update events
-    (acp-subscribe-to-notifications
-     :client (claude-agent-acp-backend-client backend)
-     :on-notification
-     (lambda (notification)
-       (claude-agent-acp--handle-notification backend notification)))
-    ;; Requests: permission prompts from agent
-    (acp-subscribe-to-requests
-     :client (claude-agent-acp-backend-client backend)
-     :on-request
-     (lambda (request)
-       (claude-agent-acp--handle-request backend request)))))
+  "Wire notification and request handlers for BACKEND."
+  (let ((client (claude-agent-acp-backend-client backend)))
+    (lexical-let ((backend backend))
+      ;; Notifications: session/update events
+      (push (lambda (notification)
+              (claude-agent-acp--handle-notification backend notification))
+            (plist-get client :notification-handlers))
+      ;; Server-to-client requests: permission prompts
+      (push (lambda (request)
+              (claude-agent-acp--handle-request backend request))
+            (plist-get client :request-handlers)))))
 #+END_SRC
 
 ** Notification Handler
@@ -200,50 +337,53 @@ Maps ACP =session/update= notifications to our callback system.
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--handle-notification (backend notification)
   "Dispatch ACP NOTIFICATION to BACKEND callbacks."
-  (let* ((event-type (map-nested-elt notification
-                                      '(params update sessionUpdate)))
+  (let* ((params (map-elt notification 'params))
+         (update (map-elt params 'update))
+         (event-type (map-elt update 'sessionUpdate))
          (callbacks (claude-agent-acp-backend-callbacks backend)))
     (cond
      ;; Streaming text from the agent
      ((equal event-type "agent_message_chunk")
-      (let ((text (map-nested-elt notification
-                                   '(params update content text))))
+      (let* ((content (map-elt update 'content))
+             (text (map-elt content 'text)))
         (when (and text (plist-get callbacks :on-token))
           (funcall (plist-get callbacks :on-token) text))))
 
      ;; Tool invocation started
      ((equal event-type "tool_call")
-      (let* ((title (map-nested-elt notification '(params update title)))
-             (status (map-nested-elt notification '(params update status)))
-             (formatted (format "\n[Tool: %s (%s)]\n" (or title "unknown") (or status ""))))
+      (let ((title (map-elt update 'title))
+            (status (map-elt update 'status)))
         (when (plist-get callbacks :on-token)
-          (funcall (plist-get callbacks :on-token) formatted))))
+          (funcall (plist-get callbacks :on-token)
+                   (format "\n[Tool: %s (%s)]\n"
+                           (or title "unknown") (or status ""))))))
 
      ;; Tool result / update
      ((equal event-type "tool_call_update")
-      (let* ((status (map-nested-elt notification '(params update status)))
-             (title (map-nested-elt notification '(params update title)))
-             (content-items (map-nested-elt notification '(params update content))))
-        ;; Only show completed/failed results, skip intermediate updates
+      (let ((status (map-elt update 'status))
+            (title (map-elt update 'title))
+            (content-items (map-elt update 'content)))
         (when (and (member status '("completed" "failed"))
                    (plist-get callbacks :on-token))
-          (let ((output (claude-agent-acp--extract-content-text content-items)))
+          (let ((output (claude-agent-acp--extract-content-text
+                         content-items)))
             (when (and output (> (length output) 0))
               (funcall (plist-get callbacks :on-token)
                        (format "\n[%s: %s]\n%s\n"
-                               (if (equal status "failed") "Tool failed" "Tool result")
+                               (if (equal status "failed")
+                                   "Tool failed" "Tool result")
                                (or title "")
-                               (truncate-string-to-width output 500 nil nil "..."))))))))
+                               (truncate-string-to-width
+                                output 500 nil nil "..."))))))))
 
-     ;; Agent thinking/reasoning
-     ((equal event-type "agent_thought_chunk")
-      ;; Currently ignored — could map to :on-thought in future
-      nil)
+     ;; Agent thinking -- currently ignored
+     ((equal event-type "agent_thought_chunk") nil)
 
-     ;; Usage update
-     ((equal event-type "usage_update")
-      ;; Currently ignored — could map to :on-usage in future
-      nil))))
+     ;; Usage update -- currently ignored
+     ((equal event-type "usage_update") nil)
+
+     ;; Available commands -- currently ignored
+     ((equal event-type "available_commands_update") nil))))
 
 (defun claude-agent-acp--extract-content-text (content-items)
   "Extract text from ACP CONTENT-ITEMS (vector of content objects)."
@@ -259,7 +399,7 @@ Maps ACP =session/update= notifications to our callback system.
 ** Permission Request Handler
 
 Handles =session/request_permission= server-to-client requests.
-For now: auto-approve by selecting the first option.
+Auto-approves by selecting the first option.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--handle-request (backend request)
@@ -269,34 +409,32 @@ For now: auto-approve by selecting the first option.
      ((equal method "session/request_permission")
       (claude-agent-acp--handle-permission backend request))
      (t
-      ;; Unknown request method — log and ignore
-      (message "claude-agent-acp: unknown request method: %s" method)))))
+      (message "claude-agent-acp: unknown request: %s" method)))))
 
 (defun claude-agent-acp--handle-permission (backend request)
   "Auto-approve permission REQUEST by selecting the first option."
   (let* ((request-id (map-elt request 'id))
-         (options (map-nested-elt request '(params options)))
+         (params (map-elt request 'params))
+         (options (map-elt params 'options))
          (first-option (when (and options (> (length options) 0))
                          (aref options 0)))
-         (option-id (when first-option
-                      (map-elt first-option 'id))))
+         (option-id (when first-option (map-elt first-option 'id))))
     (when (and request-id option-id)
-      (acp-send-response
-       :client (claude-agent-acp-backend-client backend)
-       :response (acp-make-session-request-permission-response
-                  :request-id request-id
-                  :option-id option-id))
-      ;; Notify via :on-token so user sees what was approved
+      ;; Send approval response
+      (claude-agent-acp--send-response
+       (claude-agent-acp-backend-client backend)
+       request-id
+       `((optionId . ,option-id)))
+      ;; Notify user via :on-token
       (let* ((callbacks (claude-agent-acp-backend-callbacks backend))
-             (title (map-nested-elt request '(params toolCall title))))
+             (tool-call (map-elt params 'toolCall))
+             (title (when tool-call (map-elt tool-call 'title))))
         (when (and title (plist-get callbacks :on-token))
           (funcall (plist-get callbacks :on-token)
                    (format "\n[Approved: %s]\n" title)))))))
 #+END_SRC
 
 ** Backend Protocol Implementation
-
-Implement all =cl-defgeneric= methods from =claude-agent-backend=.
 
 *** Query
 
@@ -311,7 +449,7 @@ Returns BACKEND as the opaque handle."
                 (prompt prompt)
                 (callbacks callbacks))
     (if (claude-agent-acp-backend-initialized backend)
-        ;; Already connected — send prompt directly
+        ;; Already connected -- send prompt directly
         (claude-agent-acp--send-prompt backend prompt callbacks)
       ;; Need to connect first
       (claude-agent-acp--connect backend
@@ -329,25 +467,24 @@ Returns BACKEND as the opaque handle."
   "Send PROMPT to the ACP session on BACKEND."
   (lexical-let ((backend backend)
                 (callbacks callbacks))
-    (let ((content-blocks (list `((type . "text") (content . ,prompt)))))
-      (acp-send-request
-       :client (claude-agent-acp-backend-client backend)
-       :request (acp-make-session-prompt-request
-                 :session-id (claude-agent-acp-backend-session-id backend)
-                 :prompt content-blocks)
-       :on-success
-       (lambda (result)
+    (let ((content-blocks (vector `((type . "text") (text . ,prompt)))))
+      (claude-agent-acp--send-request
+       (claude-agent-acp-backend-client backend)
+       "session/prompt"
+       `((sessionId . ,(claude-agent-acp-backend-session-id backend))
+         (prompt . ,content-blocks))
+       (lambda (_result)
          (setf (claude-agent-acp-backend-active-query backend) nil)
          (setf (claude-agent-acp-backend-callbacks backend) nil)
          (when (plist-get callbacks :on-complete)
            (funcall (plist-get callbacks :on-complete) nil)))
-       :on-failure
        (lambda (err)
          (setf (claude-agent-acp-backend-active-query backend) nil)
          (setf (claude-agent-acp-backend-callbacks backend) nil)
          (when (plist-get callbacks :on-error)
            (funcall (plist-get callbacks :on-error)
-                    (format "ACP prompt failed: %s" err)))
+                    (format "ACP prompt failed: %s"
+                            (map-elt err 'message))))
          (when (plist-get callbacks :on-complete)
            (funcall (plist-get callbacks :on-complete) nil)))))))
 #+END_SRC
@@ -361,11 +498,11 @@ Returns BACKEND as the opaque handle."
   (when (and (claude-agent-acp-backend-active-query backend)
              (claude-agent-acp-backend-session-id backend)
              (claude-agent-acp-backend-client backend))
-    (acp-send-notification
-     :client (claude-agent-acp-backend-client backend)
-     :notification (acp-make-session-cancel-notification
-                    :session-id (claude-agent-acp-backend-session-id backend)
-                    :reason "User cancelled"))
+    (claude-agent-acp--send-notification
+     (claude-agent-acp-backend-client backend)
+     "session/cancel"
+     `((sessionId . ,(claude-agent-acp-backend-session-id backend))
+       (reason . "User cancelled")))
     (setf (claude-agent-acp-backend-active-query backend) nil)))
 #+END_SRC
 
@@ -375,11 +512,8 @@ Returns BACKEND as the opaque handle."
 (cl-defmethod claude-agent-backend-cleanup
     ((backend claude-agent-acp-backend))
   "Shut down ACP client and release resources."
-  (when-let* ((client (claude-agent-acp-backend-client backend)))
-    (condition-case nil
-        (acp-shutdown :client client)
-      (error nil))
-    (setf (claude-agent-acp-backend-client backend) nil))
+  (claude-agent-acp--shutdown (claude-agent-acp-backend-client backend))
+  (setf (claude-agent-acp-backend-client backend) nil)
   (setf (claude-agent-acp-backend-session-id backend) nil)
   (setf (claude-agent-acp-backend-initialized backend) nil)
   (setf (claude-agent-acp-backend-active-query backend) nil)
@@ -405,9 +539,10 @@ Returns BACKEND as the opaque handle."
   (not (claude-agent-acp-backend-active-query backend)))
 
 (cl-defmethod claude-agent-backend-verbose-buffer
-    ((_backend claude-agent-acp-backend))
-  "ACP backend uses acp.el's own logging; no separate verbose buffer."
-  nil)
+    ((backend claude-agent-acp-backend))
+  "Return the stderr buffer for ACP traffic debugging."
+  (when-let* ((client (claude-agent-acp-backend-client backend)))
+    (plist-get client :stderr-buffer)))
 #+END_SRC
 
 *** Capability Declaration
@@ -416,7 +551,7 @@ Returns BACKEND as the opaque handle."
 (cl-defmethod claude-agent-backend-supports-p
     ((_backend claude-agent-acp-backend) capability)
   "ACP backend capabilities."
-  (memq capability '(:streaming-tokens :tool-use)))
+  (memq capability '(:streaming-tokens :tool-use :persistent-client)))
 #+END_SRC
 
 *** Error Classification
@@ -433,7 +568,8 @@ Returns BACKEND as the opaque handle."
     (cond
      ((null msg) 'unknown)
      ((string-match-p "auth" msg) 'auth)
-     ((string-match-p "session.*expired\\|invalid.*session" msg) 'session-expired)
+     ((string-match-p "session.*expired\\|invalid.*session" msg)
+      'session-expired)
      ((string-match-p "connect\\|timeout\\|ECONNREFUSED" msg) 'network)
      (t 'unknown))))
 #+END_SRC

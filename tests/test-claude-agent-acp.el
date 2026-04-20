@@ -1,7 +1,8 @@
 ;;; test-claude-agent-acp.el --- Tests for ACP backend -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Unit tests for claude-agent-acp.org using acp-fakes.
+;; Unit tests for claude-agent-acp.org using our own JSON-RPC transport.
+;; No external acp.el dependency.
 
 ;;; Code:
 
@@ -17,112 +18,46 @@
     (unless (featurep 'claude-agent-acp)
       (literate-elisp-load (expand-file-name "claude-agent-acp.org" root)))))
 
-(require 'acp)
-(require 'acp-fakes)
 (require 'claude-agent-backend)
 (require 'claude-agent-acp)
 
 ;;; Test helpers
 
-(defun test-acp--make-messages-no-auth ()
-  "Create fake ACP message traffic for a full handshake (no auth) + prompt.
-Returns a list of messages suitable for `acp-fakes-make-client'."
-  (list
-   ;; Request 1: initialize (outgoing marker)
-   `((:direction . outgoing) (:kind . request)
-     (:object (jsonrpc . "2.0") (method . "initialize") (id . 1)
-              (params (protocolVersion . 1))))
-   ;; Response 1: initialize result (no auth methods)
-   `((:direction . incoming) (:kind . response)
-     (:object (jsonrpc . "2.0") (id . 1)
-              (result (protocolVersion . 1)
-                      (authMethods . [])
-                      (agentCapabilities (loadSession . :false)))))
-   ;; Request 2: session/new
-   `((:direction . outgoing) (:kind . request)
-     (:object (jsonrpc . "2.0") (method . "session/new") (id . 2)
-              (params (cwd . "/tmp"))))
-   ;; Response 2: session/new result
-   `((:direction . incoming) (:kind . response)
-     (:object (jsonrpc . "2.0") (id . 2)
-              (result (sessionId . "test-session-42"))))
-   ;; Request 3: session/prompt
-   `((:direction . outgoing) (:kind . request)
-     (:object (jsonrpc . "2.0") (method . "session/prompt") (id . 3)
-              (params (sessionId . "test-session-42"))))
-   ;; Notification: agent_message_chunk
-   `((:direction . incoming) (:kind . notification)
-     (:object (jsonrpc . "2.0") (method . "session/update")
-              (params (update (sessionUpdate . "agent_message_chunk")
-                              (content (text . "Hello from OpenCode!"))))))
-   ;; Response 3: prompt complete
-   `((:direction . incoming) (:kind . response)
-     (:object (jsonrpc . "2.0") (id . 3)
-              (result (stopReason . "end_turn"))))))
+(defun test-acp--make-fake-client (&optional response-alist)
+  "Create a fake JSON-RPC client plist for testing.
+RESPONSE-ALIST maps method names to result values (or error alists).
+The fake process captures sent data but doesn't actually communicate."
+  (let* ((sent-messages nil)
+         (proc (start-process "test-acp-fake" nil "true"))
+         (client (list :process proc
+                       :pending (make-hash-table :test 'equal)
+                       :notification-handlers nil
+                       :request-handlers nil
+                       :stderr-buffer nil
+                       :partial-line ""
+                       ;; Test-only: track sent messages and response map
+                       :sent-messages nil
+                       :response-alist response-alist)))
+    ;; Override process-send-string by intercepting at the request level
+    client))
 
-(defun test-acp--make-messages-with-tool-call ()
-  "Create messages with a tool call notification."
-  (list
-   ;; Handshake (reuse same pattern)
-   `((:direction . outgoing) (:kind . request)
-     (:object (jsonrpc . "2.0") (method . "initialize") (id . 1)))
-   `((:direction . incoming) (:kind . response)
-     (:object (jsonrpc . "2.0") (id . 1)
-              (result (protocolVersion . 1) (authMethods . []))))
-   `((:direction . outgoing) (:kind . request)
-     (:object (jsonrpc . "2.0") (method . "session/new") (id . 2)))
-   `((:direction . incoming) (:kind . response)
-     (:object (jsonrpc . "2.0") (id . 2)
-              (result (sessionId . "test-session-42"))))
-   ;; Prompt with tool call
-   `((:direction . outgoing) (:kind . request)
-     (:object (jsonrpc . "2.0") (method . "session/prompt") (id . 3)))
-   ;; tool_call notification
-   `((:direction . incoming) (:kind . notification)
-     (:object (jsonrpc . "2.0") (method . "session/update")
-              (params (update (sessionUpdate . "tool_call")
-                              (toolCallId . "tc-1")
-                              (title . "Read file.py")
-                              (status . "running")
-                              (kind . "tool_use")))))
-   ;; tool_call_update notification (completed)
-   `((:direction . incoming) (:kind . notification)
-     (:object (jsonrpc . "2.0") (method . "session/update")
-              (params (update (sessionUpdate . "tool_call_update")
-                              (toolCallId . "tc-1")
-                              (title . "Read file.py")
-                              (status . "completed")
-                              (content . [((type . "text") (text . "file contents here"))])))))
-   ;; agent response
-   `((:direction . incoming) (:kind . notification)
-     (:object (jsonrpc . "2.0") (method . "session/update")
-              (params (update (sessionUpdate . "agent_message_chunk")
-                              (content (text . "I read the file."))))))
-   ;; Done
-   `((:direction . incoming) (:kind . response)
-     (:object (jsonrpc . "2.0") (id . 3)
-              (result (stopReason . "end_turn"))))))
+(defun test-acp--inject-response (client id result)
+  "Simulate an incoming JSON-RPC response with ID and RESULT."
+  (claude-agent-acp--route-message
+   client `((jsonrpc . "2.0") (id . ,id) (result . ,result))))
 
-(defun test-acp--make-backend-with-fake (messages)
-  "Create an ACP backend pre-loaded with a fake client using MESSAGES."
-  (let ((backend (claude-agent-acp-backend--create
-                  :cwd "/tmp"
-                  :session-key "test-key")))
-    (let ((client (acp-fakes-make-client messages)))
-      ;; acp-fakes request-sender doesn't accept :buffer — wrap it
-      (let ((orig-sender (map-elt client :request-sender)))
-        (setf (map-elt client :request-sender)
-              (cl-function
-               (lambda (&key client request on-success on-failure _sync _buffer)
-                 (funcall orig-sender
-                          :client client
-                          :request request
-                          :on-success on-success
-                          :on-failure on-failure)))))
-      (setf (claude-agent-acp-backend-client backend) client))
-    backend))
+(defun test-acp--inject-error (client id code message)
+  "Simulate an incoming JSON-RPC error response."
+  (claude-agent-acp--route-message
+   client `((jsonrpc . "2.0") (id . ,id)
+            (error . ((code . ,code) (message . ,message))))))
 
-;;; Tests
+(defun test-acp--inject-notification (client method params)
+  "Simulate an incoming JSON-RPC notification."
+  (claude-agent-acp--route-message
+   client `((jsonrpc . "2.0") (method . ,method) (params . ,params))))
+
+;;; Tests: Struct creation
 
 (ert-deftest test-acp-backend-struct-creation ()
   "Test basic struct creation."
@@ -137,14 +72,18 @@ Returns a list of messages suitable for `acp-fakes-make-client'."
     (should-not (claude-agent-acp-backend-initialized backend))
     (should-not (claude-agent-acp-backend-active-query backend))))
 
+;;; Tests: Capabilities
+
 (ert-deftest test-acp-backend-supports-p ()
   "Test capability declarations."
   (let ((backend (claude-agent-acp-backend--create)))
     (should (claude-agent-backend-supports-p backend :streaming-tokens))
     (should (claude-agent-backend-supports-p backend :tool-use))
+    (should (claude-agent-backend-supports-p backend :persistent-client))
     (should-not (claude-agent-backend-supports-p backend :structured-messages))
-    (should-not (claude-agent-backend-supports-p backend :session-resume))
-    (should-not (claude-agent-backend-supports-p backend :persistent-client))))
+    (should-not (claude-agent-backend-supports-p backend :session-resume))))
+
+;;; Tests: Ready and active state
 
 (ert-deftest test-acp-backend-ready-p ()
   "Test ready-p reflects active query state."
@@ -152,6 +91,8 @@ Returns a list of messages suitable for `acp-fakes-make-client'."
     (should (claude-agent-backend-ready-p backend))
     (setf (claude-agent-acp-backend-active-query backend) t)
     (should-not (claude-agent-backend-ready-p backend))))
+
+;;; Tests: Error classification
 
 (ert-deftest test-acp-backend-classify-error ()
   "Test error classification."
@@ -167,42 +108,7 @@ Returns a list of messages suitable for `acp-fakes-make-client'."
     (should (eq (claude-agent-backend-classify-error backend nil)
                 'unknown))))
 
-(ert-deftest test-acp-backend-handshake-and-prompt ()
-  "Test full flow: handshake + prompt with streaming token."
-  (let* ((tokens nil)
-         (completed nil)
-         (backend (test-acp--make-backend-with-fake
-                   (test-acp--make-messages-no-auth)))
-         (callbacks (list :on-token (lambda (text) (push text tokens))
-                          :on-complete (lambda (_) (setq completed t)))))
-    ;; Send query — should complete synchronously with fake client
-    (claude-agent-backend-query backend "hello" callbacks)
-    ;; Verify handshake completed
-    (should (claude-agent-acp-backend-initialized backend))
-    (should (equal (claude-agent-acp-backend-session-id backend)
-                   "test-session-42"))
-    ;; Verify token received
-    (should (member "Hello from OpenCode!" tokens))
-    ;; Verify completion
-    (should completed)
-    ;; Verify no longer active
-    (should-not (claude-agent-acp-backend-active-query backend))))
-
-(ert-deftest test-acp-backend-tool-call-notifications ()
-  "Test tool_call and tool_call_update mapped to on-token."
-  (let* ((tokens nil)
-         (completed nil)
-         (backend (test-acp--make-backend-with-fake
-                   (test-acp--make-messages-with-tool-call)))
-         (callbacks (list :on-token (lambda (text) (push text tokens))
-                          :on-complete (lambda (_) (setq completed t)))))
-    (claude-agent-backend-query backend "read file.py" callbacks)
-    (should completed)
-    ;; Should have tool_call, tool_call_update result, and agent message
-    (let ((all-text (string-join (nreverse tokens) "")))
-      (should (string-match-p "Tool:.*Read file.py" all-text))
-      (should (string-match-p "file contents here" all-text))
-      (should (string-match-p "I read the file" all-text)))))
+;;; Tests: Notification handler dispatch
 
 (ert-deftest test-acp-notification-handler-agent-message ()
   "Test direct notification dispatch for agent_message_chunk."
@@ -245,32 +151,7 @@ Returns a list of messages suitable for `acp-fakes-make-client'."
        (params (update (sessionUpdate . "unknown_event")))))
     (should-not tokens)))
 
-(ert-deftest test-acp-permission-handler-auto-approve ()
-  "Test permission auto-approval sends response with first option."
-  (let* ((tokens nil)
-         (responses nil)
-         (backend (claude-agent-acp-backend--create)))
-    (setf (claude-agent-acp-backend-callbacks backend)
-          (list :on-token (lambda (text) (push text tokens))))
-    ;; Create a fake client with a response-sender that captures calls
-    (let ((fake-client (acp-fakes-make-client nil)))
-      (setf (map-elt fake-client :response-sender)
-            (lambda (&rest args) (push args responses)))
-      (setf (claude-agent-acp-backend-client backend) fake-client))
-    ;; Send permission request
-    (claude-agent-acp--handle-request
-     backend
-     `((method . "session/request_permission")
-       (id . 99)
-       (params (toolCall (title . "Write output.txt")
-                         (toolCallId . "tc-5"))
-               (options . [((id . "allow-once") (label . "Allow once"))
-                           ((id . "deny") (label . "Deny"))]))))
-    ;; Should have sent a response
-    (should (= (length responses) 1))
-    ;; Should have notified user
-    (should (= (length tokens) 1))
-    (should (string-match-p "Approved.*Write output.txt" (car tokens)))))
+;;; Tests: Content extraction
 
 (ert-deftest test-acp-extract-content-text ()
   "Test content text extraction from ACP content items."
@@ -282,6 +163,154 @@ Returns a list of messages suitable for `acp-fakes-make-client'."
   ;; Empty
   (should-not (claude-agent-acp--extract-content-text nil))
   (should-not (claude-agent-acp--extract-content-text [])))
+
+;;; Tests: Permission handler
+
+(ert-deftest test-acp-permission-handler-auto-approve ()
+  "Test permission auto-approval sends response with first option."
+  (let* ((tokens nil)
+         (sent-responses nil)
+         (backend (claude-agent-acp-backend--create)))
+    (setf (claude-agent-acp-backend-callbacks backend)
+          (list :on-token (lambda (text) (push text tokens))))
+    ;; Create a minimal client with a process that captures sent strings
+    (let* ((sent-data nil)
+           (proc (start-process "test-acp-perm" nil "sleep" "10"))
+           (client (claude-agent-acp--make-jsonrpc-client proc)))
+      ;; Override process-send-string to capture output
+      (advice-add 'process-send-string :before
+                  (lambda (_proc data) (push data sent-data))
+                  '((name . test-acp-capture)))
+      (unwind-protect
+          (progn
+            (setf (claude-agent-acp-backend-client backend) client)
+            ;; Send permission request
+            (claude-agent-acp--handle-request
+             backend
+             `((method . "session/request_permission")
+               (id . 99)
+               (params (toolCall (title . "Write output.txt")
+                                 (toolCallId . "tc-5"))
+                       (options . [((id . "allow-once") (label . "Allow once"))
+                                   ((id . "deny") (label . "Deny"))]))))
+            ;; Should have sent a response via process
+            (should (>= (length sent-data) 1))
+            ;; Verify the response contains optionId
+            (let* ((resp-json (json-read-from-string (car sent-data)))
+                   (result (map-elt resp-json 'result)))
+              (should (equal (map-elt result 'optionId) "allow-once")))
+            ;; Should have notified user
+            (should (= (length tokens) 1))
+            (should (string-match-p "Approved.*Write output.txt" (car tokens))))
+        (advice-remove 'process-send-string 'test-acp-capture)
+        (delete-process proc)))))
+
+;;; Tests: Handshake via route-message
+
+(ert-deftest test-acp-backend-handshake-and-prompt ()
+  "Test handshake + prompt using injected responses via route-message."
+  (let* ((tokens nil)
+         (completed nil)
+         (backend (claude-agent-acp-backend--create :cwd "/tmp"))
+         ;; Create a fake client
+         (proc (start-process "test-acp-hs" nil "sleep" "10"))
+         (client (claude-agent-acp--make-jsonrpc-client proc)))
+    (setf (claude-agent-acp-backend-client backend) client)
+    (setf (claude-agent-acp-backend-initialized backend) t)
+    (setf (claude-agent-acp-backend-session-id backend) "test-session-42")
+    (claude-agent-acp--subscribe backend)
+    ;; Intercept sends to auto-respond
+    (advice-add 'process-send-string :after
+                (lambda (_proc data)
+                  (ignore-errors
+                    (let* ((msg (json-read-from-string
+                                 (string-trim data)))
+                           (id (map-elt msg 'id))
+                           (method (map-elt msg 'method)))
+                      (when (equal method "session/prompt")
+                        ;; Inject a text chunk notification
+                        (test-acp--inject-notification
+                         client "session/update"
+                         '((update (sessionUpdate . "agent_message_chunk")
+                                   (content (text . "Hello from OpenCode!")))))
+                        ;; Inject prompt completion
+                        (test-acp--inject-response
+                         client id '((stopReason . "end_turn")))))))
+                '((name . test-acp-auto-respond)))
+    (unwind-protect
+        (progn
+          (claude-agent-backend-query
+           backend "hello"
+           (list :on-token (lambda (text) (push text tokens))
+                 :on-complete (lambda (_) (setq completed t))))
+          ;; Should complete synchronously (fake)
+          (should completed)
+          ;; Verify token received
+          (should (member "Hello from OpenCode!" tokens))
+          ;; Verify no longer active
+          (should-not (claude-agent-acp-backend-active-query backend)))
+      (advice-remove 'process-send-string 'test-acp-auto-respond)
+      (delete-process proc))))
+
+;;; Tests: Tool call notifications
+
+(ert-deftest test-acp-backend-tool-call-notifications ()
+  "Test tool_call and tool_call_update mapped to on-token."
+  (let* ((tokens nil)
+         (completed nil)
+         (backend (claude-agent-acp-backend--create :cwd "/tmp"))
+         (proc (start-process "test-acp-tc" nil "sleep" "10"))
+         (client (claude-agent-acp--make-jsonrpc-client proc)))
+    (setf (claude-agent-acp-backend-client backend) client)
+    (setf (claude-agent-acp-backend-initialized backend) t)
+    (setf (claude-agent-acp-backend-session-id backend) "test-session-42")
+    (claude-agent-acp--subscribe backend)
+    (advice-add 'process-send-string :after
+                (lambda (_proc data)
+                  (ignore-errors
+                    (let* ((msg (json-read-from-string
+                                 (string-trim data)))
+                           (id (map-elt msg 'id))
+                           (method (map-elt msg 'method)))
+                      (when (equal method "session/prompt")
+                        ;; tool_call
+                        (test-acp--inject-notification
+                         client "session/update"
+                         '((update (sessionUpdate . "tool_call")
+                                   (title . "Read file.py")
+                                   (status . "running"))))
+                        ;; tool_call_update completed
+                        (test-acp--inject-notification
+                         client "session/update"
+                         `((update (sessionUpdate . "tool_call_update")
+                                   (title . "Read file.py")
+                                   (status . "completed")
+                                   (content . [((type . "text")
+                                                (text . "file contents here"))]))))
+                        ;; agent message
+                        (test-acp--inject-notification
+                         client "session/update"
+                         '((update (sessionUpdate . "agent_message_chunk")
+                                   (content (text . "I read the file.")))))
+                        ;; done
+                        (test-acp--inject-response
+                         client id '((stopReason . "end_turn")))))))
+                '((name . test-acp-tc-respond)))
+    (unwind-protect
+        (progn
+          (claude-agent-backend-query
+           backend "read file.py"
+           (list :on-token (lambda (text) (push text tokens))
+                 :on-complete (lambda (_) (setq completed t))))
+          (should completed)
+          (let ((all-text (string-join (nreverse tokens) "")))
+            (should (string-match-p "Tool:.*Read file.py" all-text))
+            (should (string-match-p "file contents here" all-text))
+            (should (string-match-p "I read the file" all-text))))
+      (advice-remove 'process-send-string 'test-acp-tc-respond)
+      (delete-process proc))))
+
+;;; Tests: Cleanup
 
 (ert-deftest test-acp-backend-cleanup ()
   "Test cleanup releases resources."

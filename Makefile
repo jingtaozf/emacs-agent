@@ -617,7 +617,17 @@ test-e2e-local:
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
 		-l tests/test-e2e-local-trace.el \
+		-l tests/test-acp-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"
+
+# ACP backend E2E tests (requires opencode CLI)
+.PHONY: test-acp-local
+test-acp-local:
+	@echo "Running ACP backend E2E tests (requires opencode CLI)..."
+	$(BATCH) $(LOAD_PATH) \
+		$(LOAD_ALL) \
+		-l tests/test-acp-integration.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :acp))"
 
 # Trace health check (requires Phoenix at localhost:6006)
 .PHONY: test-trace-health
