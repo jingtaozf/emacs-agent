@@ -4384,69 +4384,124 @@ Execution and request handling.
 
 ** Execute Command
 
-#+BEGIN_SRC elisp
-(cl-defun claude-org--execute-core (session-key content section-level custom-id
-                                     &key loop-max loop-interval
-                                          heading-marker)
-  "Shared execution logic for both direct and queued block execution.
-SESSION-KEY is the session identifier.
-CONTENT is the prompt text.
-SECTION-LEVEL is the heading level for the response section.
-CUSTOM-ID is the instruction's CUSTOM_ID for navigation.
-LOOP-MAX, LOOP-INTERVAL control loop execution.
-HEADING-MARKER is an optional marker for auto-title generation.
+Every AI-block execution is a unit of work with the same seven
+inputs: the session it belongs to, the prompt text, the heading
+level used when creating the response section, the instruction's
+CUSTOM_ID for navigation, the loop max/interval, and an optional
+marker on the heading for async title generation.  Two code paths
+deliver these inputs — ~claude-org-execute~ for a block at point,
+~--execute-queued-block~ for a block that was deferred because the
+session was busy — and both previously reassembled the same
+arguments into the same shared function (~--execute-core~).
 
-Sets session state, creates response section, starts spinner,
-sends request, and runs hooks.  Returns nil."
-  (claude-agent-with-span "execute-core"
-      (list :custom-id custom-id :loop-max loop-max
-            :input (truncate-string-to-width (or content "") 2000)
-            :session-id (ignore-errors (claude-org--get-session-id)))
-    nil
-  (let ((loop-max (or loop-max 1))
-        (loop-interval (or loop-interval 0)))
-    (claude-org--set-exec-status "executing")
-    (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
-      (save-excursion
-        (org-back-to-heading t)
-        (org-entry-put nil "LAST_AI_EXECUTED" timestamp))
-      (let ((insert-point (claude-org--find-response-insert-point))
-            (instr-num (claude-org--find-instruction-number)))
-        (unless insert-point
-          (user-error "Cannot find block end"))
-        (let ((query-id (claude-org--generate-query-id))
-              (block-marker (copy-marker (point))))
-          ;; Store session state
-          (claude-org--session-put session-key :query-id query-id)
-          (claude-org--session-put session-key :marker block-marker)
-          (claude-org--session-put session-key :original-prompt content)
-          (claude-org--session-put session-key :section-level section-level)
-          (claude-org--session-put session-key :start-time (float-time))
-          (claude-org--session-put session-key :busy t)
-          (claude-org--session-put session-key :loop-max loop-max)
-          (claude-org--session-put session-key :loop-current 1)
-          (claude-org--session-put session-key :loop-interval loop-interval)
-          (claude-org--session-put session-key :instruction-num instr-num)
-          (claude-org--session-put session-key :custom-id custom-id)
-          (claude-org--session-put session-key :recovery-count 0)
-          ;; Create Response section
-          (save-excursion
-            (goto-char insert-point)
-            (insert "\n\n")
-            (when claude-org-auto-create-response-section
-              (claude-org--create-response-section session-key query-id 'normal)))
-          ;; Start spinner
-          (claude-org--start-spinner session-key)
-          ;; Build query-context and send
-          (let ((query-ctx (when instr-num
-                             (claude-agent-make-query-context
-                              :instruction-num instr-num
-                              :loop-current 1
-                              :loop-max loop-max
-                              :custom-id custom-id))))
-            (claude-org--send-request content query-ctx session-key))
-          ;; Run post-execution hook
-          (run-hook-with-args 'claude-org-execute-after-hook session-key content nil)))))))
+Promoting the input bundle to a ~cl-defstruct~ ensures the two
+factories (from-point / from-block-info) produce the same shape,
+makes the slot set discoverable, and gives the core method a
+single typed parameter instead of seven positional/keyword args.
+
+*** The Command Class + Factories
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org-execute-command
+               (:constructor claude-org-execute-command--create)
+               (:copier nil))
+  "One AI-block execution request — the input bundle to `-run'."
+  (session-key nil
+               :documentation "Session key this execution belongs to.")
+  (content nil
+           :documentation "Prompt text extracted from the AI block.")
+  (section-level nil
+                 :documentation "Heading level of the enclosing org section.")
+  (custom-id nil
+             :documentation "Instruction CUSTOM_ID for response navigation.")
+  (loop-max 1
+            :documentation "Total loop iterations requested by the block header.")
+  (loop-interval 0
+                 :documentation "Seconds between loop iterations.")
+  (heading-marker nil
+                  :documentation "Marker on the section heading — non-nil when auto-title should run on completion."))
+
+(defun claude-org-execute-command-from-block-info (session-key block-info)
+  "Build an execute-command from a queued block's BLOCK-INFO plist.
+The queue layer serialises blocks as plists so markers can outlive
+the buffer walk; this constructor deserialises them."
+  (claude-org-execute-command--create
+   :session-key session-key
+   :content (plist-get block-info :content)
+   :section-level (plist-get block-info :section-level)
+   :custom-id (plist-get block-info :custom-id)
+   :loop-max (or (plist-get block-info :loop-max) 1)
+   :loop-interval (or (plist-get block-info :loop-interval) 0)
+   :heading-marker (plist-get block-info :heading-marker)))
+#+END_SRC
+
+*** Run Method
+
+The body that was ~--execute-core~ moves onto a ~cl-defgeneric~
+dispatched on the command class.  It still does one coherent
+thing: initialise the session, create the response section,
+start the spinner, dispatch through the backend, fire the
+after-hook — but now every read comes from a typed accessor
+instead of a positional/keyword argument.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-execute-command-run (command)
+  "Execute COMMAND: seed session state, build the response section,
+kick off the spinner, dispatch through the backend, and run the
+after-hook.  Returns nil.")
+
+(cl-defmethod claude-org-execute-command-run
+    ((cmd claude-org-execute-command))
+  "Default implementation."
+  (let ((session-key (claude-org-execute-command-session-key cmd))
+        (content (claude-org-execute-command-content cmd))
+        (section-level (claude-org-execute-command-section-level cmd))
+        (custom-id (claude-org-execute-command-custom-id cmd))
+        (loop-max (claude-org-execute-command-loop-max cmd))
+        (loop-interval (claude-org-execute-command-loop-interval cmd)))
+    (claude-agent-with-span "execute-core"
+        (list :custom-id custom-id :loop-max loop-max
+              :input (truncate-string-to-width (or content "") 2000)
+              :session-id (ignore-errors (claude-org--get-session-id)))
+      nil
+      (claude-org--set-exec-status "executing")
+      (let ((timestamp (format-time-string "%Y-%m-%d %H:%M:%S")))
+        (save-excursion
+          (org-back-to-heading t)
+          (org-entry-put nil "LAST_AI_EXECUTED" timestamp))
+        (let ((insert-point (claude-org--find-response-insert-point))
+              (instr-num (claude-org--find-instruction-number)))
+          (unless insert-point
+            (user-error "Cannot find block end"))
+          (let ((query-id (claude-org--generate-query-id))
+                (block-marker (copy-marker (point))))
+            (claude-org--session-put session-key :query-id query-id)
+            (claude-org--session-put session-key :marker block-marker)
+            (claude-org--session-put session-key :original-prompt content)
+            (claude-org--session-put session-key :section-level section-level)
+            (claude-org--session-put session-key :start-time (float-time))
+            (claude-org--session-put session-key :busy t)
+            (claude-org--session-put session-key :loop-max loop-max)
+            (claude-org--session-put session-key :loop-current 1)
+            (claude-org--session-put session-key :loop-interval loop-interval)
+            (claude-org--session-put session-key :instruction-num instr-num)
+            (claude-org--session-put session-key :custom-id custom-id)
+            (claude-org--session-put session-key :recovery-count 0)
+            (save-excursion
+              (goto-char insert-point)
+              (insert "\n\n")
+              (when claude-org-auto-create-response-section
+                (claude-org--create-response-section session-key query-id 'normal)))
+            (claude-org--start-spinner session-key)
+            (let ((query-ctx (when instr-num
+                               (claude-agent-make-query-context
+                                :instruction-num instr-num
+                                :loop-current 1
+                                :loop-max loop-max
+                                :custom-id custom-id))))
+              (claude-org--send-request content query-ctx session-key))
+            (run-hook-with-args 'claude-org-execute-after-hook
+                                session-key content nil)))))))
 
 (defun claude-org-execute ()
   "Execute the AI query at point.
@@ -4534,11 +4589,16 @@ If the session is busy, queues the block for execution when current query comple
            (message "This block is already scheduled [%d in queue]."
                     (claude-org--queue-count session-key))))
         (cl-return-from claude-org-execute nil)))
-    ;; Delegate to shared execution logic
-    (claude-org--execute-core session-key content section-level custom-id
-                              :loop-max loop-max
-                              :loop-interval loop-interval
-                              :heading-marker heading-marker)))))
+    ;; Bundle inputs + dispatch through the command class.
+    (claude-org-execute-command-run
+     (claude-org-execute-command--create
+      :session-key session-key
+      :content content
+      :section-level section-level
+      :custom-id custom-id
+      :loop-max loop-max
+      :loop-interval loop-interval
+      :heading-marker heading-marker))))))
 
 (defun org-babel-execute:ai (body _params)
   "Execute an AI block via claude-org.
@@ -4815,14 +4875,12 @@ BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
       (when-let* ((next (claude-org--dequeue-block session-key)))
         (claude-org--execute-queued-block session-key next))
       (cl-return-from claude-org--execute-queued-block nil))
-    ;; Navigate to the original position and delegate to shared core
+    ;; Navigate to the original position and delegate through the command class.
     (with-current-buffer (marker-buffer orig-marker)
       (save-excursion
         (goto-char orig-marker)
-        (claude-org--execute-core session-key content section-level custom-id
-                                  :loop-max loop-max
-                                  :loop-interval loop-interval
-                                  :heading-marker heading-marker)))
+        (claude-org-execute-command-run
+         (claude-org-execute-command-from-block-info session-key block-info))))
     ;; Free original marker
     (set-marker orig-marker nil)))))
 #+END_SRC

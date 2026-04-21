@@ -170,13 +170,15 @@ producing valid headings even when session section-level is nil."
 ;;; F3: execute-core extraction — verify shared logic
 ;;; ===========================================================================
 
-(ert-deftest test-execute-core-exists ()
-  "claude-org--execute-core should exist as the shared implementation."
+(ert-deftest test-execute-command-class-exists ()
+  "The execute-command class and its run generic should be defined."
   :tags '(:unit :fast :stable :isolated :refactor :f3)
-  (should (fboundp 'claude-org--execute-core)))
+  (should (fboundp 'claude-org-execute-command--create))
+  (should (fboundp 'claude-org-execute-command-run))
+  (should (fboundp 'claude-org-execute-command-from-block-info)))
 
-(ert-deftest test-execute-core-sets-session-state ()
-  "execute-core should set all required session state fields."
+(ert-deftest test-execute-command-run-sets-session-state ()
+  "Running an execute-command should populate all required session slots."
   :tags '(:unit :fast :stable :isolated :refactor :f3)
   (let ((test-buffer (generate-new-buffer "*test-exec-core*")))
     (unwind-protect
@@ -190,10 +192,8 @@ producing valid headings even when session section-level is nil."
                  (section-level 3)
                  (query-id "test-exec-001")
                  (custom-id "test-custom-001"))
-            ;; Position inside the AI block
             (goto-char (point-min))
             (re-search-forward "test query")
-            ;; Mock send-request to avoid real query
             (cl-letf (((symbol-function 'claude-org--send-request)
                        (lambda (&rest _args) nil))
                       ((symbol-function 'claude-org--generate-query-id)
@@ -208,11 +208,14 @@ producing valid headings even when session section-level is nil."
                        (lambda () 1))
                       ((symbol-function 'claude-org--set-exec-status)
                        (lambda (&rest _) nil)))
-              (claude-org--execute-core
-               session-key content section-level custom-id
-               :loop-max 1
-               :loop-interval 0)
-              ;; Verify session state was set
+              (claude-org-execute-command-run
+               (claude-org-execute-command--create
+                :session-key session-key
+                :content content
+                :section-level section-level
+                :custom-id custom-id
+                :loop-max 1
+                :loop-interval 0))
               (should (equal query-id (claude-org--session-get session-key :query-id)))
               (should (equal content (claude-org--session-get session-key :original-prompt)))
               (should (= section-level (claude-org--session-get session-key :section-level)))

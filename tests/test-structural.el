@@ -547,6 +547,9 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-response-stream-handle-error"
     "claude-org-response-stream-handle-complete"
     "claude-org-response-stream-callbacks"
+    ;; claude-org: execute command (input bundle for one run)
+    "claude-org-execute-command-run"
+    "claude-org-execute-command-from-block-info"
     ;; claude-org: response
     "claude-org-append-to-response"
     ;; claude-org: loop
