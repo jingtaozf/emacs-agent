@@ -1,74 +1,100 @@
-"""Tests for the Claude workspace launcher."""
+"""Tests for the Claude workspace launcher.
+
+After the class refactor, most tests construct a
+``ClaudeWorkspaceLauncher`` and exercise ``build_args`` directly.
+Pure-function helpers that stayed module-level (slug normaliser, IDE
+cleanup) are tested by name.
+"""
 
 import json
 
 import pytest
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from claude_agent.claude_workspace import (
-    _is_valid_session,
-    _normalize_name,
-    build_claude_args,
-    cleanup_ide_server,
-    parse_args,
+    ClaudeWorkspaceLauncher,
+    _cleanup_ide_server,
+    _normalize_story_slug,
+)
+from claude_agent.workspace_launcher import (
+    is_valid_session,
+    split_positional_args,
 )
 
 
-class TestParseArgs:
+def _make_launcher(
+    plugin_dir,
+    org_file="/tmp/test.org",
+    session_id="",
+    extra_args=None,
+    story_name="",
+    system_prompt="",
+    mcp_url="http://localhost:9999/mcp",
+):
+    """Build a launcher wired to PLUGIN_DIR without running the flow."""
+    launcher = ClaudeWorkspaceLauncher(org_file, session_id, extra_args or [])
+    launcher.plugin_dir = str(plugin_dir)
+    launcher.mcp_url = mcp_url
+    launcher.story_name = story_name
+    launcher.system_prompt = system_prompt
+    return launcher
+
+
+class TestArgParsing:
     def test_org_file_only(self):
-        org_file, session_id, extra = parse_args(["test.org"])
+        org_file, session_id, extra = split_positional_args(["test.org"])
         assert org_file == "test.org"
         assert session_id == ""
         assert extra == []
 
     def test_org_file_and_session(self):
-        org_file, session_id, extra = parse_args(["test.org", "session-1"])
+        org_file, session_id, extra = split_positional_args(["test.org", "session-1"])
         assert org_file == "test.org"
         assert session_id == "session-1"
         assert extra == []
 
     def test_org_file_session_and_extras(self):
-        org_file, session_id, extra = parse_args(
+        _org_file, _sid, extra = split_positional_args(
             ["test.org", "session-1", "--", "--verbose", "--model", "opus"]
         )
         assert extra == ["--verbose", "--model", "opus"]
 
     def test_org_file_with_dash_separator(self):
-        org_file, session_id, extra = parse_args(["test.org", "--", "--verbose"])
+        _org_file, session_id, extra = split_positional_args(
+            ["test.org", "--", "--verbose"]
+        )
         assert session_id == ""
         assert extra == ["--verbose"]
 
     def test_no_args_exits(self):
         with pytest.raises(SystemExit):
-            parse_args([])
+            split_positional_args([])
 
     def test_flag_as_second_arg_is_not_session(self):
-        org_file, session_id, extra = parse_args(["test.org", "--verbose"])
+        _org_file, session_id, extra = split_positional_args(["test.org", "--verbose"])
         assert session_id == ""
         assert extra == ["--verbose"]
 
 
 class TestIsValidSession:
     def test_valid(self):
-        assert _is_valid_session("cli-123") is True
+        assert is_valid_session("cli-123") is True
 
     def test_empty(self):
-        assert _is_valid_session("") is False
+        assert is_valid_session("") is False
 
     def test_null(self):
-        assert _is_valid_session("null") is False
+        assert is_valid_session("null") is False
 
     def test_nil(self):
-        assert _is_valid_session("nil") is False
+        assert is_valid_session("nil") is False
 
 
-class TestBuildClaudeArgs:
-    # build_claude_args now writes workspace-hooks.json into the plugin dir,
-    # so tests need a real writable path (pytest's tmp_path fixture).
-
+class TestBuildArgs:
     def test_minimal(self, tmp_path):
-        args = build_claude_args(str(tmp_path), "http://localhost:9999/mcp", "", [])
+        launcher = _make_launcher(tmp_path)
+        args = launcher.build_args()
         assert args[0] == "claude"
         assert "--plugin-dir" in args
         assert "--mcp-config" in args
@@ -76,117 +102,97 @@ class TestBuildClaudeArgs:
         assert "--resume" not in args
 
     def test_with_system_prompt(self, tmp_path):
-        args = build_claude_args(
-            str(tmp_path), "http://localhost:9999/mcp", "You are helpful", []
-        )
+        launcher = _make_launcher(tmp_path, system_prompt="You are helpful")
+        args = launcher.build_args()
         idx = args.index("--system-prompt")
         assert args[idx + 1] == "You are helpful"
 
     def test_resume_via_extra_args(self, tmp_path):
-        """--resume comes from Emacs via extra_args (state owner principle)."""
-        args = build_claude_args(
-            str(tmp_path), "http://localhost:9999/mcp", "", ["--resume", "cli-123"]
-        )
+        launcher = _make_launcher(tmp_path, extra_args=["--resume", "cli-123"])
+        args = launcher.build_args()
         idx = args.index("--resume")
         assert args[idx + 1] == "cli-123"
 
     def test_no_resume_without_extra_args(self, tmp_path):
-        """No --resume when extra_args is empty (new story)."""
-        args = build_claude_args(str(tmp_path), "http://x", "", [])
+        args = _make_launcher(tmp_path).build_args()
         assert "--resume" not in args
 
     def test_extra_args(self, tmp_path):
-        args = build_claude_args(
-            str(tmp_path), "http://x", "", ["--verbose", "--model", "opus"]
+        launcher = _make_launcher(
+            tmp_path, extra_args=["--verbose", "--model", "opus"]
         )
+        args = launcher.build_args()
         assert "--verbose" in args and "opus" in args
 
     def test_mcp_config_contains_url(self, tmp_path):
-        args = build_claude_args(str(tmp_path), "http://custom:8080/mcp", "", [])
+        launcher = _make_launcher(tmp_path, mcp_url="http://custom:8080/mcp")
+        args = launcher.build_args()
         config = json.loads(args[args.index("--mcp-config") + 1])
         assert config["mcpServers"]["emacs"]["url"] == "http://custom:8080/mcp"
 
     def test_writes_workspace_hooks_json(self, tmp_path):
-        """build_claude_args writes workspace-hooks.json into plugin_dir.
-        Regression: tests previously passed fake paths like '/p' which broke
-        once _write_hooks_settings started touching disk."""
-        build_claude_args(str(tmp_path), "http://x", "", [])
+        _make_launcher(tmp_path).build_args()
         hooks_file = tmp_path / "workspace-hooks.json"
         assert hooks_file.exists()
         data = json.loads(hooks_file.read_text())
-        # workspace-bridge hooks inject Stop/UserPromptSubmit/SessionStart
         assert "Stop" in data["hooks"]
         assert "UserPromptSubmit" in data["hooks"]
         assert "SessionStart" in data["hooks"]
 
 
-class TestBuildClaudeArgsIde:
-    """Tests for --ide flag in build_claude_args."""
-
+class TestBuildArgsIde:
     def test_ide_flag_always_present(self, tmp_path):
-        """build_claude_args always includes --ide."""
-        args = build_claude_args(str(tmp_path), "http://mcp", "", [])
+        args = _make_launcher(tmp_path).build_args()
         assert "--ide" in args
 
     def test_ide_flag_with_extra_args(self, tmp_path):
-        """--ide coexists with extra args."""
-        args = build_claude_args(str(tmp_path), "http://mcp", "", ["--verbose"])
+        args = _make_launcher(tmp_path, extra_args=["--verbose"]).build_args()
         assert "--ide" in args
         assert "--verbose" in args
 
 
 class TestCleanupIdeServer:
-    """Tests for cleanup_ide_server."""
-
     def test_cleanup_calls_mcp(self):
-        """cleanup_ide_server calls MCP to stop the IDE server."""
         mcp = MagicMock()
-        cleanup_ide_server(mcp, "test-123")
+        _cleanup_ide_server(mcp, "test-123")
         assert mcp.eval_elisp.called
         call_arg = mcp.eval_elisp.call_args[0][0]
         assert "claude-ide-stop-server" in call_arg
         assert "test-123" in call_arg
 
     def test_cleanup_swallows_errors(self):
-        """cleanup_ide_server does not raise even if MCP is unreachable."""
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = ConnectionError("unreachable")
-        cleanup_ide_server(mcp, "test")  # should not raise
+        _cleanup_ide_server(mcp, "test")  # should not raise
 
     def test_cleanup_skips_empty_session(self):
-        """cleanup_ide_server skips MCP call for empty session_id."""
         mcp = MagicMock()
-        cleanup_ide_server(mcp, "")
+        _cleanup_ide_server(mcp, "")
         assert not mcp.eval_elisp.called
 
 
-class TestNormalizeName:
-    """Tests for _normalize_name."""
-
+class TestNormalizeStorySlug:
     def test_simple_ascii(self):
-        assert _normalize_name("my story") == "my-story"
+        assert _normalize_story_slug("my story") == "my-story"
 
     def test_mixed_case(self):
-        assert _normalize_name("My Story Name") == "my-story-name"
+        assert _normalize_story_slug("My Story Name") == "my-story-name"
 
     def test_special_chars(self):
-        assert _normalize_name("fix: bug #123!") == "fix-bug-123"
+        assert _normalize_story_slug("fix: bug #123!") == "fix-bug-123"
 
     def test_all_unicode_returns_empty(self):
-        """BUG PY-1: All-unicode name normalizes to empty string."""
-        assert _normalize_name("混合中文") == ""
+        """All-unicode name normalises to empty string."""
+        assert _normalize_story_slug("混合中文") == ""
 
-    def test_empty_name_not_passed_to_cli(self, tmp_path):
-        """BUG PY-1: Empty normalized name must NOT produce --name ''."""
-        args = build_claude_args(
-            str(tmp_path), "http://x", "", [], story_name="混合中文"
-        )
+    def test_empty_slug_not_passed_to_cli(self, tmp_path):
+        """Empty normalised name must NOT produce --name ''."""
+        launcher = _make_launcher(tmp_path, story_name="混合中文")
+        args = launcher.build_args()
         assert "--name" not in args
 
-    def test_valid_name_passed_to_cli(self, tmp_path):
-        """Normal story name produces --name with normalized slug."""
-        args = build_claude_args(
-            str(tmp_path), "http://x", "", [], story_name="My Story"
-        )
+    def test_valid_slug_passed_to_cli(self, tmp_path):
+        launcher = _make_launcher(tmp_path, story_name="My Story")
+        args = launcher.build_args()
         idx = args.index("--name")
         assert args[idx + 1] == "my-story"
