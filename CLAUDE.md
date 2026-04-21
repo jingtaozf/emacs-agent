@@ -99,6 +99,23 @@ When investigating any issue:
 5. Inspect real results (buffer contents, cmux output, Phoenix traces)
 6. Only then report to user with actual output
 
+## Design Principles (read before editing)
+
+Two style rules are canonical for this project and apply to both
+languages (Elisp `.org` modules and Python under `python/`):
+
+| Rule | File | What it enforces |
+|---|---|---|
+| Literate programming — document first | `.claude/rules/literate-programming-document-first.md` | Prose before every code block; section headings name *concepts*, not "Functions"; one block = one meaningful step; org file carries design record + rejected alternatives. |
+| OOP — Smalltalk-flavoured protocols | `.claude/rules/oop-smalltalk-protocols.md` | Classes + generics (Elisp: `cl-defstruct` + `cl-defgeneric`; Python: classes + `typing.Protocol`/ABC). No free functions on plists/dicts for modules with real behaviour. Dispatch on the receiver, not on a keyword. |
+
+Example in this repo: `claude-agent-backend.org` defines the protocol
+(`claude-agent-backend-query`, `-cancel`, `-cleanup`, `-classify-error`,
+etc.); `claude-agent-acp-backend` and `claude-agent-json-backend` each
+`cl-defmethod` those generics. Callers in `claude-org.org` dispatch on
+the backend instance — they never branch on a string or symbol
+discriminator. New modules must follow the same pattern.
+
 ## Architecture
 
 See `ARCHITECTURE.org` for module boundaries, invariants, and extension points.

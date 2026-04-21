@@ -1,7 +1,11 @@
-"""Tests for the workspace bridge hook handler."""
+"""Tests for the workspace bridge hook handler.
+
+After the refactor the bridge is a class (``WorkspaceBridge``); tests
+construct a bridge and call methods on it rather than free functions.
+A small ``make_bridge`` helper keeps the boilerplate down.
+"""
 
 import json
-import os
 
 import pytest
 
@@ -10,19 +14,26 @@ from unittest.mock import MagicMock
 from claude_agent.mcp_client import McpConnectionError
 
 from claude_agent.workspace_bridge import (
+    WorkspaceBridge,
     _escape_elisp_string,
     _extract_copilot_response,
     _extract_full_response,
     _format_todos_as_elisp,
-    _mcp_eval_with_trace,
-    _read_custom_id,
-    _write_custom_id,
-    handle_permission,
-    handle_permission_clear,
-    handle_prompt,
-    handle_response,
     write_status,
 )
+
+
+# ----------------------------------------------------------------------
+# Fixture helpers
+# ----------------------------------------------------------------------
+
+def make_bridge(mcp=None, org_file="/tmp/f.org", session_id="sid"):
+    """Return a WorkspaceBridge with a default MagicMock MCP client."""
+    return WorkspaceBridge(
+        mcp=mcp if mcp is not None else MagicMock(),
+        org_file=org_file,
+        session_id=session_id,
+    )
 
 
 class TestWriteStatus:
@@ -39,48 +50,82 @@ class TestWriteStatus:
 
 
 class TestCustomIdPersistence:
+    """Custom-id read/write/clear are now methods on the bridge."""
+
     def test_write_and_read(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        _write_custom_id("sid", "sdd-123-instr-3")
-        assert _read_custom_id("sid") == "sdd-123-instr-3"
+        bridge = make_bridge(session_id="sid")
+        bridge._write_custom_id("sdd-123-instr-3")
+        assert bridge._read_custom_id() == "sdd-123-instr-3"
 
     def test_read_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        assert _read_custom_id("nonexistent") is None
+        bridge = make_bridge(session_id="nonexistent")
+        assert bridge._read_custom_id() is None
 
     def test_overwrite(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        _write_custom_id("sid", "sdd-123-instr-1")
-        _write_custom_id("sid", "sdd-123-instr-2")
-        assert _read_custom_id("sid") == "sdd-123-instr-2"
+        bridge = make_bridge(session_id="sid")
+        bridge._write_custom_id("sdd-123-instr-1")
+        bridge._write_custom_id("sdd-123-instr-2")
+        assert bridge._read_custom_id() == "sdd-123-instr-2"
+
+    def test_clear_removes_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge(session_id="sid")
+        bridge._write_custom_id("cid")
+        bridge._clear_custom_id()
+        assert bridge._read_custom_id() is None
+
+    def test_clear_missing_is_noop(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge(session_id="never-written")
+        bridge._clear_custom_id()  # should not raise
+
+
+class TestHandleDispatch:
+    """The ``handle`` method routes events to ``_handle_<event>``."""
+
+    def test_known_event_dispatches(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge()
+        seen = []
+        bridge._handle_prompt = lambda data: seen.append(("prompt", data))
+        bridge.handle("prompt", {"prompt": "hi"})
+        assert seen == [("prompt", {"prompt": "hi"})]
+
+    def test_hyphenated_event_dispatches(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge()
+        seen = []
+        bridge._handle_permission_clear = lambda data: seen.append(data)
+        bridge.handle("permission-clear", {"tool_name": "X"})
+        assert seen == [{"tool_name": "X"}]
+
+    def test_unknown_event_warns_and_returns(self, capsys, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge()
+        bridge.handle("never-seen-event", {})
+        assert "unknown event" in capsys.readouterr().err
 
 
 class TestHandleResponseQueryCompleted:
-    """handle_response calls query-completed to unregister from active-queries."""
+    """``_handle_response`` notifies query-completed on every exit path."""
 
     def test_query_completed_called(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        _write_custom_id("sid", "instr-custom-id")
         mcp = MagicMock()
-        handle_response(
-            mcp,
-            {"last_assistant_message": "hello"},
-            "/tmp/f.org",
-            "sid",
-        )
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._write_custom_id("instr-custom-id")
+        bridge._handle_response({"last_assistant_message": "hello"})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("claude-org--terminal-query-completed" in c for c in calls)
 
     def test_query_completed_called_even_without_response(self, tmp_path, monkeypatch):
-        """query-completed fires even when there's no response text."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
-        handle_response(
-            mcp,
-            {},
-            "/tmp/f.org",
-            "sid",
-        )
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response({})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("claude-org--terminal-query-completed" in c for c in calls)
 
@@ -154,7 +199,6 @@ class TestExtractFullResponse:
         assert _extract_full_response(path) == "world"
 
     def test_multi_turn_skips_tool_use_turns(self, tmp_path):
-        """Assistant turns containing tool_use blocks are skipped (intermediate noise)."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -166,7 +210,6 @@ class TestExtractFullResponse:
         assert _extract_full_response(path) == "Done! Here's the result."
 
     def test_multi_turn_keeps_pure_text_turns(self, tmp_path):
-        """Multiple pure-text assistant turns are all kept."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -179,7 +222,6 @@ class TestExtractFullResponse:
         assert _extract_full_response(path) == "First part.\n\nSecond part."
 
     def test_user_in_middle(self, tmp_path):
-        """Only collects text after the LAST user entry."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -206,7 +248,6 @@ class TestExtractFullResponse:
         assert _extract_full_response(path) == ""
 
     def test_no_user_entry(self, tmp_path):
-        """If no user entry, collects all assistant text."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -217,7 +258,6 @@ class TestExtractFullResponse:
         assert _extract_full_response(path) == "hello\n\nworld"
 
     def test_all_tool_use_turns_returns_empty(self, tmp_path):
-        """If every assistant turn has tool_use, returns empty string."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -229,7 +269,6 @@ class TestExtractFullResponse:
         assert _extract_full_response(path) == ""
 
     def test_content_null_does_not_crash(self, tmp_path):
-        """BUG-1: content=null in JSON must not raise TypeError."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -241,7 +280,6 @@ class TestExtractFullResponse:
         assert _extract_full_response(path) == "final answer"
 
     def test_content_null_only(self, tmp_path):
-        """BUG-1: all assistant turns with content=null → empty string."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -288,7 +326,6 @@ class TestExtractCopilotResponse:
         assert _extract_copilot_response(path) == "Hello there!"
 
     def test_skips_tool_use_turns(self, tmp_path):
-        """Turns with toolRequests are skipped — only final answer returned."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -303,7 +340,6 @@ class TestExtractCopilotResponse:
         assert _extract_copilot_response(path) == "Done! Here's the result."
 
     def test_only_last_turn_after_user(self, tmp_path):
-        """Only collects text after the LAST user.message entry."""
         path = self._make_transcript(
             tmp_path,
             [
@@ -336,7 +372,6 @@ class TestHandleResponseCopilotFormat:
     """handle_response handles Copilot's camelCase fields."""
 
     def test_camelcase_transcript_path(self, tmp_path, monkeypatch):
-        """handle_response accepts camelCase transcriptPath from Copilot sessionEnd."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         transcript = tmp_path / "events.jsonl"
         transcript.write_text(
@@ -351,40 +386,28 @@ class TestHandleResponseCopilotFormat:
                 }
             )
         )
-        from claude_agent.workspace_bridge import _write_custom_id
-
-        _write_custom_id("sid", "cid")
         mcp = MagicMock()
-        handle_response(
-            mcp,
-            {"transcriptPath": str(transcript), "sessionId": "abc"},
-            "/tmp/f.org",
-            "sid",
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._write_custom_id("cid")
+        bridge._handle_response(
+            {"transcriptPath": str(transcript), "sessionId": "abc"}
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("answer" in c for c in calls)
 
     def test_camelcase_session_id_saved(self, tmp_path, monkeypatch):
-        """sessionId (camelCase) is used for save-cli-session when present."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        from claude_agent.workspace_bridge import _write_custom_id
-
-        _write_custom_id("sid", "cid")
         mcp = MagicMock()
-        handle_response(
-            mcp,
-            {"last_assistant_message": "hi", "sessionId": "copilot-session-123"},
-            "/tmp/f.org",
-            "sid",
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._write_custom_id("cid")
+        bridge._handle_response(
+            {"last_assistant_message": "hi", "sessionId": "copilot-session-123"}
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        # At least one call should reference saving the session
         assert len(calls) > 0
 
     def test_auto_discover_copilot_events_jsonl(self, tmp_path, monkeypatch):
-        """When no transcript_path, discover events.jsonl from copilot session state."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        # Create copilot session state directory
         copilot_session_id = "abc-123-def"
         session_dir = tmp_path / ".copilot" / "session-state" / copilot_session_id
         session_dir.mkdir(parents=True)
@@ -403,21 +426,13 @@ class TestHandleResponseCopilotFormat:
                 }
             )
         )
-        # Patch expanduser to use tmp_path as home
         monkeypatch.setattr(
             "os.path.expanduser", lambda p: str(tmp_path / p.lstrip("~/"))
         )
-        from claude_agent.workspace_bridge import _write_custom_id
-
-        _write_custom_id("sid", "cid")
         mcp = MagicMock()
-        # No transcript_path in input — only sessionId
-        handle_response(
-            mcp,
-            {"sessionId": copilot_session_id},
-            "/tmp/f.org",
-            "sid",
-        )
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._write_custom_id("cid")
+        bridge._handle_response({"sessionId": copilot_session_id})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("discovered answer" in c for c in calls)
 
@@ -448,20 +463,18 @@ class TestFormatTodosAsElisp:
         assert result == '((:content "Urgent" :status "pending" :priority 1))'
 
     def test_string_priority_coerced(self):
-        """Priority that can't be int-coerced defaults to 0."""
         todos = [{"content": "X", "status": "pending", "priority": "high"}]
         result = _format_todos_as_elisp(todos)
         assert ":priority 0" in result
 
     def test_non_numeric_priority_safe(self):
-        """Malformed priority cannot inject elisp."""
         todos = [{"content": "X", "status": "pending", "priority": "1) (evil"}]
         result = _format_todos_as_elisp(todos)
         assert ":priority 0" in result
 
 
 class TestHandlePromptFiltering:
-    """Test that handle_prompt skips non-human prompts."""
+    """``_handle_prompt`` skips non-human prompts and saves custom_id."""
 
     def _make_mcp(self):
         mcp = MagicMock()
@@ -472,19 +485,19 @@ class TestHandlePromptFiltering:
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         mcp.eval_elisp.return_value = "sid-instr-1"
-        handle_prompt(mcp, {"prompt": "explain this function"}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_prompt({"prompt": "explain this function"})
         assert mcp.eval_elisp.called
 
     def test_prompt_saves_custom_id(self, tmp_path, monkeypatch):
-        """handle_prompt saves the instruction CUSTOM_ID returned by MCP."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         mcp.eval_elisp.return_value = "sdd-123-instr-5"
-        handle_prompt(mcp, {"prompt": "do X"}, "/tmp/f.org", "sid")
-        assert _read_custom_id("sid") == "sdd-123-instr-5"
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_prompt({"prompt": "do X"})
+        assert bridge._read_custom_id() == "sdd-123-instr-5"
 
     def test_task_notification_skipped(self, tmp_path, monkeypatch):
-        """Task notifications from background agents should not create Instruction headings."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         prompt = (
@@ -495,22 +508,23 @@ class TestHandlePromptFiltering:
             "<result>Found the answer.</result>\n"
             "</task-notification>"
         )
-        handle_prompt(mcp, {"prompt": prompt}, "/tmp/f.org", "sid")
-        # Should NOT call eval_elisp to insert a prompt
+        bridge = make_bridge(mcp)
+        bridge._handle_prompt({"prompt": prompt})
         assert not mcp.eval_elisp.called
 
     def test_system_reminder_skipped(self, tmp_path, monkeypatch):
-        """System reminders injected by CLI should not create Instruction headings."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         prompt = "<system-reminder>\nThe task tools haven't been used recently.\n</system-reminder>"
-        handle_prompt(mcp, {"prompt": prompt}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_prompt({"prompt": prompt})
         assert not mcp.eval_elisp.called
 
     def test_empty_prompt_skipped(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
-        handle_prompt(mcp, {"prompt": ""}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_prompt({"prompt": ""})
         assert not mcp.eval_elisp.called
 
 
@@ -518,9 +532,9 @@ class TestHandlePermission:
     """Tests for PreToolUse permission notification."""
 
     def test_ask_user_question_notifies_emacs(self, capsys):
-        """AskUserQuestion triggers notification + returns ask."""
         mcp = MagicMock()
-        handle_permission(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_permission({"tool_name": "AskUserQuestion"})
         call_arg = mcp.eval_elisp.call_args[0][0]
         assert "claude-org--terminal-permission-needed" in call_arg
         assert "AskUserQuestion" in call_arg
@@ -528,88 +542,80 @@ class TestHandlePermission:
         assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     def test_exit_plan_mode_notifies_emacs(self, capsys):
-        """ExitPlanMode triggers notification + returns ask."""
         mcp = MagicMock()
-        handle_permission(mcp, {"tool_name": "ExitPlanMode"}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_permission({"tool_name": "ExitPlanMode"})
         assert mcp.eval_elisp.called
         output = json.loads(capsys.readouterr().out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     def test_regular_tool_no_notification(self, capsys):
-        """Bash/Edit/etc. produce no output and no notification."""
         mcp = MagicMock()
-        handle_permission(mcp, {"tool_name": "Bash"}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_permission({"tool_name": "Bash"})
         assert not mcp.eval_elisp.called
         assert capsys.readouterr().out == ""
 
     def test_ask_even_on_mcp_failure(self, capsys):
-        """Permission decision is printed even if MCP call fails."""
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = McpConnectionError("unreachable")
-        handle_permission(mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_permission({"tool_name": "AskUserQuestion"})
         output = json.loads(capsys.readouterr().out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
 class TestHandlePermissionClear:
-    """Tests for PostToolUse permission clear.
-
-    Only interactive tools (AskUserQuestion, ExitPlanMode) trigger the MCP
-    call — non-interactive tools never set a pending permission in Emacs,
-    so clearing would block Emacs's main thread for nothing.
-    """
+    """Tests for PostToolUse permission clear."""
 
     def test_clears_in_emacs_for_interactive_tool(self):
         mcp = MagicMock()
-        handle_permission_clear(
-            mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid"
-        )
+        bridge = make_bridge(mcp)
+        bridge._handle_permission_clear({"tool_name": "AskUserQuestion"})
         call_arg = mcp.eval_elisp.call_args[0][0]
         assert "claude-org--terminal-permission-resolved" in call_arg
         assert "sid" in call_arg
 
     def test_clears_in_emacs_for_exit_plan_mode(self):
         mcp = MagicMock()
-        handle_permission_clear(mcp, {"tool_name": "ExitPlanMode"}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_permission_clear({"tool_name": "ExitPlanMode"})
         call_arg = mcp.eval_elisp.call_args[0][0]
         assert "claude-org--terminal-permission-resolved" in call_arg
 
     def test_skips_mcp_for_non_interactive_tool(self):
-        """Bash, Read, Grep, Edit, etc. never set a permission — skip MCP entirely."""
         mcp = MagicMock()
-        handle_permission_clear(mcp, {"tool_name": "Bash"}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_permission_clear({"tool_name": "Bash"})
         mcp.eval_elisp.assert_not_called()
 
     def test_skips_mcp_for_unknown_tool(self):
-        """Missing tool_name defaults to 'unknown' — not in _INTERACTIVE_TOOLS."""
         mcp = MagicMock()
-        handle_permission_clear(mcp, {}, "/tmp/f.org", "sid")
+        bridge = make_bridge(mcp)
+        bridge._handle_permission_clear({})
         mcp.eval_elisp.assert_not_called()
 
     def test_swallows_mcp_errors(self):
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = McpConnectionError("gone")
-        # Use an interactive tool so the MCP call is attempted
-        handle_permission_clear(
-            mcp, {"tool_name": "AskUserQuestion"}, "/tmp/f.org", "sid"
-        )
+        bridge = make_bridge(mcp)
+        bridge._handle_permission_clear({"tool_name": "AskUserQuestion"})
 
 
-class TestMcpEvalWithTrace:
-    """Tests for _mcp_eval_with_trace wrapper."""
+class TestMcpEval:
+    """Tests for the bridge's ``_mcp_eval`` method (trace-context wrapping)."""
 
     def test_passes_elisp_without_active_span(self):
-        """Without an active span, calls eval_elisp with original elisp."""
         mcp = MagicMock()
         mcp.eval_elisp.return_value = "result"
-        result = _mcp_eval_with_trace(mcp, "(+ 1 2)")
+        bridge = make_bridge(mcp)
+        result = bridge._mcp_eval("(+ 1 2)")
         assert result == "result"
         call_arg = mcp.eval_elisp.call_args[0][0]
-        # No active span → no wrapping (INVALID_SPAN has is_valid=False)
+        # No active span → no wrapping
         assert "(+ 1 2)" in call_arg
 
     def test_wraps_elisp_with_active_span(self, monkeypatch):
-        """With a valid active span, wraps elisp in let-binding."""
         mock_ctx = MagicMock()
         mock_ctx.is_valid = True
         mock_ctx.trace_id = 0xAABBCCDDEEFF0011AABBCCDDEEFF0011
@@ -618,13 +624,16 @@ class TestMcpEvalWithTrace:
         mock_span = MagicMock()
         mock_span.get_span_context.return_value = mock_ctx
 
-        import claude_agent.workspace_bridge as bridge
+        import claude_agent.workspace_bridge as bridge_mod
 
-        monkeypatch.setattr(bridge.otel_trace, "get_current_span", lambda: mock_span)
+        monkeypatch.setattr(
+            bridge_mod.otel_trace, "get_current_span", lambda: mock_span
+        )
 
         mcp = MagicMock()
         mcp.eval_elisp.return_value = "ok"
-        _mcp_eval_with_trace(mcp, "(my-func)")
+        bridge = make_bridge(mcp)
+        bridge._mcp_eval("(my-func)")
         call_arg = mcp.eval_elisp.call_args[0][0]
         assert "claude-agent-trace--current-context" in call_arg
         assert "aabbccddeeff0011aabbccddeeff0011" in call_arg
@@ -632,122 +641,80 @@ class TestMcpEvalWithTrace:
         assert "(my-func)" in call_arg
 
     def test_propagates_mcp_errors(self):
-        """McpConnectionError propagates to caller."""
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = McpConnectionError("timeout")
+        bridge = make_bridge(mcp)
         with pytest.raises(McpConnectionError):
-            _mcp_eval_with_trace(mcp, "(fail)")
+            bridge._mcp_eval("(fail)")
 
 
 class TestHandleResponsePromptInsertion:
-    """handle_response inserts prompt via MCP when custom_id is missing (OpenCode flow)."""
+    """``_handle_response`` mints a custom_id when OpenCode provides none."""
 
     def test_terminal_prompt_inserts_prompt_then_response(self, tmp_path, monkeypatch):
-        """When no custom_id and last_user_message present, insert prompt first."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
-        # First MCP call returns custom_id from insert-prompt,
-        # subsequent calls return None (response insertion, query-completed)
         mcp.eval_elisp.side_effect = ["test-custom-id", None, None]
-        handle_response(
-            mcp,
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response(
             {
                 "last_assistant_message": "the response",
                 "last_user_message": "the prompt",
-            },
-            "/tmp/f.org",
-            "sid",
+            }
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        # First call should be insert-prompt
         assert "insert-prompt" in calls[0]
         assert "the prompt" in calls[0]
-        # Second call should be insert-response with the returned custom_id
         assert "insert-response" in calls[1]
         assert "test-custom-id" in calls[1]
         assert "the response" in calls[1]
 
     def test_no_custom_id_no_user_message_returns_early(self, tmp_path, monkeypatch):
-        """When no custom_id and no last_user_message, just mark completed."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
-        handle_response(
-            mcp,
-            {"last_assistant_message": "orphan response"},
-            "/tmp/f.org",
-            "sid",
-        )
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response({"last_assistant_message": "orphan response"})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        # Should only call query-completed, no insert-prompt or insert-response
         assert all("insert-prompt" not in c for c in calls)
         assert all("insert-response" not in c for c in calls)
         assert any("terminal-query-completed" in c for c in calls)
 
     def test_from_emacs_flag_rereads_custom_id(self, tmp_path, monkeypatch):
-        """When from-emacs flag exists, consume it and re-read custom_id."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        # Write from-emacs flag and custom-id (simulating Emacs-initiated flow)
         (tmp_path / "sid.from-emacs").write_text("1")
-        _write_custom_id("sid", "emacs-custom-id")
-        # But don't write it at the normal read time (first read returns None)
-        # Actually the first _read_custom_id at line 286 reads before our code —
-        # we need custom-id to NOT exist at first read but exist at re-read.
-        # Reset: delete custom-id, write from-emacs, then re-create custom-id
-        # This is tricky — in real flow, custom-id IS written by Emacs at the same
-        # time as from-emacs. But _read_custom_id is called BEFORE our new code.
-        # So let's just test with custom-id already present — the initial read
-        # at line 286 will find it, and our new code won't even be reached.
-        # Instead, test the path where custom-id doesn't exist initially but
-        # from-emacs flag exists. We need to write custom-id AFTER the initial read.
-        # Use side_effect to write custom-id on second call... too complex.
-        # Simplest test: verify flag is consumed and insert-prompt is NOT called.
+        bridge = make_bridge(MagicMock(), session_id="sid")
+        bridge._write_custom_id("emacs-custom-id")
         mcp = MagicMock()
-        handle_response(
-            mcp,
-            {"last_assistant_message": "response", "last_user_message": "prompt"},
-            "/tmp/f.org",
-            "sid",
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response(
+            {"last_assistant_message": "response", "last_user_message": "prompt"}
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        # custom_id was found by initial read — so our new code is NOT reached
-        # The response should be inserted with emacs-custom-id
         assert any("insert-response" in c and "emacs-custom-id" in c for c in calls)
         assert all("insert-prompt" not in c for c in calls)
 
     def test_from_emacs_flag_no_custom_id_returns_early(self, tmp_path, monkeypatch):
-        """from-emacs flag exists but re-read of custom_id still fails → early return."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
-        # Write from-emacs flag but NO custom-id
         (tmp_path / "sid.from-emacs").write_text("1")
         mcp = MagicMock()
-        handle_response(
-            mcp,
-            {"last_assistant_message": "response", "last_user_message": "prompt"},
-            "/tmp/f.org",
-            "sid",
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response(
+            {"last_assistant_message": "response", "last_user_message": "prompt"}
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        # Flag consumed, no custom_id on re-read → no insert-response
         assert all("insert-response" not in c for c in calls)
         assert all("insert-prompt" not in c for c in calls)
-        # Flag file should be consumed
         assert not (tmp_path / "sid.from-emacs").exists()
 
     def test_insert_prompt_failure_returns_early(self, tmp_path, monkeypatch):
-        """When insert-prompt MCP call fails, return early without inserting response."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
-        from claude_agent.mcp_client import McpConnectionError
-
         mcp.eval_elisp.side_effect = McpConnectionError("timeout")
-        handle_response(
-            mcp,
-            {"last_assistant_message": "response", "last_user_message": "prompt"},
-            "/tmp/f.org",
-            "sid",
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response(
+            {"last_assistant_message": "response", "last_user_message": "prompt"}
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        # insert-prompt failed, then query-completed fired — no insert-response
         assert all("insert-response" not in c for c in calls)
 
     def test_custom_id_written_after_prompt_insertion(self, tmp_path, monkeypatch):
@@ -755,10 +722,23 @@ class TestHandleResponsePromptInsertion:
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = ["new-custom-id", None, None]
-        handle_response(
-            mcp,
-            {"last_assistant_message": "resp", "last_user_message": "prompt"},
-            "/tmp/f.org",
-            "sid",
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response(
+            {"last_assistant_message": "resp", "last_user_message": "prompt"}
         )
-        assert _read_custom_id("sid") == "new-custom-id"
+        assert bridge._read_custom_id() == "new-custom-id"
+
+
+class TestWorkspaceBridgeProtocol:
+    """The published protocol is satisfied by the concrete class (structural)."""
+
+    def test_concrete_has_handle_method(self):
+        from claude_agent.workspace_bridge import WorkspaceBridgeProtocol
+
+        bridge = make_bridge()
+        # Structural: any object with a callable `handle(event, data)` fits.
+        assert callable(getattr(bridge, "handle", None))
+        # typing.Protocol isinstance check (requires runtime_checkable — we
+        # didn't decorate it because the contract is compile-time; just verify
+        # the method signature exists).
+        assert "handle" in dir(WorkspaceBridgeProtocol)
