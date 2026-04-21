@@ -765,7 +765,7 @@ Usage:
 
 Session identity is determined by file path + optional CLAUDE_SESSION_ID property.
 
-** Helper Functions
+** File-Level Property Lookup
 
 File-level properties (=#+ PROPERTY:=) require different lookup logic than
 section properties. This function searches only the file header area (before
@@ -1262,7 +1262,10 @@ Permission mode can be stored as org property `CLAUDE_PERMISSION_MODE`.
 - File-level: =#+PROPERTY: CLAUDE_PERMISSION_MODE accept-edits=
 - Section-level: =:CLAUDE_PERMISSION_MODE: bypass= in property drawer
 
-** Permission Mode Functions
+** Permission Mode Property Resolution
+
+Property lookup with inheritance — section drawer wins over
+file-level =#+PROPERTY:= which wins over the defcustom fallback.
 
 #+BEGIN_SRC elisp
 (defun claude-org--get-permission-mode-property ()
@@ -1613,12 +1616,12 @@ Combines:
 
 Multi-session process management allowing concurrent queries.
 
-** State Variables
+** Session State Cross-Reference
 
-*** Session State (see claude-org-session.org)
-
-Session struct, registry, and accessors are now in =claude-org-session.org=.
-Loaded via =(require 'claude-org-session)= in the Dependencies section.
+The per-query session struct, registry, and accessors live in
+=claude-org-session.org= (composed =cl-defstruct=​s with a routing
+table over four sub-structs).  They're loaded in the Dependencies
+section and used by every module in this file.
 
 ** Persistent Client Registry
 
@@ -5005,6 +5008,13 @@ Assembles components from dedicated badge functions."
 
 * Cancel Support
 
+Interactive cancellation for the active query in the current
+session.  Delegates the heavy lifting to
+=claude-org--cleanup-session= so the same teardown path runs
+whether the cancel came from the user (here) or from an error path
+elsewhere.  A short-lived trace span wraps the request so the
+cancel itself shows up in Phoenix next to the query it aborted.
+
 #+BEGIN_SRC elisp
 (defun claude-org-cancel ()
   "Cancel the current session's active query, stop any loop, and clear queue.
@@ -5101,6 +5111,13 @@ Uses `cleanup-queued-blocks' to properly free markers and reset exec-status."
 
 * Verbose Output
 
+Shows the raw backend transcript buffer for the current session.
+Three sources are tried in order: the cmux capture-pane buffer
+(when the session runs through cmux and has captured output), the
+backend-specific verbose buffer (supplied by
+=claude-agent-backend-verbose-buffer=), and finally the shared
+per-session verbose buffer maintained by =claude-agent=.
+
 #+BEGIN_SRC elisp
 (defun claude-org-show-verbose ()
   "Show verbose output buffer for current session.
@@ -5125,6 +5142,12 @@ then the shared session verbose buffer."
 #+END_SRC
 
 * Session Manager UI
+
+Interactive buffer listing every session registered in the current
+org file.  Useful for spotting zombie sessions, jumping to a
+specific heading, or cancelling a particular run without visiting
+its heading first.  The output format intentionally mirrors the
+workspace listing in =claude-workspace= for consistency.
 
 #+BEGIN_SRC elisp
 (defun claude-org-list-sessions ()
