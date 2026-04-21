@@ -1622,23 +1622,66 @@ Loaded via =(require 'claude-org-session)= in the Dependencies section.
 
 ** Persistent Client Registry
 
-Global registry of persistent Claude clients, keyed by session-key.
-This enables long-running Claude processes that stay alive across multiple queries.
+Long-running Claude clients keyed by session-key.  Unlike
+=claude-org--sessions= (buffer-local, per-query state), this registry
+owns live processes that survive across multiple queries.  Earlier
+versions kept state in a bare hash table plus seven free functions —
+the classic "wrap the hash in a class" smell that
+=.claude/rules/oop-smalltalk-protocols.md= calls out.  The registry
+is now an explicit coordinator: one =claude-org-persistent-registry=
+struct, one singleton, generics for every verb callers need.
+
+*** The Entry Class
+
+One session's persistent-client state.  =cl-defstruct= with typed
+slots replaces the previous untyped =:client= / =:buffer= / =:heading-pos=
+plists so accessors are discoverable and refactors are compiler-checked.
 
 #+BEGIN_SRC elisp
-(defvar claude-org--persistent-clients (make-hash-table :test 'equal)
-  "Global hash table mapping session-key -> persistent client state.
+(cl-defstruct (claude-org-persistent-entry
+               (:constructor claude-org-persistent-entry--create)
+               (:copier nil))
+  "One persistent-client entry held by `claude-org-persistent-registry'."
+  (client nil
+          :documentation "`claude-agent-client' struct — the live process handle.")
+  (buffer nil
+          :documentation "Source org buffer that owns this client (cleaned up on buffer-kill).")
+  (heading-pos nil
+               :documentation "Position of the session-defining heading (for TODO state changes).")
+  (last-activity nil
+                 :documentation "float-time of the most recent query or response.")
+  (query-count 0
+               :documentation "Monotonically-incrementing count of queries dispatched through this client."))
+#+END_SRC
 
-Each entry contains:
-  :client       - claude-agent-client struct
-  :buffer       - source org buffer (for cleanup on buffer kill)
-  :heading-pos  - position of session-defining heading (for TODO state changes)
-  :last-activity - timestamp of last query/response
-  :query-count  - number of queries sent through this client
+*** The Registry Class + Singleton
 
-Unlike `claude-org--sessions' which is buffer-local and tracks per-query state,
-this registry tracks long-running processes that persist across queries.")
+The registry owns the hash.  Only one exists per Emacs
+(=claude-org--persistent-registry=); every call site dispatches into
+it via the generics below.
 
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org-persistent-registry
+               (:constructor claude-org-persistent-registry--create)
+               (:copier nil))
+  "Registry of persistent Claude clients keyed by session-key.
+See the Entry Class above for the per-session shape."
+  (entries (make-hash-table :test 'equal)
+           :documentation "Hash table: session-key (string) → `claude-org-persistent-entry'."))
+
+(defvar claude-org--persistent-registry
+  (claude-org-persistent-registry--create)
+  "The module-wide singleton registry.
+Tests may rebind this, but all normal code paths share the one
+instance because a persistent client is a per-Emacs resource.")
+#+END_SRC
+
+*** Customization
+
+=claude-org-persistent-sessions= opts into the persistent pool;
+=claude-org-backend-type= selects which backend implementation is used.
+
+#+BEGIN_SRC elisp
 (defcustom claude-org-persistent-sessions nil
   "When non-nil, use persistent process pool for sessions.
 When nil, spawn a new process for each query (legacy behavior).
@@ -1656,70 +1699,157 @@ Selects which backend implementation to use for new sessions.
     Uses --output-format stream-json with structured messages."
   :type '(radio (const :tag "JSON stream (default)" json-stream))
   :group 'claude-org)
+#+END_SRC
 
-(defun claude-org--get-persistent-client (session-key)
-  "Get persistent client for SESSION-KEY, or nil if none exists."
-  (when-let* ((entry (gethash session-key claude-org--persistent-clients)))
-    (plist-get entry :client)))
+*** Lookup
 
-(defun claude-org--persistent-client-alive-p (session-key)
-  "Return non-nil if persistent client for SESSION-KEY is alive."
-  (when-let* ((client (claude-org--get-persistent-client session-key)))
+=get-entry= returns the internal struct; =get= returns just the
+client (the common read path); =alive-p= is a bool shortcut.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-persistent-registry-get-entry
+    (registry session-key)
+  "Return the `claude-org-persistent-entry' for SESSION-KEY, or nil.")
+
+(cl-defmethod claude-org-persistent-registry-get-entry
+    ((registry claude-org-persistent-registry) session-key)
+  "Default implementation: hash lookup."
+  (gethash session-key (claude-org-persistent-registry-entries registry)))
+
+(cl-defgeneric claude-org-persistent-registry-get
+    (registry session-key)
+  "Return the live client handle for SESSION-KEY, or nil if absent.")
+
+(cl-defmethod claude-org-persistent-registry-get
+    ((registry claude-org-persistent-registry) session-key)
+  "Default implementation: return the `client' slot of the entry, if any."
+  (when-let* ((entry (claude-org-persistent-registry-get-entry
+                      registry session-key)))
+    (claude-org-persistent-entry-client entry)))
+
+(cl-defgeneric claude-org-persistent-registry-alive-p
+    (registry session-key)
+  "Return non-nil iff SESSION-KEY has a live client in REGISTRY.")
+
+(cl-defmethod claude-org-persistent-registry-alive-p
+    ((registry claude-org-persistent-registry) session-key)
+  "Default implementation: look up + `claude-agent-client-alive-p'."
+  (when-let* ((client (claude-org-persistent-registry-get registry
+                                                          session-key)))
     (claude-agent-client-alive-p client)))
+#+END_SRC
 
-(defun claude-org--register-persistent-client (session-key client buffer heading-pos)
-  "Register CLIENT as persistent client for SESSION-KEY.
-BUFFER is the org buffer that owns this client.
-HEADING-POS is the position of the session-defining heading."
+*** Registration + Activity
+
+=register= records a new entry; =update-activity= bumps the
+timestamp and increments the query counter after each successful
+dispatch.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-persistent-registry-register
+    (registry session-key client buffer heading-pos)
+  "Record CLIENT + BUFFER + HEADING-POS under SESSION-KEY in REGISTRY.")
+
+(cl-defmethod claude-org-persistent-registry-register
+    ((registry claude-org-persistent-registry)
+     session-key client buffer heading-pos)
+  "Default implementation: build the entry and puthash it."
   (puthash session-key
-           (list :client client
-                 :buffer buffer
-                 :heading-pos heading-pos
-                 :last-activity (float-time)
-                 :query-count 0)
-           claude-org--persistent-clients))
+           (claude-org-persistent-entry--create
+            :client client
+            :buffer buffer
+            :heading-pos heading-pos
+            :last-activity (float-time)
+            :query-count 0)
+           (claude-org-persistent-registry-entries registry)))
 
-(defun claude-org--update-persistent-client-activity (session-key)
-  "Update last activity timestamp for SESSION-KEY."
-  (when-let* ((entry (gethash session-key claude-org--persistent-clients)))
-    (plist-put entry :last-activity (float-time))
-    (plist-put entry :query-count (1+ (or (plist-get entry :query-count) 0)))
-    (puthash session-key entry claude-org--persistent-clients)))
+(cl-defgeneric claude-org-persistent-registry-update-activity
+    (registry session-key)
+  "Bump `last-activity' and increment `query-count' for SESSION-KEY.")
 
-(defun claude-org--disconnect-persistent-client (session-key &optional reason)
-  "Disconnect persistent client for SESSION-KEY.
-REASON is an optional string explaining why (for logging)."
-  (when-let* ((entry (gethash session-key claude-org--persistent-clients)))
-    (when-let* ((client (plist-get entry :client)))
+(cl-defmethod claude-org-persistent-registry-update-activity
+    ((registry claude-org-persistent-registry) session-key)
+  "Default implementation: mutate the entry's slots in place."
+  (when-let* ((entry (claude-org-persistent-registry-get-entry
+                      registry session-key)))
+    (setf (claude-org-persistent-entry-last-activity entry) (float-time))
+    (setf (claude-org-persistent-entry-query-count entry)
+          (1+ (or (claude-org-persistent-entry-query-count entry) 0)))))
+#+END_SRC
+
+*** Disconnection
+
+Two verbs: one-session and all-for-buffer.  The single-session path
+emits a user-facing message; the buffer-sweep path delegates to the
+single-session path so the message format stays consistent.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-persistent-registry-disconnect
+    (registry session-key &optional reason)
+  "Disconnect and remove the entry for SESSION-KEY from REGISTRY.
+REASON (optional string) is shown in the user-facing message.")
+
+(cl-defmethod claude-org-persistent-registry-disconnect
+    ((registry claude-org-persistent-registry) session-key &optional reason)
+  "Default implementation: tear down the client then remove the entry."
+  (when-let* ((entry (claude-org-persistent-registry-get-entry
+                      registry session-key)))
+    (when-let* ((client (claude-org-persistent-entry-client entry)))
       (when (claude-agent-client-alive-p client)
         (claude-agent-client-disconnect client)))
-    (remhash session-key claude-org--persistent-clients)
+    (remhash session-key
+             (claude-org-persistent-registry-entries registry))
     (message "Claude: Disconnected session %s%s"
              (claude-org--session-display-name session-key)
              (if reason (format " (%s)" reason) ""))))
 
-(defun claude-org--disconnect-all-clients-for-buffer (buffer)
-  "Disconnect all persistent clients associated with BUFFER."
+(cl-defgeneric claude-org-persistent-registry-disconnect-buffer
+    (registry buffer)
+  "Disconnect every entry whose `buffer' slot matches BUFFER.")
+
+(cl-defmethod claude-org-persistent-registry-disconnect-buffer
+    ((registry claude-org-persistent-registry) buffer)
+  "Default implementation: collect keys first, then dispatch one-by-one."
   (let ((to-remove nil))
     (maphash (lambda (key entry)
-               (when (eq (plist-get entry :buffer) buffer)
+               (when (eq (claude-org-persistent-entry-buffer entry) buffer)
                  (push key to-remove)))
-             claude-org--persistent-clients)
+             (claude-org-persistent-registry-entries registry))
     (dolist (key to-remove)
-      (claude-org--disconnect-persistent-client key "buffer killed"))))
+      (claude-org-persistent-registry-disconnect registry key "buffer killed"))))
+#+END_SRC
 
-(defun claude-org--list-persistent-clients ()
-  "Return list of (session-key . info-plist) for all persistent clients."
-  (let ((clients nil))
-    (maphash (lambda (key entry)
-               (push (cons key entry) clients))
-             claude-org--persistent-clients)
-    (nreverse clients)))
+*** Enumeration
 
-(defun claude-org--persistent-client-count ()
-  "Return count of active persistent clients."
-  (hash-table-count claude-org--persistent-clients))
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-persistent-registry-list (registry)
+  "Return a list of (SESSION-KEY . ENTRY) pairs for every entry in REGISTRY.")
 
+(cl-defmethod claude-org-persistent-registry-list
+    ((registry claude-org-persistent-registry))
+  "Default implementation: maphash into a list."
+  (let ((pairs nil))
+    (maphash (lambda (key entry) (push (cons key entry) pairs))
+             (claude-org-persistent-registry-entries registry))
+    (nreverse pairs)))
+
+(cl-defgeneric claude-org-persistent-registry-count (registry)
+  "Return the number of entries currently held by REGISTRY.")
+
+(cl-defmethod claude-org-persistent-registry-count
+    ((registry claude-org-persistent-registry))
+  "Default implementation: `hash-table-count' on the entries."
+  (hash-table-count (claude-org-persistent-registry-entries registry)))
+#+END_SRC
+
+*** Backend Registry Dispatch
+
+The backend registry maps CLAUDE_BACKEND property strings to
+constructor lambdas.  It's wired to the persistent registry only
+indirectly — ACP constructors use =claude-org--acp-session-persistence=
+to set up session-id auto-save on the returned backend.
+
+#+BEGIN_SRC elisp
 (defun claude-org--acp-session-persistence ()
   "Read the stored ACP_SESSION_ID and return a (INITIAL-ID . SAVE-FN) pair.
 SAVE-FN writes the new session id back to the org entry at point.
@@ -1807,7 +1937,8 @@ Added to `kill-buffer-hook' (buffer-local) in `claude-org-mode'."
     (claude-org-cancel-all))
   ;; Disconnect persistent clients
   (when buffer-file-name
-    (claude-org--disconnect-all-clients-for-buffer (current-buffer))))
+    (claude-org-persistent-registry-disconnect-buffer
+     claude-org--persistent-registry (current-buffer))))
 
 (defvar org-state) ; dynamically bound by Org in todo-state-change hooks
 
@@ -1822,8 +1953,10 @@ Added to `org-after-todo-state-change-hook' (buffer-local) in `claude-org-mode'.
     ;; Check if this heading has a CLAUDE_SESSION_ID
     (when-let* ((session-id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
       (let ((session-key (claude-org--current-session-key)))
-        (when (claude-org--persistent-client-alive-p session-key)
-          (claude-org--disconnect-persistent-client
+        (when (claude-org-persistent-registry-alive-p
+               claude-org--persistent-registry session-key)
+          (claude-org-persistent-registry-disconnect
+           claude-org--persistent-registry
            session-key
            (format "section marked %s" org-state)))))))
 #+END_SRC
@@ -3375,10 +3508,13 @@ Shows the session identity which is file_path + optional CLAUDE_SESSION_ID."
 If there's no persistent client for this session, show a message."
   (interactive)
   (let ((session-key (claude-org--current-session-key)))
-    (if (claude-org--persistent-client-alive-p session-key)
+    (if (claude-org-persistent-registry-alive-p
+         claude-org--persistent-registry session-key)
         (progn
-          (claude-org--disconnect-persistent-client session-key "user requested")
-          (message "Disconnected session: %s" (claude-org--session-display-name session-key)))
+          (claude-org-persistent-registry-disconnect
+           claude-org--persistent-registry session-key "user requested")
+          (message "Disconnected session: %s"
+                   (claude-org--session-display-name session-key)))
       (message "No persistent client for session: %s"
                (claude-org--session-display-name session-key)))))
 
@@ -3386,37 +3522,39 @@ If there's no persistent client for this session, show a message."
   "Disconnect all persistent clients for the current buffer.
 Prompts for confirmation if there are active clients."
   (interactive)
-  (let ((clients (claude-org--list-persistent-clients))
+  (let ((clients (claude-org-persistent-registry-list
+                  claude-org--persistent-registry))
         (buffer (current-buffer))
         (count 0))
-    ;; Count clients for this buffer
-    (dolist (entry clients)
-      (when (eq (plist-get (cdr entry) :buffer) buffer)
+    (dolist (pair clients)
+      (when (eq (claude-org-persistent-entry-buffer (cdr pair)) buffer)
         (cl-incf count)))
     (if (zerop count)
         (message "No persistent clients for this buffer")
       (when (yes-or-no-p (format "Disconnect %d persistent client%s? "
                                  count (if (= count 1) "" "s")))
-        (claude-org--disconnect-all-clients-for-buffer buffer)
+        (claude-org-persistent-registry-disconnect-buffer
+         claude-org--persistent-registry buffer)
         (message "Disconnected %d persistent client%s" count
                  (if (= count 1) "" "s"))))))
 
 (defun claude-org-list-persistent-clients ()
   "List all active persistent clients in a help buffer."
   (interactive)
-  (let ((clients (claude-org--list-persistent-clients)))
+  (let ((clients (claude-org-persistent-registry-list
+                  claude-org--persistent-registry)))
     (if (null clients)
         (message "No active persistent clients")
       (with-help-window "*Claude Persistent Clients*"
         (princ "Claude Persistent Clients\n")
         (princ "=========================\n\n")
-        (dolist (entry clients)
-          (let* ((session-key (car entry))
-                 (info (cdr entry))
-                 (client (plist-get info :client))
-                 (buffer (plist-get info :buffer))
-                 (last-activity (plist-get info :last-activity))
-                 (query-count (plist-get info :query-count)))
+        (dolist (pair clients)
+          (let* ((session-key (car pair))
+                 (entry (cdr pair))
+                 (client (claude-org-persistent-entry-client entry))
+                 (buffer (claude-org-persistent-entry-buffer entry))
+                 (last-activity (claude-org-persistent-entry-last-activity entry))
+                 (query-count (claude-org-persistent-entry-query-count entry)))
             (princ (format "Session: %s\n" session-key))
             (princ (format "  Buffer: %s\n" (if (buffer-live-p buffer)
                                                 (buffer-name buffer)
@@ -4449,7 +4587,8 @@ Stores the resulting backend and query handle in the session."
     (claude-org--session-put session-key :query-handle handle)
     ;; Update persistent client activity if applicable
     (when (claude-agent-backend-supports-p backend :persistent-client)
-      (claude-org--update-persistent-client-activity session-key)))))
+      (claude-org-persistent-registry-update-activity
+       claude-org--persistent-registry session-key)))))
 
 (defun claude-org--send-request (prompt &optional query-context session-key-override)
   "Send PROMPT to Claude via claude-agent.
@@ -5158,7 +5297,8 @@ Key bindings:
     ;; Cancel any active queries
     (claude-org-cancel-all)
     ;; Disconnect persistent clients for this buffer
-    (claude-org--disconnect-all-clients-for-buffer (current-buffer))
+    (claude-org-persistent-registry-disconnect-buffer
+     claude-org--persistent-registry (current-buffer))
     ;; Remove org file protection hook
     (claude-org--remove-protection)
     ;; Stop header timer if no more claude-org buffers

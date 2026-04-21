@@ -940,66 +940,75 @@ This ensures org operations work correctly when called during recovery."
 
 ;;; Persistent Client Registry Tests
 
+(defun test-claude-org--clear-persistent-registry ()
+  "Drain the persistent-client registry — fixture helper."
+  (clrhash (claude-org-persistent-registry-entries
+            claude-org--persistent-registry)))
+
 (ert-deftest test-claude-org-persistent-client-registry-empty ()
   "Test empty persistent client registry."
   :tags '(:unit :fast :stable :isolated :org :persistent)
-  ;; Clear registry first
-  (clrhash claude-org--persistent-clients)
-  (should (= 0 (claude-org--persistent-client-count)))
-  (should (null (claude-org--list-persistent-clients))))
+  (test-claude-org--clear-persistent-registry)
+  (should (= 0 (claude-org-persistent-registry-count
+                claude-org--persistent-registry)))
+  (should (null (claude-org-persistent-registry-list
+                 claude-org--persistent-registry))))
 
 (ert-deftest test-claude-org-register-persistent-client ()
   "Test registering a persistent client."
   :tags '(:unit :fast :stable :isolated :org :persistent)
-  (clrhash claude-org--persistent-clients)
+  (test-claude-org--clear-persistent-registry)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
     (let ((mock-client (claude-agent--make-client
                         :session-key "/tmp/test.org::test-session"
                         :connected-p nil)))
-      (claude-org--register-persistent-client
+      (claude-org-persistent-registry-register
+       claude-org--persistent-registry
        "/tmp/test.org::test-session"
        mock-client
        (current-buffer)
        1)
-      ;; Should be registered
-      (should (= 1 (claude-org--persistent-client-count)))
-      ;; Should be retrievable
-      (should (eq mock-client (claude-org--get-persistent-client "/tmp/test.org::test-session")))
-      ;; Should be in list
-      (let ((clients (claude-org--list-persistent-clients)))
+      (should (= 1 (claude-org-persistent-registry-count
+                    claude-org--persistent-registry)))
+      (should (eq mock-client
+                  (claude-org-persistent-registry-get
+                   claude-org--persistent-registry
+                   "/tmp/test.org::test-session")))
+      (let ((clients (claude-org-persistent-registry-list
+                      claude-org--persistent-registry)))
         (should (= 1 (length clients)))
         (should (equal "/tmp/test.org::test-session" (caar clients))))
-      ;; Cleanup
-      (clrhash claude-org--persistent-clients))))
+      (test-claude-org--clear-persistent-registry))))
 
 (ert-deftest test-claude-org-disconnect-persistent-client ()
   "Test disconnecting a persistent client."
   :tags '(:unit :fast :stable :isolated :org :persistent)
-  (clrhash claude-org--persistent-clients)
+  (test-claude-org--clear-persistent-registry)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
     (let ((mock-client (claude-agent--make-client
                         :session-key "/tmp/test.org::test-session"
                         :connected-p nil)))
-      (claude-org--register-persistent-client
-       "/tmp/test.org::test-session"
-       mock-client
-       (current-buffer)
-       1)
-      (should (= 1 (claude-org--persistent-client-count)))
-      ;; Disconnect
-      (claude-org--disconnect-persistent-client "/tmp/test.org::test-session")
-      ;; Should be removed
-      (should (= 0 (claude-org--persistent-client-count)))
-      (should (null (claude-org--get-persistent-client "/tmp/test.org::test-session"))))))
+      (claude-org-persistent-registry-register
+       claude-org--persistent-registry
+       "/tmp/test.org::test-session" mock-client (current-buffer) 1)
+      (should (= 1 (claude-org-persistent-registry-count
+                    claude-org--persistent-registry)))
+      (claude-org-persistent-registry-disconnect
+       claude-org--persistent-registry "/tmp/test.org::test-session")
+      (should (= 0 (claude-org-persistent-registry-count
+                    claude-org--persistent-registry)))
+      (should (null (claude-org-persistent-registry-get
+                     claude-org--persistent-registry
+                     "/tmp/test.org::test-session"))))))
 
 (ert-deftest test-claude-org-disconnect-all-clients-for-buffer ()
   "Test disconnecting all clients for a buffer."
   :tags '(:unit :fast :stable :isolated :org :persistent)
-  (clrhash claude-org--persistent-clients)
+  (test-claude-org--clear-persistent-registry)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
@@ -1010,46 +1019,44 @@ This ensures org operations work correctly when called during recovery."
           (mock-client-2 (claude-agent--make-client
                           :session-key "/tmp/test.org::session-2"
                           :connected-p nil)))
-      ;; Register two clients for same buffer
-      (claude-org--register-persistent-client
+      (claude-org-persistent-registry-register
+       claude-org--persistent-registry
        "/tmp/test.org::session-1" mock-client-1 buf 1)
-      (claude-org--register-persistent-client
+      (claude-org-persistent-registry-register
+       claude-org--persistent-registry
        "/tmp/test.org::session-2" mock-client-2 buf 10)
-      (should (= 2 (claude-org--persistent-client-count)))
-      ;; Disconnect all for this buffer
-      (claude-org--disconnect-all-clients-for-buffer buf)
-      ;; Both should be removed
-      (should (= 0 (claude-org--persistent-client-count))))))
+      (should (= 2 (claude-org-persistent-registry-count
+                    claude-org--persistent-registry)))
+      (claude-org-persistent-registry-disconnect-buffer
+       claude-org--persistent-registry buf)
+      (should (= 0 (claude-org-persistent-registry-count
+                    claude-org--persistent-registry))))))
 
 (ert-deftest test-claude-org-update-persistent-client-activity ()
   "Test updating persistent client activity timestamp."
   :tags '(:unit :fast :stable :isolated :org :persistent)
-  (clrhash claude-org--persistent-clients)
+  (test-claude-org--clear-persistent-registry)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
     (let ((mock-client (claude-agent--make-client
                         :session-key "/tmp/test.org::test-session"
                         :connected-p nil)))
-      (claude-org--register-persistent-client
-       "/tmp/test.org::test-session"
-       mock-client
-       (current-buffer)
-       1)
-      ;; Get initial state
-      (let* ((entry (gethash "/tmp/test.org::test-session"
-                             claude-org--persistent-clients))
-             (initial-count (plist-get entry :query-count)))
-        (should (= 0 initial-count))
-        ;; Update activity
-        (claude-org--update-persistent-client-activity "/tmp/test.org::test-session")
-        ;; Check updated
-        (let ((updated-entry (gethash "/tmp/test.org::test-session"
-                                      claude-org--persistent-clients)))
-          (should (= 1 (plist-get updated-entry :query-count)))
-          (should (plist-get updated-entry :last-activity))))
-      ;; Cleanup
-      (clrhash claude-org--persistent-clients))))
+      (claude-org-persistent-registry-register
+       claude-org--persistent-registry
+       "/tmp/test.org::test-session" mock-client (current-buffer) 1)
+      (let* ((entry (claude-org-persistent-registry-get-entry
+                     claude-org--persistent-registry
+                     "/tmp/test.org::test-session")))
+        (should (= 0 (claude-org-persistent-entry-query-count entry)))
+        (claude-org-persistent-registry-update-activity
+         claude-org--persistent-registry "/tmp/test.org::test-session")
+        (let ((updated (claude-org-persistent-registry-get-entry
+                        claude-org--persistent-registry
+                        "/tmp/test.org::test-session")))
+          (should (= 1 (claude-org-persistent-entry-query-count updated)))
+          (should (claude-org-persistent-entry-last-activity updated))))
+      (test-claude-org--clear-persistent-registry))))
 
 (ert-deftest test-claude-org-persistent-sessions-default-nil ()
   "Test that persistent sessions is disabled by default."
@@ -1062,7 +1069,7 @@ This ensures org operations work correctly when called during recovery."
 (ert-deftest test-claude-org-on-buffer-kill-cleans-clients ()
   "Test that buffer kill hook cleans up persistent clients."
   :tags '(:unit :fast :stable :isolated :org :persistent)
-  (clrhash claude-org--persistent-clients)
+  (test-claude-org--clear-persistent-registry)
   (let ((test-buf (generate-new-buffer "*test-org*")))
     (unwind-protect
         (with-current-buffer test-buf
@@ -1071,25 +1078,22 @@ This ensures org operations work correctly when called during recovery."
           (let ((mock-client (claude-agent--make-client
                               :session-key "/tmp/test-kill.org::session"
                               :connected-p nil)))
-            (claude-org--register-persistent-client
-             "/tmp/test-kill.org::session"
-             mock-client
-             test-buf
-             1)
-            (should (= 1 (claude-org--persistent-client-count)))
-            ;; Call the hook function directly
+            (claude-org-persistent-registry-register
+             claude-org--persistent-registry
+             "/tmp/test-kill.org::session" mock-client test-buf 1)
+            (should (= 1 (claude-org-persistent-registry-count
+                          claude-org--persistent-registry)))
             (claude-org--on-buffer-kill)
-            ;; Should be cleaned up
-            (should (= 0 (claude-org--persistent-client-count)))))
+            (should (= 0 (claude-org-persistent-registry-count
+                          claude-org--persistent-registry)))))
       (kill-buffer test-buf))))
 
 (ert-deftest test-claude-org-on-todo-state-change-disconnects ()
   "Test that TODO state change to DONE disconnects persistent client.
-Note: disconnect only happens if client is alive (connected with live process).
-This test verifies the disconnect path is called when client is alive."
+The hook only disconnects when the client is alive; this test mocks
+alive-p + disconnect to verify the disconnect branch fires."
   :tags '(:unit :fast :stable :isolated :org :persistent)
-  (clrhash claude-org--persistent-clients)
-  ;; Use a dynamic variable to track disconnect calls
+  (test-claude-org--clear-persistent-registry)
   (defvar test--disconnect-called nil)
   (setq test--disconnect-called nil)
   (with-temp-buffer
@@ -1103,30 +1107,26 @@ This test verifies the disconnect path is called when client is alive."
            (mock-client (claude-agent--make-client
                          :session-key session-key
                          :connected-p nil)))
-      (claude-org--register-persistent-client
-       session-key
-       mock-client
-       (current-buffer)
-       1)
-      (should (= 1 (claude-org--persistent-client-count)))
-      ;; Mock claude-org--persistent-client-alive-p to return t
-      (cl-letf (((symbol-function 'claude-org--persistent-client-alive-p)
-                 (lambda (_key) t))
-                ((symbol-function 'claude-org--disconnect-persistent-client)
-                 (lambda (key _reason)
+      (claude-org-persistent-registry-register
+       claude-org--persistent-registry
+       session-key mock-client (current-buffer) 1)
+      (should (= 1 (claude-org-persistent-registry-count
+                    claude-org--persistent-registry)))
+      (cl-letf (((symbol-function 'claude-org-persistent-registry-alive-p)
+                 (lambda (_registry _key) t))
+                ((symbol-function 'claude-org-persistent-registry-disconnect)
+                 (lambda (registry key &optional _reason)
                    (setq test--disconnect-called t)
-                   (remhash key claude-org--persistent-clients))))
-        ;; Simulate TODO state change to DONE
-        ;; org-state must be DYNAMICALLY bound (not lexical) since
-        ;; claude-org--on-todo-state-change uses (bound-and-true-p org-state)
+                   (remhash key (claude-org-persistent-registry-entries
+                                 registry)))))
         (goto-char (point-min))
         (re-search-forward "^\\* Task")
-        (defvar org-state)  ; Declare as special/dynamic variable
+        (defvar org-state)
         (let ((org-state "DONE"))
           (claude-org--on-todo-state-change))
-        ;; Verify disconnect was called
         (should test--disconnect-called)
-        (should (= 0 (claude-org--persistent-client-count)))))))
+        (should (= 0 (claude-org-persistent-registry-count
+                      claude-org--persistent-registry)))))))
 
 ;;; Response Message Separator Tests
 

@@ -190,8 +190,8 @@ BUG B4: on-buffer-kill only disconnects persistent clients."
           ;; Mock cancel-all to detect it was called
           (cl-letf (((symbol-function 'claude-org-cancel-all)
                      (lambda () (setq cancel-all-called t)))
-                    ((symbol-function 'claude-org--disconnect-all-clients-for-buffer)
-                     #'ignore))
+                    ((symbol-function 'claude-org-persistent-registry-disconnect-buffer)
+                     (lambda (_registry _buffer) nil)))
             ;; Kill the buffer
             (kill-buffer buf)
             (setq buf nil)  ; already killed
