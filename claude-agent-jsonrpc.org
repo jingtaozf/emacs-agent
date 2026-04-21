@@ -5,10 +5,35 @@
 
 Pure JSON-RPC 2.0 over stdio.  Agent-agnostic — wraps any existing
 subprocess whose stdout emits newline-delimited JSON-RPC messages and
-whose stdin accepts newline-delimited JSON-RPC messages.
+whose stdin accepts the same, and turns it into a Smalltalk-flavoured
+object that other modules talk to through generics.
 
-Used as the transport layer for the ACP (Agent Client Protocol) backend
-and any future protocol sharing the same wire format.
+Used as the transport layer for the ACP (Agent Client Protocol)
+backend and any future protocol that shares the wire format.
+
+** Design shape
+
+The module publishes one class (=claude-agent-jsonrpc-client=,
+implemented as a =cl-defstruct= so accessors are auto-generated and
+methods can dispatch on type) plus a small set of generic functions
+— =send-request=, =send-response=, =send-notification=, add-handler
+variants, =shutdown=.  Internal routing and the process filter /
+sentinel attach to the client at construction time and stay out of
+the public surface.
+
+Why a class rather than a plist: the project's
+=.claude/rules/oop-smalltalk-protocols.md= calls this out — "wrap the
+hash in a class; expose =defgeneric= verbs."  The old plist was
+fine-ish when there were two call sites; once ACP grew multiple
+callers and the tests started reaching into =:process= and
+=:stderr-buffer= directly, the free-function-over-plist shape stopped
+carrying its weight.
+
+Struct accessors replace the =(plist-get client :process)= idiom
+(readers) and =(plist-put client :partial-line partial)= (mutators,
+now via =setf=).  The transport module exports the accessors so
+clients outside this file read state through them rather than the
+raw fields.
 
 ** Dependencies
 
@@ -18,29 +43,61 @@ and any future protocol sharing the same wire format.
 (require 'map)
 #+END_SRC
 
-** Client State
+** The Client Class
 
-A client is a plist holding the process, pending request callbacks, and
-registered handlers.  The caller owns the process — this module only
-wires filter + sentinel and drives send/receive.
+State held by one JSON-RPC connection: its subprocess, the pending
+request table, the handler lists, the stderr buffer, and the partial
+line accumulator.  A =cl-defstruct= is the right shape — all fields
+are data, all behaviour lives in the methods below.
 
 #+BEGIN_SRC elisp
-(defvar claude-agent-jsonrpc--next-id 0
-  "Monotonically increasing JSON-RPC request ID counter.")
+(cl-defstruct (claude-agent-jsonrpc-client
+               (:constructor claude-agent-jsonrpc-client--create)
+               (:copier nil))
+  "JSON-RPC 2.0 client — one instance per subprocess."
+  (process nil
+           :documentation "Emacs process object for the subprocess.")
+  (pending nil
+           :documentation "Hash table: request-id (integer) → callbacks plist.")
+  (notification-handlers nil
+                         :documentation "List of (MSG) → void handlers invoked for every incoming notification.")
+  (request-handlers nil
+                    :documentation "List of (MSG) → void handlers invoked for server-to-client requests.")
+  (stderr-buffer nil
+                 :documentation "Buffer owned by the client; killed on shutdown.  Callers may `plist-put'-style attach a buffer after construction when the factory does not create one itself.")
+  (partial-line ""
+                :documentation "Accumulator for the trailing half-line not yet terminated by \\n."))
 
+(defvar claude-agent-jsonrpc--next-id 0
+  "Monotonic JSON-RPC request id counter (process-global).
+A global counter is sufficient because each client has its own
+`pending' hash; routing never confuses ids across clients.")
+#+END_SRC
+
+** Factory
+
+Construction wires the filter and sentinel onto the subprocess so
+the rest of the module can forget about where bytes come from.
+=lexical-let= is required because literate-elisp does not honour the
+file-level =lexical-binding= directive — without it the lambda
+closures would see =client= as a dynamic variable and fail at
+runtime.
+
+#+BEGIN_SRC elisp
 (defun claude-agent-jsonrpc-make-client (process)
   "Create a JSON-RPC client wrapping PROCESS.
 Caller must ensure PROCESS is live and uses utf-8-unix with pipe I/O.
-Wires process filter and sentinel; returns a plist representing the client."
-  (let ((client (list :process process
-                      :pending (make-hash-table :test 'equal)
-                      :notification-handlers nil
-                      :request-handlers nil
-                      :stderr-buffer nil
-                      :partial-line "")))
-    ;; `lexical-let' is required here: literate-elisp loads without lexical
-    ;; binding, so a plain (lambda ... client ...) would capture `client' by
-    ;; name and see void after the function returns.
+Returns a `claude-agent-jsonrpc-client' struct with its filter and
+sentinel wired; the returned value is the same object the caller
+stores on whichever higher-level state it owns (typically a backend
+struct)."
+  (let ((client (claude-agent-jsonrpc-client--create
+                 :process process
+                 :pending (make-hash-table :test 'equal)
+                 :notification-handlers nil
+                 :request-handlers nil
+                 :stderr-buffer nil
+                 :partial-line "")))
     (lexical-let ((client client))
       (set-process-filter process
                           (lambda (_proc output)
@@ -53,65 +110,83 @@ Wires process filter and sentinel; returns a plist representing the client."
 
 ** Sending
 
+Three verbs are published as generics — =send-request=,
+=send-response=, =send-notification= — each dispatched on the client
+class.  Subclassing the client in tests is the expected substitution
+point (e.g. a recording client that captures sent messages).
+
 #+BEGIN_SRC elisp
-(defun claude-agent-jsonrpc-send-request
+(cl-defgeneric claude-agent-jsonrpc-send-request
     (client method params on-success on-failure)
-  "Send a JSON-RPC request via CLIENT.
-METHOD is a string.  PARAMS is an alist or nil.  ON-SUCCESS receives the
-result; ON-FAILURE receives the error object."
+  "Send a JSON-RPC request to the peer via CLIENT.
+METHOD is a string.  PARAMS is an alist or nil.  ON-SUCCESS receives
+the result; ON-FAILURE receives the error alist.  Returns the
+assigned request id.")
+
+(cl-defmethod claude-agent-jsonrpc-send-request
+    ((client claude-agent-jsonrpc-client) method params on-success on-failure)
+  "JSON-RPC client method: allocate an id, register callbacks, write."
   (let* ((id (cl-incf claude-agent-jsonrpc--next-id))
          (msg `((jsonrpc . "2.0")
                 (id . ,id)
                 (method . ,method)
                 (params . ,params)))
          (json-str (json-encode msg))
-         (proc (plist-get client :process)))
-    (puthash id (list :on-success on-success
-                      :on-failure on-failure
-                      :method method)
-             (plist-get client :pending))
+         (proc (claude-agent-jsonrpc-client-process client)))
+    (puthash id
+             (list :on-success on-success
+                   :on-failure on-failure
+                   :method method)
+             (claude-agent-jsonrpc-client-pending client))
     (message "claude-agent-jsonrpc: -> %s (id=%d)" method id)
     (process-send-string proc (concat json-str "\n"))
     id))
 
-(defun claude-agent-jsonrpc-send-response (client id result &optional error-obj)
-  "Send a JSON-RPC response via CLIENT for request ID.
-Provide RESULT on success or ERROR-OBJ on failure."
+(cl-defgeneric claude-agent-jsonrpc-send-response
+    (client id result &optional error-obj)
+  "Send a JSON-RPC response for the inbound request ID.
+Provide RESULT on success or ERROR-OBJ on failure.")
+
+(cl-defmethod claude-agent-jsonrpc-send-response
+    ((client claude-agent-jsonrpc-client) id result &optional error-obj)
+  "JSON-RPC client method: emit a response envelope."
   (let* ((msg (if error-obj
                   `((jsonrpc . "2.0") (id . ,id) (error . ,error-obj))
                 `((jsonrpc . "2.0") (id . ,id) (result . ,result))))
          (json-str (json-encode msg))
-         (proc (plist-get client :process)))
+         (proc (claude-agent-jsonrpc-client-process client)))
     (process-send-string proc (concat json-str "\n"))))
 
-(defun claude-agent-jsonrpc-send-notification (client method params)
-  "Send a JSON-RPC notification (no id, no response expected)."
+(cl-defgeneric claude-agent-jsonrpc-send-notification
+    (client method params)
+  "Send a JSON-RPC notification (no id, no response expected).")
+
+(cl-defmethod claude-agent-jsonrpc-send-notification
+    ((client claude-agent-jsonrpc-client) method params)
+  "JSON-RPC client method: emit a notification envelope."
   (let* ((msg `((jsonrpc . "2.0")
                 (method . ,method)
                 (params . ,params)))
          (json-str (json-encode msg))
-         (proc (plist-get client :process)))
+         (proc (claude-agent-jsonrpc-client-process client)))
     (process-send-string proc (concat json-str "\n"))))
 #+END_SRC
 
 ** Receiving
 
-The filter accumulates partial lines then parses each complete line.  A
-parse error is routed back to any pending callback whose request it
-was replying to if we can identify one; otherwise it is logged.  Unlike
-the earlier implementation, a malformed payload never silently drops
-a pending request — if parsing a response fails for a known id, the
-callback is invoked with a =-32700 parse error= failure.
+The filter accumulates partial lines then parses each complete line.
+An outer =condition-case= wraps the loop because a process filter
+that signals an error terminates the subprocess in Emacs — we cannot
+afford that at the transport layer.  Parse errors on a single line
+are caught and logged separately so one malformed payload does not
+halt the stream.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-jsonrpc--filter (client output)
-  "Accumulate OUTPUT and dispatch complete JSON-RPC lines from CLIENT.
-Wrapped in an outer `condition-case' — a process filter that signals an
-error terminates the subprocess in Emacs, which would orphan every
-pending request.  Parse errors for a single line are caught separately
-so one malformed message doesn't block the rest of the stream."
+  "Accumulate OUTPUT and dispatch complete JSON-RPC lines from CLIENT."
   (condition-case filter-err
-      (let ((partial (concat (plist-get client :partial-line) output)))
+      (let ((partial (concat (claude-agent-jsonrpc-client-partial-line client)
+                             output)))
         (while (string-match "\n" partial)
           (let ((line (substring partial 0 (match-beginning 0))))
             (setq partial (substring partial (match-end 0)))
@@ -122,31 +197,36 @@ so one malformed message doesn't block the rest of the stream."
                 (error
                  (claude-agent-jsonrpc--handle-parse-error
                   client line parse-err))))))
-        (plist-put client :partial-line partial))
+        (setf (claude-agent-jsonrpc-client-partial-line client) partial))
     (error
      (message "claude-agent-jsonrpc: filter error (process preserved): %s"
               (error-message-string filter-err)))))
 
-(defun claude-agent-jsonrpc--handle-parse-error (client line err)
-  "Log LINE and ERR; no pending request can be identified from a parse error.
-Since the id is unknown, we log — the caller times out via its own logic."
+(defun claude-agent-jsonrpc--handle-parse-error (_client line err)
+  "Log LINE + ERR when JSON parsing fails.
+The pending request id is unknown at parse-error time so callers
+time out on their own clocks; the log line is enough to diagnose
+most ACP wire-format skews."
   (message "claude-agent-jsonrpc: parse error %s on line: %s"
            err
            (truncate-string-to-width line 200 nil nil "...")))
 
 (defun claude-agent-jsonrpc--route (client msg)
-  "Route an incoming JSON-RPC MSG from CLIENT to the correct handler."
+  "Dispatch an incoming JSON-RPC MSG to the correct handler branch.
+Three shapes matter: a response (id but no method), a server-to-
+client request (id AND method), and a notification (method, no id).
+Anything else is logged and dropped."
   (let ((id (map-elt msg 'id))
         (method (map-elt msg 'method))
         (result (map-elt msg 'result))
         (err (map-elt msg 'error)))
     (cond
-     ;; Response to our request (has id, no method)
+     ;; Response to our request (has id, no method).
      ((and id (not method))
-      (let ((pending (gethash id (plist-get client :pending))))
+      (let ((pending (gethash id (claude-agent-jsonrpc-client-pending client))))
         (if pending
             (progn
-              (remhash id (plist-get client :pending))
+              (remhash id (claude-agent-jsonrpc-client-pending client))
               (if err
                   (progn
                     (message "claude-agent-jsonrpc: <- error id=%s: %s"
@@ -158,15 +238,15 @@ Since the id is unknown, we log — the caller times out via its own logic."
                   (funcall (plist-get pending :on-success) result))))
           (message "claude-agent-jsonrpc: response to unknown id=%s" id))))
 
-     ;; Server-to-client request (has id AND method)
+     ;; Server-to-client request (has id AND method).
      ((and id method)
       (message "claude-agent-jsonrpc: <- request %s (id=%s)" method id)
-      (dolist (handler (plist-get client :request-handlers))
+      (dolist (handler (claude-agent-jsonrpc-client-request-handlers client))
         (funcall handler msg)))
 
-     ;; Notification (has method, no id)
+     ;; Notification (has method, no id).
      (method
-      (dolist (handler (plist-get client :notification-handlers))
+      (dolist (handler (claude-agent-jsonrpc-client-notification-handlers client))
         (funcall handler msg)))
 
      (t
@@ -174,7 +254,10 @@ Since the id is unknown, we log — the caller times out via its own logic."
                (truncate-string-to-width (format "%S" msg) 200 nil nil "..."))))))
 
 (defun claude-agent-jsonrpc--sentinel (client event)
-  "Process sentinel for CLIENT's subprocess; rejects pending on exit."
+  "Process sentinel for CLIENT's subprocess; rejects pending on exit.
+Invokes every pending :on-failure callback with a synthesized error
+so callers' completion paths fire deterministically when the peer
+dies mid-stream."
   (condition-case err
       (let ((event-clean (string-trim event)))
         (message "claude-agent-jsonrpc: process %s" event-clean)
@@ -184,36 +267,53 @@ Since the id is unknown, we log — the caller times out via its own logic."
                               `((code . -1)
                                 (message . ,(format "Process %s"
                                                     event-clean))))))
-                 (plist-get client :pending))
-        (clrhash (plist-get client :pending)))
+                 (claude-agent-jsonrpc-client-pending client))
+        (clrhash (claude-agent-jsonrpc-client-pending client)))
     (error (message "claude-agent-jsonrpc: sentinel error: %S" err))))
 #+END_SRC
 
 ** Handler Registration
 
-#+BEGIN_SRC elisp
-(defun claude-agent-jsonrpc-add-notification-handler (client handler)
-  "Add HANDLER (function of MSG) for server notifications on CLIENT."
-  (push handler (plist-get client :notification-handlers)))
+Generics so tests can override how handlers are stored (e.g. a
+recording subclass that keeps every handler call for assertions).
 
-(defun claude-agent-jsonrpc-add-request-handler (client handler)
-  "Add HANDLER (function of MSG) for server-to-client requests on CLIENT."
-  (push handler (plist-get client :request-handlers)))
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-jsonrpc-add-notification-handler
+    (client handler)
+  "Register HANDLER (function of one MSG) for server-side notifications.")
+
+(cl-defmethod claude-agent-jsonrpc-add-notification-handler
+    ((client claude-agent-jsonrpc-client) handler)
+  "JSON-RPC client method: push HANDLER onto the notification list."
+  (push handler (claude-agent-jsonrpc-client-notification-handlers client)))
+
+(cl-defgeneric claude-agent-jsonrpc-add-request-handler
+    (client handler)
+  "Register HANDLER (function of one MSG) for server-to-client requests.")
+
+(cl-defmethod claude-agent-jsonrpc-add-request-handler
+    ((client claude-agent-jsonrpc-client) handler)
+  "JSON-RPC client method: push HANDLER onto the request list."
+  (push handler (claude-agent-jsonrpc-client-request-handlers client)))
 #+END_SRC
 
 ** Shutdown
 
 #+BEGIN_SRC elisp
-(defun claude-agent-jsonrpc-shutdown (client)
-  "Shut down CLIENT: kill its process and stderr buffer, clear pending."
+(cl-defgeneric claude-agent-jsonrpc-shutdown (client)
+  "Release CLIENT: kill its subprocess and stderr buffer, clear pending.")
+
+(cl-defmethod claude-agent-jsonrpc-shutdown
+    ((client claude-agent-jsonrpc-client))
+  "JSON-RPC client method: tear down the subprocess end-to-end."
   (when client
-    (let ((proc (plist-get client :process))
-          (stderr (plist-get client :stderr-buffer)))
+    (let ((proc (claude-agent-jsonrpc-client-process client))
+          (stderr (claude-agent-jsonrpc-client-stderr-buffer client)))
       (when (and proc (process-live-p proc))
         (delete-process proc))
       (when (and stderr (buffer-live-p stderr))
         (kill-buffer stderr)))
-    (when-let* ((pending (plist-get client :pending)))
+    (when-let* ((pending (claude-agent-jsonrpc-client-pending client)))
       (clrhash pending))))
 #+END_SRC
 

@@ -154,7 +154,7 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
     ;; Verify process is alive
     (let ((client (claude-agent-acp-backend-client backend)))
       (should client)
-      (should (process-live-p (plist-get client :process)))
+      (should (process-live-p (claude-agent-jsonrpc-client-process client)))
 
       ;; Cleanup
       (claude-agent-backend-cleanup backend)
