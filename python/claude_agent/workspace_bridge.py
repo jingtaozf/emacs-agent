@@ -48,15 +48,13 @@ from claude_agent.mcp_client import McpClient, McpConnectionError, McpElispError
 try:
     from claude_agent.otel_setup import (
         STATUS_DIR,
-        read_trace_context,
+        TraceContextStore,
         setup_tracer,
-        write_trace_context,
     )
 except ImportError:
     STATUS_DIR = "/tmp/claude-agent-status"
     setup_tracer = None
-    read_trace_context = None
-    write_trace_context = None
+    TraceContextStore = None
 
 logger = logging.getLogger(__name__)
 
@@ -919,7 +917,8 @@ def main() -> None:
         sys.exit(0)  # soft-fail: don't break hooks for non-workspace sessions
 
     tracer = setup_tracer("claude-agent-workspace-bridge") if setup_tracer else None
-    ctx = read_trace_context(session_id) if (tracer and read_trace_context) else None
+    trace_store = TraceContextStore(STATUS_DIR) if (tracer and TraceContextStore) else None
+    ctx = trace_store.read(session_id) if trace_store else None
 
     try:
         input_data = json.loads(input_text) if input_text.strip() else {}
@@ -966,9 +965,9 @@ def main() -> None:
         )
 
     with root_span_ctx as root_span:
-        if ctx is None and root_span is not None and write_trace_context:
+        if ctx is None and root_span is not None and trace_store is not None:
             span_ctx = root_span.get_span_context()
-            write_trace_context(
+            trace_store.write(
                 session_id,
                 format(span_ctx.trace_id, "032x"),
                 format(span_ctx.span_id, "016x"),

@@ -1,33 +1,33 @@
-"""Tests for the OTel bridge Flask server."""
+"""Tests for the OTel bridge Flask server.
+
+Each test constructs a fresh ``OtelBridgeServer`` wired to an in-memory
+span exporter so state is fully isolated between cases.
+"""
 
 import pytest
 
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace.status import StatusCode
 
-from claude_agent.otel_bridge import app, spans, setup_otel
-
-# Initialize OTel with an in-memory exporter (no I/O, no blocking).
-_test_exporter = InMemorySpanExporter()
-setup_otel(exporter=_test_exporter)
+from claude_agent.otel_bridge import OtelBridgeServer
 
 
 @pytest.fixture
-def client():
-    """Flask test client."""
-    app.config["TESTING"] = True
-    with app.test_client() as c:
+def server():
+    """Fresh server + in-memory exporter per test."""
+    srv = OtelBridgeServer()
+    exporter = InMemorySpanExporter()
+    srv.setup(exporter=exporter)
+    srv._exporter = exporter  # test-only handle for assertions
+    return srv
+
+
+@pytest.fixture
+def client(server):
+    """Flask test client for the server's app."""
+    server.app.config["TESTING"] = True
+    with server.app.test_client() as c:
         yield c
-
-
-@pytest.fixture(autouse=True)
-def _clear_state():
-    """Reset active spans and exported spans between tests."""
-    spans.clear()
-    _test_exporter.clear()
-    yield
-    spans.clear()
-    _test_exporter.clear()
 
 
 class TestStatus:
@@ -35,6 +35,11 @@ class TestStatus:
 
     def test_returns_ok(self, client):
         resp = client.get("/otel/status")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"status": "ok"}
+
+    def test_health_also_returns_ok(self, client):
+        resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.get_json() == {"status": "ok"}
 
@@ -54,24 +59,21 @@ class TestSpanStart:
         payload.update(overrides)
         return payload
 
-    def test_creates_span(self, client):
-        """Starting a span returns ok and registers it."""
+    def test_creates_span(self, client, server):
         resp = client.post("/otel/span/start", json=self._start_payload())
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "ok"
-        assert self.SPAN_ID in spans
+        assert self.SPAN_ID in server.spans
 
-    def test_with_attributes(self, client):
-        """Attributes with hyphens are converted to dots."""
+    def test_with_attributes(self, client, server):
         resp = client.post(
             "/otel/span/start",
             json=self._start_payload(attrs={"claude-session": "s1"}),
         )
         assert resp.status_code == 200
-        assert self.SPAN_ID in spans
+        assert self.SPAN_ID in server.spans
 
-    def test_with_parent_span_id(self, client):
-        """Parent span id creates a linked child context."""
+    def test_with_parent_span_id(self, client, server):
         parent_id = "def456"
         resp = client.post(
             "/otel/span/start",
@@ -79,19 +81,17 @@ class TestSpanStart:
         )
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "ok"
-        assert self.SPAN_ID in spans
+        assert self.SPAN_ID in server.spans
 
-    def test_with_start_time(self, client):
-        """Custom start_time_ns is accepted."""
+    def test_with_start_time(self, client, server):
         resp = client.post(
             "/otel/span/start",
             json=self._start_payload(start_time_ns=1000000000),
         )
         assert resp.status_code == 200
-        assert self.SPAN_ID in spans
+        assert self.SPAN_ID in server.spans
 
-    def test_with_span_kind(self, client):
-        """SpanKind is set from the kind field."""
+    def test_with_span_kind(self, client, server):
         from opentelemetry.trace import SpanKind
 
         resp = client.post(
@@ -99,11 +99,10 @@ class TestSpanStart:
             json=self._start_payload(kind="SERVER"),
         )
         assert resp.status_code == 200
-        span = spans[self.SPAN_ID]
+        span = server.spans[self.SPAN_ID]
         assert span.kind == SpanKind.SERVER
 
     def test_missing_trace_id_returns_400(self, client):
-        """BUG-2: Missing trace_id must return 400, not crash with 500."""
         resp = client.post(
             "/otel/span/start",
             json={"span_id": "abc", "name": "test"},
@@ -111,7 +110,6 @@ class TestSpanStart:
         assert resp.status_code == 400
 
     def test_missing_span_id_returns_400(self, client):
-        """BUG-2: Missing span_id must return 400, not crash with 500."""
         resp = client.post(
             "/otel/span/start",
             json={"trace_id": "0" * 32, "name": "test"},
@@ -119,7 +117,6 @@ class TestSpanStart:
         assert resp.status_code == 400
 
     def test_missing_name_returns_400(self, client):
-        """BUG-2: Missing name must return 400, not crash with 500."""
         resp = client.post(
             "/otel/span/start",
             json={"trace_id": "0" * 32, "span_id": "abc"},
@@ -127,7 +124,6 @@ class TestSpanStart:
         assert resp.status_code == 400
 
     def test_invalid_hex_trace_id_returns_400(self, client):
-        """BUG-3: Non-hex trace_id must return 400, not crash with 500."""
         resp = client.post(
             "/otel/span/start",
             json={"trace_id": "not-hex", "span_id": "abc", "name": "t"},
@@ -135,15 +131,13 @@ class TestSpanStart:
         assert resp.status_code == 400
 
     def test_invalid_hex_parent_span_id_returns_400(self, client):
-        """BUG-3: Non-hex parent_span_id must return 400, not 500."""
         resp = client.post(
             "/otel/span/start",
             json=self._start_payload(parent_span_id="not-hex"),
         )
         assert resp.status_code == 400
 
-    def test_default_span_kind_is_internal(self, client):
-        """SpanKind defaults to INTERNAL when kind is omitted."""
+    def test_default_span_kind_is_internal(self, client, server):
         from opentelemetry.trace import SpanKind
 
         resp = client.post(
@@ -151,7 +145,7 @@ class TestSpanStart:
             json=self._start_payload(),
         )
         assert resp.status_code == 200
-        span = spans[self.SPAN_ID]
+        span = server.spans[self.SPAN_ID]
         assert span.kind == SpanKind.INTERNAL
 
 
@@ -172,8 +166,7 @@ class TestSpanEnd:
             },
         )
 
-    def test_end_ok(self, client):
-        """Ending a span with status ok succeeds."""
+    def test_end_ok(self, client, server):
         self._start_span(client)
         resp = client.post(
             "/otel/span/end",
@@ -181,10 +174,9 @@ class TestSpanEnd:
         )
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "ok"
-        assert self.SPAN_ID not in spans
+        assert self.SPAN_ID not in server.spans
 
-    def test_end_error(self, client):
-        """Ending a span with status error sets error status and message."""
+    def test_end_error(self, client, server):
         self._start_span(client)
         resp = client.post(
             "/otel/span/end",
@@ -196,10 +188,9 @@ class TestSpanEnd:
         )
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "ok"
-        assert self.SPAN_ID not in spans
+        assert self.SPAN_ID not in server.spans
 
     def test_end_with_end_time(self, client):
-        """Custom end_time_ns is accepted."""
         self._start_span(client)
         resp = client.post(
             "/otel/span/end",
@@ -208,7 +199,6 @@ class TestSpanEnd:
         assert resp.status_code == 200
 
     def test_end_unknown_span_returns_404(self, client):
-        """Ending a non-existent span returns 404."""
         resp = client.post(
             "/otel/span/end",
             json={"span_id": "does-not-exist"},
@@ -217,7 +207,6 @@ class TestSpanEnd:
         assert resp.get_json()["status"] == "not_found"
 
     def test_end_default_status_is_ok(self, client):
-        """Omitting status defaults to ok."""
         self._start_span(client)
         resp = client.post(
             "/otel/span/end",
@@ -226,7 +215,6 @@ class TestSpanEnd:
         assert resp.status_code == 200
 
     def test_end_missing_span_id_returns_400(self, client):
-        """BUG-2: Missing span_id in end must return 400, not crash."""
         resp = client.post(
             "/otel/span/end",
             json={"status": "ok"},
@@ -240,8 +228,7 @@ class TestSpanLifecycle:
     TRACE_ID = "a" * 32
     SPAN_ID = "life01"
 
-    def test_start_then_end_exports_span(self, client):
-        """Complete lifecycle: start -> end -> span exported."""
+    def test_start_then_end_exports_span(self, client, server):
         client.post(
             "/otel/span/start",
             json={
@@ -251,7 +238,7 @@ class TestSpanLifecycle:
                 "attrs": {"org.block": "ai-block-1"},
             },
         )
-        assert self.SPAN_ID in spans
+        assert self.SPAN_ID in server.spans
 
         client.post(
             "/otel/span/end",
@@ -261,14 +248,13 @@ class TestSpanLifecycle:
                 "end_time_ns": 5000000000,
             },
         )
-        assert self.SPAN_ID not in spans
+        assert self.SPAN_ID not in server.spans
 
-        exported = _test_exporter.get_finished_spans()
+        exported = server._exporter.get_finished_spans()
         assert len(exported) == 1
         assert exported[0].name == "lifecycle-span"
 
-    def test_error_lifecycle_sets_status(self, client):
-        """Error lifecycle: start -> end with error -> exported span has error."""
+    def test_error_lifecycle_sets_status(self, client, server):
         client.post(
             "/otel/span/start",
             json={
@@ -287,13 +273,12 @@ class TestSpanLifecycle:
             },
         )
 
-        exported = _test_exporter.get_finished_spans()
+        exported = server._exporter.get_finished_spans()
         assert len(exported) == 1
         assert exported[0].status.status_code == StatusCode.ERROR
         assert "timeout" in exported[0].status.description
 
-    def test_multiple_concurrent_spans(self, client):
-        """Multiple spans can be active simultaneously."""
+    def test_multiple_concurrent_spans(self, client, server):
         for i in range(5):
             client.post(
                 "/otel/span/start",
@@ -303,7 +288,7 @@ class TestSpanLifecycle:
                     "name": f"span-{i}",
                 },
             )
-        assert len(spans) == 5
+        assert len(server.spans) == 5
 
         for i in range(4, -1, -1):
             resp = client.post(
@@ -312,15 +297,13 @@ class TestSpanLifecycle:
             )
             assert resp.status_code == 200
 
-        assert len(spans) == 0
-
-        exported = _test_exporter.get_finished_spans()
+        assert len(server.spans) == 0
+        exported = server._exporter.get_finished_spans()
         assert len(exported) == 5
 
-    def test_span_preserves_exact_ids(self, client):
-        """Exported span has the exact trace/span IDs from the request."""
-        trace_id_hex = "abcd" * 8  # 32 hex chars
-        span_id_hex = "ef01" * 4   # 16 hex chars
+    def test_span_preserves_exact_ids(self, client, server):
+        trace_id_hex = "abcd" * 8
+        span_id_hex = "ef01" * 4
         client.post(
             "/otel/span/start",
             json={
@@ -333,14 +316,13 @@ class TestSpanLifecycle:
             "/otel/span/end",
             json={"span_id": span_id_hex},
         )
-        exported = _test_exporter.get_finished_spans()
+        exported = server._exporter.get_finished_spans()
         assert len(exported) == 1
         ctx = exported[0].context
         assert format(ctx.trace_id, "032x") == trace_id_hex
         assert format(ctx.span_id, "016x") == span_id_hex
 
-    def test_root_span_has_no_parent(self, client):
-        """Root span (no parent_span_id) has no parent in exported data."""
+    def test_root_span_has_no_parent(self, client, server):
         client.post(
             "/otel/span/start",
             json={
@@ -353,33 +335,27 @@ class TestSpanLifecycle:
             "/otel/span/end",
             json={"span_id": "b" * 16},
         )
-        exported = _test_exporter.get_finished_spans()
+        exported = server._exporter.get_finished_spans()
         assert len(exported) == 1
-        # Root span should have no valid parent
         assert exported[0].parent is None
 
-    def test_child_span_references_parent(self, client):
-        """Child span's parent_id matches the parent's actual span_id."""
+    def test_child_span_references_parent(self, client, server):
         trace_id = "c" * 32
         parent_sid = "d" * 16
         child_sid = "e" * 16
-        # Start parent
         client.post("/otel/span/start", json={
             "trace_id": trace_id, "span_id": parent_sid, "name": "parent",
         })
-        # Start child referencing parent
         client.post("/otel/span/start", json={
             "trace_id": trace_id, "span_id": child_sid, "name": "child",
             "parent_span_id": parent_sid,
         })
-        # End both
         client.post("/otel/span/end", json={"span_id": child_sid})
         client.post("/otel/span/end", json={"span_id": parent_sid})
 
-        exported = _test_exporter.get_finished_spans()
+        exported = server._exporter.get_finished_spans()
         assert len(exported) == 2
         by_name = {s.name: s for s in exported}
         parent = by_name["parent"]
         child = by_name["child"]
-        # Child's parent_id should match parent's span_id exactly
         assert child.parent.span_id == parent.context.span_id

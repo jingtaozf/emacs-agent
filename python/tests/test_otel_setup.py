@@ -1,13 +1,16 @@
-"""Tests for the OTel setup module."""
+"""Tests for the OTel setup module.
 
-import os
+Covers both the stateless tracer factory (``setup_tracer``) and the
+``TraceContextStore`` class that persists Emacs↔Python traceparents.
+"""
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 
-# Mock OTel packages before importing the module under test.
-# These may not be installed in the test environment.
+# Mock OTel packages before importing the module under test — they may
+# not be installed in the test environment.
 
 _mock_trace = MagicMock()
 _mock_sdk_trace = MagicMock()
@@ -26,15 +29,13 @@ _OTEL_MODULES = {
 
 @pytest.fixture(autouse=True)
 def _patch_otel_imports(monkeypatch):
-    """Ensure OTel modules are available even without installation."""
     for mod_name, mock_mod in _OTEL_MODULES.items():
         monkeypatch.setitem(__import__("sys").modules, mod_name, mock_mod)
 
 
 @pytest.fixture()
 def otel_setup():
-    """Import otel_setup after mocks are in place."""
-    # Force re-import so module-level code sees mocked modules.
+    """Reload the module so its module-level code sees the mocked OTel."""
     import importlib
 
     import claude_agent.otel_setup as mod
@@ -44,147 +45,129 @@ def otel_setup():
 
 
 class TestSetupTracer:
-    """Tests for setup_tracer()."""
+    """Tests for ``setup_tracer()`` — the stateless tracer factory."""
 
     def test_returns_tracer(self, otel_setup):
-        """setup_tracer() returns whatever trace.get_tracer() provides."""
         tracer = otel_setup.setup_tracer("test-service")
         assert tracer is not None
 
     def test_creates_provider_with_service_name(self, otel_setup):
-        """TracerProvider is created with a Resource containing the service name."""
         otel_setup.setup_tracer("my-service")
         otel_setup.Resource.create.assert_called_with(
-            {"service.name": "my-service", "openinference.project.name": "emacs-agent"}
+            {
+                "service.name": "my-service",
+                "openinference.project.name": "emacs-agent",
+            }
         )
 
     def test_sets_global_tracer_provider(self, otel_setup):
-        """setup_tracer() calls trace.set_tracer_provider()."""
         otel_setup.setup_tracer("svc")
         otel_setup.trace.set_tracer_provider.assert_called()
 
     def test_falls_back_to_console_exporter_on_import_error(self, otel_setup):
-        """When OTLP exporter is unavailable, ConsoleSpanExporter is used."""
-        with patch.dict("sys.modules", {"opentelemetry.exporter": None,
-                                         "opentelemetry.exporter.otlp": None,
-                                         "opentelemetry.exporter.otlp.proto": None,
-                                         "opentelemetry.exporter.otlp.proto.http": None,
-                                         "opentelemetry.exporter.otlp.proto.http.trace_exporter": None}):
-            # The ImportError path uses ConsoleSpanExporter from sdk.export
+        with patch.dict(
+            "sys.modules",
+            {
+                "opentelemetry.exporter": None,
+                "opentelemetry.exporter.otlp": None,
+                "opentelemetry.exporter.otlp.proto": None,
+                "opentelemetry.exporter.otlp.proto.http": None,
+                "opentelemetry.exporter.otlp.proto.http.trace_exporter": None,
+            },
+        ):
             otel_setup.setup_tracer("fallback-svc")
-            # Provider should still be created (no crash)
             _mock_sdk_trace.TracerProvider.assert_called()
 
 
-class TestReadTraceContext:
-    """Tests for read_trace_context()."""
+class TestTraceContextStoreRead:
+    """``TraceContextStore.read`` returns an OTel context, or None."""
 
-    def test_parses_valid_traceparent(self, tmp_path, otel_setup, monkeypatch):
-        """A valid W3C traceparent file yields an OTel context."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
+    def _make_store(self, otel_setup, tmp_path):
+        return otel_setup.TraceContextStore(status_dir=str(tmp_path))
+
+    def test_parses_valid_traceparent(self, tmp_path, otel_setup):
         ctx_file = tmp_path / "sess-123.trace-context"
         ctx_file.write_text(
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\n"
         )
-        result = otel_setup.read_trace_context("sess-123")
-        assert result is not None
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("sess-123") is not None
 
-    def test_falls_back_to_newest_when_session_missing(self, tmp_path, otel_setup, monkeypatch):
-        """Falls back to newest .trace-context when session-specific not found."""
+    def test_falls_back_to_newest_when_session_missing(self, tmp_path, otel_setup):
         import time
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
+
         old = tmp_path / "old-session.trace-context"
         old.write_text("00-" + "a" * 32 + "-" + "a" * 16 + "-01")
         time.sleep(0.05)
         new = tmp_path / "new-session.trace-context"
         new.write_text("00-" + "b" * 32 + "-" + "b" * 16 + "-01")
-        # Non-matching session ID → falls back to newest file
-        result = otel_setup.read_trace_context("missing-session")
-        assert result is not None
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("missing-session") is not None
 
-    def test_prefers_session_specific_over_newest(self, tmp_path, otel_setup, monkeypatch):
-        """Session-specific file takes priority over newer files."""
+    def test_prefers_session_specific_over_newest(self, tmp_path, otel_setup):
         import time
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
-        # Write session-specific file first (older)
+
         session = tmp_path / "my-sess.trace-context"
         session.write_text("00-" + "a" * 32 + "-" + "a" * 16 + "-01")
         time.sleep(0.05)
-        # Write a newer file for different session
         other = tmp_path / "other-sess.trace-context"
         other.write_text("00-" + "b" * 32 + "-" + "b" * 16 + "-01")
-        # Session-specific should be used (even though older)
-        result = otel_setup.read_trace_context("my-sess")
-        assert result is not None
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("my-sess") is not None
 
-    def test_ignores_non_trace_context_files(self, tmp_path, otel_setup, monkeypatch):
-        """Only .trace-context files are considered, not generic traceparent."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
+    def test_ignores_non_trace_context_files(self, tmp_path, otel_setup):
         generic = tmp_path / "traceparent"
         generic.write_text(
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         )
-        result = otel_setup.read_trace_context("different-session-id")
-        assert result is None  # only .trace-context files are used
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("different-session-id") is None
 
-    def test_returns_none_for_missing_file(self, tmp_path, otel_setup, monkeypatch):
-        """Missing trace-context file returns None."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
-        result = otel_setup.read_trace_context("nonexistent-session")
-        assert result is None
+    def test_returns_none_for_missing_file(self, tmp_path, otel_setup):
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("nonexistent-session") is None
 
-    def test_returns_none_for_malformed_content(self, tmp_path, otel_setup, monkeypatch):
-        """Malformed traceparent (wrong number of parts) returns None."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
+    def test_returns_none_for_malformed_content(self, tmp_path, otel_setup):
         ctx_file = tmp_path / "bad-sess.trace-context"
         ctx_file.write_text("not-a-valid-traceparent\n")
-        result = otel_setup.read_trace_context("bad-sess")
-        assert result is None
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("bad-sess") is None
 
-    def test_returns_none_for_invalid_hex(self, tmp_path, otel_setup, monkeypatch):
-        """Traceparent with non-hex values returns None."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
+    def test_returns_none_for_invalid_hex(self, tmp_path, otel_setup):
         ctx_file = tmp_path / "hex-fail.trace-context"
         ctx_file.write_text("00-ZZZZ-0000-01\n")
-        result = otel_setup.read_trace_context("hex-fail")
-        assert result is None
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("hex-fail") is None
 
-    def test_returns_none_for_empty_file(self, tmp_path, otel_setup, monkeypatch):
-        """Empty trace-context file returns None."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
+    def test_returns_none_for_empty_file(self, tmp_path, otel_setup):
         ctx_file = tmp_path / "empty.trace-context"
         ctx_file.write_text("")
-        result = otel_setup.read_trace_context("empty")
-        assert result is None
+        store = self._make_store(otel_setup, tmp_path)
+        assert store.read("empty") is None
 
 
-class TestWriteTraceContext:
-    """Tests for write_trace_context()."""
+class TestTraceContextStoreWrite:
+    """``TraceContextStore.write`` persists traceparents to disk."""
 
-    def test_writes_session_file(self, tmp_path, otel_setup, monkeypatch):
-        """Writes per-session traceparent file."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
-        otel_setup.write_trace_context("sess-1", "a" * 32, "b" * 16)
+    def test_writes_session_file(self, tmp_path, otel_setup):
+        store = otel_setup.TraceContextStore(status_dir=str(tmp_path))
+        store.write("sess-1", "a" * 32, "b" * 16)
         content = (tmp_path / "sess-1.trace-context").read_text()
         assert content == f"00-{'a' * 32}-{'b' * 16}-01"
 
-    def test_writes_generic_traceparent(self, tmp_path, otel_setup, monkeypatch):
-        """Writes generic traceparent file."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
-        otel_setup.write_trace_context("sess-1", "a" * 32, "b" * 16)
+    def test_writes_generic_traceparent(self, tmp_path, otel_setup):
+        store = otel_setup.TraceContextStore(status_dir=str(tmp_path))
+        store.write("sess-1", "a" * 32, "b" * 16)
         content = (tmp_path / "traceparent").read_text()
         assert content == f"00-{'a' * 32}-{'b' * 16}-01"
 
-    def test_creates_status_dir(self, tmp_path, otel_setup, monkeypatch):
-        """Creates STATUS_DIR if it doesn't exist."""
+    def test_creates_status_dir(self, tmp_path, otel_setup):
         new_dir = tmp_path / "subdir"
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(new_dir))
-        otel_setup.write_trace_context("s", "0" * 32, "1" * 16)
+        store = otel_setup.TraceContextStore(status_dir=str(new_dir))
+        store.write("s", "0" * 32, "1" * 16)
         assert new_dir.is_dir()
 
-    def test_roundtrip_with_read(self, tmp_path, otel_setup, monkeypatch):
-        """write then read returns a valid context."""
-        monkeypatch.setattr(otel_setup, "STATUS_DIR", str(tmp_path))
-        otel_setup.write_trace_context("rt-sess", "a" * 32, "b" * 16)
-        ctx = otel_setup.read_trace_context("rt-sess")
-        assert ctx is not None
+    def test_roundtrip_with_read(self, tmp_path, otel_setup):
+        store = otel_setup.TraceContextStore(status_dir=str(tmp_path))
+        store.write("rt-sess", "a" * 32, "b" * 16)
+        assert store.read("rt-sess") is not None
