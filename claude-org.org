@@ -4592,19 +4592,111 @@ SDK-UUID: Session UUID for resume"
 ** Send Request
 
 #+BEGIN_SRC elisp
-(defun claude-org--make-guarded-callback (buf session-key query-id handler)
-  "Return a callback that calls HANDLER only if BUF is live and QUERY-ID current.
-Guards against stale callbacks from cancelled or superseded queries."
-  (lexical-let ((buf buf)
-                (session-key session-key)
-                (qid query-id)
-                (handler handler))
-    (lambda (arg)
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (when (equal qid (claude-org--session-get session-key :query-id))
-            (funcall handler session-key arg)))))))
+#+END_SRC
 
+*** Response Stream Class
+
+Every backend query returns four streaming callbacks —
+=:on-token=, =:on-message=, =:on-error=, =:on-complete=.  Previously
+each was hand-wrapped by =claude-org--make-guarded-callback= into a
+closure that validated the query-id + source buffer before
+dispatching to a bare ~defun~.  That is precisely the shape the
+Smalltalk rule points at: several functions sharing identical
+dispatch state (session-key, source-buffer, query-id) glued
+together by closures.
+
+Promoting to a ~cl-defstruct~ + ~cl-defgeneric~ verbs makes the state
+carrier explicit and the dispatch symmetric.  The actual handler
+bodies (=--handle-token-v2=, =--handle-message=, =--handle-error=,
+=--handle-complete=) remain as free functions — they're the
+procedural "how"; the stream class is the "who" that owns the
+validation.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-org-response-stream
+               (:constructor claude-org-response-stream--create)
+               (:copier nil))
+  "Per-query streaming state.
+A stream instance is created in `claude-org--send-request' and
+lives only as long as the backend query it serves; the four
+methods below validate that the stream is still current before
+dispatching to the buffer-mutating handlers."
+  (session-key nil
+               :documentation "Session key identifying the owning org section.")
+  (source-buffer nil
+                 :documentation "Originating org buffer — handlers no-op if it's been killed.")
+  (query-id nil
+            :documentation "Query id frozen at stream creation; handlers no-op when the session's current query-id has moved on (new query or cancel)."))
+
+(defun claude-org-response-stream--current-p (stream)
+  "Return non-nil if STREAM is still the active one for its session.
+Called by every handler before dispatching to the bare `--handle-*'
+function: it short-circuits stale callbacks from superseded queries."
+  (and (buffer-live-p (claude-org-response-stream-source-buffer stream))
+       (with-current-buffer (claude-org-response-stream-source-buffer stream)
+         (equal (claude-org-response-stream-query-id stream)
+                (claude-org--session-get
+                 (claude-org-response-stream-session-key stream)
+                 :query-id)))))
+
+(defun claude-org-response-stream--dispatch (stream handler arg)
+  "Call HANDLER on ARG inside STREAM's source buffer if STREAM is current.
+HANDLER is one of the bare `--handle-*' functions."
+  (when (claude-org-response-stream--current-p stream)
+    (with-current-buffer (claude-org-response-stream-source-buffer stream)
+      (funcall handler
+               (claude-org-response-stream-session-key stream)
+               arg))))
+
+(cl-defgeneric claude-org-response-stream-handle-token (stream text)
+  "Deliver TEXT token to STREAM (no-op on stale streams).")
+
+(cl-defmethod claude-org-response-stream-handle-token
+    ((stream claude-org-response-stream) text)
+  "Default implementation: validate + dispatch to `--handle-token-v2'."
+  (claude-org-response-stream--dispatch
+   stream #'claude-org--handle-token-v2 text))
+
+(cl-defgeneric claude-org-response-stream-handle-message (stream msg)
+  "Deliver structured MSG to STREAM (no-op on stale streams).")
+
+(cl-defmethod claude-org-response-stream-handle-message
+    ((stream claude-org-response-stream) msg)
+  "Default implementation: validate + dispatch to `--handle-message'."
+  (claude-org-response-stream--dispatch
+   stream #'claude-org--handle-message msg))
+
+(cl-defgeneric claude-org-response-stream-handle-error (stream err)
+  "Deliver ERR to STREAM (no-op on stale streams).")
+
+(cl-defmethod claude-org-response-stream-handle-error
+    ((stream claude-org-response-stream) err)
+  "Default implementation: validate + dispatch to `--handle-error'."
+  (claude-org-response-stream--dispatch
+   stream #'claude-org--handle-error err))
+
+(cl-defgeneric claude-org-response-stream-handle-complete (stream result)
+  "Deliver RESULT to STREAM (no-op on stale streams).")
+
+(cl-defmethod claude-org-response-stream-handle-complete
+    ((stream claude-org-response-stream) result)
+  "Default implementation: validate + dispatch to `--handle-complete'."
+  (claude-org-response-stream--dispatch
+   stream #'claude-org--handle-complete result))
+
+(defun claude-org-response-stream-callbacks (stream)
+  "Return a :on-token / :on-message / :on-error / :on-complete plist
+whose lambdas forward to the generic verbs on STREAM."
+  (lexical-let ((stream stream))
+    (list :on-token    (lambda (text)  (claude-org-response-stream-handle-token    stream text))
+          :on-message  (lambda (msg)   (claude-org-response-stream-handle-message  stream msg))
+          :on-error    (lambda (err)   (claude-org-response-stream-handle-error    stream err))
+          :on-complete (lambda (result) (claude-org-response-stream-handle-complete stream result)))))
+#+END_SRC
+
+*** Prompt + Dispatch Helpers
+
+#+BEGIN_SRC elisp
 (defun claude-org--build-full-prompt (prompt system-reminder)
   "Prepend SYSTEM-REMINDER to PROMPT if non-nil and non-empty.
 Returns the combined prompt string, or PROMPT unchanged when
@@ -4678,20 +4770,14 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
              (when-let* ((heading-pos (claude-org--find-session-scope-heading)))
                (goto-char heading-pos)
                (substring-no-properties (org-get-heading t t t t))))))
-      ;; Build callbacks with query-id validation via guarded helper
+      ;; Build the streaming state carrier; its methods validate the
+      ;; query-id + source buffer before dispatching to handler bodies.
       (let* ((query-id (claude-org--session-get session-key :query-id))
-             (mk (lexical-let ((source-buf source-buf)
-                                (session-key session-key)
-                                (query-id query-id))
-                   (lambda (handler)
-                     (claude-org--make-guarded-callback
-                      source-buf session-key query-id handler))))
-             (callbacks
-              (list
-               :on-token    (funcall mk #'claude-org--handle-token-v2)
-               :on-message  (funcall mk #'claude-org--handle-message)
-               :on-error    (funcall mk #'claude-org--handle-error)
-               :on-complete (funcall mk #'claude-org--handle-complete))))
+             (stream (claude-org-response-stream--create
+                      :session-key session-key
+                      :source-buffer source-buf
+                      :query-id query-id))
+             (callbacks (claude-org-response-stream-callbacks stream)))
         ;; Dispatch through backend
         (claude-org--dispatch-query session-key full-prompt callbacks
           :options options

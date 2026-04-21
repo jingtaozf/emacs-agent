@@ -528,6 +528,25 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-org-list-sessions"
     "claude-org-show-session-info"
     "claude-org-show-verbose"
+    ;; claude-org: persistent-client registry (class-based singleton)
+    "claude-org-persistent-registry-get-entry"
+    "claude-org-persistent-registry-get"
+    "claude-org-persistent-registry-alive-p"
+    "claude-org-persistent-registry-register"
+    "claude-org-persistent-registry-update-activity"
+    "claude-org-persistent-registry-disconnect"
+    "claude-org-persistent-registry-disconnect-buffer"
+    "claude-org-persistent-registry-list"
+    "claude-org-persistent-registry-count"
+    ;; claude-org: copilot title generator (class-based singleton)
+    "claude-org-copilot-title-generator-ensure-instance"
+    "claude-org-copilot-title-generator-generate"
+    ;; claude-org: response streaming (per-query state carrier)
+    "claude-org-response-stream-handle-token"
+    "claude-org-response-stream-handle-message"
+    "claude-org-response-stream-handle-error"
+    "claude-org-response-stream-handle-complete"
+    "claude-org-response-stream-callbacks"
     ;; claude-org: response
     "claude-org-append-to-response"
     ;; claude-org: loop
