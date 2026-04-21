@@ -204,9 +204,11 @@
   "claude-agent-trace--ensure-bridge auto-starts the bridge process."
   :tags '(:unit :otel)
   (let ((started nil)
-        (claude-agent-trace--bridge-process nil)
         (claude-agent-trace-enabled t)
         (mock-buf (generate-new-buffer " *mock-bridge*")))
+    ;; Reset the singleton slot so the ensure-call spawns a fresh process.
+    (setf (claude-agent-trace-service-process
+           claude-agent-trace--bridge-service) nil)
     (unwind-protect
         (cl-letf (((symbol-function 'start-process)
                    (lambda (&rest args)
@@ -215,6 +217,8 @@
           (should (claude-agent-trace--ensure-bridge))
           (should started)
           (should (member "otel-bridge" started)))
+      (setf (claude-agent-trace-service-process
+             claude-agent-trace--bridge-service) nil)
       (kill-buffer mock-buf))))
 
 ;;; Test 11: stop-bridge kills process
@@ -226,14 +230,16 @@
         (mock-buf (generate-new-buffer " *mock-bridge*")))
     (unwind-protect
         (progn
-          (setq claude-agent-trace--bridge-process mock-buf)
+          (setf (claude-agent-trace-service-process
+                 claude-agent-trace--bridge-service) mock-buf)
           (cl-letf (((symbol-function 'process-live-p)
                      (lambda (_p) t))
                     ((symbol-function 'kill-process)
                      (lambda (p) (setq killed p))))
             (claude-agent-trace-stop-bridge)
             (should killed)
-            (should (null claude-agent-trace--bridge-process))))
+            (should (null (claude-agent-trace-service-process
+                           claude-agent-trace--bridge-service)))))
       (when (buffer-live-p mock-buf)
         (kill-buffer mock-buf)))))
 
@@ -243,8 +249,9 @@
   "claude-agent-trace--ensure-phoenix auto-starts Phoenix."
   :tags '(:unit :otel)
   (let ((started nil)
-        (claude-agent-trace--phoenix-process nil)
         (mock-buf (generate-new-buffer " *mock-phoenix*")))
+    (setf (claude-agent-trace-service-process
+           claude-agent-trace--phoenix-service) nil)
     (unwind-protect
         (cl-letf (((symbol-function 'start-process)
                    (lambda (&rest args)
@@ -253,6 +260,8 @@
           (should (claude-agent-trace--ensure-phoenix))
           (should started)
           (should (member "phoenix" started)))
+      (setf (claude-agent-trace-service-process
+             claude-agent-trace--phoenix-service) nil)
       (kill-buffer mock-buf))))
 
 ;;; Test 13: stop-phoenix kills process
@@ -264,14 +273,16 @@
         (mock-buf (generate-new-buffer " *mock-phoenix*")))
     (unwind-protect
         (progn
-          (setq claude-agent-trace--phoenix-process mock-buf)
+          (setf (claude-agent-trace-service-process
+                 claude-agent-trace--phoenix-service) mock-buf)
           (cl-letf (((symbol-function 'process-live-p)
                      (lambda (_p) t))
                     ((symbol-function 'kill-process)
                      (lambda (p) (setq killed p))))
             (claude-agent-trace-stop-phoenix)
             (should killed)
-            (should (null claude-agent-trace--phoenix-process))))
+            (should (null (claude-agent-trace-service-process
+                           claude-agent-trace--phoenix-service)))))
       (when (buffer-live-p mock-buf)
         (kill-buffer mock-buf)))))
 

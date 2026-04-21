@@ -341,16 +341,81 @@ Writes to ALL ancestor CLAUDE_SESSION_ID keys so that Python hooks
 
 * Server Lifecycle
 
+** Service Class
+
+Two external processes need the same "auto-start + stop + alive?"
+contract: the OTel bridge and Phoenix itself.  Promoting the pattern
+to a =cl-defstruct= (per
+=.claude/rules/oop-smalltalk-protocols.md=) replaces four free
+functions and two pairs of =defvar= process handles with a single
+class carrying name, buffer, command, and current process, plus two
+generics for the lifecycle verbs.
+
 #+BEGIN_SRC elisp
-(defvar claude-agent-trace--bridge-process nil
-  "Process object for the OTel bridge Flask server.")
+(cl-defstruct (claude-agent-trace-service
+               (:constructor claude-agent-trace-service--create)
+               (:copier nil))
+  "A managed Python subprocess providing tracing infrastructure.
+Two instances exist as module-level singletons: the OTel bridge and
+the Phoenix collector.  The class captures the shape they share so
+the start/stop verbs can be defined once."
+  (name nil
+        :documentation "Short name — surfaces in `start-process' and user-visible messages.")
+  (buffer-name nil
+               :documentation "Name of the buffer that receives stdout/stderr.")
+  (command nil
+           :documentation "List passed to `start-process' after name + buffer-name.")
+  (process nil
+           :documentation "The running process object, or nil when stopped."))
 
-(defvar claude-agent-trace--phoenix-process nil
-  "Process object for the Arize Phoenix collector.")
+(cl-defgeneric claude-agent-trace-service-ensure (service cwd)
+  "Ensure SERVICE is running, starting it in CWD if needed.
+Returns non-nil on success, nil on failure (silently logged).")
 
+(cl-defmethod claude-agent-trace-service-ensure
+    ((service claude-agent-trace-service) cwd)
+  "Default implementation: no-op when already alive, otherwise spawn."
+  (let ((proc (claude-agent-trace-service-process service)))
+    (if (and proc (process-live-p proc))
+        t
+      (condition-case err
+          (let ((default-directory cwd))
+            (setf (claude-agent-trace-service-process service)
+                  (apply #'start-process
+                         (claude-agent-trace-service-name service)
+                         (claude-agent-trace-service-buffer-name service)
+                         (claude-agent-trace-service-command service)))
+            t)
+        (error
+         (message "%s failed to start: %s"
+                  (claude-agent-trace-service-name service)
+                  (error-message-string err))
+         nil)))))
+
+(cl-defgeneric claude-agent-trace-service-stop (service)
+  "Kill SERVICE's process if alive; clear the slot either way.")
+
+(cl-defmethod claude-agent-trace-service-stop
+    ((service claude-agent-trace-service))
+  "Default implementation: delete-process when alive, forget it either way."
+  (let ((proc (claude-agent-trace-service-process service)))
+    (when (and proc (process-live-p proc))
+      (kill-process proc)))
+  (setf (claude-agent-trace-service-process service) nil))
+#+END_SRC
+
+** Singletons + Path Helper
+
+The two services are module-level singletons — there is ever only
+one bridge and one Phoenix per Emacs.  =claude-agent-trace--python-dir=
+is extracted because both singletons need the same CWD to find the
+Python package.
+
+#+BEGIN_SRC elisp
 (defun claude-agent-trace--python-dir ()
   "Return the python/ directory under the claude-agent project root.
-Uses `claude-code-directory' (set at package load time) as primary source."
+Uses `claude-code-directory' (set at package load time) as primary
+source; falls back to locating this file on disk."
   (expand-file-name "python" (or (bound-and-true-p claude-code-directory)
                                  (file-name-directory
                                   (or load-file-name
@@ -362,56 +427,52 @@ Uses `claude-code-directory' (set at package load time) as primary source."
                                             load-history))
                                       default-directory)))))
 
-(defun claude-agent-trace--process-alive-p (proc)
-  "Return non-nil if PROC is a live process."
-  (and proc (process-live-p proc)))
+(defvar claude-agent-trace--bridge-service
+  (claude-agent-trace-service--create
+   :name "otel-bridge"
+   :buffer-name "*otel-bridge*"
+   :command '("uv" "run" "--extra" "tracing"
+              "python" "-m" "claude_agent.otel_bridge"))
+  "Singleton controlling the OTel bridge Flask server.")
 
+(defvar claude-agent-trace--phoenix-service
+  (claude-agent-trace-service--create
+   :name "phoenix"
+   :buffer-name "*phoenix*"
+   :command '("uv" "run" "--extra" "phoenix"
+              "python" "-m" "phoenix.server.main" "serve"))
+  "Singleton controlling the Phoenix collector process.")
+#+END_SRC
+
+** Thin Wrappers
+
+The module's published API is procedural (auto-start here, stop
+there) — the wrappers below dispatch into the singletons so external
+callers need no awareness of the class shape.
+
+#+BEGIN_SRC elisp
 (defun claude-agent-trace--ensure-bridge ()
-  "Ensure the OTel bridge is running. Auto-starts if needed.
-Returns non-nil if bridge is running, nil on failure (silently)."
+  "Ensure the OTel bridge is running (respects `claude-agent-trace-enabled')."
   (when claude-agent-trace-enabled
-    (if (claude-agent-trace--process-alive-p claude-agent-trace--bridge-process)
-        t
-      (condition-case err
-          (let ((default-directory (claude-agent-trace--python-dir)))
-            (setq claude-agent-trace--bridge-process
-                  (start-process "otel-bridge" "*otel-bridge*"
-                                 "uv" "run" "--extra" "tracing"
-                                 "python" "-m" "claude_agent.otel_bridge"))
-            t)
-        (error
-         (message "OTel bridge failed to start: %s" (error-message-string err))
-         nil)))))
+    (claude-agent-trace-service-ensure
+     claude-agent-trace--bridge-service
+     (claude-agent-trace--python-dir))))
 
 (defun claude-agent-trace--ensure-phoenix ()
-  "Ensure Phoenix collector is running. Auto-starts if needed.
-Returns non-nil if Phoenix is running, nil on failure (silently)."
-  (if (claude-agent-trace--process-alive-p claude-agent-trace--phoenix-process)
-      t
-    (condition-case err
-        (let ((default-directory (claude-agent-trace--python-dir)))
-          (setq claude-agent-trace--phoenix-process
-                (start-process "phoenix" "*phoenix*"
-                               "uv" "run" "--extra" "phoenix"
-                               "python" "-m" "phoenix.server.main" "serve"))
-          t)
-      (error
-       (message "Phoenix failed to start: %s" (error-message-string err))
-       nil))))
+  "Ensure the Phoenix collector is running."
+  (claude-agent-trace-service-ensure
+   claude-agent-trace--phoenix-service
+   (claude-agent-trace--python-dir)))
 
 (defun claude-agent-trace-stop-bridge ()
   "Stop the OTel bridge server."
   (interactive)
-  (when (claude-agent-trace--process-alive-p claude-agent-trace--bridge-process)
-    (kill-process claude-agent-trace--bridge-process))
-  (setq claude-agent-trace--bridge-process nil))
+  (claude-agent-trace-service-stop claude-agent-trace--bridge-service))
 
 (defun claude-agent-trace-stop-phoenix ()
   "Stop the Phoenix collector."
   (interactive)
-  (when (claude-agent-trace--process-alive-p claude-agent-trace--phoenix-process)
-    (kill-process claude-agent-trace--phoenix-process))
-  (setq claude-agent-trace--phoenix-process nil))
+  (claude-agent-trace-service-stop claude-agent-trace--phoenix-service))
 
 (defun claude-agent-trace--wait-for-url (url callback &optional max-retries)
   "Poll URL until it returns HTTP 200, then call CALLBACK.
