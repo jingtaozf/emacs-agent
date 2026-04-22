@@ -1157,7 +1157,7 @@ call new-workspace."
                                        :key #'car :test #'equal))
                       ;; Verbose timer started
                       (let ((sk (claude-org--current-session-key)))
-                        (should (claude-org--session-get sk :verbose-timer)))))))
+                        (should (claude-org--session-get sk :verbose-follow-process)))))))
             ;; Cleanup: stop verbose, clear state, kill buffer
             (let ((sk (with-current-buffer buf
                         (claude-org--current-session-key))))
@@ -1755,7 +1755,7 @@ calling new-workspace."
                 ;; after phase 2 recovery
                 ;; Verbose timer started
                 (let ((sk (claude-org--current-session-key)))
-                  (should (claude-org--session-get sk :verbose-timer)))
+                  (should (claude-org--session-get sk :verbose-follow-process)))
                 ;; list-workspaces was queried for name lookup
                 (should (cl-find "list-workspaces" calls
                                  :key #'car :test #'equal))
@@ -1966,7 +1966,7 @@ launch command sent, verbose timer restarted."
                       (should (>= (length send-calls) 2)))
                     ;; 4. Verbose timer restarted
                     (let ((sk (claude-org--current-session-key)))
-                      (should (claude-org--session-get sk :verbose-timer))))))
+                      (should (claude-org--session-get sk :verbose-follow-process))))))
             ;; Cleanup
             (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
               (when sk (claude-org-cmux--stop-verbose sk)))
@@ -2024,7 +2024,7 @@ with header-line containing the session ID and keybinding hints."
                       (with-current-buffer vbuf
                         (should header-line-format))
                       ;; Timer is running
-                      (should (claude-org--session-get sk :verbose-timer))))))
+                      (should (claude-org--session-get sk :verbose-follow-process))))))
             ;; Cleanup
             (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
               (when sk
@@ -2176,36 +2176,48 @@ tracking the new surface."
                     (claude-org-mode 1))
                   (insert test-cmux--org-content-with-surface)
                   (save-buffer))
+                ;; Seed the workspace→UUID cache so --start-verbose can
+                ;; resolve the workspace and actually spawn a follow process.
+                (puthash "test-cmux-session-003" "mock-uuid-123"
+                         claude-org-cmux--workspace-to-cmux-id)
                 (cl-letf (((symbol-function 'claude-org-cmux--call)
                            (lambda (subcmd &rest _args)
                              (cond
                               ((string= subcmd "tree")
                                "workspace workspace:mock-1 \"Test\"")
                               ((string= subcmd "capture-pane") "screen v1")
-                              (t "ok")))))
+                              (t "ok"))))
+                          ;; Keep the follow-process harmless — spawn a
+                          ;; long-lived no-op instead of real cmux.
+                          ;; Keep the follow-process harmless — spawn a
+                          ;; long-lived no-op via the UNMOCKED start-process.
+                          ;; Binding start-process via cl-letf then recursing
+                          ;; into it would blow the nesting limit.
+                          ((symbol-function 'start-process)
+                           (let ((orig (symbol-function 'start-process)))
+                             (lambda (_name _buffer _program &rest _args)
+                               (funcall orig "cmux-follow-mock" nil "sleep" "60")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
                     (let ((sk (claude-org--current-session-key)))
                       ;; Start verbose with surface-A
                       (claude-org-cmux--start-verbose "surface:A" sk)
-                      (let ((timer-a (claude-org--session-get sk :verbose-timer)))
-                        (should timer-a)
+                      (let ((proc-a (claude-org--session-get sk :verbose-follow-process)))
+                        (should proc-a)
                         (should (equal "surface:A"
                                        (claude-org--session-get sk :verbose-surface-id)))
                         ;; Start verbose with surface-B (surface changed)
                         (claude-org-cmux--start-verbose "surface:B" sk)
-                        (let ((timer-b (claude-org--session-get sk :verbose-timer)))
-                          ;; Timer replaced (not the same object)
-                          (should timer-b)
-                          (should-not (eq timer-a timer-b))
-                          ;; Surface updated
+                        (let ((proc-b (claude-org--session-get sk :verbose-follow-process)))
+                          ;; Process replaced (not the same object)
+                          (should proc-b)
+                          (should-not (eq proc-a proc-b))
                           (should (equal "surface:B"
                                          (claude-org--session-get sk :verbose-surface-id)))
-                          ;; Start verbose with SAME surface-B (no change)
+                          ;; Start verbose with SAME surface-B — no restart
                           (claude-org-cmux--start-verbose "surface:B" sk)
-                          (let ((timer-b2 (claude-org--session-get sk :verbose-timer)))
-                            ;; Timer NOT replaced — same surface
-                            (should (eq timer-b timer-b2)))))))))
+                          (let ((proc-b2 (claude-org--session-get sk :verbose-follow-process)))
+                            (should (eq proc-b proc-b2)))))))))
             ;; Cleanup
             (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
               (when sk (claude-org-cmux--stop-verbose sk)))
@@ -2220,7 +2232,7 @@ tracking the new surface."
 ;;; ============================================================================
 
 (ert-deftest test-cmux-stop-verbose-cancels-timer ()
-  "E12: stop-verbose cancels timer and clears :verbose-timer session state.
+  "E12: stop-verbose cancels timer and clears :verbose-follow-process session state.
 Ensures no orphan timers remain after cleanup."
   :tags '(:unit :stable :e2e)
   (let ((file (make-temp-file "test-cmux-vstop-" nil ".org")))
@@ -2246,14 +2258,14 @@ Ensures no orphan timers remain after cleanup."
                     (let ((sk (claude-org--current-session-key)))
                       ;; Start verbose
                       (claude-org-cmux--start-verbose "surface:test" sk)
-                      (should (claude-org--session-get sk :verbose-timer))
+                      (should (claude-org--session-get sk :verbose-follow-process))
                       ;; Stop verbose
                       (claude-org-cmux--stop-verbose sk)
                       ;; Timer cleared
-                      (should-not (claude-org--session-get sk :verbose-timer))
+                      (should-not (claude-org--session-get sk :verbose-follow-process))
                       ;; Stopping again is safe (no error)
                       (claude-org-cmux--stop-verbose sk)
-                      (should-not (claude-org--session-get sk :verbose-timer))))))
+                      (should-not (claude-org--session-get sk :verbose-follow-process))))))
             ;; Cleanup
             (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
               (when sk (claude-org-cmux--stop-verbose sk)))
@@ -2268,72 +2280,36 @@ Ensures no orphan timers remain after cleanup."
 ;;; ============================================================================
 
 (ert-deftest test-cmux-verbose-buffer-self-heals-after-kill ()
-  "E13: If the user kills the verbose buffer, the timer must recreate it.
-Without self-healing, the timer closure holds a dead buffer reference and
-silently no-ops forever. The fix is to re-resolve the buffer each tick
-via `claude-org-cmux--create-verbose-buffer' (which is idempotent)."
+  "E13: `--create-verbose-buffer' is idempotent — killing the
+verbose buffer and calling the helper again returns a fresh live
+buffer with the registry pointing at it.
+
+Historical: earlier versions ran a 1 Hz timer that relied on this
+helper being re-called each tick for self-healing.  After the
+follow-process refactor (2026-04-22) there is no tick, so the test
+now only asserts the helper's idempotency — that's what the rest
+of the code (restart paths, recovery) depends on."
   :tags '(:unit :stable :e2e)
-  (let ((file (make-temp-file "test-cmux-vheal-" nil ".org")))
-    (unwind-protect
-        (let ((buf (find-file-noselect file)))
-          (unwind-protect
-              (progn
-                (with-current-buffer buf
-                  (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
-                  (insert test-cmux--org-content-with-surface)
-                  (save-buffer))
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
-                           (lambda (subcmd &rest _args)
-                             (cond
-                              ((string= subcmd "tree") "workspace workspace:mock-1 \"Test\"")
-                              ((string= subcmd "capture-pane") "screen content")
-                              (t "ok")))))
-                  (with-current-buffer buf
-                    (test-cmux--goto-ai-block)
-                    (let ((sk (claude-org--current-session-key)))
-                      ;; Start verbose streaming
-                      (claude-org-cmux--start-verbose "surface:heal" sk)
-                      ;; Initial buffer should exist and be live
-                      (let ((buf1 (gethash sk claude-agent--session-verbose-buffers)))
-                        (should buf1)
-                        (should (buffer-live-p buf1))
-                        ;; User kills the verbose buffer
-                        (kill-buffer buf1)
-                        (should-not (buffer-live-p buf1))
-                        ;; Ensure function should return a fresh live buffer
-                        (let ((buf2 (claude-org-cmux--create-verbose-buffer sk "surface:heal")))
-                          (should buf2)
-                          (should (buffer-live-p buf2))
-                          (should-not (eq buf1 buf2))
-                          ;; Registry now points to the new buffer
-                          (should (eq buf2 (gethash sk claude-agent--session-verbose-buffers))))
-                        ;; Kill again and verify timer tick self-heals
-                        (let ((buf2 (gethash sk claude-agent--session-verbose-buffers)))
-                          (kill-buffer buf2)
-                          (should-not (buffer-live-p buf2))
-                          ;; Manually invoke the timer's work function (simulates one tick)
-                          (let ((timer (claude-org--session-get sk :verbose-timer)))
-                            (should timer)
-                            (funcall (timer--function timer)))
-                          ;; After tick, a fresh buffer should exist in the registry
-                          (let ((buf3 (gethash sk claude-agent--session-verbose-buffers)))
-                            (should buf3)
-                            (should (buffer-live-p buf3))
-                            (should-not (eq buf2 buf3)))))))))
-            ;; Cleanup
-            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
-              (when sk
-                (claude-org-cmux--stop-verbose sk)
-                (when-let ((b (gethash sk claude-agent--session-verbose-buffers)))
-                  (when (buffer-live-p b) (kill-buffer b)))
-                (remhash sk claude-agent--session-verbose-buffers)))
-            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
-            (kill-buffer buf)))
-      (delete-file file))))
+  (puthash "test-cmux-session-003" "mock-uuid-123"
+           claude-org-cmux--workspace-to-cmux-id)
+  (unwind-protect
+      (let ((sk "/tmp/test-vheal.org::test-cmux-session-003")
+            (buf1 (claude-org-cmux--create-verbose-buffer
+                   "/tmp/test-vheal.org::test-cmux-session-003"
+                   "surface:heal")))
+        (should buf1)
+        (should (buffer-live-p buf1))
+        (kill-buffer buf1)
+        (should-not (buffer-live-p buf1))
+        (let ((buf2 (claude-org-cmux--create-verbose-buffer sk "surface:heal")))
+          (should buf2)
+          (should (buffer-live-p buf2))
+          (should-not (eq buf1 buf2))
+          (should (eq buf2 (gethash sk claude-agent--session-verbose-buffers)))
+          (kill-buffer buf2)))
+    (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+    (remhash "/tmp/test-vheal.org::test-cmux-session-003"
+             claude-agent--session-verbose-buffers)))
 
 ;;; ============================================================================
 ;;; E14: Story switch updates ACTIVE_STORY and renames tab

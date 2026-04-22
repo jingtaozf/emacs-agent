@@ -1360,171 +1360,122 @@ tick; a subsequent `ensure-session' will repopulate the cache."
     (when ws-sid
       (gethash ws-sid claude-org-cmux--workspace-to-cmux-id))))
 
-(defun claude-org-cmux--session-has-executing-p (session-key)
-  "Return non-nil if SESSION-KEY's workspace has any instruction in
-the `executing' state.
+(defun claude-org-cmux--verbose-strip-ansi (chunk)
+  "Best-effort strip of ANSI escapes + control chars from CHUNK.
 
-Walks the workspace's org subtree looking for
-=:AI_EXEC_STATUS: executing= property drawers.  Cheap (pure org
-traversal, no subprocess); called on every verbose-tick to decide
-whether polling cmux is actually worth doing.
+Stripping is deliberately lossy: we discard colour, cursor
+positioning, and clear-screen sequences.  Preserving them would
+require a tty emulator inside the verbose buffer — disproportionate
+for a read-only debug view.  A handful of safe whitespace chars
+(newline, tab, carriage return) survive so the stream remains
+line-structured."
+  (replace-regexp-in-string
+   "\x1b\\[[0-9;?]*[a-zA-Z]\\|\x1b\\][^\a\x1b]*\\(?:\a\\|\x1b\\\\\\)\\|[\x00-\x08\x0b\x0c\x0e-\x1f]"
+   "" chunk))
 
-Returns nil when the session or buffer can't be located — safer
-than assuming \"executing\" (would keep polling an orphan) or
-assuming \"idle\" (would miss genuine activity).  Nil here is the
-\"nothing to poll\" signal for the tick gate."
-  (let* ((ws-sid (when (and session-key
-                            (string-match "::\\([^:]+\\)\\'" session-key))
-                   (match-string 1 session-key)))
-         (file (when session-key
-                 (car (split-string session-key "::")))))
-    (when (and ws-sid file (file-exists-p file))
-      (let ((buf (get-file-buffer file)))
-        (when (buffer-live-p buf)
-          (with-current-buffer buf
+(defun claude-org-cmux--verbose-follow-filter (proc chunk)
+  "Append CHUNK (scrubbed) from `cmux capture-pane --follow' to the verbose buffer.
+
+Auto-scrolls only windows that were already at `point-max' — a user
+reading an earlier page keeps their scroll position as new content
+lands after the visible window."
+  (let ((vbuf (process-get proc 'verbose-buffer)))
+    (when (buffer-live-p vbuf)
+      (let ((scrubbed (claude-org-cmux--verbose-strip-ansi chunk)))
+        (when (> (length scrubbed) 0)
+          (with-current-buffer vbuf
+            (let ((win-states nil))
+              (dolist (win (get-buffer-window-list vbuf nil t))
+                (push (cons win (= (window-point win) (point-max))) win-states))
+              (let ((inhibit-read-only t))
+                (save-excursion
+                  (goto-char (point-max))
+                  (insert scrubbed)))
+              (dolist (state win-states)
+                (let ((win (car state)) (was-at-end (cdr state)))
+                  (when (and (window-live-p win) was-at-end)
+                    (set-window-point win (point-max))))))))))))
+
+(defun claude-org-cmux--verbose-follow-sentinel (proc event)
+  "Handle `cmux capture-pane --follow' lifecycle events.
+
+On exit we drop the process reference from the session so a later
+`--start-verbose' call can restart it (either manually, or when a
+workspace is relaunched).  We deliberately DO NOT auto-restart
+here — if cmux is genuinely gone there's no workspace to follow,
+and silent reconnect loops would mask real failures."
+  (let ((sk (process-get proc 'session-key))
+        (vbuf (process-get proc 'verbose-buffer)))
+    (when (string-match-p "\\(finished\\|exited\\|killed\\|broken\\)" event)
+      (when (and sk (eq proc (claude-org--session-get sk :verbose-follow-process)))
+        (claude-org--session-put sk :verbose-follow-process nil))
+      (when (buffer-live-p vbuf)
+        (with-current-buffer vbuf
+          (let ((inhibit-read-only t))
             (save-excursion
-              (save-restriction
-                (widen)
-                (goto-char (point-min))
-                (when (re-search-forward
-                       (format ":CLAUDE_SESSION_ID:[ \t]+%s\\b"
-                               (regexp-quote ws-sid))
-                       nil t)
-                  (org-back-to-heading t)
-                  (let ((end (save-excursion (org-end-of-subtree t t))))
-                    (re-search-forward
-                     "^:AI_EXEC_STATUS:[ \t]+executing\\b" end t)))))))))))
-
-(defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf socket-path)
-  "Async capture-pane tick: capture screen, replace buffer with current view.
-Resolves the cmux workspace UUID via `claude-org-cmux--verbose-workspace-uuid'
-and pins the capture to SURFACE-ID so the verbose buffer always shows the
-Claude Code terminal — even when the user switches to a different tab in the
-same cmux workspace.  Without `--surface', `capture-pane --workspace' returns
-the selected (active) surface, which may be a shell or other non-Claude tab.
-SOCKET-PATH is the cmux socket (resolved once at timer creation).
-
-Two gates short-circuit the subprocess spawn — before this change
-the tick forked `cmux capture-pane' once per second for every
-session regardless of state, which pegged the macOS analytics
-daemons at high load even during idle periods (observed as
-osanalyticshelper + ASPCarryLog + analyticsd burning ~140% CPU
-combined for 3 idle sessions):
-
-* Orphan cleanup (D): if the workspace UUID can't be resolved OR
-  the verbose buffer was killed, the timer self-cancels — the
-  session is gone or the user dismissed the buffer.
-* Busy gate (A): polling only happens when some instruction under
-  this session is `AI_EXEC_STATUS: executing'.  An idle session's
-  terminal view doesn't change, so capturing it produces no new
-  information.  A fresh `executing' state resumes polling on the
-  next tick (session state is still checked per-tick — it's a
-  pure org traversal with no subprocess cost).
-
-Only auto-scrolls windows where the user is already at the end."
-  (let ((ws-uuid (claude-org-cmux--verbose-workspace-uuid session-key)))
-    (cond
-     ;; D: Orphaned timer — workspace vanished or verbose buffer killed.
-     ((or (not ws-uuid) (not (buffer-live-p verbose-buf)))
-      (claude-org-cmux--stop-verbose session-key))
-
-     ;; A: Busy gate — skip polling when no executing instruction.
-     ((not (claude-org-cmux--session-has-executing-p session-key))
-      nil)  ; silent no-op, keep timer alive for the next tick
-
-     (t
-      (let* ((cli (or claude-org-cmux-cli-path "cmux"))
-             (args (append (when socket-path (list "--socket" socket-path))
-                           (list "capture-pane"
-                                 "--workspace" ws-uuid
-                                 "--surface" surface-id)))
-             (proc-buf (generate-new-buffer " *cmux-vcap*"))
-             (proc (apply #'start-process "cmux-verbose" proc-buf cli args)))
-      (set-process-sentinel proc
-        (lexical-let ((vbuf verbose-buf) (pbuf proc-buf))
-          (lambda (proc event)
-            (when (string-prefix-p "finished" event)
-              (let ((cur-text (with-current-buffer pbuf (buffer-string))))
-                (when (and (not (string-empty-p cur-text))
-                           (buffer-live-p vbuf))
-                  (with-current-buffer vbuf
-                    (unless (string= cur-text claude-org-cmux--verbose-prev-text)
-                      ;; Save each window's scroll position before replacing content
-                      (let ((win-states nil))
-                        (dolist (win (get-buffer-window-list vbuf nil t))
-                          (push (list win
-                                      (window-start win)
-                                      (window-point win)
-                                      (= (window-point win) (point-max)))
-                                win-states))
-                        ;; Replace buffer content with current terminal view
-                        (let ((inhibit-read-only t))
-                          (erase-buffer)
-                          (insert (replace-regexp-in-string
-                                   "\\[[][0-9;]*[a-zA-Z]" ""
-                                   (replace-regexp-in-string
-                                    "[\x00-\x08\x0b\x0c\x0e-\x1f]" "" cur-text))))
-                        ;; Restore each window's position
-                        (dolist (state win-states)
-                          (let ((win (nth 0 state))
-                                (start (nth 1 state))
-                                (pt (nth 2 state))
-                                (was-at-end (nth 3 state)))
-                            (when (window-live-p win)
-                              (if was-at-end
-                                  ;; Was following — stay at end
-                                  (set-window-point win (point-max))
-                                ;; Was reading — restore exact position
-                                (set-window-start win (min start (point-max)) t)
-                                (set-window-point win (min pt (point-max))))))))
-                      (setq-local claude-org-cmux--verbose-prev-text cur-text))))))
-            (when (buffer-live-p pbuf)
-              (kill-buffer pbuf))))))))))
+              (goto-char (point-max))
+              (insert (format "\n;; cmux stream ended: %s\n"
+                              (string-trim event))))))))))
 
 (defun claude-org-cmux--start-verbose (surface-id session-key)
-  "Start verbose output streaming for cmux session.
-Restarts if surface-id changed (workspace relaunched).
-Resolves socket path now (from org context) and closes over it,
-since the timer fires in an arbitrary buffer context.
+  "Start the long-running `cmux capture-pane --follow' stream for SESSION-KEY.
 
-The timer is self-healing: if the user kills the verbose buffer, the
-next tick re-resolves it via `claude-org-cmux--create-verbose-buffer'
-\(which uses `get-buffer-create' and is idempotent), so the buffer
-always reappears within one tick interval."
-  (let ((existing-timer (claude-org--session-get session-key :verbose-timer))
+Replaces the earlier polling timer (one `capture-pane' fork per
+second per session).  A single subprocess per session reads the
+terminal as it changes and its filter appends into
+`*cmux: <session>*'.  The subprocess is idle-cheap — it blocks on
+read between terminal writes, so zero CPU when nothing is
+happening.  Restarts automatically when the surface id changes
+(workspace relaunched with a new terminal pane)."
+  (let ((existing (claude-org--session-get session-key :verbose-follow-process))
         (old-surface (claude-org--session-get session-key :verbose-surface-id)))
-    ;; Restart if surface changed or surface-id was never tracked
-    (when (and existing-timer (or (not old-surface)
-                                  (not (equal old-surface surface-id))))
+    ;; Restart if the surface id moved (new workspace pane replaces old).
+    (when (and existing (or (not old-surface)
+                            (not (equal old-surface surface-id))))
       (claude-org-cmux--stop-verbose session-key)
-      (setq existing-timer nil))
-    (unless existing-timer
+      (setq existing nil))
+    (when (and existing (not (process-live-p existing)))
+      (claude-org-cmux--stop-verbose session-key)
+      (setq existing nil))
+    (unless existing
       (claude-org--session-put session-key :verbose-surface-id surface-id)
-      ;; Create the initial buffer so `*cmux: <session>*' exists immediately,
-      ;; before the first tick. The timer will re-resolve it every tick, so
-      ;; this is just for user-visible responsiveness.
-      (claude-org-cmux--create-verbose-buffer session-key surface-id)
-      (let ((sock (or claude-org-cmux-socket-path
-                      (condition-case nil
-                          (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
-                        (error nil)))))
-        (claude-org--session-put session-key :verbose-timer
-          (run-at-time 1 1
-            (lexical-let ((sid surface-id) (sk session-key) (sp sock))
-              (lambda ()
-                (condition-case nil
-                    ;; Re-resolve the buffer each tick. If the user killed
-                    ;; it (or we're in a fresh Emacs session recovering),
-                    ;; `create-verbose-buffer' recreates it via
-                    ;; `get-buffer-create' and updates the registry.
-                    (let ((vb (claude-org-cmux--create-verbose-buffer sk sid)))
-                      (when (buffer-live-p vb)
-                        (claude-org-cmux--verbose-tick sid sk vb sp)))
-                  (error nil))))))))))
+      (let* ((ws-uuid (claude-org-cmux--verbose-workspace-uuid session-key))
+             (vbuf (claude-org-cmux--create-verbose-buffer session-key surface-id))
+             (sock (or claude-org-cmux-socket-path
+                       (condition-case nil
+                           (claude-org-terminal--find-session-property "CMUX_SOCKET_PATH")
+                         (error nil)))))
+        ;; No workspace resolution yet → nothing to follow.  Leave the
+        ;; buffer in place; a later call (after `ensure-session'
+        ;; populates the workspace map) will spawn the stream.
+        (when (and ws-uuid surface-id (buffer-live-p vbuf))
+          (let* ((cli (or claude-org-cmux-cli-path "cmux"))
+                 (args (append (when sock (list "--socket" sock))
+                               (list "capture-pane"
+                                     "--workspace" ws-uuid
+                                     "--surface" surface-id
+                                     "--follow"
+                                     "--interval" "0.5")))
+                 (proc (apply #'start-process
+                              (format "cmux-follow-%s" session-key)
+                              nil cli args)))
+            (process-put proc 'verbose-buffer vbuf)
+            (process-put proc 'session-key session-key)
+            (set-process-filter proc #'claude-org-cmux--verbose-follow-filter)
+            (set-process-sentinel proc #'claude-org-cmux--verbose-follow-sentinel)
+            (claude-org--session-put session-key :verbose-follow-process proc)))))))
 
 (defun claude-org-cmux--stop-verbose (session-key)
-  "Stop verbose output streaming."
-  (let ((timer (claude-org--session-get session-key :verbose-timer)))
+  "Kill the verbose stream subprocess for SESSION-KEY, if any.
+
+Also clears the legacy `:verbose-timer' slot — older sessions still
+carrying a run-at-time timer (before the follow-stream refactor)
+get cleaned up the first time this is called."
+  (let ((proc (claude-org--session-get session-key :verbose-follow-process))
+        (timer (claude-org--session-get session-key :verbose-timer)))
+    (when (and proc (process-live-p proc))
+      (delete-process proc))
+    (claude-org--session-put session-key :verbose-follow-process nil)
     (when timer
       (cancel-timer timer)
       (claude-org--session-put session-key :verbose-timer nil))))
