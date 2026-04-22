@@ -295,9 +295,42 @@ Org headings in response content are shifted to become subsections."
                 (insert (format "%s Response %d (%s) :ai_output:\n"
                                 stars response-num timestamp))
                 (insert ":PROPERTIES:\n:QUERY_TYPE: terminal\n:END:\n\n")
-                (insert (claude-org-workspace-bridge--shift-org-headings response instr-level) "\n")))))))
+                (insert (claude-org-workspace-bridge--shift-org-headings response instr-level) "\n")))
+            ;; Flip the instruction's status so the header-line shows
+            ;; "completed" rather than staying stuck at "executing".
+            ;; Previously no code path did this on terminal-typed prompts,
+            ;; which is why 4 PCR-dev1 blocks remained "executing" even
+            ;; after their responses arrived.
+            (save-excursion
+              (goto-char instr-pos)
+              (org-entry-put nil claude-org-exec-status-property "completed"))))))
     (save-buffer)
     (format "Inserted Response (%d chars)" (length response)))))
+
+(defun claude-org-workspace-bridge-mark-cancelled
+    (org-file session-id instr-custom-id)
+  "Flip INSTR-CUSTOM-ID's AI_EXEC_STATUS to \"cancelled\" in ORG-FILE.
+Called by the workspace bridge when a queued prompt was superseded
+(user typed a new prompt before Claude Code generated a reply to the
+old one).  Leaves the AI block content untouched so the user can
+re-execute manually."
+  (claude-agent-with-span "workspace-mark-cancelled"
+      (list :session-id session-id :custom-id instr-custom-id) nil
+  (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (claude-org-workspace-bridge--find-workflow session-id)
+        (let* ((workflow-level (org-current-level))
+               (workflow-end (claude-org-workspace-bridge--find-next-sibling-heading
+                              workflow-level (point-max)))
+               (instr-pos (claude-org-workspace-bridge--find-heading-by-custom-id
+                           instr-custom-id workflow-end)))
+          (when instr-pos
+            (goto-char instr-pos)
+            (org-entry-put nil claude-org-exec-status-property "cancelled")
+            (save-buffer)
+            (format "Marked %s cancelled" instr-custom-id))))))))
 #+END_SRC
 
 ** CLI Session Persistence

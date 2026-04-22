@@ -83,6 +83,113 @@ class TestCustomIdPersistence:
         bridge._clear_custom_id()  # should not raise
 
 
+class TestCustomIdQueue:
+    """Regression tests for the queue-based custom-id storage (PCR dev1 bug)."""
+
+    def test_append_preserves_order(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge(session_id="sid")
+        bridge._append_custom_id("a")
+        bridge._append_custom_id("b")
+        bridge._append_custom_id("c")
+        assert bridge._read_custom_ids() == ["a", "b", "c"]
+
+    def test_read_custom_id_returns_newest(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge(session_id="sid")
+        bridge._append_custom_id("older")
+        bridge._append_custom_id("newer")
+        assert bridge._read_custom_id() == "newer"
+
+    def test_clear_drains_queue(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge(session_id="sid")
+        bridge._append_custom_id("a")
+        bridge._append_custom_id("b")
+        bridge._clear_custom_ids()
+        assert bridge._read_custom_ids() == []
+
+    def test_write_custom_id_is_append(self, tmp_path, monkeypatch):
+        """Back-compat alias should append, not overwrite (bug fix)."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        bridge = make_bridge(session_id="sid")
+        bridge._write_custom_id("first")
+        bridge._write_custom_id("second")
+        assert bridge._read_custom_ids() == ["first", "second"]
+
+
+class TestExtractTurns:
+    """Per-turn transcript extraction — the other half of the supersede fix."""
+
+    def _write_transcript(self, tmp_path, entries):
+        path = tmp_path / "transcript.jsonl"
+        path.write_text("\n".join(json.dumps(e) for e in entries))
+        return str(path)
+
+    def _user(self, text):
+        return {"type": "user",
+                "message": {"content": [{"type": "text", "text": text}]}}
+
+    def _assistant(self, text):
+        return {"type": "assistant",
+                "message": {"content": [{"type": "text", "text": text}]}}
+
+    def _assistant_tool(self, text):
+        return {"type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": text},
+                    {"type": "tool_use", "name": "Bash", "input": {}},
+                ]}}
+
+    def test_single_turn(self, tmp_path):
+        from claude_agent.workspace_bridge import _extract_turns
+        path = self._write_transcript(tmp_path, [
+            self._user("q"), self._assistant("a"),
+        ])
+        assert _extract_turns(path) == [("q", "a")]
+
+    def test_two_sequential_turns(self, tmp_path):
+        from claude_agent.workspace_bridge import _extract_turns
+        path = self._write_transcript(tmp_path, [
+            self._user("q1"), self._assistant("a1"),
+            self._user("q2"), self._assistant("a2"),
+        ])
+        assert _extract_turns(path) == [("q1", "a1"), ("q2", "a2")]
+
+    def test_superseded_first_turn_has_empty_assistant(self, tmp_path):
+        """The PCR dev1 bug: user typed q2 before Claude finished q1."""
+        from claude_agent.workspace_bridge import _extract_turns
+        path = self._write_transcript(tmp_path, [
+            self._user("q1"),
+            self._user("q2"),
+            self._assistant("a2"),
+        ])
+        assert _extract_turns(path) == [("q1", ""), ("q2", "a2")]
+
+    def test_tool_use_turns_skipped(self, tmp_path):
+        from claude_agent.workspace_bridge import _extract_turns
+        path = self._write_transcript(tmp_path, [
+            self._user("q1"),
+            self._assistant_tool("Let me check"),
+            self._assistant("final answer"),
+        ])
+        assert _extract_turns(path) == [("q1", "final answer")]
+
+    def test_empty_transcript(self, tmp_path):
+        from claude_agent.workspace_bridge import _extract_turns
+        path = self._write_transcript(tmp_path, [])
+        assert _extract_turns(path) == []
+
+    def test_user_without_assistant(self, tmp_path):
+        """Final user entry with no assistant follow-up (cancelled during generation)."""
+        from claude_agent.workspace_bridge import _extract_turns
+        path = self._write_transcript(tmp_path, [
+            self._user("q1"), self._assistant("a1"),
+            self._user("q2"),
+        ])
+        assert _extract_turns(path) == [("q1", "a1"), ("q2", "")]
+
+
 class TestHandleDispatch:
     """The ``handle`` method routes events to ``_handle_<event>``."""
 
@@ -526,6 +633,100 @@ class TestHandlePromptFiltering:
         bridge = make_bridge(mcp)
         bridge._handle_prompt({"prompt": ""})
         assert not mcp.eval_elisp.called
+
+
+class TestHandleResponseSupersede:
+    """PCR dev1 bug regression tests: two prompts + one Stop.
+
+    Before the fix, only the newest prompt got a response and the older
+    was stuck at AI_EXEC_STATUS: executing.  After the fix, the older
+    gets marked cancelled and the newer gets its response.
+    """
+
+    def _mcp_returning_each_prompt_id(self, ids):
+        """Mock that returns a different custom-id per insert-prompt call."""
+        mcp = MagicMock()
+        remaining = list(ids)
+
+        def _side_effect(elisp):
+            if "insert-prompt" in elisp:
+                return remaining.pop(0) if remaining else "leftover"
+            return None
+
+        mcp.eval_elisp.side_effect = _side_effect
+        return mcp
+
+    def _write_transcript(self, tmp_path, entries):
+        path = tmp_path / "transcript.jsonl"
+        path.write_text("\n".join(json.dumps(e) for e in entries))
+        return str(path)
+
+    def test_two_prompts_one_stop_inserts_both_actions(self, tmp_path, monkeypatch):
+        """Two UserPromptSubmit events followed by one Stop: response
+        for the newer prompt + cancelled mark for the older prompt."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        mcp = self._mcp_returning_each_prompt_id(["cid-older", "cid-newer"])
+        bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
+
+        bridge._handle_prompt({"prompt": "q1"})
+        bridge._handle_prompt({"prompt": "q2"})
+        assert bridge._read_custom_ids() == ["cid-older", "cid-newer"]
+
+        transcript = self._write_transcript(
+            tmp_path,
+            [
+                {"type": "user",
+                 "message": {"content": [{"type": "text", "text": "q1"}]}},
+                {"type": "user",
+                 "message": {"content": [{"type": "text", "text": "q2"}]}},
+                {"type": "assistant",
+                 "message": {"content": [{"type": "text", "text": "a2"}]}},
+            ],
+        )
+
+        mcp.eval_elisp.side_effect = None
+        calls = []
+        mcp.eval_elisp.side_effect = lambda elisp: calls.append(elisp) or None
+
+        bridge._handle_response({"transcript_path": transcript})
+
+        flat = "\n".join(calls)
+        assert "workspace-bridge-mark-cancelled" in flat
+        assert "cid-older" in flat
+        assert "workspace-bridge-insert-response" in flat
+        assert "cid-newer" in flat
+        # The queue should be drained after Stop processes it.
+        assert bridge._read_custom_ids() == []
+
+    def test_three_prompts_two_responses_one_cancelled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        mcp = self._mcp_returning_each_prompt_id(["A", "B", "C"])
+        bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
+        bridge._handle_prompt({"prompt": "q1"})
+        bridge._handle_prompt({"prompt": "q2"})
+        bridge._handle_prompt({"prompt": "q3"})
+
+        # Transcript: q1→a1, then q2 superseded by q3, then a3.
+        transcript = self._write_transcript(tmp_path, [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q1"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a1"}]}},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q2"}]}},
+            {"type": "user", "message": {"content": [{"type": "text", "text": "q3"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a3"}]}},
+        ])
+
+        calls = []
+        mcp.eval_elisp.side_effect = lambda elisp: calls.append(elisp) or None
+        bridge._handle_response({"transcript_path": transcript})
+
+        responses = [c for c in calls if "insert-response" in c]
+        cancels = [c for c in calls if "mark-cancelled" in c]
+        assert len(responses) == 2, "A and C should get responses"
+        assert any("\"A\"" in c or "a1" in c for c in responses)
+        assert any("\"C\"" in c or "a3" in c for c in responses)
+        assert len(cancels) == 1, "B should be cancelled"
+        assert any("\"B\"" in c for c in cancels)
+        assert bridge._read_custom_ids() == []
 
 
 class TestHandlePermission:

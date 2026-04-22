@@ -222,6 +222,79 @@ def _extract_full_response(transcript_path: str) -> str:
     return "\n\n".join(texts)
 
 
+def _extract_turns(transcript_path: str) -> list[tuple[str, str]]:
+    """Return one (user_text, assistant_text) pair per user turn in ORDER.
+
+    Iterates the Claude Code JSONL transcript once and groups every
+    ``type: "user"`` entry with the *non-tool-use* assistant text that
+    immediately follows it (before the next user turn).  ``assistant_text``
+    is empty when the user's turn was superseded or cancelled before
+    an assistant reply materialised.
+
+    Why this matters: when the user types a second prompt before Claude
+    Code finishes replying to the first, the transcript grows to
+    ``[user-A, (optional) assistant-A, user-B, assistant-B]`` but the
+    bridge only fires one ``Stop`` hook — the orchestration layer
+    needs per-turn pairs to route each response under the matching
+    instruction heading and to mark superseded prompts as cancelled.
+    """
+    entries: list[dict] = []
+    with open(transcript_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning("Skipping malformed JSONL line in transcript")
+                continue
+
+    turns: list[tuple[str, str]] = []
+    current_user: str | None = None
+    current_assistant_parts: list[str] = []
+
+    def _flush():
+        if current_user is not None:
+            turns.append((current_user, "\n\n".join(current_assistant_parts)))
+
+    for entry in entries:
+        etype = entry.get("type")
+        if etype == "user":
+            _flush()
+            current_user = _extract_user_text(entry)
+            current_assistant_parts = []
+        elif etype == "assistant" and current_user is not None:
+            message = entry.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content") or []
+            if any(p.get("type") == "tool_use" for p in content):
+                continue  # tool-use turn — skip same as legacy extractor
+            for part in content:
+                if part.get("type") == "text":
+                    text = part.get("text", "").strip()
+                    if text:
+                        current_assistant_parts.append(text)
+    _flush()
+    return turns
+
+
+def _extract_user_text(entry: dict) -> str:
+    """Best-effort text extraction from a ``type: "user"`` transcript entry."""
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                return part.get("text", "")
+    return ""
+
+
 def _extract_copilot_response(transcript_path: str) -> str:
     """Collect assistant text since the last ``user.message`` in a Copilot
     events.jsonl transcript.
@@ -389,38 +462,58 @@ class WorkspaceBridge:
         return self.mcp.eval_elisp(wrapped)
 
     # ------------------------------------------------------------------
-    # Custom-id persistence
+    # Custom-id queue
     #
-    # The *custom_id* is the id of the current instruction heading in
-    # the org file. The prompt hook writes it so the response hook can
-    # correlate and insert the response under the correct heading. One
-    # file per session keeps the bookkeeping out of process memory so
-    # the hook handlers can be short-lived subprocesses.
+    # Each *custom_id* is the id of one instruction heading in the org
+    # file.  Previously a single ``<session>.custom-id`` file held the
+    # latest id and ``UserPromptSubmit`` blindly overwrote it — which
+    # lost the routing target whenever the user typed a new prompt
+    # before Claude Code finished replying to the previous one, causing
+    # the older instruction to be stuck at ``AI_EXEC_STATUS: executing``
+    # forever (the PCR dev1 bug, 2026-04-22).
+    #
+    # The queue model preserves every pending id.  Each prompt
+    # *appends* to ``<session>.custom-ids`` (newline-delimited, oldest
+    # first, newest last).  On ``Stop`` the orchestrator pops the whole
+    # queue and maps entries to the last-N turns of the transcript so
+    # every prompt gets either a response or a ``cancelled`` mark.
     # ------------------------------------------------------------------
 
-    def _custom_id_path(self) -> str:
-        return os.path.join(STATUS_DIR, f"{self.session_id}.custom-id")
+    def _custom_ids_path(self) -> str:
+        return os.path.join(STATUS_DIR, f"{self.session_id}.custom-ids")
 
-    def _read_custom_id(self) -> str | None:
-        """Return the active instruction custom id, or None if unset."""
+    def _read_custom_ids(self) -> list[str]:
+        """Return the queue of pending custom ids, oldest first."""
         try:
-            with open(self._custom_id_path()) as f:
-                value = f.read().strip()
-                return value if value else None
+            with open(self._custom_ids_path()) as f:
+                return [l.strip() for l in f if l.strip()]
         except FileNotFoundError:
-            return None
+            return []
 
-    def _write_custom_id(self, custom_id: str) -> None:
-        """Persist CUSTOM_ID so the response handler can correlate later."""
-        with open(self._custom_id_path(), "w") as f:
-            f.write(custom_id)
+    def _append_custom_id(self, custom_id: str) -> None:
+        """Append CUSTOM_ID to the pending-response queue."""
+        with open(self._custom_ids_path(), "a") as f:
+            f.write(f"{custom_id}\n")
 
-    def _clear_custom_id(self) -> None:
-        """Remove the custom-id file so the next prompt starts fresh."""
+    def _clear_custom_ids(self) -> None:
+        """Remove the queue file — called after ``Stop`` finishes processing."""
         try:
-            os.remove(self._custom_id_path())
+            os.remove(self._custom_ids_path())
         except FileNotFoundError:
             pass
+
+    # Back-compat single-entry aliases — callers that only care about the
+    # most recent pending id (e.g. trace-span attributes, legacy tests)
+    # go through these thin shims.
+    def _read_custom_id(self) -> str | None:
+        ids = self._read_custom_ids()
+        return ids[-1] if ids else None
+
+    def _write_custom_id(self, custom_id: str) -> None:
+        self._append_custom_id(custom_id)
+
+    def _clear_custom_id(self) -> None:
+        self._clear_custom_ids()
 
     # ------------------------------------------------------------------
     # Small helpers
@@ -580,30 +673,40 @@ class WorkspaceBridge:
             write_status(self.session_id, "ready")
 
     def _handle_response(self, input_data: dict) -> None:
-        """Handle ``Stop`` / ``sessionEnd`` / ``session.idle`` — render response.
+        """Handle ``Stop`` / ``sessionEnd`` / ``session.idle`` — render responses.
 
-        The hook may arrive with either Claude Code's snake_case or
-        Copilot's camelCase field names; we accept both. When a
-        transcript path is available we parse it for the full assistant
-        text since the last user turn (skipping tool-use turns that
-        would insert noisy narration); otherwise we fall back to the
-        hook payload's ``last_assistant_message`` field.
+        Walks the pending custom-id queue and the transcript's turns
+        together so every queued prompt either gets a response
+        rendered or gets its ``AI_EXEC_STATUS`` flipped to
+        ``cancelled``.  This is the fix for the supersede bug where a
+        new ``UserPromptSubmit`` used to overwrite the previous custom
+        id and the older instruction's response was dropped forever.
 
-        A missing custom_id means the prompt was typed into the
-        terminal and no prompt hook ever ran (OpenCode's ``session.idle``
-        is an example): we insert the prompt here to mint one, then
-        continue with response insertion.
+        Flow:
+
+        * Gather the queue (pending ids, oldest first) and the
+          transcript turns (same ordering).
+        * Pair the queue with the *last-N* turns (N = len(queue)).
+          Any older transcript turns have already been processed by
+          earlier ``Stop`` events.
+        * Per pair: empty assistant text → mark that id cancelled;
+          non-empty → insert the response.
+        * Persist the CLI session id and clear the queue.
+
+        Legacy paths:
+
+        * Empty queue + transcript with a response → mint a custom id
+          on the fly (terminal-typed prompt, no preceding prompt hook)
+          and insert.  Same behaviour as before the queue refactor.
+        * Copilot's ``sessionEnd`` without ``transcript_path`` → fall
+          back to the local session-state events file.
         """
         write_status(self.session_id, "ready")
 
-        custom_id = self._read_custom_id()
         transcript_path = (
             input_data.get("transcript_path")
             or input_data.get("transcriptPath", "")
         )
-
-        # Copilot's sessionEnd doesn't always pass transcript_path — try
-        # the canonical session-state location as a fallback.
         if not transcript_path:
             copilot_session_id = input_data.get("sessionId", "")
             if copilot_session_id:
@@ -613,19 +716,30 @@ class WorkspaceBridge:
                 if os.path.isfile(candidate):
                     transcript_path = candidate
 
+        pending_ids = self._read_custom_ids()
+
         with self._span(
             "handle-response",
             **self._span_attrs(
-                custom_id, **{"transcript.path": transcript_path}
+                pending_ids[-1] if pending_ids else None,
+                **{
+                    "transcript.path": transcript_path,
+                    "pending.queue_length": len(pending_ids),
+                },
             ),
         ) as span:
-            response = self._collect_response_text(transcript_path, span)
+            if pending_ids and self._looks_like_claude_transcript(transcript_path):
+                self._render_queue_against_transcript(
+                    pending_ids, transcript_path, input_data, span
+                )
+                self._clear_custom_ids()
+                self._notify_query_completed(pending_ids[-1])
+                return
 
-            # Fallback to the payload's last_assistant_message when the
-            # transcript extractors returned nothing useful.
+            # Legacy / Copilot path — single response under a single id.
+            response = self._collect_response_text(transcript_path, span)
             if not response:
                 response = input_data.get("last_assistant_message", "")
-
             if span:
                 span.set_attribute(
                     "response.length", len(response) if response else 0
@@ -634,45 +748,142 @@ class WorkspaceBridge:
                 span.set_attribute("output.mime_type", "text/plain")
 
             if not response:
-                self._notify_query_completed(custom_id)
+                self._notify_query_completed(pending_ids[-1] if pending_ids else None)
                 return
 
-            save_sexp = self._build_save_cli_session_sexp(
-                input_data.get("session_id")
-                or input_data.get("sessionId", "")
-            )
-
+            custom_id = pending_ids[-1] if pending_ids else None
             if not custom_id:
                 custom_id = self._mint_missing_custom_id(input_data, span)
                 if not custom_id:
-                    return  # already notified inside the helper
+                    return
 
-            elisp = (
-                f"(progn "
-                f"(claude-org-workspace-bridge-insert-response "
-                f'"{_escape_elisp_string(self.org_file)}" '
-                f'"{_escape_elisp_string(self.session_id)}" '
-                f'"{_escape_elisp_string(response)}" '
-                f'"{_escape_elisp_string(custom_id)}") '
-                f"{save_sexp} "
-                f"(with-current-buffer (claude-org-workspace-bridge--ensure-buffer "
-                f'"{_escape_elisp_string(self.org_file)}") '
-                f"(run-hook-with-args "
-                f"'claude-org-complete-hook "
-                f"(claude-org--current-session-key) nil "
-                f"'completed)))"
-            )
-            try:
-                self._mcp_eval(elisp)
-            except (McpConnectionError, McpElispError):
-                logger.warning(
-                    "Failed to insert response for %s", self.session_id
-                )
-
-            # Clear the stale custom_id so the next terminal-typed prompt
-            # creates a new instruction heading instead of reusing this one.
-            self._clear_custom_id()
+            self._insert_response(custom_id, response, input_data)
+            self._clear_custom_ids()
             self._notify_query_completed(custom_id)
+
+    # ------------------------------------------------------------------
+    # Response-rendering helpers
+    # ------------------------------------------------------------------
+
+    def _looks_like_claude_transcript(self, transcript_path: str) -> bool:
+        """Quick sniff: does TRANSCRIPT_PATH look like a Claude Code JSONL?
+
+        Copilot transcripts start with ``session.*`` entries and are
+        handled by the single-response legacy path (they don't supersede
+        like Claude Code does).
+        """
+        if not (transcript_path and os.path.isfile(transcript_path)):
+            return False
+        try:
+            with open(transcript_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        return False
+                    return not str(entry.get("type", "")).startswith("session.")
+        except OSError:
+            return False
+        return False
+
+    def _render_queue_against_transcript(
+        self,
+        pending_ids: list[str],
+        transcript_path: str,
+        input_data: dict,
+        span,
+    ) -> None:
+        """Pair every pending id with the last ``len(pending_ids)`` transcript turns.
+
+        Shorter-than-queue transcripts mean the earliest pending ids
+        never had any user turn recorded (shouldn't happen under normal
+        operation) — we mark them cancelled.  Empty assistant turns
+        inside the matched window are the supersede case and get the
+        same cancellation treatment.
+        """
+        with self._span(
+            "extract-turns", **{"transcript.path": transcript_path}
+        ):
+            turns = _extract_turns(transcript_path)
+
+        n = len(pending_ids)
+        matched_turns = turns[-n:] if len(turns) >= n else ([("", "")] * (n - len(turns)) + turns)
+
+        if span:
+            span.set_attribute("pending.ids_count", n)
+            span.set_attribute("transcript.turns_count", len(turns))
+
+        for cid, (_user_text, assistant_text) in zip(pending_ids, matched_turns):
+            if assistant_text:
+                self._insert_response(cid, assistant_text, input_data)
+            else:
+                self._mark_cancelled(cid)
+
+    def _insert_response(
+        self,
+        custom_id: str,
+        response: str,
+        input_data: dict,
+    ) -> None:
+        """Insert RESPONSE under the instruction keyed by CUSTOM_ID.
+
+        Also persists the CLI session id on the workspace heading and
+        fires the ``claude-org-complete-hook`` so downstream listeners
+        (queue drain, header-line refresh) run.
+        """
+        save_sexp = self._build_save_cli_session_sexp(
+            input_data.get("session_id")
+            or input_data.get("sessionId", "")
+        )
+        elisp = (
+            f"(progn "
+            f"(claude-org-workspace-bridge-insert-response "
+            f'"{_escape_elisp_string(self.org_file)}" '
+            f'"{_escape_elisp_string(self.session_id)}" '
+            f'"{_escape_elisp_string(response)}" '
+            f'"{_escape_elisp_string(custom_id)}") '
+            f"{save_sexp} "
+            f"(with-current-buffer (claude-org-workspace-bridge--ensure-buffer "
+            f'"{_escape_elisp_string(self.org_file)}") '
+            f"(run-hook-with-args "
+            f"'claude-org-complete-hook "
+            f"(claude-org--current-session-key) nil "
+            f"'completed)))"
+        )
+        try:
+            self._mcp_eval(elisp)
+        except (McpConnectionError, McpElispError):
+            logger.warning(
+                "Failed to insert response for %s (custom-id=%s)",
+                self.session_id,
+                custom_id,
+            )
+
+    def _mark_cancelled(self, custom_id: str) -> None:
+        """Flip the instruction's ``AI_EXEC_STATUS`` to ``cancelled``.
+
+        Called when a queued prompt has no assistant turn in the
+        transcript (superseded by a later prompt, or aborted before any
+        generation ran).  Leaves the AI block text in place so the user
+        can re-execute manually if they still want a response.
+        """
+        elisp = (
+            f"(claude-org-workspace-bridge-mark-cancelled "
+            f'"{_escape_elisp_string(self.org_file)}" '
+            f'"{_escape_elisp_string(self.session_id)}" '
+            f'"{_escape_elisp_string(custom_id)}")'
+        )
+        try:
+            self._mcp_eval(elisp)
+        except (McpConnectionError, McpElispError):
+            logger.warning(
+                "Failed to mark cancelled for %s (custom-id=%s)",
+                self.session_id,
+                custom_id,
+            )
 
     def _collect_response_text(self, transcript_path: str, span) -> str:
         """Read the transcript file and return the response text or ``""``.

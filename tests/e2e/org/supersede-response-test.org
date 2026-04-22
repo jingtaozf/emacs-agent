@@ -1,0 +1,66 @@
+#+TITLE: Supersede-Response Regression Test Fixture
+#+PROPERTY: PROJECT_ROOT /Users/jingtao/projects/claude-agent
+
+This fixture documents the PCR dev1 bug (2026-04-22): when the user
+types a new prompt into a cmux workspace terminal before Claude Code
+finishes replying to the previous prompt, the older instruction used
+to stay stuck at ~AI_EXEC_STATUS: executing~ forever with no response
+section.
+
+Root cause (=workspace_bridge.py=):
+1. The ~.custom-id~ file was a single slot that every
+   ~UserPromptSubmit~ overwrote.  The older prompt's routing target
+   was lost.
+2. ~_extract_full_response~ only returned text after the *last* user
+   turn, so even if the transcript had the older response, it was
+   dropped.
+
+Fix:
+1. The storage became a queue (=<session>.custom-ids=, newline-
+   delimited, oldest first).  Each prompt *appends* instead of
+   overwriting.
+2. New ~_extract_turns~ returns every user/assistant pair.  On
+   ~Stop~, the orchestrator pairs the queue with the last-N turns —
+   each queued id gets either a response insert or an
+   ~AI_EXEC_STATUS: cancelled~ mark.
+
+* Supersede Scenario
+:PROPERTIES:
+:CLAUDE_BACKEND: cmux
+:CLAUDE_SESSION_ID: supersede-regression
+:END:
+
+Run this scenario in a real cmux workspace (backend=cmux) to verify:
+
+1. Open this file in Emacs, launch cmux Claude Code via the
+   per-workspace menu.  You should see two instruction sub-sections
+   pre-created below this heading.
+2. Execute ~Instruction A~ via C-c C-c.  BEFORE Claude finishes,
+   execute ~Instruction B~ — this is the supersede event.
+3. Wait for Claude's response to B.
+4. Expected post-fix state:
+   - ~Instruction A~: =AI_EXEC_STATUS: cancelled=, no Response section.
+   - ~Instruction B~: =AI_EXEC_STATUS: completed=, one Response
+     section with Claude's reply.
+5. Pre-fix symptom: ~Instruction A~ would remain
+   =AI_EXEC_STATUS: executing= with no Response section.
+
+** Instruction A :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: supersede-regression-a
+:END:
+
+#+begin_src ai
+Please think carefully for 30 seconds and write a 1000-word essay on
+the history of type systems in programming languages.  I want to
+supersede this with a different question before you finish.
+#+end_src
+
+** Instruction B :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: supersede-regression-b
+:END:
+
+#+begin_src ai
+Never mind — just reply with exactly the word: acknowledged
+#+end_src
