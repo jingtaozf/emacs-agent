@@ -729,6 +729,48 @@ class TestHandleResponseSupersede:
         assert bridge._read_custom_ids() == []
 
 
+class TestHandleResponseSpuriousStop:
+    """A Stop without a Claude Code transcript must NOT drain the queue.
+
+    Regression guard for the 2026-04-22 bug where a spurious Stop
+    (opencode E2E hook leaking through shared env vars during a
+    parallel test run) drained the queue and inserted the wrong
+    response text ("first") under a queued claude instruction.
+    """
+
+    def test_spurious_stop_preserves_queue(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        mcp = MagicMock()
+        bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
+        bridge._append_custom_id("cid-genuine")
+        # Stop arrives with no transcript_path and a foreign
+        # last_assistant_message (the opencode E2E output).
+        bridge._handle_response(
+            {"last_assistant_message": "first", "last_user_message": "Say only: first"}
+        )
+        # Queue is preserved — the real Claude Code Stop will drain it later.
+        assert bridge._read_custom_ids() == ["cid-genuine"]
+        # No insert-response MCP call happened with "first".
+        for call in mcp.eval_elisp.call_args_list:
+            elisp = call[0][0]
+            assert "insert-response" not in elisp or "first" not in elisp
+
+    def test_spurious_stop_empty_queue_falls_through_legacy(self, tmp_path, monkeypatch):
+        """When queue IS empty, the legacy path still mints a custom-id
+        and inserts the response — preserves backward-compat for
+        terminal-typed prompts that never fired UserPromptSubmit."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        mcp = MagicMock()
+        mcp.eval_elisp.side_effect = ["freshly-minted-cid", None, None]
+        bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
+        bridge._handle_response(
+            {"last_assistant_message": "hello", "last_user_message": "hi"}
+        )
+        calls = "\n".join(str(c) for c in mcp.eval_elisp.call_args_list)
+        assert "insert-prompt" in calls  # minted a custom-id
+        assert "insert-response" in calls  # inserted the response
+
+
 class TestHandlePermission:
     """Tests for PreToolUse permission notification."""
 
@@ -880,7 +922,17 @@ class TestHandleResponsePromptInsertion:
         assert all("insert-response" not in c for c in calls)
         assert any("terminal-query-completed" in c for c in calls)
 
-    def test_from_emacs_flag_rereads_custom_id(self, tmp_path, monkeypatch):
+    def test_from_emacs_flag_without_transcript_preserves_queue(
+        self, tmp_path, monkeypatch
+    ):
+        """Updated 2026-04-22 for the 'first' regression fix.
+
+        A Stop arriving without a usable transcript_path no longer
+        drains the queue via `last_assistant_message'.  The queued
+        custom-id is kept intact so the real Claude Code Stop (with a
+        valid transcript) can route against it later.  Prevents
+        cross-agent response leakage observed when opencode test
+        output was inserted under a claude instruction."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         (tmp_path / "sid.from-emacs").write_text("1")
         bridge = make_bridge(MagicMock(), session_id="sid")
@@ -891,8 +943,10 @@ class TestHandleResponsePromptInsertion:
             {"last_assistant_message": "response", "last_user_message": "prompt"}
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        assert any("insert-response" in c and "emacs-custom-id" in c for c in calls)
+        # Queue preserved — no insert-response fired.
+        assert all("insert-response" not in c for c in calls)
         assert all("insert-prompt" not in c for c in calls)
+        assert bridge._read_custom_ids() == ["emacs-custom-id"]
 
     def test_from_emacs_flag_no_custom_id_returns_early(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))

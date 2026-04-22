@@ -728,7 +728,12 @@ class WorkspaceBridge:
                 },
             ),
         ) as span:
-            if pending_ids and self._looks_like_claude_transcript(transcript_path):
+            transcript_exists = bool(transcript_path and os.path.isfile(transcript_path))
+
+            if pending_ids and transcript_exists and \
+                    self._looks_like_claude_transcript(transcript_path):
+                # Claude Code supersede-capable path: pair queue entries with
+                # the last N transcript turns.
                 self._render_queue_against_transcript(
                     pending_ids, transcript_path, input_data, span
                 )
@@ -736,7 +741,21 @@ class WorkspaceBridge:
                 self._notify_query_completed(pending_ids[-1])
                 return
 
-            # Legacy / Copilot path — single response under a single id.
+            if pending_ids and not transcript_exists:
+                # Spurious Stop: queue is non-empty but the transcript is
+                # absent (another agent's hook leaked through shared env
+                # vars, or a cancelled turn).  Do NOT drain the queue —
+                # that would insert the payload's `last_assistant_message'
+                # (which belongs to the other agent) under our queued id.
+                # The real Stop will fire later with a valid transcript.
+                # Regression guard: 2026-04-22 "first" incident.
+                self._notify_query_completed(pending_ids[-1])
+                return
+
+            # Single-response path (Copilot session.idle, or legacy
+            # terminal-typed prompt with no prompt hook): the transcript
+            # (when present) carries one response; the queued id (when
+            # present) is the routing target.
             response = self._collect_response_text(transcript_path, span)
             if not response:
                 response = input_data.get("last_assistant_message", "")
