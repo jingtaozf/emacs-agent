@@ -307,6 +307,44 @@ Org headings in response content are shifted to become subsections."
     (save-buffer)
     (format "Inserted Response (%d chars)" (length response)))))
 
+(defun claude-org-workspace-bridge-latest-instruction-custom-id
+    (org-file session-id)
+  "Return the CUSTOM_ID of the most recent :claude_chat: instruction
+under SESSION-ID's Workflow in ORG-FILE, or nil if none exists.
+
+Used by the Python bridge when a Stop hook fires without a queued
+custom-id — typically for `/loop' autonomous iterations whose
+sentinel prompt (`<<autonomous-loop-dynamic>>') was filtered from
+queue-append in `_handle_prompt'.  The sentinel response is a
+continuation of the user's last real instruction, so we route it
+there via `claude-org-workspace-bridge-insert-response' (which
+appends to any existing Response section).
+
+Walks the session's workflow subtree and returns the last (deepest
+by position) heading that matches `claude-org-heading-tag'."
+  (claude-agent-with-span "workspace-latest-instruction-custom-id"
+      (list :session-id session-id) nil
+    (with-current-buffer (claude-org-workspace-bridge--ensure-buffer org-file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (claude-org-workspace-bridge--find-workflow session-id)
+          (let* ((workflow-level (org-current-level))
+                 (workflow-end (claude-org-workspace-bridge--find-next-sibling-heading
+                                workflow-level (point-max)))
+                 (instr-level (1+ workflow-level))
+                 (latest-cid nil))
+            (save-excursion
+              (while (re-search-forward
+                      (format "^\\*\\{%d\\} +.+:%s:" instr-level
+                              claude-org-heading-tag)
+                      workflow-end t)
+                (save-excursion
+                  (org-back-to-heading t)
+                  (let ((cid (org-entry-get nil "CUSTOM_ID")))
+                    (when cid (setq latest-cid cid))))))
+            latest-cid))))))
+
 (defun claude-org-workspace-bridge-mark-cancelled
     (org-file session-id instr-custom-id)
   "Flip INSTR-CUSTOM-ID's AI_EXEC_STATUS to \"cancelled\" in ORG-FILE.

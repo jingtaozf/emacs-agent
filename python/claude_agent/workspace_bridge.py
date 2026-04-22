@@ -773,12 +773,48 @@ class WorkspaceBridge:
             custom_id = pending_ids[-1] if pending_ids else None
             if not custom_id:
                 custom_id = self._mint_missing_custom_id(input_data, span)
+            if not custom_id:
+                # Fallback for sentinel prompts (`/loop` autonomous
+                # iterations, `<task-notification>`, `<system-reminder>`)
+                # whose UserPromptSubmit was filtered at the `<` prefix
+                # check — no queue entry + `last_user_message` missing
+                # or also a sentinel.  Route the response to the
+                # newest real instruction so its Response section grows
+                # to capture the continuation.  Observed 2026-04-22:
+                # PCR dev1's autonomous-loop "Profiling done" response
+                # was silently dropped before this fallback existed.
+                custom_id = self._find_latest_instruction_custom_id()
                 if not custom_id:
+                    self._notify_query_completed(None)
                     return
 
             self._insert_response(custom_id, response, input_data)
             self._clear_custom_ids()
             self._notify_query_completed(custom_id)
+
+    def _find_latest_instruction_custom_id(self) -> str | None:
+        """Ask Emacs for the newest instruction's custom-id under this workspace.
+
+        Used as a fallback when the legacy path can't route via
+        queue or by minting a new instruction from
+        `last_user_message' (typical for sentinel-prompt turns that
+        never registered a UserPromptSubmit).  Returns None if no
+        instruction exists yet, which causes the caller to drop the
+        response — preferable to spawning a ghost heading.
+        """
+        elisp = (
+            f"(claude-org-workspace-bridge-latest-instruction-custom-id "
+            f'"{_escape_elisp_string(self.org_file)}" '
+            f'"{_escape_elisp_string(self.session_id)}")'
+        )
+        try:
+            result = self._mcp_eval(elisp)
+            return result if result else None
+        except (McpConnectionError, McpElispError):
+            logger.warning(
+                "Failed to find latest instruction for %s", self.session_id
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Response-rendering helpers

@@ -1,0 +1,59 @@
+#+TITLE: /loop Autonomous Sentinel — Lost Response Regression
+#+PROPERTY: PROJECT_ROOT /Users/jingtao/projects/claude-agent
+
+This fixture documents the 2026-04-22 bug observed in
+=skills-network-dev.org :: * PCR dev1= where the response to the
+=/loop= dynamic-mode sentinel (=<<autonomous-loop-dynamic>>=) was
+silently dropped from the org buffer.
+
+Root cause (=workspace_bridge.py=):
+1. =_handle_prompt= filters any prompt whose first non-whitespace char
+   is =<=.  This was right for =<task-notification>= and
+   =<system-reminder>= — they're framework-internal, not human
+   prompts.  But the =/loop= sentinel *also* matches, so its
+   UserPromptSubmit skips queue-append.
+2. When the corresponding Stop fires, the queue is empty → legacy
+   path → =_mint_missing_custom_id= tries to insert a new
+   instruction using =last_user_message= (often empty or the
+   sentinel itself) → returns None → response silently dropped.
+
+Fix:
+
+* New elisp function =claude-org-workspace-bridge-latest-instruction
+  -custom-id= walks the session's workflow, returns the newest
+  =:claude_chat:= instruction's =CUSTOM_ID=.
+* Python =_handle_response= legacy path now falls back to that
+  function when =_mint_missing_custom_id= can't mint.  The existing
+  =insert-response= MCP call then appends the response to the
+  newest instruction's Response section (or creates one).
+
+* Sentinel Response Scenario
+:PROPERTIES:
+:CLAUDE_BACKEND: cmux
+:CLAUDE_SESSION_ID: loop-sentinel-regression
+:END:
+
+Run in a real cmux workspace to verify:
+
+1. Launch cmux Claude Code from Emacs.
+2. Execute ~Instruction A~ (C-c C-c) — a prompt that would benefit
+   from a =/loop= run (e.g., iterative profiling).
+3. After Claude's first reply, trigger =/loop= with a prompt that
+   continues the work.  Each autonomous iteration produces
+   =<<autonomous-loop-dynamic>>= as a synthetic UserPromptSubmit.
+4. Expected post-fix: each iteration's substantive response appends
+   to ~Instruction A~'s Response section (the same ~** Response 1
+   (…) :ai_output:~ subtree grows over time).
+5. Pre-fix symptom: only the FIRST reply appears in the org; every
+   subsequent autonomous-loop iteration is lost from the visible
+   buffer despite being in the transcript.
+
+** Instruction A :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: loop-sentinel-regression-a
+:END:
+
+#+begin_src ai
+Profile this function and report the bottleneck.  After that, we
+will use /loop to iterate on optimizations.
+#+end_src

@@ -729,6 +729,95 @@ class TestHandleResponseSupersede:
         assert bridge._read_custom_ids() == []
 
 
+class TestHandleResponseSentinelPrompt:
+    """Regression guard: /loop autonomous sentinels + other `<`-prefixed
+    prompts whose UserPromptSubmit was filtered must still route their
+    assistant response to the most-recent instruction's Response section.
+
+    Observed 2026-04-22 in `skills-network-dev.org :: PCR dev1`: the
+    autonomous-loop iteration's substantive response ("Profiling done —
+    byte-identical parity preserved") was silently dropped because
+    `_mint_missing_custom_id` couldn't mint a new instruction from the
+    sentinel's `last_user_message` and the code returned early.
+    """
+
+    def test_sentinel_response_routes_to_latest_instruction(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        mcp = MagicMock()
+
+        # Simulate the autonomous-loop scenario:
+        # - _mint_missing_custom_id sees empty last_user_message → returns None
+        # - Our fallback queries the latest-instruction-custom-id
+        # - Then inserts response under that id
+        def _side_effect(elisp):
+            if "latest-instruction-custom-id" in elisp:
+                return "skills-network-dev-instruction-52-sdd-82544"
+            return None
+
+        mcp.eval_elisp.side_effect = _side_effect
+        bridge = make_bridge(mcp, session_id="sid-982", org_file="/tmp/test.org")
+
+        # Transcript path exists so we don't hit the spurious-Stop branch.
+        transcript = tmp_path / "t.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "user",
+                        "message": {"content": [{"type": "text",
+                                                 "text": "<<autonomous-loop-dynamic>>"}]}})
+            + "\n"
+            + json.dumps({"type": "assistant",
+                          "message": {"content": [{"type": "text",
+                                                   "text": "Profiling done — parity OK"}]}})
+        )
+
+        bridge._handle_response(
+            {
+                "transcript_path": str(transcript),
+                # Claude Code often omits the sentinel from last_user_message
+                # (or leaves it empty) — our fallback must handle both.
+                "last_user_message": "",
+            }
+        )
+
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
+        joined = "\n".join(calls)
+        assert "latest-instruction-custom-id" in joined, \
+            "fallback should query for the newest instruction"
+        # Response should be inserted under the returned latest cid.
+        assert any(
+            "insert-response" in c and "instruction-52-sdd-82544" in c
+            and "Profiling done" in c
+            for c in calls
+        ), "response must be inserted under the latest instruction's cid"
+
+    def test_sentinel_no_existing_instruction_drops_response(
+        self, tmp_path, monkeypatch
+    ):
+        """If the workspace has no instructions at all, the fallback
+        returns None and we drop the response rather than synthesise a
+        ghost heading."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        mcp = MagicMock()
+        mcp.eval_elisp.return_value = None  # no latest cid
+        bridge = make_bridge(mcp, session_id="empty-sid", org_file="/tmp/t.org")
+
+        transcript = tmp_path / "t.jsonl"
+        transcript.write_text(
+            json.dumps({"type": "user", "message": {"content": [{"type": "text",
+                                                                   "text": "<<autonomous-loop-dynamic>>"}]}})
+            + "\n"
+            + json.dumps({"type": "assistant",
+                          "message": {"content": [{"type": "text", "text": "some work"}]}})
+        )
+        bridge._handle_response(
+            {"transcript_path": str(transcript), "last_user_message": ""}
+        )
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
+        # No insert-response happens when there's nowhere to route to.
+        assert all("insert-response" not in c for c in calls)
+
+
 class TestHandleResponseSpuriousStop:
     """A Stop without a Claude Code transcript must NOT drain the queue.
 
@@ -912,15 +1001,39 @@ class TestHandleResponsePromptInsertion:
         assert "test-custom-id" in calls[1]
         assert "the response" in calls[1]
 
-    def test_no_custom_id_no_user_message_returns_early(self, tmp_path, monkeypatch):
+    def test_no_custom_id_no_user_message_falls_back_to_latest(
+        self, tmp_path, monkeypatch
+    ):
+        """Updated 2026-04-22: no last_user_message → can't mint a new
+        instruction, but the fallback now queries for the latest
+        instruction and appends there so the response isn't lost."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
+        # Fallback returns a fake latest-instruction cid.
+        mcp.eval_elisp.side_effect = (
+            lambda elisp: "latest-cid"
+            if "latest-instruction-custom-id" in elisp else None
+        )
         bridge = make_bridge(mcp, session_id="sid")
         bridge._handle_response({"last_assistant_message": "orphan response"})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        assert all("insert-prompt" not in c for c in calls)
+        assert any("latest-instruction-custom-id" in c for c in calls)
+        assert any(
+            "insert-response" in c and "latest-cid" in c and "orphan response" in c
+            for c in calls
+        )
+
+    def test_no_custom_id_no_user_message_no_latest_drops(
+        self, tmp_path, monkeypatch
+    ):
+        """If there's no instruction at all, the response is dropped."""
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        mcp = MagicMock()
+        mcp.eval_elisp.return_value = None
+        bridge = make_bridge(mcp, session_id="sid")
+        bridge._handle_response({"last_assistant_message": "orphan response"})
+        calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert all("insert-response" not in c for c in calls)
-        assert any("terminal-query-completed" in c for c in calls)
 
     def test_from_emacs_flag_without_transcript_preserves_queue(
         self, tmp_path, monkeypatch
@@ -948,17 +1061,29 @@ class TestHandleResponsePromptInsertion:
         assert all("insert-prompt" not in c for c in calls)
         assert bridge._read_custom_ids() == ["emacs-custom-id"]
 
-    def test_from_emacs_flag_no_custom_id_returns_early(self, tmp_path, monkeypatch):
+    def test_from_emacs_flag_no_custom_id_falls_back_to_latest(
+        self, tmp_path, monkeypatch
+    ):
+        """Updated 2026-04-22: from-emacs flag present but no custom-id
+        in file → mint returns None → fallback queries latest
+        instruction so the response still lands somewhere visible."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         (tmp_path / "sid.from-emacs").write_text("1")
         mcp = MagicMock()
+        mcp.eval_elisp.side_effect = (
+            lambda elisp: "latest-cid"
+            if "latest-instruction-custom-id" in elisp else None
+        )
         bridge = make_bridge(mcp, session_id="sid")
         bridge._handle_response(
             {"last_assistant_message": "response", "last_user_message": "prompt"}
         )
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        assert all("insert-response" not in c for c in calls)
+        # Fallback used — no NEW prompt minted, response routed to latest.
         assert all("insert-prompt" not in c for c in calls)
+        assert any(
+            "insert-response" in c and "latest-cid" in c for c in calls
+        )
         assert not (tmp_path / "sid.from-emacs").exists()
 
     def test_insert_prompt_failure_returns_early(self, tmp_path, monkeypatch):
