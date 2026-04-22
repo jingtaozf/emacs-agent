@@ -1360,6 +1360,41 @@ tick; a subsequent `ensure-session' will repopulate the cache."
     (when ws-sid
       (gethash ws-sid claude-org-cmux--workspace-to-cmux-id))))
 
+(defun claude-org-cmux--session-has-executing-p (session-key)
+  "Return non-nil if SESSION-KEY's workspace has any instruction in
+the `executing' state.
+
+Walks the workspace's org subtree looking for
+=:AI_EXEC_STATUS: executing= property drawers.  Cheap (pure org
+traversal, no subprocess); called on every verbose-tick to decide
+whether polling cmux is actually worth doing.
+
+Returns nil when the session or buffer can't be located — safer
+than assuming \"executing\" (would keep polling an orphan) or
+assuming \"idle\" (would miss genuine activity).  Nil here is the
+\"nothing to poll\" signal for the tick gate."
+  (let* ((ws-sid (when (and session-key
+                            (string-match "::\\([^:]+\\)\\'" session-key))
+                   (match-string 1 session-key)))
+         (file (when session-key
+                 (car (split-string session-key "::")))))
+    (when (and ws-sid file (file-exists-p file))
+      (let ((buf (get-file-buffer file)))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (save-excursion
+              (save-restriction
+                (widen)
+                (goto-char (point-min))
+                (when (re-search-forward
+                       (format ":CLAUDE_SESSION_ID:[ \t]+%s\\b"
+                               (regexp-quote ws-sid))
+                       nil t)
+                  (org-back-to-heading t)
+                  (let ((end (save-excursion (org-end-of-subtree t t))))
+                    (re-search-forward
+                     "^:AI_EXEC_STATUS:[ \t]+executing\\b" end t)))))))))))
+
 (defun claude-org-cmux--verbose-tick (surface-id session-key verbose-buf socket-path)
   "Async capture-pane tick: capture screen, replace buffer with current view.
 Resolves the cmux workspace UUID via `claude-org-cmux--verbose-workspace-uuid'
@@ -1368,10 +1403,36 @@ Claude Code terminal — even when the user switches to a different tab in the
 same cmux workspace.  Without `--surface', `capture-pane --workspace' returns
 the selected (active) surface, which may be a shell or other non-Claude tab.
 SOCKET-PATH is the cmux socket (resolved once at timer creation).
-Skips the tick entirely if no UUID can be resolved.
+
+Two gates short-circuit the subprocess spawn — before this change
+the tick forked `cmux capture-pane' once per second for every
+session regardless of state, which pegged the macOS analytics
+daemons at high load even during idle periods (observed as
+osanalyticshelper + ASPCarryLog + analyticsd burning ~140% CPU
+combined for 3 idle sessions):
+
+* Orphan cleanup (D): if the workspace UUID can't be resolved OR
+  the verbose buffer was killed, the timer self-cancels — the
+  session is gone or the user dismissed the buffer.
+* Busy gate (A): polling only happens when some instruction under
+  this session is `AI_EXEC_STATUS: executing'.  An idle session's
+  terminal view doesn't change, so capturing it produces no new
+  information.  A fresh `executing' state resumes polling on the
+  next tick (session state is still checked per-tick — it's a
+  pure org traversal with no subprocess cost).
+
 Only auto-scrolls windows where the user is already at the end."
   (let ((ws-uuid (claude-org-cmux--verbose-workspace-uuid session-key)))
-    (when (and ws-uuid surface-id (buffer-live-p verbose-buf))
+    (cond
+     ;; D: Orphaned timer — workspace vanished or verbose buffer killed.
+     ((or (not ws-uuid) (not (buffer-live-p verbose-buf)))
+      (claude-org-cmux--stop-verbose session-key))
+
+     ;; A: Busy gate — skip polling when no executing instruction.
+     ((not (claude-org-cmux--session-has-executing-p session-key))
+      nil)  ; silent no-op, keep timer alive for the next tick
+
+     (t
       (let* ((cli (or claude-org-cmux-cli-path "cmux"))
              (args (append (when socket-path (list "--socket" socket-path))
                            (list "capture-pane"
@@ -1418,7 +1479,7 @@ Only auto-scrolls windows where the user is already at the end."
                                 (set-window-point win (min pt (point-max))))))))
                       (setq-local claude-org-cmux--verbose-prev-text cur-text))))))
             (when (buffer-live-p pbuf)
-              (kill-buffer pbuf)))))))))
+              (kill-buffer pbuf))))))))))
 
 (defun claude-org-cmux--start-verbose (surface-id session-key)
   "Start verbose output streaming for cmux session.
