@@ -188,7 +188,7 @@
 (ert-deftest test-claude-agent-exclude-predicates ()
   "Test IDE context exclusion predicates."
   :tags '(:unit :fast :stable :isolated :context)
-  ;; This test requires claude-org to be loaded which registers its exclusion
+  ;; This test requires code-agent-org to be loaded which registers its exclusion
   ;; For now, just test that the list exists and is callable
   (should (listp claude-agent-ide-context-exclude-predicates))
   ;; Test that predicates are callable

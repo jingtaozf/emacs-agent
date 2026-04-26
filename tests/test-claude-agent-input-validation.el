@@ -71,7 +71,7 @@
   (with-temp-buffer
     (insert "FOO=bar\n")
     (insert "BAZ=qux\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (equal (cdr (assoc "FOO" result)) "bar"))
       (should (equal (cdr (assoc "BAZ" result)) "qux")))))
 
@@ -80,7 +80,7 @@
   :tags '(:unit :fast :stable :isolated :input-validation :tdd)
   (with-temp-buffer
     (insert "MESSAGE=hello world\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (equal (cdr (assoc "MESSAGE" result)) "hello world")))))
 
 (ert-deftest test-parse-env-file-quoted-values ()
@@ -89,7 +89,7 @@
   (with-temp-buffer
     (insert "SINGLE='single quoted'\n")
     (insert "DOUBLE=\"double quoted\"\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (equal (cdr (assoc "SINGLE" result)) "single quoted"))
       (should (equal (cdr (assoc "DOUBLE" result)) "double quoted")))))
 
@@ -98,7 +98,7 @@
   :tags '(:unit :fast :stable :isolated :input-validation :tdd)
   (with-temp-buffer
     (insert "EMPTY=\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (equal (cdr (assoc "EMPTY" result)) "")))))
 
 (ert-deftest test-parse-env-file-comments ()
@@ -109,7 +109,7 @@
     (insert "FOO=bar\n")
     (insert "  # Indented comment\n")
     (insert "BAZ=qux\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (= 2 (length result)))
       (should (equal (cdr (assoc "FOO" result)) "bar")))))
 
@@ -122,7 +122,7 @@
     (insert "\n")
     (insert "   \n")
     (insert "BAZ=qux\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (= 2 (length result))))))
 
 (ert-deftest test-parse-env-file-no-elisp-execution ()
@@ -132,7 +132,7 @@ This test ensures the env parser doesn't use (read) which could execute code."
   (with-temp-buffer
     ;; Attempt to inject elisp - should be treated as literal string
     (insert "EXPLOIT=(shell-command \"rm -rf /\")\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       ;; Should be parsed as literal string, not executed
       (should (equal (cdr (assoc "EXPLOIT" result))
                      "(shell-command \"rm -rf /\")")))))
@@ -142,7 +142,7 @@ This test ensures the env parser doesn't use (read) which could execute code."
   :tags '(:unit :fast :stable :isolated :input-validation :tdd)
   (with-temp-buffer
     (insert "URL=https://example.com?foo=bar&baz=qux\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (equal (cdr (assoc "URL" result))
                      "https://example.com?foo=bar&baz=qux")))))
 
@@ -152,7 +152,7 @@ This test ensures the env parser doesn't use (read) which could execute code."
   (with-temp-buffer
     (insert "export FOO=bar\n")
     (insert "  export   BAZ=qux\n")
-    (let ((result (claude-org--parse-env-file-safe (buffer-string))))
+    (let ((result (code-agent-org--parse-env (buffer-string) :from-string t)))
       (should (equal (cdr (assoc "FOO" result)) "bar"))
       (should (equal (cdr (assoc "BAZ" result)) "qux")))))
 
@@ -166,7 +166,7 @@ This test ensures the env parser doesn't use (read) which could execute code."
     ;; The important thing is it doesn't crash or execute code
     (should-not (condition-case nil
                     (progn
-                      (claude-org--parse-env-file-safe (buffer-string))
+                      (code-agent-org--parse-env (buffer-string) :from-string t)
                       nil)
                   (error t)))))
 

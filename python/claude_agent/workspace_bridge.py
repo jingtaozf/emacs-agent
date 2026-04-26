@@ -531,7 +531,7 @@ class WorkspaceBridge:
         ):
             try:
                 self._mcp_eval(
-                    f"(claude-org--terminal-query-completed "
+                    f"(code-agent-org--terminal-query-completed "
                     f'"{_escape_elisp_string(self.session_id)}")'
                 )
             except (McpConnectionError, McpElispError):
@@ -550,7 +550,7 @@ class WorkspaceBridge:
             return ""
         prop = _cli_session_property()
         return (
-            f"(claude-org-workspace-bridge-save-cli-session "
+            f"(code-agent-org-workspace-bridge-save-cli-session "
             f'"{_escape_elisp_string(self.org_file)}" '
             f'"{_escape_elisp_string(self.session_id)}" '
             f'"{_escape_elisp_string(cli_session)}" '
@@ -648,7 +648,7 @@ class WorkspaceBridge:
                 # Terminal-typed: insert into org and cache the returned
                 # custom_id for the response handler.
                 elisp = (
-                    f"(claude-org-workspace-bridge-insert-prompt "
+                    f"(code-agent-org-workspace-bridge-insert-prompt "
                     f'"{_escape_elisp_string(self.org_file)}" '
                     f'"{_escape_elisp_string(self.session_id)}" '
                     f'"{_escape_elisp_string(prompt)}")'
@@ -803,7 +803,7 @@ class WorkspaceBridge:
         response — preferable to spawning a ghost heading.
         """
         elisp = (
-            f"(claude-org-workspace-bridge-latest-instruction-custom-id "
+            f"(code-agent-org-workspace-bridge-latest-instruction-custom-id "
             f'"{_escape_elisp_string(self.org_file)}" '
             f'"{_escape_elisp_string(self.session_id)}")'
         )
@@ -886,7 +886,7 @@ class WorkspaceBridge:
         """Insert RESPONSE under the instruction keyed by CUSTOM_ID.
 
         Also persists the CLI session id on the workspace heading and
-        fires the ``claude-org-complete-hook`` so downstream listeners
+        fires the ``code-agent-org-complete-hook`` so downstream listeners
         (queue drain, header-line refresh) run.
         """
         save_sexp = self._build_save_cli_session_sexp(
@@ -895,17 +895,17 @@ class WorkspaceBridge:
         )
         elisp = (
             f"(progn "
-            f"(claude-org-workspace-bridge-insert-response "
+            f"(code-agent-org-workspace-bridge-insert-response "
             f'"{_escape_elisp_string(self.org_file)}" '
             f'"{_escape_elisp_string(self.session_id)}" '
             f'"{_escape_elisp_string(response)}" '
             f'"{_escape_elisp_string(custom_id)}") '
             f"{save_sexp} "
-            f"(with-current-buffer (claude-org-workspace-bridge--ensure-buffer "
+            f"(with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer "
             f'"{_escape_elisp_string(self.org_file)}") '
             f"(run-hook-with-args "
-            f"'claude-org-complete-hook "
-            f"(claude-org--current-session-key) nil "
+            f"'code-agent-org-complete-hook "
+            f"(code-agent-org--current-session-key) nil "
             f"'completed)))"
         )
         try:
@@ -926,7 +926,7 @@ class WorkspaceBridge:
         can re-execute manually if they still want a response.
         """
         elisp = (
-            f"(claude-org-workspace-bridge-mark-cancelled "
+            f"(code-agent-org-workspace-bridge-mark-cancelled "
             f'"{_escape_elisp_string(self.org_file)}" '
             f'"{_escape_elisp_string(self.session_id)}" '
             f'"{_escape_elisp_string(custom_id)}")'
@@ -1007,7 +1007,7 @@ class WorkspaceBridge:
             return custom_id
 
         elisp = (
-            f"(claude-org-workspace-bridge-insert-prompt "
+            f"(code-agent-org-workspace-bridge-insert-prompt "
             f'"{_escape_elisp_string(self.org_file)}" '
             f'"{_escape_elisp_string(self.session_id)}" '
             f'"{_escape_elisp_string(last_user_message)}")'
@@ -1057,7 +1057,7 @@ class WorkspaceBridge:
             return
 
         elisp = (
-            f"(claude-org-workspace-bridge-update-todos "
+            f"(code-agent-org-workspace-bridge-update-todos "
             f'"{_escape_elisp_string(self.org_file)}" '
             f'"{_escape_elisp_string(self.session_id)}" '
             f"'{_format_todos_as_elisp(todos)} "
@@ -1107,7 +1107,7 @@ class WorkspaceBridge:
 
             try:
                 self._mcp_eval(
-                    f"(claude-org--terminal-permission-needed "
+                    f"(code-agent-org--terminal-permission-needed "
                     f'"{_escape_elisp_string(self.session_id)}" '
                     f'"{_escape_elisp_string(display_text)}")'
                 )
@@ -1148,7 +1148,7 @@ class WorkspaceBridge:
                 return
             try:
                 self._mcp_eval(
-                    f"(claude-org--terminal-permission-resolved "
+                    f"(code-agent-org--terminal-permission-resolved "
                     f'"{_escape_elisp_string(self.session_id)}")'
                 )
             except (McpConnectionError, McpElispError):

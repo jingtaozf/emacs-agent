@@ -637,7 +637,7 @@ must be a no-op (state is already closed)."
             ;; State must remain closed
             (should (claude-agent--process-state-closed state))
             ;; Document: complete callback fires twice (sentinel doesn't guard)
-            ;; This is acceptable because callers (claude-org) are idempotent
+            ;; This is acceptable because callers (code-agent-org) are idempotent
             (should (= 2 complete-count))))
       (when (process-live-p proc) (delete-process proc)))))
 

@@ -5,13 +5,13 @@ EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch
 
 # Source files
-SOURCES = claude-agent.org claude-org.org claude-agent-trace.org
+SOURCES = claude-agent.org code-agent-org.org claude-agent-trace.org
 
 # Test files
 # Note: actual test loading is in target recipes below, not this variable
-UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-claude-org-unit.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el tests/test-claude-agent-backend-protocol.el
-MOCK_TESTS = tests/test-claude-agent-mock.el tests/test-claude-org-mock.el
-INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-claude-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
+UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-code-agent-org-unit.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el tests/test-claude-agent-backend-protocol.el
+MOCK_TESTS = tests/test-claude-agent-mock.el tests/test-code-agent-org-mock.el
+INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-code-agent-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
@@ -27,14 +27,18 @@ LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COM
 # Load order: trace → agent (includes backend) → mcp → org
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
 LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
-LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")"
+LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/claude-agent-agent.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/claude-agent-multiplexer.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/claude-agent-cmux-backend.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/claude-agent-tmux-backend.org\")"
 LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-jsonrpc.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-opencode.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-gemini.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-codex.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
-LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/claude-org.org\")"
+LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/code-agent-org.org\")"
 # Presets for common combinations
 LOAD_AGENT_ONLY = $(LOAD_LITERATE) $(LOAD_AGENT)
 LOAD_ALL = $(LOAD_LITERATE) $(LOAD_AGENT) $(LOAD_MCP) $(LOAD_ORG)
@@ -62,7 +66,7 @@ help:
 	@echo "  make test-integration-seq     - Run integration tests sequentially"
 	@echo "  make test-integration PARALLEL_JOBS=N  - Custom parallelism"
 	@echo "  make test-agent-unit  - Run claude-agent unit tests"
-	@echo "  make test-org-unit    - Run claude-org unit tests"
+	@echo "  make test-org-unit    - Run code-agent-org unit tests"
 	@echo "  make test-permissions - Run permission functions tests"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
 	@echo "  make test-mock        - Run mock CLI tests (no API, fast)"
@@ -104,15 +108,15 @@ compile:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_LITERATE) \
 		--eval "(literate-elisp-tangle-file \"claude-agent.org\")" \
-		--eval "(literate-elisp-tangle-file \"claude-org.org\")" \
+		--eval "(literate-elisp-tangle-file \"code-agent-org.org\")" \
 		--eval "(byte-compile-file \"claude-code.el\")" \
-		--eval "(byte-compile-file \"claude-org.el\")"
+		--eval "(byte-compile-file \"code-agent-org.el\")"
 
 .PHONY: clean
 clean:
 	@echo "Cleaning compiled files..."
 	rm -f claude-code.elc
-	rm -f claude-org.el claude-org.elc
+	rm -f code-agent-org.el code-agent-org.elc
 	rm -f tests/*.elc
 
 .PHONY: reload
@@ -122,7 +126,7 @@ reload:
 	@echo "  (progn"
 	@echo "    (literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
 	@echo "    (literate-elisp-load \"$(PWD)/claude-agent.org\")"
-	@echo "    (literate-elisp-load \"$(PWD)/claude-org.org\"))"
+	@echo "    (literate-elisp-load \"$(PWD)/code-agent-org.org\"))"
 
 .PHONY: install-hooks
 install-hooks:
@@ -159,9 +163,9 @@ test-cmux:
 	@echo "Running cmux backend E2E tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-workspace-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-terminal-base.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-cmux.org\")" \
 		-l tests/test-cmux-e2e-simulated.el \
 		-l tests/test-cmux-e2e-agent-profiles.el \
 		-f ert-run-tests-batch-and-exit
@@ -215,10 +219,10 @@ _run-sharded-tests-parallel:
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-claude-agent-integration.el \
-			-l tests/test-claude-org-integration.el \
-			-l tests/test-claude-org-cancel-active-queries.el \
-			-l tests/test-claude-org-cancel-race.el \
-			-l tests/test-claude-org-exec-status.el \
+			-l tests/test-code-agent-org-integration.el \
+			-l tests/test-code-agent-org-cancel-active-queries.el \
+			-l tests/test-code-agent-org-cancel-race.el \
+			-l tests/test-code-agent-org-exec-status.el \
 			--eval "(test-claude-run-shard $(TOTAL_SHARDS) {})"'
 
 # Internal: run shards using bash background jobs (portable fallback)
@@ -233,10 +237,10 @@ _run-sharded-tests-bash:
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-claude-agent-integration.el \
-			-l tests/test-claude-org-integration.el \
-			-l tests/test-claude-org-cancel-active-queries.el \
-			-l tests/test-claude-org-cancel-race.el \
-			-l tests/test-claude-org-exec-status.el \
+			-l tests/test-code-agent-org-integration.el \
+			-l tests/test-code-agent-org-cancel-active-queries.el \
+			-l tests/test-code-agent-org-cancel-race.el \
+			-l tests/test-code-agent-org-exec-status.el \
 			--eval "(test-claude-run-shard $(TOTAL_SHARDS) $$i)" \
 			> .test-results/shard-$$i.log 2>&1; \
 			echo $$? > .test-results/shard-$$i.exit ) & \
@@ -309,6 +313,7 @@ test-backend-unit:
 		-l tests/test-claude-agent-backend.el \
 		-l tests/test-claude-agent-backend-protocol.el \
 		-l tests/test-claude-agent-chat-backend.el \
+		-l tests/test-backend-protocol3.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-acp-unit
@@ -322,37 +327,37 @@ test-acp-unit:
 
 .PHONY: test-org-unit
 test-org-unit:
-	@echo "Running claude-org unit tests..."
+	@echo "Running code-agent-org unit tests..."
 	$(BATCH) $(LOAD_PATH) -L tests/support \
 		$(LOAD_ALL) \
 		-l tests/support/test-helpers.el \
-		-l tests/test-claude-org-unit.el \
-		-l tests/test-claude-org-refine.el \
-		-l tests/test-claude-org-scheduled.el \
-		-l tests/test-claude-org-response.el \
-		-l tests/test-claude-org-queue.el \
-		-l tests/test-claude-org-cancel.el \
-		-l tests/test-claude-org-refactor-phase1.el \
-		-l tests/test-claude-org-refactor-phase2.el \
-		-l tests/test-claude-org-refactor-phase4.el \
+		-l tests/test-code-agent-org-unit.el \
+		-l tests/test-code-agent-org-refine.el \
+		-l tests/test-code-agent-org-scheduled.el \
+		-l tests/test-code-agent-org-response.el \
+		-l tests/test-code-agent-org-queue.el \
+		-l tests/test-code-agent-org-cancel.el \
+		-l tests/test-code-agent-org-refactor-phase1.el \
+		-l tests/test-code-agent-org-refactor-phase2.el \
+		-l tests/test-code-agent-org-refactor-phase4.el \
 		-l tests/support/org-fixtures.el \
-		-l tests/test-claude-org-refactor-phase5.el \
-		-l tests/test-claude-org-heading-level.el \
-		-l tests/test-claude-org-content-loss-repro.el \
-		-l tests/test-claude-org-wrong-level-repro.el \
-		-l tests/test-claude-org-wrong-position-repro.el \
-		-l tests/test-claude-org-loop.el \
-		-l tests/test-claude-org-marker-lifecycle.el \
-		-l tests/test-claude-org-query-id.el \
-		-l tests/test-claude-org-query-id-issues.el \
-		-l tests/test-claude-org-workspace.el \
+		-l tests/test-code-agent-org-refactor-phase5.el \
+		-l tests/test-code-agent-org-heading-level.el \
+		-l tests/test-code-agent-org-content-loss-repro.el \
+		-l tests/test-code-agent-org-wrong-level-repro.el \
+		-l tests/test-code-agent-org-wrong-position-repro.el \
+		-l tests/test-code-agent-org-loop.el \
+		-l tests/test-code-agent-org-marker-lifecycle.el \
+		-l tests/test-code-agent-org-query-id.el \
+		-l tests/test-code-agent-org-query-id-issues.el \
+		-l tests/test-code-agent-org-workspace.el \
 		-l tests/test-mcp-report-invocation.el \
 		-l tests/test-plugin-discovery.el \
-		-l tests/test-claude-org-edge-cases.el \
+		-l tests/test-code-agent-org-edge-cases.el \
 		-l tests/test-slash-completion.el \
-		-l tests/test-claude-org-loop-detection.el \
-		-l tests/test-claude-org-pre-completion.el \
-		-l tests/test-claude-org-telemetry.el \
+		-l tests/test-code-agent-org-loop-detection.el \
+		-l tests/test-code-agent-org-pre-completion.el \
+		-l tests/test-code-agent-org-telemetry.el \
 		-l tests/test-structural.el \
 		-l tests/test-mcp-eval-state.el \
 		-l tests/test-agent-workflow.el \
@@ -361,10 +366,10 @@ test-org-unit:
 		-l tests/test-mcp-lifecycle.el \
 		-l tests/test-mcp-eval-handler.el \
 		-l tests/test-mcp-http.el \
-		-l tests/test-claude-org-cleanup.el \
-		-l tests/test-claude-org-cleanup-r2.el \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
+		-l tests/test-code-agent-org-cleanup.el \
+		-l tests/test-code-agent-org-cleanup-r2.el \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-workspace-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-terminal-base.org\")" \
 		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
 		-l tests/test-claude-agent-input-validation.el \
@@ -396,11 +401,11 @@ test-agent-mock:
 
 .PHONY: test-org-mock
 test-org-mock:
-	@echo "Running claude-org mock CLI tests..."
+	@echo "Running code-agent-org mock CLI tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
-		-l tests/test-claude-org-mock.el \
+		-l tests/test-code-agent-org-mock.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-agent-integration
@@ -414,15 +419,15 @@ test-agent-integration:
 
 .PHONY: test-org-integration
 test-org-integration:
-	@echo "Running claude-org integration tests (requires API key)..."
+	@echo "Running code-agent-org integration tests (requires API key)..."
 	@echo "Note: These tests use the fixture at tests/fixtures/test-session.org"
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
-		-l tests/test-claude-org-integration.el \
-		-l tests/test-claude-org-cancel-active-queries.el \
-		-l tests/test-claude-org-cancel-race.el \
-		-l tests/test-claude-org-exec-status.el \
+		-l tests/test-code-agent-org-integration.el \
+		-l tests/test-code-agent-org-cancel-active-queries.el \
+		-l tests/test-code-agent-org-cancel-race.el \
+		-l tests/test-code-agent-org-exec-status.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-permissions
@@ -539,7 +544,7 @@ test-interactive:
 	$(EMACS) -Q $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/test-claude-agent-unit.el \
-		-l tests/test-claude-org-unit.el \
+		-l tests/test-code-agent-org-unit.el \
 		--eval "(ert t)"
 
 # Coverage (requires undercover or similar)
@@ -605,7 +610,7 @@ readme:
 watch:
 	@echo "Watching for changes (requires fswatch)..."
 	@which fswatch > /dev/null || (echo "fswatch not found. Install with: brew install fswatch" && exit 1)
-	fswatch -o claude-agent.org claude-org.org | while read; do \
+	fswatch -o claude-agent.org code-agent-org.org | while read; do \
 		echo "Files changed, reloading..."; \
 		$(MAKE) test-unit; \
 	done
@@ -617,9 +622,9 @@ test-e2e-local:
 	@echo "Running local E2E tests (requires Phoenix + OTel bridge)..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-workspace-bridge.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-terminal-base.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/claude-org-cmux.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-workspace-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-terminal-base.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-cmux.org\")" \
 		-l tests/test-e2e-local-trace.el \
 		-l tests/test-acp-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"

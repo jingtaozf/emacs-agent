@@ -41,7 +41,7 @@ Placed after existing P4. Ordered by user impact.
 | E02 | Restore existing workspace | ensure-session phase 1: hash tables rebuilt |
 | E03 | Recover stale UUID after cmux restart | ensure-session phase 2: name lookup |
 | E04 | Launch when no workspace exists | ensure-session phase 3: new workspace |
-| E05 | Restart Claude Code in existing tab | claude-org-cmux-restart: /exit + relaunch |
+| E05 | Restart Claude Code in existing tab | code-agent-org-cmux-restart: /exit + relaunch |
 | E06 | Open tab / focus workspace | open-tab: select-workspace + set-app-focus |
 | E07 | Close workspace + cleanup | close: hash tables cleared, state removed |
 | E08 | Workspace alive-p with dead UUID | alive-p returns nil, no crash |

@@ -20,10 +20,10 @@
   :tags '(:unit :fast :stable :isolated :chat-backend :f1)
   (should (boundp 'claude-agent-chat-backend-type)))
 
-(ert-deftest test-chat-f1-backend-type-default-is-json-stream ()
-  "claude-agent-chat-backend-type should default to json-stream."
+(ert-deftest test-chat-f1-backend-type-default-is-claude-code ()
+  "claude-agent-chat-backend-type should default to claude-code."
   :tags '(:unit :fast :stable :isolated :chat-backend :f1)
-  (should (eq 'json-stream claude-agent-chat-backend-type)))
+  (should (eq 'claude-code claude-agent-chat-backend-type)))
 
 ;; ---------------------------------------------------------------------------
 ;; F2: Buffer-local claude-agent-chat--backend
@@ -48,12 +48,12 @@
 ;; F3: claude-agent-chat--make-backend
 ;; ---------------------------------------------------------------------------
 
-(ert-deftest test-chat-f3-make-backend-json-stream ()
-  "make-backend with json-stream type creates json-backend."
+(ert-deftest test-chat-f3-make-backend-claude-code ()
+  "make-backend with claude-code type creates claude-code-backend."
   :tags '(:unit :fast :stable :isolated :chat-backend :f3)
-  (let ((claude-agent-chat-backend-type 'json-stream))
+  (let ((claude-agent-chat-backend-type 'claude-code))
     (let ((backend (claude-agent-chat--make-backend)))
-      (should (claude-agent-json-backend-p backend)))))
+      (should (claude-agent-claude-code-backend-p backend)))))
 
 ;; ---------------------------------------------------------------------------
 ;; F4: send-input uses backend
@@ -72,7 +72,7 @@
           (claude-agent-chat--mcp-config nil)
           (claude-agent-chat--options nil)
           (claude-agent-chat--response-start-marker nil)
-          (claude-agent-chat-backend-type 'json-stream)
+          (claude-agent-chat-backend-type 'claude-code)
           (claude-agent-chat-include-ide-context nil)
           (query-called nil))
       (cl-letf (((symbol-function 'claude-agent-backend-query)
@@ -87,14 +87,14 @@
                  (lambda () nil)))
         (claude-agent-chat--send-input "hello")
         (should claude-agent-chat--backend)
-        (should (claude-agent-json-backend-p claude-agent-chat--backend))
+        (should (claude-agent-claude-code-backend-p claude-agent-chat--backend))
         (should query-called)))))
 
 (ert-deftest test-chat-f4-send-input-reuses-existing-backend ()
   "send-input should reuse existing backend on subsequent calls."
   :tags '(:unit :fast :stable :isolated :chat-backend :f4)
   (with-temp-buffer
-    (let* ((mock-backend (claude-agent-json-backend--create :session-key "test"))
+    (let* ((mock-backend (claude-agent-claude-code-backend--create :session-key "test"))
            (claude-agent-chat--backend mock-backend)
            (claude-agent-chat--query-handle nil)
            (claude-agent-chat--waiting nil)
@@ -132,7 +132,7 @@
           (claude-agent-chat--mcp-config nil)
           (claude-agent-chat--options nil)
           (claude-agent-chat--response-start-marker nil)
-          (claude-agent-chat-backend-type 'json-stream)
+          (claude-agent-chat-backend-type 'claude-code)
           (claude-agent-chat-include-ide-context nil))
       (cl-letf (((symbol-function 'claude-agent-backend-query)
                  (lambda (backend prompt callbacks &rest args)
@@ -159,7 +159,7 @@
           (claude-agent-chat--mcp-config nil)
           (claude-agent-chat--options nil)
           (claude-agent-chat--response-start-marker nil)
-          (claude-agent-chat-backend-type 'json-stream)
+          (claude-agent-chat-backend-type 'claude-code)
           (claude-agent-chat-include-ide-context nil)
           (received-callbacks nil))
       (cl-letf (((symbol-function 'claude-agent-backend-query)
@@ -192,7 +192,7 @@
           (claude-agent-chat--mcp-config nil)
           (claude-agent-chat--options nil)
           (claude-agent-chat--response-start-marker nil)
-          (claude-agent-chat-backend-type 'json-stream)
+          (claude-agent-chat-backend-type 'claude-code)
           (claude-agent-chat-include-ide-context nil)
           (received-args nil))
       (cl-letf (((symbol-function 'claude-agent-backend-query)
@@ -231,7 +231,7 @@
   :tags '(:unit :fast :stable :isolated :chat-backend :f5)
   (with-temp-buffer
     (let* ((cancel-called nil)
-           (mock-backend (claude-agent-json-backend--create))
+           (mock-backend (claude-agent-claude-code-backend--create))
            (claude-agent-chat--backend mock-backend)
            (claude-agent-chat--query-handle 'the-handle)
            (claude-agent-chat--waiting t))
@@ -267,7 +267,7 @@
   "chat-interrupt should nil out the query handle."
   :tags '(:unit :fast :stable :isolated :chat-backend :f5)
   (with-temp-buffer
-    (let ((claude-agent-chat--backend (claude-agent-json-backend--create))
+    (let ((claude-agent-chat--backend (claude-agent-claude-code-backend--create))
           (claude-agent-chat--query-handle 'some-handle)
           (claude-agent-chat--waiting t))
       (cl-letf (((symbol-function 'claude-agent-backend-cancel)
@@ -300,7 +300,7 @@
       (let ((buf (generate-new-buffer " *test-chat-kill*")))
         (with-current-buffer buf
           (setq-local claude-agent-chat--backend
-                      (claude-agent-json-backend--create))
+                      (claude-agent-claude-code-backend--create))
           ;; Simulate adding the hook (as chat-mode would)
           (add-hook 'kill-buffer-hook #'claude-agent-chat--kill-buffer-cleanup nil t))
         (kill-buffer buf)
@@ -325,7 +325,7 @@
   :tags '(:unit :fast :stable :isolated :chat-backend :f7)
   (with-temp-buffer
     (let ((cleanup-called nil)
-          (claude-agent-chat--backend (claude-agent-json-backend--create))
+          (claude-agent-chat--backend (claude-agent-claude-code-backend--create))
           (claude-agent-chat--query-handle 'some-handle)
           (claude-agent-chat--session-id "sess-1")
           (claude-agent-chat--waiting nil)
@@ -344,13 +344,13 @@
         (should-not claude-agent-chat--query-handle)
         (should-not claude-agent-chat--session-id)))))
 
-(ert-deftest test-chat-f7-new-session-json-stream-nils-session ()
-  "new-session with json-stream backend nils session-id."
+(ert-deftest test-chat-f7-new-session-claude-code-nils-session ()
+  "new-session with claude-code backend nils session-id."
   :tags '(:unit :fast :stable :isolated :chat-backend :f7)
   (with-temp-buffer
-    (let ((claude-agent-chat--backend (claude-agent-json-backend--create))
+    (let ((claude-agent-chat--backend (claude-agent-claude-code-backend--create))
           (claude-agent-chat--session-id "old-sess")
-          (claude-agent-chat-backend-type 'json-stream))
+          (claude-agent-chat-backend-type 'claude-code))
       (cl-letf (((symbol-function 'claude-agent-chat--insert)
                  (lambda (&rest _) nil)))
         (claude-agent-chat-new-session)

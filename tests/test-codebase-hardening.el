@@ -65,10 +65,10 @@ prevent JSON parse errors from propagating through process filter."
 (ert-deftest test-hardening-fontlock-timer-checks-buffer-live ()
   "The debounced font-lock timer checks (buffer-live-p) before operating.
 FIX: Add (when (buffer-live-p buf) ...) inside the timer lambda in
-claude-org--schedule-fontlock. See ARCHITECTURE.org Invariants."
+code-agent-org--schedule-fontlock. See ARCHITECTURE.org Invariants."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    (let* ((file (expand-file-name "claude-org-response.org" test-hardening--project-root))
+    (let* ((file (expand-file-name "code-agent-org-response.org" test-hardening--project-root))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string))))

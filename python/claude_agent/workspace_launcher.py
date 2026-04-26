@@ -225,11 +225,11 @@ class WorkspaceLauncher:
         esc_sid = _escape_elisp_string(self.session_id)
         elisp = (
             "(let ((debug-on-error nil) (debug-on-quit nil))"
-            "  (let* ((prompt (claude-org-workspace-bridge-system-prompt "
+            "  (let* ((prompt (code-agent-org-workspace-bridge-system-prompt "
             f'    "{esc_org}" "{esc_sid}"))'
-            f'         (story (with-current-buffer (claude-org-workspace-bridge--ensure-buffer "{esc_org}")'
+            f'         (story (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer "{esc_org}")'
             "            (save-excursion (save-restriction (widen)"
-            f'              (claude-org-workspace-bridge--goto-session "{esc_sid}")'
+            f'              (code-agent-org-workspace-bridge--goto-session "{esc_sid}")'
             "              (substring-no-properties (org-get-heading t t t t)))))))"
             r'    (substring-no-properties (format "%s\n%s" story prompt))))'
         )

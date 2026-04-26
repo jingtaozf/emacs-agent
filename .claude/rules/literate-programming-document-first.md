@@ -13,7 +13,7 @@ Adapted from `~/projects/mind-ai/agents/mega/dev-agent/lisp-style.org`
 ## What "document first" means
 
 For every `.org` module under the repo root (`claude-agent.org`,
-`claude-org.org`, `claude-agent-acp*.org`, etc.), and for every meaningful
+`code-agent-org.org`, `claude-agent-acp*.org`, etc.), and for every meaningful
 Python module under `python/claude_agent/`, the file must justify its
 own existence in prose **before the first code block**.
 

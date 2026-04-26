@@ -1,0 +1,321 @@
+#+TITLE: Claude Agent — Multiplexer Family Base
+#+PROPERTY: literate-load yes
+
+* Claude Agent — Multiplexer Family Base
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+Abstract base class for all terminal-multiplexer-driven backends —
+today cmux, Phase 4 adds tmux — plus the Protocol 2b multiplexer-wire
+generics that every concrete multiplexer implements.
+
+This module is the multiplexer-family sibling of
+=claude-agent-agent.org=. The execution model differs fundamentally:
+agent backends drive a CLI subprocess over stdio and read structured
+events; multiplexer backends type prompts into a shell pane and pick
+up response text asynchronously through the Python =workspace-bridge=
+adapter. The shared abstractions — agent profile resolution, Python
+bridge contract, verbose buffer machinery — live here.
+
+Phase 0 status: *skeleton only*. Generics declared with stub
+defaults. Phase 1 wires the Template Method =backend-query= (on the
+abstract base) to =ensure-session= → =send-text= → register flow.
+Phase 3 lands the concrete =cmux-backend= specialisations.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'claude-agent-backend)
+#+END_SRC
+
+** Multiplexer Base Struct
+
+Shared state for any multiplexer-driven backend. Identity is the
+multiplexer-assigned session id plus the pane/surface id inside it.
+Status directory is the on-disk rendezvous with the Python bridge
+(status files, request-id marker, from-emacs flag). Follower process
+holds the =capture-pane= / =pipe-pane= stream subprocess; stream-sink
+is the file it writes to.
+
+Agent-profile resolution lives here (not per-concrete-multiplexer)
+because cmux and tmux both launch the same set of agent CLIs
+(Claude Code, Copilot, OpenCode) using the same launch patterns.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-multiplexer-backend
+               (:include claude-agent-backend (type :multiplexer))
+               (:constructor nil)
+               (:copier nil))
+  "Abstract base for multiplexer-driven terminal backends.
+Concrete subclasses: `claude-agent-cmux-backend' (Phase 3),
+`claude-agent-tmux-backend' (Phase 4).  Do not instantiate directly.
+
+Slot policy: only slots *every* multiplexer needs live here.
+Multiplexer-specific niceties (cmux workspace colour, sidebar
+metadata, tmux control-mode state) belong on the concrete subclass,
+not the abstract base."
+  (session-key            nil
+   :documentation "Emacs session key `file::session-id' (shared identity with frontend).")
+  (multiplexer-session-id nil
+   :documentation "Session identifier as understood by the multiplexer.")
+  (pane-id                nil
+   :documentation "Pane / surface identifier within that session.")
+  (status-dir             "/tmp/claude-agent-status"
+   :documentation "On-disk rendezvous dir for Python bridge side-channel.")
+  (stream-sink            nil
+   :documentation "File the follower writes live pane output to.")
+  (follower-proc          nil
+   :documentation "Subprocess streaming pane output (nil when stopped).")
+  (agent-profile          nil
+   :documentation "Agent profile struct (claude/copilot/opencode)."))
+#+END_SRC
+
+** Protocol 2b Generics
+
+The published wire protocol for multiplexers. Each generic is
+declared here with a safe default; concrete multiplexers override.
+
+*** Launch session
+
+Spawn a new multiplexer session with a given launch command. No
+default — abstract.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-launch-session (backend launch-cmd)
+  "Launch a new multiplexer session for BACKEND running LAUNCH-CMD.
+LAUNCH-CMD is a list (executable + args).  Returns the session id
+(string) or nil on failure.  Concrete multiplexers must override.")
+#+END_SRC
+
+*** Ensure session
+
+Idempotent: return the existing session id if one is already running
+for this backend's identity, otherwise launch fresh.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-ensure-session (backend)
+  "Resolve or launch a multiplexer session for BACKEND.
+Returns the session id.  Concrete multiplexers must override.")
+#+END_SRC
+
+*** Resolve session by heading
+
+Recover session identity from org heading (stable identity across
+Emacs restarts). Walks the multiplexer's current sessions looking
+for a name match.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-resolve-session-by-heading (backend heading)
+  "Return existing multiplexer session id matching HEADING, or nil.
+Used for session recovery.  Concrete multiplexers override."
+  (ignore backend heading)
+  nil)
+#+END_SRC
+
+*** Send text
+
+Type text into the current pane, respecting vi-mode / non-vi-mode
+from the agent profile.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-send-text (backend text)
+  "Type TEXT into BACKEND's current pane.  No default."
+  (ignore backend text)
+  (error "claude-agent-mux-send-text: no method on %S" (type-of backend)))
+#+END_SRC
+
+*** Send key
+
+Send a named key. Keys are keywords (=:enter=, =:escape=, =:ctrl-c=,
+=:ctrl-b=, etc.) translated per-multiplexer.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-send-key (backend key)
+  "Send named KEY to BACKEND's pane (e.g. :enter, :escape, :ctrl-c).
+No default."
+  (ignore backend key)
+  (error "claude-agent-mux-send-key: no method on %S" (type-of backend)))
+#+END_SRC
+
+*** Capture screen
+
+Return the current pane text as a string (no scrollback).
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-capture-screen (backend)
+  "Return current pane text for BACKEND as a string."
+  (ignore backend)
+  "")
+#+END_SRC
+
+*** Start Follower
+
+Begin streaming pane output to =stream-sink= (a file). cmux uses
+=capture-pane --follow=; tmux uses =pipe-pane -o "cat>>FILE"=. No
+default — concrete multiplexers override with their native streaming
+primitive.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-start-follower (backend sink)
+  "Begin streaming BACKEND's pane output to SINK (a file path).
+Concrete multiplexers override."
+  (ignore backend sink)
+  nil)
+#+END_SRC
+
+*** Stop Follower
+
+Tear down the follower subprocess.  The default body is sufficient
+for all subclasses because =follower-proc= lives on the abstract base
+— the generic just kills the process and clears the slot.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-stop-follower (backend)
+  "Stop BACKEND's pane output follower, if any.
+Default kills `follower-proc' and clears the slot — works unchanged
+for every subclass since the slot is declared on the abstract base."
+  (when-let* ((proc (claude-agent-multiplexer-backend-follower-proc backend)))
+    (when (process-live-p proc) (delete-process proc))
+    (setf (claude-agent-multiplexer-backend-follower-proc backend) nil)))
+#+END_SRC
+
+*** Session status
+
+Return the current agent-ready state inferred from screen content and
+agent profile's ready/busy patterns.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-session-status (backend)
+  "Return :ready / :busy / :error / :missing for BACKEND's session."
+  (ignore backend)
+  :missing)
+#+END_SRC
+
+*** Wait for ready
+
+Block (event-driven or polling) until the agent's TUI reports ready.
+Default polls =session-status= every 0.2 s up to =timeout= seconds.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-wait-for-ready (backend &optional timeout)
+  "Block until BACKEND's agent TUI is :ready, up to TIMEOUT seconds.
+
+Default polls `claude-agent-mux-session-status' on the *main thread*
+via `sit-for' — this stalls redisplay for up to TIMEOUT seconds if
+the agent never becomes ready.  Concrete multiplexers SHOULD override
+with an async wait (e.g. cmux's `wait-for claude-ready-<id>' event
+sub-command + sentinel) to avoid blocking the editor.  This default
+is a functional fallback for development only."
+  (let ((deadline (+ (float-time) (or timeout 15.0))))
+    (while (and (< (float-time) deadline)
+                (not (eq :ready (claude-agent-mux-session-status backend))))
+      (sit-for 0.2))
+    (eq :ready (claude-agent-mux-session-status backend))))
+#+END_SRC
+
+*** Rename
+
+Set the workspace / tab title. cmux overrides to call its sidebar API;
+tmux overrides with =rename-session= / =rename-window=.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-rename (backend workspace-name &optional tab-name)
+  "Rename BACKEND's workspace to WORKSPACE-NAME (and tab to TAB-NAME if given).
+Default: no-op."
+  (ignore backend workspace-name tab-name)
+  nil)
+#+END_SRC
+
+*** Apply style
+
+Set workspace color / icon. cmux-only feature; tmux default is no-op.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-apply-style (backend color icon)
+  "Apply workspace COLOR and ICON to BACKEND (cmux-only).  Default: no-op."
+  (ignore backend color icon)
+  nil)
+#+END_SRC
+
+*** Focus
+
+Raise BACKEND's workspace to the foreground (for permission alerts, etc.).
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-focus (backend)
+  "Raise BACKEND's workspace to foreground.  Default: no-op."
+  (ignore backend)
+  nil)
+#+END_SRC
+
+*** Restart agent
+
+Send exit to the current TUI, wait for shell prompt, re-spawn the agent.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-restart-agent (backend)
+  "Send exit to BACKEND's agent, wait, re-spawn in same pane.
+Concrete multiplexers override."
+  (ignore backend)
+  nil)
+#+END_SRC
+
+*** CLI path
+
+Return the executable name for this multiplexer (=cmux= / =tmux=).
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-agent-mux-cli-path (backend)
+  "Return the CLI executable path for BACKEND."
+  (ignore backend)
+  nil)
+#+END_SRC
+
+** Shared helpers — ANSI strip + verbose cap
+
+Both cmux and tmux run the same stream filter over pane output. The
+ANSI-strip regex and the 256 KB verbose buffer cap (from the
+2026-04-24 memory-leak fix) live here so both concrete multiplexers
+inherit them for free.
+
+*Phase 3 note*: =code-agent-org-cmux.org= still owns its own private
+copies of =code-agent-org-cmux-verbose-buffer-max-size= and
+=code-agent-org-cmux--verbose-strip-ansi= (they pre-date the backend
+extraction and are referenced throughout the legacy module).  The
+shared versions defined below are inherited by =claude-agent-tmux-backend=
+and future multiplexers, but cmux still uses its private copies.
+This duplication goes away in Phase 6 — the follow-up session that
+actually moves cmux wire-level code into =claude-agent-cmux-backend.org=
+and deletes =code-agent-org-cmux.org='s local copies.
+
+*** Strip ANSI escapes from a chunk
+
+#+BEGIN_SRC elisp
+(defun claude-agent-multiplexer--strip-ansi (chunk)
+  "Best-effort strip of ANSI escape sequences + control chars from CHUNK.
+Preserves newline/tab/CR for line-structured output."
+  (replace-regexp-in-string
+   "\x1b\\[[0-9;?]*[a-zA-Z]\\|\x1b\\][^\a\x1b]*\\(?:\a\\|\x1b\\\\\\)\\|[\x00-\x08\x0b\x0c\x0e-\x1f]"
+   "" chunk))
+#+END_SRC
+
+*** Verbose buffer size ceiling
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-multiplexer-verbose-buffer-max-size (* 256 1024)
+  "Ceiling (bytes) for each multiplexer verbose buffer.
+When exceeded, whole lines are trimmed from the start.  Shared by
+cmux and tmux verbose streams.  Set nil to disable (long sessions
+will grow without bound — not recommended)."
+  :type '(choice (const :tag "No cap (unbounded growth)" nil)
+                 (integer :tag "Max bytes"))
+  :group 'claude-agent)
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-multiplexer)
+#+END_SRC

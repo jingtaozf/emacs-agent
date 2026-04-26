@@ -35,11 +35,11 @@
   (should (fboundp 'claude-agent-backend-classify-error)))
 
 ;; F11.4 JSON stream backend struct and constructor
-(ert-deftest test-f11-json-backend-struct ()
+(ert-deftest test-f11-claude-code-backend-struct ()
   "JSON stream backend struct should be defined."
   :tags '(:unit :fast :stable :isolated :refactor :f11)
-  (should (fboundp 'claude-agent-json-backend-p))
-  (should (fboundp 'claude-agent-json-backend--create)))
+  (should (fboundp 'claude-agent-claude-code-backend-p))
+  (should (fboundp 'claude-agent-claude-code-backend--create)))
 
 ;; F11.5 Claude CLI backend was removed (no longer supported)
 

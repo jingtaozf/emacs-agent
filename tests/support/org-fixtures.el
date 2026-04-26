@@ -1,4 +1,4 @@
-;;; org-fixtures.el --- Shared test helpers for claude-org tests -*- lexical-binding: t; -*-
+;;; org-fixtures.el --- Shared test helpers for code-agent-org tests -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024-2025 Jingtao Xu
 
@@ -35,8 +35,8 @@ Initializes the session registry hash table and creates a session."
      (org-mode)
      (insert ,content)
      (goto-char (point-min))
-     (setq-local claude-org--sessions (make-hash-table :test 'equal))
-     (claude-org--get-session ,session-key)
+     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
+     (code-agent-org--get-session ,session-key)
      ,@body))
 
 (defmacro test-org-with-sessions (content &rest body)
@@ -47,7 +47,7 @@ Only initializes the hash table; does not create any session."
      (org-mode)
      (insert ,content)
      (goto-char (point-min))
-     (setq-local claude-org--sessions (make-hash-table :test 'equal))
+     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
      ,@body))
 
 ;;; ============================================================
@@ -102,12 +102,12 @@ Returns the full path if valid, signals error if not found."
 
 (defun test-org-session-field-eq (session-key field expected)
   "Assert that session SESSION-KEY's FIELD equals EXPECTED."
-  (let ((actual (claude-org--session-get session-key field)))
+  (let ((actual (code-agent-org--session-get session-key field)))
     (should (equal expected actual))))
 
 (defun test-org-session-field-nil (session-key field)
   "Assert that session SESSION-KEY's FIELD is nil."
-  (should-not (claude-org--session-get session-key field)))
+  (should-not (code-agent-org--session-get session-key field)))
 
 (provide 'org-fixtures)
 ;;; org-fixtures.el ends here

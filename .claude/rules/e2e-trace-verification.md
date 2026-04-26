@@ -10,7 +10,7 @@ AI block execution — not just unit tests or manual curl.
    (find-file "/path/to/tests/fixtures/trace-test.org")
    ```
 
-2. **Insert an SDD story** with `claude-org-insert-sdd` or manually:
+2. **Insert an SDD story** with `code-agent-org-insert-sdd` or manually:
    ```org
    * Trace Test
    :PROPERTIES:
@@ -23,9 +23,9 @@ AI block execution — not just unit tests or manual curl.
    #+end_src
    ```
 
-3. **Open terminal tab** via `claude-org-cmux-open-tab` or menu
+3. **Open terminal tab** via `code-agent-org-cmux-open-tab` or menu
 
-4. **Execute the AI block** via `claude-org-execute` (C-c C-c)
+4. **Execute the AI block** via `code-agent-org-execute` (C-c C-c)
 
 5. **Check Phoenix** for root spans:
    ```bash
@@ -71,8 +71,8 @@ open -g "path/to/cmux DEV emacs-test.app" \
 
 Then in Emacs:
 ```elisp
-(setq claude-org-cmux-socket-path "/tmp/cmux-debug-emacs-test.sock")
-;; To switch back: (setq claude-org-cmux-socket-path nil)
+(setq code-agent-org-cmux-socket-path "/tmp/cmux-debug-emacs-test.sock")
+;; To switch back: (setq code-agent-org-cmux-socket-path nil)
 ```
 
 ## Cleanup

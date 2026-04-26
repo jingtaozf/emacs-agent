@@ -34,7 +34,7 @@ nohup "/Applications/cmux DEV.app/Contents/MacOS/cmux DEV" > /dev/null 2>&1 &
 ## Emacs connection
 
 Set per-file: `#+PROPERTY: CMUX_VERSION dev`
-Or global: `(setq claude-org-cmux-socket-path "/tmp/cmux-debug-emacs-test.sock")`
+Or global: `(setq code-agent-org-cmux-socket-path "/tmp/cmux-debug-emacs-test.sock")`
 
 ## Source repo
 

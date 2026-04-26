@@ -1136,7 +1136,7 @@ Only provided non-nil keyword arguments are updated."
 
 (defun claude-agent-close-process-state (state)
   "Mark STATE as closed and unregister its query from active tracking.
-This is the public API for external modules (e.g., claude-org) to signal
+This is the public API for external modules (e.g., code-agent-org) to signal
 that a process state is terminated without reaching into private internals."
   (when (and state (claude-agent--process-state-p state))
     (setf (claude-agent--process-state-closed state) t)
@@ -1575,7 +1575,7 @@ Skips the complete callback entirely if the query was cancelled,
 since the cancel path already handled cleanup."
   (claude-agent-with-span "sentinel-normal-exit"
       (list :event event) nil
-  ;; When a query is cancelled, claude-org-cancel (or cancel-query) already
+  ;; When a query is cancelled, code-agent-org-cancel (or cancel-query) already
   ;; cleans up the session state (frees marker, sets status, stops spinner).
   ;; Calling complete-callback here would cause duplicate cleanup and fire
   ;; completion hooks with the wrong status.
@@ -2286,7 +2286,7 @@ Returns a process state object."
 ** Core API
 :PROPERTIES:
 :DEPENDS_ON: Data Structures, Process Management, Permission System, Session Management
-:DEPENDED_BY: Client API, Conversation Titling, Prompt Refinement, claude-org.org
+:DEPENDED_BY: Client API, Conversation Titling, Prompt Refinement, code-agent-org.org
 :END:
 
 *** Query Function
@@ -2329,7 +2329,7 @@ ON-MESSAGE is called with each message as it arrives.
 
 ON-TOKEN is called with each text token for streaming display.
   Function signature: (lambda (text) ...)
-  This is useful for real-time streaming UIs like claude-org mode.
+  This is useful for real-time streaming UIs like code-agent-org mode.
 
 ON-ERROR is called if an error occurs.
   Function signature: (lambda (error) ...)
@@ -2876,7 +2876,7 @@ and sends back a =control_response=.
 ** Query Cancellation
 :PROPERTIES:
 :DEPENDS_ON: Data Structures, Process Management
-:DEPENDED_BY: Core API, Activity Mode-Line, claude-org.org
+:DEPENDED_BY: Core API, Activity Mode-Line, code-agent-org.org
 :END:
 
 This section provides query cancellation support by tracking active
@@ -3396,7 +3396,7 @@ and result messages."
 
 Extensible backend abstraction via =cl-defgeneric= / =cl-defmethod=.
 Each backend type (JSON stream, terminal, future HTTP) implements this protocol.
-The presentation layer (claude-org.org) depends only on these generics.
+The presentation layer (code-agent-org.org) depends only on these generics.
 
 ** Backend Base Struct
 
@@ -3408,7 +3408,7 @@ The presentation layer (claude-org.org) depends only on these generics.
 Dispatch on this type via cl-defmethod for protocol implementations.
 Do not instantiate directly — use a concrete backend constructor."
   (type nil :read-only t
-   :documentation "Keyword identifying backend type, e.g. :json-stream, :terminal."))
+   :documentation "Keyword identifying backend type, e.g. :claude-code, :terminal."))
 #+END_SRC
 
 ** Backend Protocol Generics
@@ -3503,6 +3503,306 @@ See `claude-agent-backend--callback-capabilities' for the mapping."
     result))
 #+END_SRC
 
+** Org-Integration Protocol (Protocol 3)
+
+The third protocol alongside lifecycle (Protocol 1) and the
+family-specific wire protocols (Protocols 2a/2b).  Protocol 3 covers
+*how a backend interacts with the org buffer* — executing an AI
+block, inserting prompts, streaming responses, notifying on
+permission, recovering sessions.  Every backend implements all three
+protocols; sensible defaults cascade from the abstract bases.
+
+The prefix =claude-org-backend-= (rather than the
+=claude-agent-backend-= of Protocols 1/2) is deliberate and final:
+it marks the protocol as the org-level interaction surface, visible
+to the frontend (=code-agent-org.org=), while Protocols 1/2 are
+wire-level contracts internal to the SDK layer.
+
+*Phase 1 note on =block-info= plist*: Phase 1 callers populate only
+=:prompt=, =:callbacks=, =:props=, =:session-key=.  The fuller keys
+listed on each generic's contract (=:target-heading=, =:custom-id=,
+=:source-buffer=, =:source-marker=, =:loop-max=, =:loop-interval=)
+arrive from Phase 2 onwards as the frontend integration deepens.
+
+*** Execute Block
+
+=execute-block= is the primary frontend entry point — called once
+per C-c C-c on an AI block.  The default method on
+=claude-agent-backend= is the Phase 1 shim: unpack =block-info= and
+delegate to =claude-agent-backend-query=.  Concrete agent backends
+(Phase 2+) and multiplexer backends (Phase 3+) override with their
+own orchestration.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-execute-block (backend block-info)
+  "Execute an AI block on BACKEND.
+BLOCK-INFO is a plist: :prompt :callbacks :session-key :props
+:target-heading :custom-id :source-buffer :source-marker
+:loop-max :loop-interval.
+Returns an opaque handle compatible with `claude-agent-backend-cancel'.
+Concrete backends may override for family-specific flow; default
+shims to `claude-agent-backend-query' below.")
+
+(cl-defmethod claude-org-backend-execute-block
+  ((backend claude-agent-backend) block-info)
+  "Default execute-block: dispatch BLOCK-INFO's :prompt through
+`claude-agent-backend-query' on BACKEND.
+Phase 1 shim — keeps the current JSON/ACP execution path running
+unchanged while the frontend starts calling through Protocol 3.
+Concrete agent/multiplexer backends in later phases override this
+with their own orchestration."
+  (let* ((prompt (plist-get block-info :prompt))
+         (callbacks (plist-get block-info :callbacks))
+         (props (plist-get block-info :props))
+         (filtered (claude-agent-backend-filter-callbacks backend callbacks)))
+    (apply #'claude-agent-backend-query backend prompt filtered props)))
+#+END_SRC
+
+*** Insert Prompt
+
+Materialise the user's prompt in the org buffer so a later response
+can anchor relative to it.  For agent-family backends the AI src
+block itself IS the visible prompt, so the default is a no-op.
+Multiplexer-family backends override: the response section lives
+under a distinct =:claude_chat:= instruction heading that the bridge
+writes, so that heading has to be created first.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-insert-prompt (backend block-info)
+  "Materialise the user's prompt in the org buffer for BACKEND.
+Default: no-op (suitable for agent-family — the ai src block IS the
+prompt).  Multiplexer-family overrides to insert a :claude_chat:
+instruction heading via the Python bridge."
+  (ignore backend block-info)
+  nil)
+#+END_SRC
+
+*** Open Response Section
+
+Return a live marker where streamed response text should be appended.
+The default is intentionally a no-op (return nil) — Protocol 3
+defaults live in the SDK layer and must not reach up into the
+org-integration layer via =fboundp=.  The frontend
+(=code-agent-org.org=) provides a concrete implementation by
+overriding on =claude-agent-backend= in its own module; agent and
+multiplexer backends inherit that frontend default unless they need
+a specialisation.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-open-response-section (backend block-info)
+  "Return a live marker where response text should be appended.
+Default: return nil.  The frontend provides the real implementation
+by specialising on `claude-agent-backend'.  Concrete family bases
+(agent, multiplexer) may override."
+  (ignore backend block-info)
+  nil)
+#+END_SRC
+
+*** Append Response
+
+Write a chunk of response text at the given marker.  Default is a
+safe insert-at-marker that preserves marker position — works for
+both agent-family (token-by-token streaming) and multiplexer-family
+(whole-chunk delivery from the bridge) out of the box.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-append-response (backend marker chunk)
+  "Append CHUNK of response text at MARKER for BACKEND.
+Default: insert-at-marker, preserving marker position."
+  (ignore backend)
+  (when (and (markerp marker) (marker-buffer marker)
+             (buffer-live-p (marker-buffer marker))
+             (stringp chunk))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (goto-char marker)
+        (insert chunk)
+        (set-marker marker (point))))))
+#+END_SRC
+
+*** Finalize Response
+
+Called once after the stream completes.  Default is no-op; subclasses
+attach a footer, persist telemetry (tokens / duration / tool count),
+save the buffer.  =meta= carries whatever the wire protocol exposes;
+backends that can't produce a field leave it out and callers guard
+via =claude-agent-backend-supports-p=.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-finalize-response (backend marker meta)
+  "Finalize the response at MARKER for BACKEND.
+META is a plist of telemetry (:elapsed-ms :token-count :error etc).
+Default: no-op — subclasses add footer / persist telemetry / save."
+  (ignore backend marker meta)
+  nil)
+#+END_SRC
+
+*** Register Query
+
+Book-keeping on query start: record the request id so hooks can find
+the active query, set =:busy= in session state.  Default is a no-op
+placeholder — concrete agent backends and the frontend use their own
+existing registration routines in Phase 1; Phase 2+ folds those into
+the generic.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-register-query (backend block-info)
+  "Register BLOCK-INFO as an in-flight query on BACKEND.
+Default: no-op — Phase 1 callers still use `claude-agent--register-query'
+directly; Phase 2+ routes through here."
+  (ignore backend block-info)
+  nil)
+#+END_SRC
+
+*** Query Completed
+
+Called from the sentinel / Stop hook when a query finishes.  Clears
+=:busy=, advances loop state, dequeues the next pending block.
+Default is a no-op in Phase 1; concrete backends specialise as they
+migrate their completion paths.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-query-completed (backend session-key)
+  "Mark BACKEND's query for SESSION-KEY as complete.
+Clears :busy, advances loop, dequeues next pending block.
+Default: no-op — Phase 1 wires this to the existing completion path."
+  (ignore backend session-key)
+  nil)
+#+END_SRC
+
+*** Cancel From Org
+
+User-initiated cancel (C-c C-k) from the org buffer.  Default
+dispatches to =claude-agent-backend-cancel= with a nil handle (the
+backend looks it up from session state).  Multiplexer backends
+override to additionally =send-key :ctrl-c= to the pane so the TUI
+stops.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-cancel-from-org (backend session-key)
+  "Handle user-initiated cancel (C-c C-k) from the org buffer on BACKEND.
+Default dispatches to `claude-agent-backend-cancel' with the query
+handle read from session state (via `code-agent-org--session-get'
+when available).  The `fboundp' guard keeps this SDK-layer default
+from hard-depending on the org-integration layer at load time."
+  (let ((handle (when (and session-key
+                           (fboundp 'code-agent-org--session-get))
+                  (funcall 'code-agent-org--session-get
+                           session-key :query-handle))))
+    (claude-agent-backend-cancel backend handle)))
+#+END_SRC
+
+*** Permission Notify / Resolved
+
+The agent or its TUI has paused waiting for user permission
+(=session/request_permission= over ACP, =can_use_tool= over Claude
+Code stream-json, or a Y/N prompt in the TUI for multiplexer
+backends).  Default adds / removes a mode-line alert via
+=claude-agent-add-alert=.  cmux overrides to additionally flash the
+sidebar and raise the workspace.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-permission-notify (backend request-desc)
+  "Notify user that BACKEND needs a tool-use permission.
+REQUEST-DESC is a short string describing the tool / action.
+Default: add a mode-line alert via `claude-agent-add-alert' if
+available.  cmux overrides to add sidebar alert + focus workspace."
+  (ignore backend)
+  (when (fboundp 'claude-agent-add-alert)
+    (funcall 'claude-agent-add-alert
+             :id 'permission-needed
+             :label (format "⚠ Permission: %s"
+                            (or request-desc "tool use"))
+             :face 'warning)))
+
+(cl-defgeneric claude-org-backend-permission-resolved (backend)
+  "Clear the permission-needed alert for BACKEND."
+  (ignore backend)
+  (when (fboundp 'claude-agent-remove-alert)
+    (funcall 'claude-agent-remove-alert 'permission-needed)))
+#+END_SRC
+
+*** On Story Changed
+
+Fired when =ACTIVE_STORY= property changes on the workspace heading.
+Agent-family defaults to no-op (nothing to rename).
+Multiplexer-family overrides to rename the tab so the UI keeps up.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-on-story-changed (backend old-name new-name)
+  "Notify BACKEND that ACTIVE_STORY changed from OLD-NAME to NEW-NAME.
+Default: no-op.  Multiplexer backends override to rename tab."
+  (ignore backend old-name new-name)
+  nil)
+#+END_SRC
+
+*** Recover Session
+
+Called after Emacs restart / module reload to rebuild runtime state.
+Agent-family reads the backend's session property for the next
+=--resume=.  Multiplexer-family walks the multiplexer's existing
+sessions, rebuilds the workspace↔session-key map, re-starts the
+follower if verbose mode was active.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-recover-session (backend)
+  "Recover BACKEND's session state after Emacs restart / reload.
+Default: no-op.  Agent-family: re-read session property for next
+resume.  Multiplexer-family: resolve-session-by-heading + restart
+follower + re-apply style."
+  (ignore backend)
+  nil)
+#+END_SRC
+
+*** Status Badge
+
+Return a short string for headline display (spinner / ready / busy /
+error).  Default is nil (no badge).  Concrete backends specialise to
+consult their own status source (process state for agent-family,
+status file + pattern match for multiplexer-family).
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-status-badge (backend session-key)
+  "Return a status badge string for SESSION-KEY on BACKEND.
+Used by the headline renderer.  Default returns nil (no badge)."
+  (ignore backend session-key)
+  nil)
+#+END_SRC
+
+*** Todos Update
+
+The Python bridge calls this (via MCP) when the agent's Todo tool
+writes a new list.  Default is no-op.  The bridge is the only caller
+for multiplexer backends today; agent-family agents embed todos
+directly into their response stream so they override by parsing the
+stream event.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-todos-update (backend todos instr-custom-id)
+  "Update the todo-list display for INSTR-CUSTOM-ID on BACKEND.
+TODOS is the parsed list from the agent.  Default: no-op — the
+Python bridge calls this directly for multiplexer backends."
+  (ignore backend todos instr-custom-id)
+  nil)
+#+END_SRC
+
+*** Open Terminal Tab
+
+Raises the backend's live terminal so the user can look at it.  Only
+meaningful for multiplexer backends — agent backends signal
+=user-error= because a stream-json subprocess has no user-visible
+terminal.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric claude-org-backend-open-terminal-tab (backend)
+  "Raise BACKEND's terminal tab.  Agent-family default: user-error
+(no terminal).  Multiplexer-family overrides to call the multiplexer
+CLI's focus/activate command."
+  (ignore backend)
+  (user-error "No terminal to open for %s backend"
+              (or (claude-agent-backend-type backend) "unknown")))
+#+END_SRC
+
 
 * JSON Stream Backend
 :PROPERTIES:
@@ -3510,15 +3810,15 @@ See `claude-agent-backend--callback-capabilities' for the mapping."
 :DEPENDED_BY: Core API, Client API
 :END:
 
-The JSON stream backend wraps the existing process layer. It handles
+The Claude Code backend wraps the existing process layer. It handles
 both per-query (one-shot) and persistent-client (bidirectional) modes.
 
 #+BEGIN_SRC elisp
-(cl-defstruct (claude-agent-json-backend
-               (:include claude-agent-backend (type :json-stream))
-               (:constructor claude-agent-json-backend--create)
+(cl-defstruct (claude-agent-claude-code-backend
+               (:include claude-agent-backend (type :claude-code))
+               (:constructor claude-agent-claude-code-backend--create)
                (:copier nil))
-  "JSON stream CLI backend (--output-format stream-json).
+  "Claude Code CLI backend (--output-format stream-json).
 Handles both per-query and persistent-client modes."
   (process-state nil :documentation "Active claude-agent--process-state or nil")
   (client nil :documentation "Persistent claude-agent--client or nil")
@@ -3526,20 +3826,20 @@ Handles both per-query and persistent-client modes."
   (persistent-p nil :documentation "Non-nil for persistent client mode"))
 
 (cl-defmethod claude-agent-backend-supports-p
-    ((backend claude-agent-json-backend) capability)
-  "JSON stream backend supports all standard capabilities."
+    ((backend claude-agent-claude-code-backend) capability)
+  "Claude Code backend supports all standard capabilities."
   (pcase capability
     (:streaming-tokens t)
     (:structured-messages t)
     (:tool-use t)
     (:session-resume t)
     (:interactive-input t)
-    (:persistent-client (claude-agent-json-backend-persistent-p backend))
+    (:persistent-client (claude-agent-claude-code-backend-persistent-p backend))
     (_ nil)))
 
 (cl-defmethod claude-agent-backend-classify-error
-    ((backend claude-agent-json-backend) error)
-  "Classify ERROR using JSON-stream-specific error patterns."
+    ((backend claude-agent-claude-code-backend) error)
+  "Classify ERROR using Claude Code error patterns."
   (let ((msg (cond
               ((stringp error) error)
               ((and (listp error) (plist-get error :message))
@@ -3552,55 +3852,55 @@ Handles both per-query and persistent-client modes."
      (t 'unknown))))
 
 (cl-defmethod claude-agent-backend-verbose-buffer
-    ((_backend claude-agent-json-backend))
+    ((_backend claude-agent-claude-code-backend))
   "JSON backend uses the shared verbose buffer system, not a backend-managed one."
   nil)
 
 (cl-defmethod claude-agent-backend-ready-p
-    ((backend claude-agent-json-backend))
+    ((backend claude-agent-claude-code-backend))
   "JSON backend is ready when no query is active."
   (not (claude-agent-backend-active-p backend)))
 
 (cl-defmethod claude-agent-backend-active-p
-    ((backend claude-agent-json-backend))
+    ((backend claude-agent-claude-code-backend))
   "Check if JSON backend has an active query."
-  (when-let* ((state (claude-agent-json-backend-process-state backend)))
+  (when-let* ((state (claude-agent-claude-code-backend-process-state backend)))
     (claude-agent--query-active-p state)))
 
 (cl-defmethod claude-agent-backend-session-id
-    ((backend claude-agent-json-backend))
+    ((backend claude-agent-claude-code-backend))
   "Return SDK UUID for the JSON backend's session."
-  (when-let* ((key (claude-agent-json-backend-session-key backend)))
+  (when-let* ((key (claude-agent-claude-code-backend-session-key backend)))
     (claude-agent--get-sdk-uuid key)))
 
 (cl-defmethod claude-agent-backend-cancel
-    ((backend claude-agent-json-backend) handle)
+    ((backend claude-agent-claude-code-backend) handle)
   "Cancel query via HANDLE (a process-state)."
   (when handle
     (claude-agent-query-interrupt handle)))
 
 (cl-defmethod claude-agent-backend-cleanup
-    ((backend claude-agent-json-backend))
+    ((backend claude-agent-claude-code-backend))
   "Clean up JSON backend resources."
-  (when-let* ((state (claude-agent-json-backend-process-state backend)))
+  (when-let* ((state (claude-agent-claude-code-backend-process-state backend)))
     (claude-agent-close-process-state state)
-    (setf (claude-agent-json-backend-process-state backend) nil))
-  (when-let* ((client (claude-agent-json-backend-client backend)))
+    (setf (claude-agent-claude-code-backend-process-state backend) nil))
+  (when-let* ((client (claude-agent-claude-code-backend-client backend)))
     (when (claude-agent-client-alive-p client)
       (claude-agent-client-disconnect client))
-    (setf (claude-agent-json-backend-client backend) nil)))
+    (setf (claude-agent-claude-code-backend-client backend) nil)))
 
 (cl-defmethod claude-agent-backend-send-input
-    ((backend claude-agent-json-backend) input)
-  "Send INPUT to the active JSON stream process via stdin."
-  (when-let* ((state (claude-agent-json-backend-process-state backend)))
+    ((backend claude-agent-claude-code-backend) input)
+  "Send INPUT to the active Claude Code process via stdin."
+  (when-let* ((state (claude-agent-claude-code-backend-process-state backend)))
     (when-let* ((proc (claude-agent--process-state-process state)))
       (when (process-live-p proc)
         (process-send-string proc (concat input "\n"))))))
 
 (cl-defmethod claude-agent-backend-query
-    ((backend claude-agent-json-backend) prompt callbacks &rest args)
-  "Send PROMPT via JSON stream backend, invoking CALLBACKS.
+    ((backend claude-agent-claude-code-backend) prompt callbacks &rest args)
+  "Send PROMPT via Claude Code backend, invoking CALLBACKS.
 Delegates to `claude-agent-query' (one-shot) or
 `claude-agent-client-send-message' (persistent)."
   (let* ((on-token (plist-get callbacks :on-token))
@@ -3608,16 +3908,16 @@ Delegates to `claude-agent-query' (one-shot) or
          (on-error (plist-get callbacks :on-error))
          (on-complete (plist-get callbacks :on-complete))
          (state
-          (if (claude-agent-json-backend-persistent-p backend)
+          (if (claude-agent-claude-code-backend-persistent-p backend)
               ;; Persistent mode: reuse client
-              (let* ((session-key (claude-agent-json-backend-session-key backend))
+              (let* ((session-key (claude-agent-claude-code-backend-session-key backend))
                      (options (plist-get args :options))
-                     (client (or (claude-agent-json-backend-client backend)
+                     (client (or (claude-agent-claude-code-backend-client backend)
                                  (let ((c (claude-agent-client-create
                                            :options options
                                            :session-key session-key)))
                                    (claude-agent-client-connect c "")
-                                   (setf (claude-agent-json-backend-client backend) c)
+                                   (setf (claude-agent-claude-code-backend-client backend) c)
                                    c))))
                 (claude-agent-client-send-message
                  client prompt
@@ -3635,7 +3935,7 @@ Delegates to `claude-agent-query' (one-shot) or
                    (cl-loop for (k v) on args by #'cddr
                             append (list k v))))))
     ;; Store process-state for active-p / cancel
-    (setf (claude-agent-json-backend-process-state backend) state)
+    (setf (claude-agent-claude-code-backend-process-state backend) state)
     state))
 #+END_SRC
 
@@ -3664,7 +3964,7 @@ It serves as a reference for implementing new backends.
 *** Protocol Overview
 
 A backend is a =cl-defstruct= inheriting from =claude-agent-backend=.  It must
-implement the 8 generic functions below.  The presentation layer (claude-org.org)
+implement the 8 generic functions below.  The presentation layer (code-agent-org.org)
 calls only these generics plus =claude-agent-backend-filter-callbacks=.
 
 | Generic | Required | Returns | Purpose |
@@ -3764,8 +4064,8 @@ To add a new backend (e.g., HTTP API, terminal multiplexer):
    ((string-match-p "timeout" error) 'network)
    (t 'unknown)))
 
-;; 3. Create a factory function for claude-org integration
-(defun claude-org--make-my-backend (session-key options)
+;; 3. Create a factory function for code-agent-org integration
+(defun code-agent-org--make-my-backend (session-key options)
   (claude-agent-my-backend--create :session-key session-key))
 #+end_example
 

@@ -42,7 +42,7 @@ This is the Smalltalk pattern. It gives us:
 - **Clear protocols between modules.** The set of generic functions on
   a class is the published API; everything else is private.
 - **Pluggability.** Subclass + override to mock, record, or swap
-  backends — `claude-agent-acp-backend` vs. `claude-agent-json-backend`
+  backends — `claude-agent-acp-backend` vs. `claude-agent-claude-code-backend`
   both implement the same `claude-agent-backend-*` protocol.
 - **Hot-reload.** Redefining a `cl-defmethod` hot-swaps it everywhere
   the live system dispatches — no plumbing. Python: reloading the
@@ -119,7 +119,7 @@ class — structural typing keeps the protocol as the contract.
   `do_thing(x, style="a")` branching on string → separate subclasses.
 - **Direct global-var access from another module.** Module A publishes
   *classes + generics*, not hash-tables, sockets, or threads. If you
-  find yourself reaching into `claude-org--persistent-clients` from
+  find yourself reaching into `code-agent-org--persistent-clients` from
   an ACP file, expose a generic instead.
 
 ## Concrete examples in this repo
@@ -135,8 +135,8 @@ class — structural typing keeps the protocol as the contract.
 (cl-defgeneric claude-agent-backend-supports-p (backend capability))
 ```
 
-`claude-agent-acp-backend`, `claude-agent-json-backend`, and others
-each `cl-defmethod` these generics. Caller (`claude-org.org`) dispatches
+`claude-agent-acp-backend`, `claude-agent-claude-code-backend`, and others
+each `cl-defmethod` these generics. Caller (`code-agent-org.org`) dispatches
 on the backend instance.
 
 **Mixed** — `python/claude_agent/workspace_bridge.py` uses mostly free

@@ -179,23 +179,23 @@ E.g., /workspacefoo should NOT match /workspace prefix."
 
 ;;; Claude-org Docker Property Tests
 
-(ert-deftest test-claude-org-docker-properties ()
+(ert-deftest test-code-agent-org-docker-properties ()
   "Test that Docker property constants are defined."
   :tags '(:unit :fast :stable :isolated :docker)
-  (skip-unless (featurep 'claude-org))
-  (should (boundp 'claude-org-code-path-property))
-  (should (boundp 'claude-org-container-path-property))
-  (should (equal "CLAUDE_CODE_PATH" claude-org-code-path-property))
-  (should (equal "CLAUDE_CONTAINER_PATH" claude-org-container-path-property))
+  (skip-unless (featurep 'code-agent-org))
+  (should (boundp 'code-agent-org-code-path-property))
+  (should (boundp 'code-agent-org-container-path-property))
+  (should (equal "CLAUDE_CODE_PATH" code-agent-org-code-path-property))
+  (should (equal "CLAUDE_CONTAINER_PATH" code-agent-org-container-path-property))
   ;; CLAUDE_HOST_PATH was removed - now uses PROJECT_ROOT instead
-  (should-not (boundp 'claude-org-host-path-property)))
+  (should-not (boundp 'code-agent-org-host-path-property)))
 
-(ert-deftest test-claude-org-elisp-reload-hint ()
+(ert-deftest test-code-agent-org-elisp-reload-hint ()
   "Test elisp reload hint function."
   :tags '(:unit :fast :stable :isolated :docker)
-  (skip-unless (fboundp 'claude-org--build-elisp-reload-hint))
+  (skip-unless (fboundp 'code-agent-org--build-elisp-reload-hint))
   ;; Test that hint is always generated (not mode-dependent)
-  (let ((hint (claude-org--build-elisp-reload-hint)))
+  (let ((hint (code-agent-org--build-elisp-reload-hint)))
     (should hint)
     (should (stringp hint))
     (should (string-match-p "load-file" hint))

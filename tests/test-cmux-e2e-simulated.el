@@ -1,6 +1,6 @@
 ;;; test-cmux-e2e-simulated.el --- E2E tests for cmux backend -*- lexical-binding: t -*-
 
-;; Strategy: Mock ONLY the cmux CLI gateway (claude-org-cmux--call).
+;; Strategy: Mock ONLY the cmux CLI gateway (code-agent-org-cmux--call).
 ;; Everything else — org buffer, properties, dispatch, session lookup —
 ;; uses real code against real org buffers.
 ;;
@@ -20,8 +20,8 @@
   (load (expand-file-name "tests/support/test-helpers.el" project-root) nil t)
   (require 'literate-elisp)
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org-cmux.org" project-root)))
+  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent-org-cmux.org" project-root)))
 
 (defvar test-cmux--project-root
   (file-name-directory
@@ -54,7 +54,7 @@
       (buffer-string))))
 
 (defun test-cmux--mock-call (subcommand &rest args)
-  "Mock implementation of `claude-org-cmux--call'.
+  "Mock implementation of `code-agent-org-cmux--call'.
 Records the call and returns fixture-based responses."
   ;; Record the call
   (push (cons subcommand args) test-cmux--mock-calls)
@@ -103,7 +103,7 @@ Records the call and returns fixture-based responses."
   (declare (indent 0))
   `(let ((test-cmux--mock-calls nil)
          (test-cmux--mock-responses nil))
-     (cl-letf (((symbol-function 'claude-org-cmux--call) #'test-cmux--mock-call))
+     (cl-letf (((symbol-function 'code-agent-org-cmux--call) #'test-cmux--mock-call))
        ,@body)))
 
 ;;; ============================================================================
@@ -228,23 +228,23 @@ Returns values from BODY. Cleans up buffer afterwards."
 (ert-deftest test-cmux-parse-surface-ref-from-json ()
   "Parse surface ref from identify JSON output."
   (let ((json "{\n  \"focused\" : {\n    \"surface_ref\" : \"surface:1\"\n  }\n}"))
-    (should (equal "surface:1" (claude-org-cmux--parse-surface-ref json)))))
+    (should (equal "surface:1" (code-agent-org-cmux--parse-surface-ref json)))))
 
 (ert-deftest test-cmux-parse-surface-ref-from-new-workspace ()
   "Parse workspace ref from new-workspace output."
   (should (equal "workspace:3"
-                 (claude-org-cmux--parse-surface-ref "OK workspace:3"))))
+                 (code-agent-org-cmux--parse-surface-ref "OK workspace:3"))))
 
 (ert-deftest test-cmux-parse-surface-ref-from-list-panes ()
   "Parse surface ref from list-pane-surfaces output."
   (should (equal "surface:5"
-                 (claude-org-cmux--parse-surface-ref
+                 (code-agent-org-cmux--parse-surface-ref
                   "* surface:5  ~  [selected]"))))
 
 (ert-deftest test-cmux-parse-surface-ref-clean ()
   "Already clean ref passes through."
   (should (equal "surface:1"
-                 (claude-org-cmux--parse-surface-ref "surface:1"))))
+                 (code-agent-org-cmux--parse-surface-ref "surface:1"))))
 
 ;;; ============================================================================
 ;;; Tests: Session Property Lookup
@@ -254,14 +254,14 @@ Returns values from BODY. Cleans up buffer afterwards."
   "Can find CLAUDE_SESSION_ID from within AI block."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((sid (claude-org-terminal--find-session-property "CLAUDE_SESSION_ID")))
+    (let ((sid (code-agent-org-terminal--find-session-property "CLAUDE_SESSION_ID")))
       (should (equal sid "test-cmux-session-001")))))
 
 (ert-deftest test-cmux-find-session-property-missing ()
   "Returns nil for missing property."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (should (null (claude-org-terminal--find-session-property "NONEXISTENT_PROP")))))
+    (should (null (code-agent-org-terminal--find-session-property "NONEXISTENT_PROP")))))
 
 ;;; ============================================================================
 ;;; Tests: Tab Title
@@ -271,7 +271,7 @@ Returns values from BODY. Cleans up buffer afterwards."
   "Tab title uses ACTIVE_STORY or heading name (no session ID suffix)."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((title (claude-org-terminal--tab-title)))
+    (let ((title (code-agent-org-terminal--tab-title)))
       ;; Must contain heading text (fallback when no ACTIVE_STORY)
       (should (stringp title))
       (should (> (length title) 0))
@@ -287,7 +287,7 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (let ((surface-id (claude-org-cmux--ensure-session)))
+      (let ((surface-id (code-agent-org-cmux--ensure-session)))
         ;; Should return the mock surface ID
         (should (equal surface-id test-cmux--mock-surface-id))
         ;; Should have called new-workspace
@@ -307,7 +307,7 @@ Returns values from BODY. Cleans up buffer afterwards."
           test-cmux--mock-responses)
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
-      (let ((surface-id (claude-org-cmux--ensure-session)))
+      (let ((surface-id (code-agent-org-cmux--ensure-session)))
         ;; Should return existing surface ID (fresh == saved)
         (should (equal surface-id "surface:existing-123"))
         ;; Should NOT have called new-workspace
@@ -319,7 +319,7 @@ Returns values from BODY. Cleans up buffer afterwards."
   "Ensure-session relaunches when existing surface is dead."
   (test-cmux--with-mock
     (let ((ready-screen (test-cmux--read-fixture "capture-pane-ready.txt")))
-      (cl-letf (((symbol-function 'claude-org-cmux--call)
+      (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                  (lambda (subcmd &rest args)
                    (push (cons subcmd args) test-cmux--mock-calls)
                    (cond
@@ -335,7 +335,7 @@ Returns values from BODY. Cleans up buffer afterwards."
                     (t "ok")))))
         (test-cmux--with-org-buffer test-cmux--org-content-with-surface
           (test-cmux--goto-ai-block)
-          (let ((surface-id (claude-org-cmux--ensure-session)))
+          (let ((surface-id (code-agent-org-cmux--ensure-session)))
             ;; Should have launched new workspace
             (should (test-cmux--mock-calls-for "new-workspace"))
             ;; Should return new surface ID
@@ -351,7 +351,7 @@ Returns values from BODY. Cleans up buffer afterwards."
     (push (cons "capture-pane"
                 (test-cmux--read-fixture "capture-pane-ready.txt"))
           test-cmux--mock-responses)
-    (let ((status (claude-org-cmux--get-status "test-sid" "surface:1")))
+    (let ((status (code-agent-org-cmux--get-status "test-sid" "surface:1")))
       (should (equal status "ready")))))
 
 (ert-deftest test-cmux-status-busy-from-screen ()
@@ -360,18 +360,18 @@ Returns values from BODY. Cleans up buffer afterwards."
     (push (cons "capture-pane"
                 (test-cmux--read-fixture "capture-pane-busy.txt"))
           test-cmux--mock-responses)
-    (let ((status (claude-org-cmux--get-status "test-sid" "surface:1")))
+    (let ((status (code-agent-org-cmux--get-status "test-sid" "surface:1")))
       (should (equal status "busy")))))
 
 (ert-deftest test-cmux-status-from-hook-file ()
   "Uses hook file status when available."
-  (let* ((dir claude-org-terminal-status-dir)
+  (let* ((dir code-agent-org-terminal-status-dir)
          (file (expand-file-name "test-hook-sid" dir)))
     (unwind-protect
         (progn
           (make-directory dir t)
           (with-temp-file file (insert "ready"))
-          (let ((status (claude-org-cmux--get-status "test-hook-sid" "surface:1")))
+          (let ((status (code-agent-org-cmux--get-status "test-hook-sid" "surface:1")))
             (should (equal status "ready"))))
       (ignore-errors (delete-file file)))))
 
@@ -384,7 +384,7 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (claude-org-cmux--execute-ai-block)
+      (code-agent-org-cmux--execute-ai-block)
       ;; Should have sent text via "send" command
       (let ((send-calls (test-cmux--mock-calls-for "send")))
         (should send-calls)
@@ -398,11 +398,11 @@ Returns values from BODY. Cleans up buffer afterwards."
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
       (let ((initial-count (hash-table-count claude-agent--active-queries)))
-        (claude-org-cmux--execute-ai-block)
+        (code-agent-org-cmux--execute-ai-block)
         ;; Should have registered one new query
         (should (> (hash-table-count claude-agent--active-queries) initial-count))
         ;; Clean up: unregister
-        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
+        (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
             (claude-agent--unregister-query req-id)))))))
 
@@ -411,20 +411,20 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (claude-org-cmux--execute-ai-block)
+      (code-agent-org-cmux--execute-ai-block)
       ;; Check that flag file was written
       (let ((flag-path (expand-file-name
                         "test-cmux-session-001.from-emacs"
-                        claude-org-terminal-status-dir)))
+                        code-agent-org-terminal-status-dir)))
         (should (file-exists-p flag-path))
         ;; Clean up
         (delete-file flag-path)
-        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
+        (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
             (claude-agent--unregister-query req-id)
             (delete-file (expand-file-name
                           "test-cmux-session-001.request-id"
-                          claude-org-terminal-status-dir)
+                          code-agent-org-terminal-status-dir)
                          t)))))))
 
 (ert-deftest test-cmux-execute-rejects-busy ()
@@ -436,7 +436,7 @@ Returns values from BODY. Cleans up buffer afterwards."
           test-cmux--mock-responses)
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
-      (should-error (claude-org-cmux--execute-ai-block)
+      (should-error (code-agent-org-cmux--execute-ai-block)
                     :type 'user-error))))
 
 ;;; ============================================================================
@@ -448,28 +448,28 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-with-backend
       (test-cmux--goto-ai-block)
-      ;; Verify the property is accessible
-      (let ((backend (claude-org--get-org-property "CLAUDE_BACKEND" t)))
+      ;; Verify the property is accessible (still a plain string from org)
+      (let ((backend (code-agent-org--get-org-property "CLAUDE_BACKEND" t)))
         (should (equal backend "cmux")))
       ;; Execute should dispatch to cmux
-      (claude-org-execute)
+      (code-agent-org-execute)
       ;; Verify cmux calls were made (new-workspace or identify)
       (should (or (test-cmux--mock-calls-for "new-workspace")
                   (test-cmux--mock-calls-for "identify")))
       ;; Verify prompt was sent via send command
       (should (test-cmux--mock-calls-for "send"))
       ;; Clean up active query
-      (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-002")))
+      (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-002")))
         (when req-id
           (claude-agent--unregister-query req-id)
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-002.request-id"
-                          claude-org-terminal-status-dir)))
+                          code-agent-org-terminal-status-dir)))
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-002.from-emacs"
-                          claude-org-terminal-status-dir))))))))
+                          code-agent-org-terminal-status-dir))))))))
 
 ;;; ============================================================================
 ;;; Tests: Query Completion
@@ -480,24 +480,24 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (claude-org-cmux--execute-ai-block)
-      (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
+      (code-agent-org-cmux--execute-ai-block)
+      (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
         (should req-id)
         ;; Verify query is registered
         (should (claude-agent--get-active-query req-id))
         ;; Complete the query
-        (claude-org-cmux--query-completed "test-cmux-session-001")
+        (code-agent-org-cmux--query-completed "test-cmux-session-001")
         ;; Should be unregistered
         (should-not (claude-agent--get-active-query req-id))
         ;; Clean up files
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-001.request-id"
-                        claude-org-terminal-status-dir)))
+                        code-agent-org-terminal-status-dir)))
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-001.from-emacs"
-                        claude-org-terminal-status-dir)))))))
+                        code-agent-org-terminal-status-dir)))))))
 
 ;;; ============================================================================
 ;;; Tests: Cancel
@@ -508,7 +508,7 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
-      (claude-org-cmux-cancel)
+      (code-agent-org-cmux-cancel)
       (let ((key-calls (test-cmux--mock-calls-for "send-key")))
         (should key-calls)
         (should (member "escape" (cdar key-calls)))))))
@@ -518,43 +518,42 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (should-error (claude-org-cmux-cancel) :type 'user-error))))
+      (should-error (code-agent-org-cmux-cancel) :type 'user-error))))
 
 (ert-deftest test-cmux-execute-busy-lifecycle ()
-  "E05: Full busy lifecycle: execute → hook sets busy → complete clears busy.
-The :busy flag is set by the Python workspace bridge hook (handle-prompt),
-not by execute-ai-block directly. This test simulates the hook-driven
-lifecycle: execute sends prompt, bridge sets :busy t, query-completed
-clears :busy nil. The busy flag controls header-line display and prevents
-duplicate execution."
+  "E05: Full busy lifecycle: execute sets busy → complete clears busy.
+The :busy flag is set synchronously by execute-ai-block so the
+immediate cancel/queue/loop paths see the right state.  The Python
+workspace bridge hook can refresh it later, but execute MUST be the
+primary setter — otherwise A4/A5/A6 regress: cancel returns 'No
+active query' before the hook arrives, queue check skips, and loops
+do not continue past iteration 1."
   :tags '(:unit :stable :e2e)
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (let ((session-key (claude-org--current-session-key)))
+      (let ((session-key (code-agent-org--current-session-key)))
         ;; Before execute: not busy
-        (should-not (claude-org--session-get session-key :busy))
-        ;; Execute sends prompt (does NOT set :busy — that's the bridge's job)
-        (claude-org-cmux--execute-ai-block)
-        (should-not (claude-org--session-get session-key :busy))
-        ;; Simulate Python workspace bridge hook: handle-prompt sets :busy t
-        (claude-org--session-put session-key :busy t)
-        (should (claude-org--session-get session-key :busy))
-        ;; get-status should now prevent duplicate execution
-        ;; (mock capture-pane doesn't show busy patterns, but :busy session flag
-        ;; would cause execute-ai-block to reject with "busy" error)
+        (should-not (code-agent-org--session-get session-key :busy))
+        ;; Execute sets :busy t synchronously so subsequent cancel/queue
+        ;; paths see the active query.
+        (code-agent-org-cmux--execute-ai-block)
+        (should (code-agent-org--session-get session-key :busy))
+        ;; Bridge UserPromptSubmit hook can re-affirm idempotently.
+        (code-agent-org--session-put session-key :busy t)
+        (should (code-agent-org--session-get session-key :busy))
         ;; Complete clears busy
-        (claude-org-cmux--query-completed "test-cmux-session-001")
-        (should-not (claude-org--session-get session-key :busy))
+        (code-agent-org-cmux--query-completed "test-cmux-session-001")
+        (should-not (code-agent-org--session-get session-key :busy))
         ;; Clean up files
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-001.request-id"
-                        claude-org-terminal-status-dir)))
+                        code-agent-org-terminal-status-dir)))
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-001.from-emacs"
-                        claude-org-terminal-status-dir)))))))
+                        code-agent-org-terminal-status-dir)))))))
 
 (ert-deftest test-cmux-execute-sets-backend ()
   "Execute sets :backend to \"cmux\" on session so generic cancel can dispatch."
@@ -562,12 +561,12 @@ duplicate execution."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (claude-org-cmux--execute-ai-block)
-      (let* ((session-key (claude-org--current-session-key))
-             (backend (claude-org--session-get session-key :backend)))
-        (should (equal backend "cmux"))
+      (code-agent-org-cmux--execute-ai-block)
+      (let* ((session-key (code-agent-org--current-session-key))
+             (backend (code-agent-org--session-get session-key :backend)))
+        (should (claude-agent-cmux-backend-p backend))
         ;; Clean up
-        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-001")))
+        (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
             (claude-agent--unregister-query req-id)))))))
 
@@ -580,49 +579,49 @@ query-completed clears busy and unregisters query."
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
       ;; 1. Execute sets up the query
-      (claude-org-cmux--execute-ai-block)
-      (let ((session-key (claude-org--current-session-key))
-            (req-id (claude-org-terminal--read-request-id "test-cmux-session-003")))
+      (code-agent-org-cmux--execute-ai-block)
+      (let ((session-key (code-agent-org--current-session-key))
+            (req-id (code-agent-org-terminal--read-request-id "test-cmux-session-003")))
         ;; Query should be registered
         (should req-id)
         (should (claude-agent--get-active-query req-id))
         ;; 2. Simulate bridge setting busy (as hook would)
-        (claude-org--session-put session-key :busy t)
-        (should (claude-org--session-get session-key :busy))
+        (code-agent-org--session-put session-key :busy t)
+        (should (code-agent-org--session-get session-key :busy))
         ;; 3. Cancel sends escape
-        (claude-org-cmux-cancel)
+        (code-agent-org-cmux-cancel)
         (let ((key-calls (test-cmux--mock-calls-for "send-key")))
           (should key-calls)
           (should (member "escape" (cdar key-calls))))
         ;; 4. query-completed fires (Python hook detects agent stopped)
-        (claude-org-cmux--query-completed "test-cmux-session-003")
+        (code-agent-org-cmux--query-completed "test-cmux-session-003")
         ;; 5. Verify clean state: not busy, query unregistered
-        (should-not (claude-org--session-get session-key :busy))
+        (should-not (code-agent-org--session-get session-key :busy))
         (should-not (claude-agent--get-active-query req-id))
         ;; Clean up files
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-003.request-id"
-                        claude-org-terminal-status-dir)))
+                        code-agent-org-terminal-status-dir)))
         (ignore-errors
           (delete-file (expand-file-name
                         "test-cmux-session-003.from-emacs"
-                        claude-org-terminal-status-dir)))))))
+                        code-agent-org-terminal-status-dir)))))))
 
 (ert-deftest test-cmux-generic-cancel-dispatches-to-cmux ()
-  "Generic claude-org-cancel dispatches to claude-org-cmux-cancel for cmux sessions."
+  "Generic code-agent-org-cancel dispatches to code-agent-org-cmux-cancel for cmux sessions."
   :tags '(:unit :stable)
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
       ;; Set up session state as if execute had run
-      (let ((session-key (claude-org--current-session-key)))
-        (claude-org--session-put session-key :backend "cmux")
-        (claude-org--session-put session-key :busy t)
+      (let ((session-key (code-agent-org--current-session-key)))
+        (code-agent-org--session-put session-key :backend (claude-agent-cmux-backend-create :session-key session-key))
+        (code-agent-org--session-put session-key :busy t)
         ;; Mock cleanup functions
-        (cl-letf (((symbol-function 'claude-org--cleanup-session) #'ignore)
-                  ((symbol-function 'claude-org--queue-count) (lambda (_) 0)))
-          (claude-org-cancel)
+        (cl-letf (((symbol-function 'code-agent-org--cleanup-session) #'ignore)
+                  ((symbol-function 'code-agent-org--queue-count) (lambda (_) 0)))
+          (code-agent-org-cancel)
           ;; Should have sent escape via cmux cancel
           (let ((key-calls (test-cmux--mock-calls-for "send-key")))
             (should key-calls)
@@ -634,10 +633,10 @@ query-completed clears busy and unregisters query."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
-      (let ((session-key (claude-org--current-session-key)))
-        (claude-org--session-put session-key :backend "cmux")
+      (let ((session-key (code-agent-org--current-session-key)))
+        (code-agent-org--session-put session-key :backend (claude-agent-cmux-backend-create :session-key session-key))
         ;; :busy is NOT set -- cancel should be a no-op message, not an error
-        (claude-org-cancel)
+        (code-agent-org-cancel)
         ;; No send-key calls should have been made
         (let ((key-calls (test-cmux--mock-calls-for "send-key")))
           (should-not key-calls))))))
@@ -650,9 +649,9 @@ query-completed clears busy and unregisters query."
   "Build launch command for claude-workspace mode."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((claude-org-cmux-launch-command 'claude-workspace)
-          (claude-org-cmux-workspace-script "/path/to/claude-workspace"))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-launch-command 'claude-workspace)
+          (code-agent-org-cmux-workspace-script "/path/to/claude-workspace"))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/tmp/test.org" "sid-001" "/tmp")))
         (should (string-match-p "/path/to/claude-workspace" cmd))
         (should (string-match-p "sid-001" cmd))))))
@@ -661,8 +660,8 @@ query-completed clears busy and unregisters query."
   "Build launch command for custom string mode."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((claude-org-cmux-launch-command "my-custom-command"))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-launch-command "my-custom-command"))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/tmp/test.org" "sid-001" "/tmp")))
         (should (equal cmd "my-custom-command"))))))
 
@@ -675,13 +674,13 @@ query-completed clears busy and unregisters query."
   :tags '(:unit :stable :e2e)
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((claude-org-cmux-launch-command 'claude)
-          (claude-org-cmux-extra-args nil))
-      (cl-letf (((symbol-function 'claude-org-workspace-bridge-system-prompt)
+    (let ((code-agent-org-cmux-launch-command 'claude)
+          (code-agent-org-cmux-extra-args nil))
+      (cl-letf (((symbol-function 'code-agent-org-workspace-bridge-system-prompt)
                  (lambda (&rest _) "test system prompt"))
-                ((symbol-function 'claude-org-workspace-bridge-get-cli-session)
+                ((symbol-function 'code-agent-org-workspace-bridge-get-cli-session)
                  (lambda (&rest _) nil)))
-        (let ((cmd (claude-org-cmux--build-launch-command
+        (let ((cmd (code-agent-org-cmux--build-launch-command
                     "/tmp/test.org" "sid-001" "/tmp")))
           (should (stringp cmd))
           ;; Starts with 'claude'
@@ -696,7 +695,7 @@ query-completed clears busy and unregisters query."
 (ert-deftest test-cmux-sidebar-set-status ()
   "set-status calls cmux CLI."
   (test-cmux--with-mock
-    (claude-org-cmux-set-status "task" "Running...")
+    (code-agent-org-cmux-set-status "task" "Running...")
     (let ((calls (test-cmux--mock-calls-for "set-status")))
       (should calls)
       (should (member "task" (cdar calls)))
@@ -705,7 +704,7 @@ query-completed clears busy and unregisters query."
 (ert-deftest test-cmux-sidebar-notify ()
   "notify calls cmux CLI."
   (test-cmux--with-mock
-    (claude-org-cmux-notify "Done" "Query complete")
+    (code-agent-org-cmux-notify "Done" "Query complete")
     (let ((calls (test-cmux--mock-calls-for "notify")))
       (should calls)
       (should (member "--title" (cdar calls)))
@@ -777,7 +776,7 @@ Query C
   (test-cmux--with-org-buffer test-cmux--org-two-stories
     (goto-char (point-min))
     (re-search-forward "Query B")
-    (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((cmd (code-agent-org-cmux--build-launch-command
                 (buffer-file-name) "sdd-story-b" default-directory)))
       (should (stringp cmd))
       (should-not (string-match-p "--resume" cmd)))))
@@ -789,7 +788,7 @@ Query C
     ;; Position at Story A's AI block — property is on the parent heading
     (goto-char (point-min))
     (re-search-forward "Query A")
-    (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((cmd (code-agent-org-cmux--build-launch-command
                 (buffer-file-name) "sdd-story-a" default-directory)))
       (should (stringp cmd))
       (should (string-match-p "--resume" cmd))
@@ -803,7 +802,7 @@ the same session."
   (test-cmux--with-org-buffer test-cmux--org-file-level-cli
     (goto-char (point-min))
     (re-search-forward "Query C")
-    (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((cmd (code-agent-org-cmux--build-launch-command
                 (buffer-file-name) "sdd-story-c" default-directory)))
       (should (stringp cmd))
       ;; Must NOT contain --resume from the file-level property
@@ -846,26 +845,26 @@ First query.
           (unwind-protect
               (with-current-buffer buf
                 (org-mode)
-                (let ((claude-org-auto-start-mcp-server nil))
-                  (claude-org-mode 1))
+                (let ((code-agent-org-auto-start-mcp-server nil))
+                  (code-agent-org-mode 1))
                 (insert org-content)
                 (save-buffer)
                 (test-cmux--goto-ai-block)
                 ;; 1. First launch: no CLAUDE_CLI_SESSION → no --resume
-                (let ((cmd1 (claude-org-cmux--build-launch-command
+                (let ((cmd1 (code-agent-org-cmux--build-launch-command
                              (buffer-file-name) "test-cmux-resume-001"
                              default-directory)))
                   (should (stringp cmd1))
                   (should-not (string-match-p "--resume" cmd1)))
                 ;; 2. Simulate bridge saving CLI session (what Python hook does)
                 (save-excursion
-                  (claude-org-terminal--goto-session-heading)
+                  (code-agent-org-terminal--goto-session-heading)
                   (org-set-property "CLAUDE_CLI_SESSION" "saved-cli-session-uuid"))
                 ;; 3. Verify property persisted
                 (should (equal "saved-cli-session-uuid"
                                (org-entry-get nil "CLAUDE_CLI_SESSION" t)))
                 ;; 4. Second launch: has CLAUDE_CLI_SESSION → --resume
-                (let ((cmd2 (claude-org-cmux--build-launch-command
+                (let ((cmd2 (code-agent-org-cmux--build-launch-command
                              (buffer-file-name) "test-cmux-resume-001"
                              default-directory)))
                   (should (stringp cmd2))
@@ -879,17 +878,17 @@ First query.
 ;;; ============================================================================
 
 (ert-deftest test-cmux-permission-needed-calls-select-workspace ()
-  "claude-org-cmux--permission-needed focuses the cmux workspace and adds alert."
+  "code-agent-org-cmux--permission-needed focuses the cmux workspace and adds alert."
   :tags '(:unit :stable)
   (test-cmux--with-mock
     (puthash "sdd-perm-test" "mock-session-key"
-             claude-org-terminal--workspace-to-session-key)
+             code-agent-org-terminal--workspace-to-session-key)
     (puthash "sdd-perm-test" "mock-ws-id"
-             claude-org-cmux--workspace-to-cmux-id)
+             code-agent-org-cmux--workspace-to-cmux-id)
     (let ((saved-alerts claude-agent-pending-alerts))
       (unwind-protect
           (progn
-            (claude-org-cmux--permission-needed "sdd-perm-test" "Bash")
+            (code-agent-org-cmux--permission-needed "sdd-perm-test" "Bash")
             ;; Should have called select-workspace to focus the terminal
             (let ((calls (test-cmux--mock-calls-for "select-workspace")))
               (should calls)
@@ -898,18 +897,18 @@ First query.
             (should (assq (intern "sdd-perm-test") claude-agent-pending-alerts)))
         ;; Cleanup
         (setq claude-agent-pending-alerts saved-alerts)
-        (remhash "sdd-perm-test" claude-org-terminal--workspace-to-session-key)
-        (remhash "sdd-perm-test" claude-org-cmux--workspace-to-cmux-id)))))
+        (remhash "sdd-perm-test" code-agent-org-terminal--workspace-to-session-key)
+        (remhash "sdd-perm-test" code-agent-org-cmux--workspace-to-cmux-id)))))
 
 (ert-deftest test-cmux-permission-resolved-clears-state ()
-  "claude-org-cmux--permission-resolved clears pending alert."
+  "code-agent-org-cmux--permission-resolved clears pending alert."
   :tags '(:unit :stable)
   (let ((saved-alerts claude-agent-pending-alerts))
     ;; Add a pending alert
     (claude-agent-add-alert (intern "sdd-resolve-test") :label "test")
     (unwind-protect
         (progn
-          (claude-org-cmux--permission-resolved "sdd-resolve-test")
+          (code-agent-org-cmux--permission-resolved "sdd-resolve-test")
           (should-not (assq (intern "sdd-resolve-test") claude-agent-pending-alerts)))
       (setq claude-agent-pending-alerts saved-alerts))))
 
@@ -918,20 +917,20 @@ First query.
   :tags '(:unit :stable)
   (test-cmux--with-mock
     (puthash "sdd-route-test" "mock-key"
-             claude-org-terminal--workspace-to-session-key)
+             code-agent-org-terminal--workspace-to-session-key)
     (puthash "sdd-route-test" "mock-ws"
-             claude-org-cmux--workspace-to-cmux-id)
+             code-agent-org-cmux--workspace-to-cmux-id)
     (let ((saved-alerts claude-agent-pending-alerts))
       (unwind-protect
           (progn
-            (claude-org--terminal-permission-needed "sdd-route-test" "Edit")
+            (code-agent-org--terminal-permission-needed "sdd-route-test" "Edit")
             ;; Should have used cmux path (select-workspace called)
             (should (test-cmux--mock-calls-for "select-workspace"))
             ;; Should have registered alert via cmux handler
             (should (assq (intern "sdd-route-test") claude-agent-pending-alerts)))
         (setq claude-agent-pending-alerts saved-alerts)
-        (remhash "sdd-route-test" claude-org-terminal--workspace-to-session-key)
-        (remhash "sdd-route-test" claude-org-cmux--workspace-to-cmux-id)))))
+        (remhash "sdd-route-test" code-agent-org-terminal--workspace-to-session-key)
+        (remhash "sdd-route-test" code-agent-org-cmux--workspace-to-cmux-id)))))
 
 ;;; ============================================================================
 ;;; Tests: Session Recovery (P1)
@@ -941,7 +940,7 @@ First query.
   "Session recovery finds the heading via CLAUDE_SESSION_ID, resolves the
 cmux workspace by heading name, and repopulates hash tables."
   :tags '(:unit :stable)
-  ;; Use file-backed buffer with claude-org-mode (recovery checks this)
+  ;; Use file-backed buffer with code-agent-org-mode (recovery checks this)
   (let ((file (make-temp-file "test-recover-" nil ".org")))
     (unwind-protect
         (test-cmux--with-mock
@@ -951,36 +950,36 @@ cmux workspace by heading name, and repopulates hash tables."
           (let ((buf (find-file-noselect file)))
             (with-current-buffer buf
               (org-mode)
-              (let ((claude-org-auto-start-mcp-server nil))
-                (claude-org-mode 1))
+              (let ((code-agent-org-auto-start-mcp-server nil))
+                (code-agent-org-mode 1))
               (insert test-cmux--org-content-with-surface)
               (save-buffer))
             ;; Clear all 3 hash tables to simulate Emacs restart
-            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
             ;; Try recovery — list-workspaces resolves "Test Story" → mock-1;
             ;; sidebar-state returns mock-workspace-uuid-123.
-            (let ((result (claude-org-cmux--recover-session "test-cmux-session-003")))
+            (let ((result (code-agent-org-cmux--recover-session "test-cmux-session-003")))
               (should result)
-              (should (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
+              (should (gethash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key))
               ;; Surface comes from the CMUX_SURFACE_ID property on the heading
               (should (equal "surface:existing-123"
-                             (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)))
+                             (gethash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)))
               ;; UUID comes from name-based resolution (not an org property)
               (should (equal "AABBCCDD-1111-2222-3333-444455556677"
-                             (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id))))
+                             (gethash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id))))
             ;; Cleanup
-            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
       (delete-file file))))
 
 (ert-deftest test-cmux-recover-session-not-found ()
   "Session recovery returns nil for unknown session IDs."
   :tags '(:unit :stable)
-  (should-not (claude-org-cmux--recover-session "nonexistent-session-999")))
+  (should-not (code-agent-org-cmux--recover-session "nonexistent-session-999")))
 
 ;;; ============================================================================
 ;;; Tests: Focus Terminal (P1)
@@ -1017,28 +1016,28 @@ file-level #+PROPERTY must also dispatch correctly."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-file-level-backend
       (test-cmux--goto-ai-block)
-      ;; Verify the file-level property is accessible
-      (let ((backend (claude-org--get-org-property "CLAUDE_BACKEND" t)))
+      ;; Verify the file-level property is accessible (plain string from org)
+      (let ((backend (code-agent-org--get-org-property "CLAUDE_BACKEND" t)))
         (should (equal backend "cmux")))
       ;; Execute should dispatch to cmux backend
-      (claude-org-execute)
+      (code-agent-org-execute)
       ;; Verify cmux calls were made
       (should (or (test-cmux--mock-calls-for "new-workspace")
                   (test-cmux--mock-calls-for "identify")))
       ;; Verify prompt was sent
       (should (test-cmux--mock-calls-for "send"))
       ;; Clean up
-      (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-file-backend")))
+      (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-file-backend")))
         (when req-id
           (claude-agent--unregister-query req-id)
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-file-backend.request-id"
-                          claude-org-terminal-status-dir)))
+                          code-agent-org-terminal-status-dir)))
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-file-backend.from-emacs"
-                          claude-org-terminal-status-dir))))))))
+                          code-agent-org-terminal-status-dir))))))))
 
 (ert-deftest test-cmux-file-level-backend-sets-backend-property ()
   "File-level CLAUDE_BACKEND=cmux sets :backend on session after execute.
@@ -1047,22 +1046,22 @@ T52b: Ensures generic cancel works for file-level backend dispatch."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-file-level-backend
       (test-cmux--goto-ai-block)
-      (claude-org-execute)
-      (let* ((session-key (claude-org--current-session-key))
-             (backend (claude-org--session-get session-key :backend)))
-        (should (equal backend "cmux"))
+      (code-agent-org-execute)
+      (let* ((session-key (code-agent-org--current-session-key))
+             (backend (code-agent-org--session-get session-key :backend)))
+        (should (claude-agent-cmux-backend-p backend))
         ;; Clean up
-        (let ((req-id (claude-org-terminal--read-request-id "test-cmux-session-file-backend")))
+        (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-file-backend")))
           (when req-id
             (claude-agent--unregister-query req-id)
             (ignore-errors
               (delete-file (expand-file-name
                             "test-cmux-session-file-backend.request-id"
-                            claude-org-terminal-status-dir)))
+                            code-agent-org-terminal-status-dir)))
             (ignore-errors
               (delete-file (expand-file-name
                             "test-cmux-session-file-backend.from-emacs"
-                            claude-org-terminal-status-dir)))))))))
+                            code-agent-org-terminal-status-dir)))))))))
 
 ;;; ============================================================================
 ;;; Tests: Ensure-session hash table restore on reconnect (T53)
@@ -1087,23 +1086,23 @@ workspace by heading name and repopulate all three hash tables."
       (should (equal "surface:existing-123"
                      (org-entry-get nil "CMUX_SURFACE_ID" t)))
       ;; Clear all hash tables to simulate Emacs restart
-      (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-      (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-      (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+      (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+      (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+      (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
       ;; Verify cleared
-      (should-not (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
-      (should-not (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface))
-      (should-not (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id))
+      (should-not (gethash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key))
+      (should-not (gethash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface))
+      (should-not (gethash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id))
       ;; Call ensure-session — resolves workspace by heading name
-      (let ((surface (claude-org-cmux--ensure-session)))
+      (let ((surface (code-agent-org-cmux--ensure-session)))
         (should (equal surface "surface:existing-123"))
         ;; All three hash tables should be repopulated
-        (should (gethash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key))
+        (should (gethash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key))
         (should (equal "surface:existing-123"
-                       (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)))
+                       (gethash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)))
         ;; UUID resolved via sidebar-state (default mock returns a UUID)
         (should (equal "AABBCCDD-1111-2222-3333-444455556677"
-                       (gethash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)))))))
+                       (gethash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)))))))
 
 (ert-deftest test-cmux-restore-workspace-verbose-and-color ()
   "E02: Restore workspace after Emacs restart starts verbose and reapplies color.
@@ -1119,19 +1118,19 @@ call new-workspace."
               (progn
                 (with-current-buffer buf
                   (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
                   (insert test-cmux--org-content-with-surface)
                   (save-buffer))
                 ;; Clear hash tables to simulate Emacs restart
                 (remhash "test-cmux-session-003"
-                         claude-org-terminal--workspace-to-session-key)
+                         code-agent-org-terminal--workspace-to-session-key)
                 (remhash "test-cmux-session-003"
-                         claude-org-cmux--workspace-to-surface)
+                         code-agent-org-cmux--workspace-to-surface)
                 (remhash "test-cmux-session-003"
-                         claude-org-cmux--workspace-to-cmux-id)
+                         code-agent-org-cmux--workspace-to-cmux-id)
                 ;; Mock with call recording
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
                              (cond
@@ -1146,7 +1145,7 @@ call new-workspace."
                               (t "ok")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((surface (claude-org-cmux--ensure-session)))
+                    (let ((surface (code-agent-org-cmux--ensure-session)))
                       ;; Returns existing surface (not a new one)
                       (should (equal surface "surface:existing-123"))
                       ;; No new-workspace was called
@@ -1156,18 +1155,18 @@ call new-workspace."
                       (should (cl-find "rename-tab" calls
                                        :key #'car :test #'equal))
                       ;; Verbose timer started
-                      (let ((sk (claude-org--current-session-key)))
-                        (should (claude-org--session-get sk :verbose-follow-process)))))))
+                      (let ((sk (code-agent-org--current-session-key)))
+                        (should (code-agent-org--session-get sk :verbose-follow-process)))))))
             ;; Cleanup: stop verbose, clear state, kill buffer
             (let ((sk (with-current-buffer buf
-                        (claude-org--current-session-key))))
-              (when sk (claude-org-cmux--stop-verbose sk)))
+                        (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-003"
-                     claude-org-terminal--workspace-to-session-key)
+                     code-agent-org-terminal--workspace-to-session-key)
             (remhash "test-cmux-session-003"
-                     claude-org-cmux--workspace-to-surface)
+                     code-agent-org-cmux--workspace-to-surface)
             (remhash "test-cmux-session-003"
-                     claude-org-cmux--workspace-to-cmux-id)
+                     code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
       (delete-file file))))
 
@@ -1224,9 +1223,9 @@ when mode is set at file level."
   (test-cmux--with-org-buffer test-cmux--org-file-level-permission
     (test-cmux--goto-ai-block)
     ;; Should read file-level permission
-    (should (equal "bypass" (claude-org--get-permission-mode-property)))
-    (should (equal "BP" (claude-org--permission-mode-short)))
-    (should (equal "bypassPermissions" (claude-org--get-permission-mode)))))
+    (should (equal "bypass" (code-agent-org--get-permission-mode-property)))
+    (should (equal "BP" (code-agent-org--permission-mode-short)))
+    (should (equal "bypassPermissions" (code-agent-org--get-permission-mode)))))
 
 (ert-deftest test-cmux-permission-section-overrides-file ()
   "Section-level CLAUDE_PERMISSION_MODE overrides file-level.
@@ -1235,9 +1234,9 @@ T54b: Org inheritance — section property takes priority over #+PROPERTY."
   (test-cmux--with-org-buffer test-cmux--org-section-override-permission
     (test-cmux--goto-ai-block)
     ;; Section-level readonly should override file-level bypass
-    (should (equal "readonly" (claude-org--get-permission-mode-property)))
-    (should (equal "RO" (claude-org--permission-mode-short)))
-    (should (equal "default" (claude-org--get-permission-mode)))))
+    (should (equal "readonly" (code-agent-org--get-permission-mode-property)))
+    (should (equal "RO" (code-agent-org--permission-mode-short)))
+    (should (equal "default" (code-agent-org--get-permission-mode)))))
 
 ;;; ============================================================================
 ;;; Tests: Archive Workflow (T55)
@@ -1310,7 +1309,7 @@ function removes CLAUDE_CLI_SESSION from the workspace heading."
                  (let ((beg (save-excursion (org-back-to-heading t) (point)))
                        (end (save-excursion (org-end-of-subtree t t) (point))))
                    (delete-region beg end)))))
-      (claude-org-workspace-archive-workflow))
+      (code-agent-org-workspace-archive-workflow))
     ;; CLI session should be cleared
     (goto-char (point-min))
     (re-search-forward ":CLAUDE_SESSION_ID: sdd-archive-test")
@@ -1332,7 +1331,7 @@ empty Instruction 1 AI block must be present at the correct level."
                  (let ((beg (save-excursion (org-back-to-heading t) (point)))
                        (end (save-excursion (org-end-of-subtree t t) (point))))
                    (delete-region beg end)))))
-      (claude-org-workspace-archive-workflow))
+      (code-agent-org-workspace-archive-workflow))
     ;; Verify new Workflow heading exists with :sdd: tag
     (goto-char (point-min))
     (should (re-search-forward "^\\*\\*\\* Workflow.*:sdd:" nil t))
@@ -1371,30 +1370,30 @@ Guards against firing queued timers after user cancels."
 
           (setq session-key (concat buffer-file-name "::test-lc"))
           ;; Set up loop state as if iteration 1 completed
-          (claude-org--session-put session-key :loop-current 2)
-          (claude-org--session-put session-key :loop-max 3)
-          (claude-org--session-put session-key :marker (point-marker))
-          (claude-org--session-put session-key :original-prompt "test")
-          (claude-org--session-put session-key :instruction-num 1)
-          (claude-org--session-put session-key :custom-id "test-lc")
-          (claude-org--session-put session-key :busy nil)
+          (code-agent-org--session-put session-key :loop-current 2)
+          (code-agent-org--session-put session-key :loop-max 3)
+          (code-agent-org--session-put session-key :marker (point-marker))
+          (code-agent-org--session-put session-key :original-prompt "test")
+          (code-agent-org--session-put session-key :instruction-num 1)
+          (code-agent-org--session-put session-key :custom-id "test-lc")
+          (code-agent-org--session-put session-key :busy nil)
 
           ;; Simulate: session was cancelled
-          (cl-letf (((symbol-function 'claude-org--get-exec-status-for-session)
+          (cl-letf (((symbol-function 'code-agent-org--get-exec-status-for-session)
                      (lambda (&rest _) "cancelled"))
-                    ((symbol-function 'claude-org--send-request)
+                    ((symbol-function 'code-agent-org--send-request)
                      (lambda (&rest _) (setq send-called t)))
-                    ((symbol-function 'claude-org--start-spinner) #'ignore)
-                    ((symbol-function 'claude-org--set-exec-status) #'ignore))
+                    ((symbol-function 'code-agent-org--start-spinner) #'ignore)
+                    ((symbol-function 'code-agent-org--set-exec-status) #'ignore))
             ;; Call execute-loop-iteration directly (as a timer would)
-            (claude-org--execute-loop-iteration
+            (code-agent-org--execute-loop-iteration
              session-key 2 3 "test" 1 "test-lc" 0)
             ;; send-request should NOT have been called
             (should-not send-called)
             ;; E25: :busy stays nil (not set by cancelled iteration)
-            (should-not (claude-org--session-get session-key :busy))
+            (should-not (code-agent-org--session-get session-key :busy))
             ;; E25: :loop-current unchanged (still 2, not incremented)
-            (should (equal 2 (claude-org--session-get session-key :loop-current)))))
+            (should (equal 2 (code-agent-org--session-get session-key :loop-current)))))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when buffer-file-name
@@ -1420,18 +1419,18 @@ continue its loop."
           (set-buffer-modified-p nil)
 
           (setq session-key (concat buffer-file-name "::test-le"))
-          (claude-org--session-put session-key :loop-current 2)
-          (claude-org--session-put session-key :loop-max 3)
-          (claude-org--session-put session-key :marker (point-marker))
-          (claude-org--session-put session-key :original-prompt "test")
+          (code-agent-org--session-put session-key :loop-current 2)
+          (code-agent-org--session-put session-key :loop-max 3)
+          (code-agent-org--session-put session-key :marker (point-marker))
+          (code-agent-org--session-put session-key :original-prompt "test")
 
-          (cl-letf (((symbol-function 'claude-org--get-exec-status-for-session)
+          (cl-letf (((symbol-function 'code-agent-org--get-exec-status-for-session)
                      (lambda (&rest _) "error"))
-                    ((symbol-function 'claude-org--send-request)
+                    ((symbol-function 'code-agent-org--send-request)
                      (lambda (&rest _) (setq send-called t)))
-                    ((symbol-function 'claude-org--start-spinner) #'ignore)
-                    ((symbol-function 'claude-org--set-exec-status) #'ignore))
-            (claude-org--execute-loop-iteration
+                    ((symbol-function 'code-agent-org--start-spinner) #'ignore)
+                    ((symbol-function 'code-agent-org--set-exec-status) #'ignore))
+            (code-agent-org--execute-loop-iteration
              session-key 2 3 "test" 1 "test-le" 0)
             (should-not send-called)))
       (when (buffer-live-p buf)
@@ -1473,7 +1472,7 @@ Verifies session-key resolution and property lookup work with special chars."
     (save-excursion
       (goto-char (point-min))
       (re-search-forward ":CUSTOM_ID: test-unicode-instr-1" nil t)
-      (let ((sk (claude-org--current-session-key)))
+      (let ((sk (code-agent-org--current-session-key)))
         (should (stringp sk))
         (should (string-match-p "sdd-unicode-001" sk))))
     ;; ACTIVE_STORY with CJK chars reads correctly
@@ -1531,40 +1530,40 @@ Verifies session-key resolution and property lookup work with special chars."
 Verifies that non-ASCII characters are stripped and only alphanum + hyphens remain."
   :tags '(:e2e :simulated :unit :fast :stable)
   ;; CJK characters stripped
-  (should (equal "" (claude-org--workspace-name-to-slug "日本語")))
+  (should (equal "" (code-agent-org--workspace-name-to-slug "日本語")))
   ;; Emoji stripped
-  (should (equal "" (claude-org--workspace-name-to-slug "🚀🔥💡")))
+  (should (equal "" (code-agent-org--workspace-name-to-slug "🚀🔥💡")))
   ;; Mixed ASCII and unicode: ASCII preserved, unicode stripped
-  (should (equal "api-design" (claude-org--workspace-name-to-slug "API Design 🎯")))
+  (should (equal "api-design" (code-agent-org--workspace-name-to-slug "API Design 🎯")))
   ;; Org-mode special chars: * # : |
-  (should (equal "fix-bug-123" (claude-org--workspace-name-to-slug "fix bug *#123*")))
-  (should (equal "table-col-a-col-b" (claude-org--workspace-name-to-slug "table: col-a | col-b")))
+  (should (equal "fix-bug-123" (code-agent-org--workspace-name-to-slug "fix bug *#123*")))
+  (should (equal "table-col-a-col-b" (code-agent-org--workspace-name-to-slug "table: col-a | col-b")))
   ;; Plain ASCII passthrough
-  (should (equal "hello-world" (claude-org--workspace-name-to-slug "Hello World")))
+  (should (equal "hello-world" (code-agent-org--workspace-name-to-slug "Hello World")))
   ;; Leading/trailing special chars stripped
-  (should (equal "test" (claude-org--workspace-name-to-slug "---test---")))
+  (should (equal "test" (code-agent-org--workspace-name-to-slug "---test---")))
   ;; Empty string
-  (should (equal "" (claude-org--workspace-name-to-slug ""))))
+  (should (equal "" (code-agent-org--workspace-name-to-slug ""))))
 
 (ert-deftest test-cmux-custom-id-generation-unicode ()
   "T58b: CUSTOM_ID generation handles unicode in section names.
 Non-ASCII chars are replaced with hyphens and collapsed."
   :tags '(:e2e :simulated :unit :fast :stable)
   ;; CJK section name: [:alnum:] includes unicode letters, so CJK chars preserved
-  (let ((id (claude-org--generate-custom-id "sdd-001" "データベース設計")))
+  (let ((id (code-agent-org--generate-custom-id "sdd-001" "データベース設計")))
     (should (stringp id))
     (should (string-match-p "sdd-001" id))
     ;; CJK chars ARE alphanumeric in Emacs regex — preserved in CUSTOM_ID
     (should (string-match-p "データベース設計" id)))
   ;; Emoji section name: emoji are NOT [:alnum:], so stripped
-  (let ((id (claude-org--generate-custom-id "sdd-002" "Deploy 🚀 Pipeline")))
+  (let ((id (code-agent-org--generate-custom-id "sdd-002" "Deploy 🚀 Pipeline")))
     (should (stringp id))
     (should (string-match-p "deploy" id))
     (should (string-match-p "pipeline" id))
     ;; Emoji should be stripped (replaced by hyphens and collapsed)
     (should-not (string-match-p "🚀" id)))
   ;; Plain ASCII
-  (let ((id (claude-org--generate-custom-id "sdd-003" "Research Output")))
+  (let ((id (code-agent-org--generate-custom-id "sdd-003" "Research Output")))
     (should (equal "sdd-003-research-output" id))))
 
 ;;; ============================================================================
@@ -1602,7 +1601,7 @@ Non-ASCII chars are replaced with hyphens and collapsed."
       (re-search-forward ":CUSTOM_ID: test-tab-unicode-ws" nil t)
       (org-back-to-heading t)
       ;; Tab title function reads ACTIVE_STORY
-      (let ((title (claude-org-terminal--tab-title)))
+      (let ((title (code-agent-org-terminal--tab-title)))
         (should (stringp title))
         ;; Title should contain the story name with accented chars
         (should (string-match-p "résumé review" title))))))
@@ -1627,7 +1626,7 @@ fresh workspace ref."
         (goto-char (point-min))
         (re-search-forward ":CUSTOM_ID: test-cmux-story-existing" nil t)
         (org-back-to-heading t)
-        (claude-org-cmux-open-tab)
+        (code-agent-org-cmux-open-tab)
         ;; Should have called select-workspace with the ref from name lookup
         (let ((select-calls (test-cmux--mock-calls-for "select-workspace")))
           (should select-calls)
@@ -1677,23 +1676,23 @@ calling new-workspace."
         (let ((buf (find-file-noselect file)))
           (with-current-buffer buf
             (org-mode)
-            (let ((claude-org-auto-start-mcp-server nil))
-              (claude-org-mode 1))
+            (let ((code-agent-org-auto-start-mcp-server nil))
+              (code-agent-org-mode 1))
             (insert test-cmux--org-stale-workspace)
             (save-buffer))
           ;; Clear hash tables (simulate Emacs restart too — worst case)
           (remhash "test-cmux-session-recover-001"
-                   claude-org-terminal--workspace-to-session-key)
+                   code-agent-org-terminal--workspace-to-session-key)
           (remhash "test-cmux-session-recover-001"
-                   claude-org-cmux--workspace-to-surface)
+                   code-agent-org-cmux--workspace-to-surface)
           (remhash "test-cmux-session-recover-001"
-                   claude-org-cmux--workspace-to-cmux-id)
+                   code-agent-org-cmux--workspace-to-cmux-id)
           ;; Argument-aware cmux mock that simulates a cmux restart:
           ;; - old UUID returns "not_found"
           ;; - list-workspaces shows a workspace with the matching name
           ;; - sidebar-state returns the fresh UUID
           ;; - list-pane-surfaces returns the fresh surface
-          (cl-letf (((symbol-function 'claude-org-cmux--call)
+          (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                      (lambda (subcmd &rest args)
                        (push (cons subcmd args) calls)
                        (cond
@@ -1732,7 +1731,7 @@ calling new-workspace."
                         (t "ok")))))
             (with-current-buffer buf
               (test-cmux--goto-ai-block)
-              (let ((surface (claude-org-cmux--ensure-session)))
+              (let ((surface (code-agent-org-cmux--ensure-session)))
                 ;; Returns the fresh surface, not the stale one
                 (should (equal surface "surface:42"))
                 ;; No new workspace was created
@@ -1741,21 +1740,21 @@ calling new-workspace."
                 ;; property we persist; workspace identity lives in
                 ;; the heading title)
                 (save-excursion
-                  (claude-org-terminal--goto-session-heading)
+                  (code-agent-org-terminal--goto-session-heading)
                   (should (equal "surface:42"
                                  (org-entry-get nil "CMUX_SURFACE_ID"))))
                 ;; Hash tables point to fresh workspace
                 (should (equal "surface:42"
                                (gethash "test-cmux-session-recover-001"
-                                        claude-org-cmux--workspace-to-surface)))
+                                        code-agent-org-cmux--workspace-to-surface)))
                 (should (equal "11111111-FE51-0000-0000-000000000000"
                                (gethash "test-cmux-session-recover-001"
-                                        claude-org-cmux--workspace-to-cmux-id)))
+                                        code-agent-org-cmux--workspace-to-cmux-id)))
                 ;; E03 extensions: verify restore-workspace side effects
                 ;; after phase 2 recovery
                 ;; Verbose timer started
-                (let ((sk (claude-org--current-session-key)))
-                  (should (claude-org--session-get sk :verbose-follow-process)))
+                (let ((sk (code-agent-org--current-session-key)))
+                  (should (code-agent-org--session-get sk :verbose-follow-process)))
                 ;; list-workspaces was queried for name lookup
                 (should (cl-find "list-workspaces" calls
                                  :key #'car :test #'equal))
@@ -1764,22 +1763,22 @@ calling new-workspace."
                                  :key #'car :test #'equal)))))
           ;; Cleanup
           (let ((sk (with-current-buffer buf
-                      (claude-org--current-session-key))))
-            (when sk (claude-org-cmux--stop-verbose sk)))
+                      (code-agent-org--current-session-key))))
+            (when sk (code-agent-org-cmux--stop-verbose sk)))
           (remhash "test-cmux-session-recover-001"
-                   claude-org-terminal--workspace-to-session-key)
+                   code-agent-org-terminal--workspace-to-session-key)
           (remhash "test-cmux-session-recover-001"
-                   claude-org-cmux--workspace-to-surface)
+                   code-agent-org-cmux--workspace-to-surface)
           (remhash "test-cmux-session-recover-001"
-                   claude-org-cmux--workspace-to-cmux-id)
+                   code-agent-org-cmux--workspace-to-cmux-id)
           (kill-buffer buf))
       (delete-file file))))
 
 (ert-deftest test-cmux-find-workspace-by-name-parses-list ()
-  "T61b: claude-org-cmux--find-workspace-by-name parses list-workspaces output.
+  "T61b: code-agent-org-cmux--find-workspace-by-name parses list-workspaces output.
 Handles selected marker, leading whitespace, and multi-word names."
   :tags '(:unit :stable)
-  (cl-letf (((symbol-function 'claude-org-cmux--call)
+  (cl-letf (((symbol-function 'code-agent-org-cmux--call)
              (lambda (subcmd &rest _args)
                (when (string= subcmd "list-workspaces")
                  (concat "  workspace:1  deployment\n"
@@ -1788,17 +1787,17 @@ Handles selected marker, leading whitespace, and multi-word names."
                          "* workspace:13  Emacs-claude dev1  [selected]\n")))))
     ;; Exact match wins
     (should (equal "workspace:9"
-                   (claude-org-cmux--find-workspace-by-name "PCR dev1")))
+                   (code-agent-org-cmux--find-workspace-by-name "PCR dev1")))
     (should (equal "workspace:11"
-                   (claude-org-cmux--find-workspace-by-name "PCR dev2")))
+                   (code-agent-org-cmux--find-workspace-by-name "PCR dev2")))
     ;; Selected workspace parses correctly (strips [selected])
     (should (equal "workspace:13"
-                   (claude-org-cmux--find-workspace-by-name "Emacs-claude dev1")))
+                   (code-agent-org-cmux--find-workspace-by-name "Emacs-claude dev1")))
     ;; Single-word name
     (should (equal "workspace:1"
-                   (claude-org-cmux--find-workspace-by-name "deployment")))
+                   (code-agent-org-cmux--find-workspace-by-name "deployment")))
     ;; Missing name
-    (should-not (claude-org-cmux--find-workspace-by-name "nonexistent"))))
+    (should-not (code-agent-org-cmux--find-workspace-by-name "nonexistent"))))
 
 
 ;;; ============================================================================
@@ -1839,12 +1838,12 @@ Color and verbose must be applied BEFORE wait-for-ready."
                 (progn
                   (with-current-buffer buf
                     (org-mode)
-                    (let ((claude-org-auto-start-mcp-server nil))
-                      (claude-org-mode 1))
+                    (let ((code-agent-org-auto-start-mcp-server nil))
+                      (code-agent-org-mode 1))
                     (insert test-cmux--org-launch-with-color)
                     (save-buffer))
                   ;; Mock cmux CLI, tracking call order
-                  (cl-letf (((symbol-function 'claude-org-cmux--call)
+                  (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                              (lambda (subcmd &rest args)
                                (push (cons subcmd args) calls)
                                (push subcmd call-order)
@@ -1861,7 +1860,7 @@ Color and verbose must be applied BEFORE wait-for-ready."
                                 (t "ok")))))
                     (with-current-buffer buf
                       (test-cmux--goto-ai-block)
-                      (let ((surface (claude-org-cmux--ensure-session)))
+                      (let ((surface (code-agent-org-cmux--ensure-session)))
                         ;; 1. Returns the correct surface
                         (should (equal surface "surface:mock-77"))
                         ;; 2. new-workspace was called
@@ -1869,18 +1868,18 @@ Color and verbose must be applied BEFORE wait-for-ready."
                         ;; 3. CMUX_SURFACE_ID persisted (only property we write;
                         ;; workspace identity = heading title, not a UUID)
                         (save-excursion
-                          (claude-org-terminal--goto-session-heading)
+                          (code-agent-org-terminal--goto-session-heading)
                           (should (equal "surface:mock-77"
                                          (org-entry-get nil "CMUX_SURFACE_ID"))))
                         ;; 4. Hash tables populated (UUID resolved from ref)
                         (should (equal "surface:mock-77"
                                        (gethash "test-cmux-session-launch-001"
-                                                claude-org-cmux--workspace-to-surface)))
+                                                code-agent-org-cmux--workspace-to-surface)))
                         (should (gethash "test-cmux-session-launch-001"
-                                         claude-org-terminal--workspace-to-session-key))
+                                         code-agent-org-terminal--workspace-to-session-key))
                         (should (equal "AABB1122-3344-5566-7788-99AABBCCDDEE"
                                        (gethash "test-cmux-session-launch-001"
-                                                claude-org-cmux--workspace-to-cmux-id)))
+                                                code-agent-org-cmux--workspace-to-cmux-id)))
                         ;; 5. rename-workspace and rename-tab called
                         (should (cl-find "rename-workspace" calls :key #'car :test #'equal))
                         (should (cl-find "rename-tab" calls :key #'car :test #'equal))
@@ -1893,11 +1892,11 @@ Color and verbose must be applied BEFORE wait-for-ready."
                           (when (and color-pos wait-pos)
                             (should (< color-pos wait-pos))))))))
               ;; Inner cleanup: stop verbose, clear hash tables, kill buffer
-              (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
-                (when sk (claude-org-cmux--stop-verbose sk)))
-              (remhash "test-cmux-session-launch-001" claude-org-terminal--workspace-to-session-key)
-              (remhash "test-cmux-session-launch-001" claude-org-cmux--workspace-to-surface)
-              (remhash "test-cmux-session-launch-001" claude-org-cmux--workspace-to-cmux-id)
+              (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+                (when sk (code-agent-org-cmux--stop-verbose sk)))
+              (remhash "test-cmux-session-launch-001" code-agent-org-terminal--workspace-to-session-key)
+              (remhash "test-cmux-session-launch-001" code-agent-org-cmux--workspace-to-surface)
+              (remhash "test-cmux-session-launch-001" code-agent-org-cmux--workspace-to-cmux-id)
               (kill-buffer buf))))
       ;; Outer cleanup: delete temp file
       (delete-file file))))
@@ -1907,7 +1906,7 @@ Color and verbose must be applied BEFORE wait-for-ready."
 ;;; ============================================================================
 
 (ert-deftest test-cmux-restart-sends-exit-then-relaunches ()
-  "E04: claude-org-cmux-restart sends /exit, waits for shell, relaunches.
+  "E04: code-agent-org-cmux-restart sends /exit, waits for shell, relaunches.
 Verifies the restart sequence: ensure-session refreshes surface, /exit sent
 to running Claude Code, shell prompt detected via capture-pane, fresh
 launch command sent, verbose timer restarted."
@@ -1921,15 +1920,15 @@ launch command sent, verbose timer restarted."
               (progn
                 (with-current-buffer buf
                   (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
                   (insert test-cmux--org-content-with-surface)
                   (save-buffer))
                 ;; Mock: capture-pane returns Claude Code screen first,
                 ;; then shell prompt on retry (simulating /exit completing).
                 ;; sleep-for is no-op to avoid 15s wait.
                 ;; run-at-time is no-op to avoid /ide timer firing.
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
                              (cond
@@ -1947,7 +1946,7 @@ launch command sent, verbose timer restarted."
                           ((symbol-function 'sleep-for) (lambda (&rest _) nil)))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (claude-org-cmux-restart)
+                    (code-agent-org-cmux-restart)
                     ;; 1. /exit was sent (Claude Code was running, not at shell)
                     (should (cl-find "send" calls
                                      :test (lambda (key cell)
@@ -1965,14 +1964,14 @@ launch command sent, verbose timer restarted."
                       ;; At least 2 send calls: /exit + launch-cmd
                       (should (>= (length send-calls) 2)))
                     ;; 4. Verbose timer restarted
-                    (let ((sk (claude-org--current-session-key)))
-                      (should (claude-org--session-get sk :verbose-follow-process))))))
+                    (let ((sk (code-agent-org--current-session-key)))
+                      (should (code-agent-org--session-get sk :verbose-follow-process))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
-              (when sk (claude-org-cmux--stop-verbose sk)))
-            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
       (delete-file file))))
 
@@ -1991,17 +1990,17 @@ with header-line containing the session ID and keybinding hints."
               (progn
                 (with-current-buffer buf
                   (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
                   (insert test-cmux--org-content-with-surface)
                   (save-buffer))
                 (remhash "test-cmux-session-003"
-                         claude-org-terminal--workspace-to-session-key)
+                         code-agent-org-terminal--workspace-to-session-key)
                 (remhash "test-cmux-session-003"
-                         claude-org-cmux--workspace-to-surface)
+                         code-agent-org-cmux--workspace-to-surface)
                 (remhash "test-cmux-session-003"
-                         claude-org-cmux--workspace-to-cmux-id)
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                         code-agent-org-cmux--workspace-to-cmux-id)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest _args)
                              (cond
                               ((string= subcmd "tree")
@@ -2011,8 +2010,8 @@ with header-line containing the session ID and keybinding hints."
                               (t "ok")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (claude-org-cmux--ensure-session)
-                    (let* ((sk (claude-org--current-session-key))
+                    (code-agent-org-cmux--ensure-session)
+                    (let* ((sk (code-agent-org--current-session-key))
                            (vbuf (gethash sk claude-agent--session-verbose-buffers)))
                       ;; Buffer exists and is live
                       (should vbuf)
@@ -2024,20 +2023,20 @@ with header-line containing the session ID and keybinding hints."
                       (with-current-buffer vbuf
                         (should header-line-format))
                       ;; Timer is running
-                      (should (claude-org--session-get sk :verbose-follow-process))))))
+                      (should (code-agent-org--session-get sk :verbose-follow-process))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
+            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
               (when sk
-                (claude-org-cmux--stop-verbose sk)
+                (code-agent-org-cmux--stop-verbose sk)
                 (let ((vbuf (gethash sk claude-agent--session-verbose-buffers)))
                   (when (and vbuf (buffer-live-p vbuf))
                     (kill-buffer vbuf)))))
             (remhash "test-cmux-session-003"
-                     claude-org-terminal--workspace-to-session-key)
+                     code-agent-org-terminal--workspace-to-session-key)
             (remhash "test-cmux-session-003"
-                     claude-org-cmux--workspace-to-surface)
+                     code-agent-org-cmux--workspace-to-surface)
             (remhash "test-cmux-session-003"
-                     claude-org-cmux--workspace-to-cmux-id)
+                     code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
       (delete-file file))))
 
@@ -2055,18 +2054,18 @@ them sequentially via its own input buffer."
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
       ;; Execute Block A
-      (claude-org-cmux--execute-ai-block)
+      (code-agent-org-cmux--execute-ai-block)
       (let ((send-count-after-a (length (test-cmux--mock-calls-for "send"))))
         ;; Execute again (Block B in same session) — should NOT error,
         ;; just send another prompt
-        (claude-org-cmux--execute-ai-block)
+        (code-agent-org-cmux--execute-ai-block)
         (let ((send-count-after-b (length (test-cmux--mock-calls-for "send"))))
           ;; Both prompts should have been sent (2 "send" calls total
           ;; for prompt text, plus initial sends from ensure-session)
           (should (> send-count-after-b send-count-after-a))
           ;; No queue was used — cmux sends directly
-          (let ((sk (claude-org--current-session-key)))
-            (should (zerop (claude-org--queue-count sk)))))))))
+          (let ((sk (code-agent-org--current-session-key)))
+            (should (zerop (code-agent-org--queue-count sk)))))))))
 
 ;;; ============================================================================
 ;;; E10: Verbose tick diff-based dedup
@@ -2080,28 +2079,28 @@ terminal screen hasn't changed between ticks."
   (let ((vbuf (generate-new-buffer "*test-verbose-dedup*")))
     (unwind-protect
         (with-current-buffer vbuf
-          (claude-org-cmux-verbose-mode)
-          (setq-local claude-org-cmux--verbose-prev-text "")
+          (code-agent-org-cmux-verbose-mode)
+          (setq-local code-agent-org-cmux--verbose-prev-text "")
           ;; Simulate first tick: new content → buffer updates
           (let ((content-v1 "Claude Code\n  -- INSERT --\n❯ hello"))
             (let ((inhibit-read-only t))
               (erase-buffer)
               (insert content-v1))
-            (setq claude-org-cmux--verbose-prev-text content-v1)
+            (setq code-agent-org-cmux--verbose-prev-text content-v1)
             (should (equal (buffer-string) content-v1))
             ;; Simulate second tick: same content → should NOT rewrite
             ;; (we verify by checking prev-text is still the same)
-            (should (string= claude-org-cmux--verbose-prev-text content-v1))
+            (should (string= code-agent-org-cmux--verbose-prev-text content-v1))
             ;; Simulate third tick: different content → updates
             (let ((content-v2 "Claude Code\n  -- INSERT --\n❯ world"))
-              (should-not (string= claude-org-cmux--verbose-prev-text content-v2))
+              (should-not (string= code-agent-org-cmux--verbose-prev-text content-v2))
               ;; Apply the update (what verbose-tick sentinel does)
               (let ((inhibit-read-only t))
                 (erase-buffer)
                 (insert content-v2))
-              (setq claude-org-cmux--verbose-prev-text content-v2)
+              (setq code-agent-org-cmux--verbose-prev-text content-v2)
               (should (equal (buffer-string) content-v2))
-              (should (string= claude-org-cmux--verbose-prev-text content-v2)))))
+              (should (string= code-agent-org-cmux--verbose-prev-text content-v2)))))
       (kill-buffer vbuf))))
 
 ;;; ============================================================================
@@ -2122,37 +2121,37 @@ buffer forever with \"not_found: Workspace not found\"."
   (let* ((session-id "sdd-resolve-test-12345")
          (hash-uuid "TEST-HASH-UUID-0001")
          (session-key (format "/tmp/any.org::%s" session-id))
-         (sessions-backup claude-org--sessions)
-         (hash-backup (copy-hash-table claude-org-cmux--workspace-to-cmux-id)))
+         (sessions-backup code-agent-org--sessions)
+         (hash-backup (copy-hash-table code-agent-org-cmux--workspace-to-cmux-id)))
     (unwind-protect
         (progn
           ;; Clean slate
-          (setq claude-org--sessions (make-hash-table :test 'equal))
-          (remhash session-id claude-org-cmux--workspace-to-cmux-id)
+          (setq code-agent-org--sessions (make-hash-table :test 'equal))
+          (remhash session-id code-agent-org-cmux--workspace-to-cmux-id)
           ;; Cache miss: no session-state, no hash entry → nil.
-          (should-not (claude-org-cmux--verbose-workspace-uuid session-key))
+          (should-not (code-agent-org-cmux--verbose-workspace-uuid session-key))
           ;; Populate the hash (what restore-workspace / recover-session do
           ;; after name-based lookup) → helper returns it via session-id
           ;; parsed out of session-key.
-          (puthash session-id hash-uuid claude-org-cmux--workspace-to-cmux-id)
-          (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
+          (puthash session-id hash-uuid code-agent-org-cmux--workspace-to-cmux-id)
+          (should (equal (code-agent-org-cmux--verbose-workspace-uuid session-key)
                          hash-uuid))
           ;; Session-state slot populated → same lookup via different path.
-          (remhash session-id claude-org-cmux--workspace-to-cmux-id)
-          (should-not (claude-org-cmux--verbose-workspace-uuid session-key))
-          (claude-org--session-put session-key :workspace-session-id session-id)
-          (puthash session-id hash-uuid claude-org-cmux--workspace-to-cmux-id)
-          (should (equal (claude-org-cmux--verbose-workspace-uuid session-key)
+          (remhash session-id code-agent-org-cmux--workspace-to-cmux-id)
+          (should-not (code-agent-org-cmux--verbose-workspace-uuid session-key))
+          (code-agent-org--session-put session-key :workspace-session-id session-id)
+          (puthash session-id hash-uuid code-agent-org-cmux--workspace-to-cmux-id)
+          (should (equal (code-agent-org-cmux--verbose-workspace-uuid session-key)
                          hash-uuid))
           ;; Nil session-key must not crash (defensive).
-          (should-not (claude-org-cmux--verbose-workspace-uuid nil))
+          (should-not (code-agent-org-cmux--verbose-workspace-uuid nil))
           ;; Session-key without "::" separator → no session-id, return nil.
-          (should-not (claude-org-cmux--verbose-workspace-uuid "/tmp/no-sep.org")))
+          (should-not (code-agent-org-cmux--verbose-workspace-uuid "/tmp/no-sep.org")))
       ;; Cleanup
-      (setq claude-org--sessions sessions-backup)
-      (clrhash claude-org-cmux--workspace-to-cmux-id)
+      (setq code-agent-org--sessions sessions-backup)
+      (clrhash code-agent-org-cmux--workspace-to-cmux-id)
       (maphash (lambda (k v)
-                 (puthash k v claude-org-cmux--workspace-to-cmux-id))
+                 (puthash k v code-agent-org-cmux--workspace-to-cmux-id))
                hash-backup))))
 
 ;;; ============================================================================
@@ -2172,15 +2171,15 @@ tracking the new surface."
               (progn
                 (with-current-buffer buf
                   (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
                   (insert test-cmux--org-content-with-surface)
                   (save-buffer))
                 ;; Seed the workspace→UUID cache so --start-verbose can
                 ;; resolve the workspace and actually spawn a follow process.
                 (puthash "test-cmux-session-003" "mock-uuid-123"
-                         claude-org-cmux--workspace-to-cmux-id)
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                         code-agent-org-cmux--workspace-to-cmux-id)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest _args)
                              (cond
                               ((string= subcmd "tree")
@@ -2199,31 +2198,31 @@ tracking the new surface."
                                (funcall orig "cmux-follow-mock" nil "sleep" "60")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((sk (claude-org--current-session-key)))
+                    (let ((sk (code-agent-org--current-session-key)))
                       ;; Start verbose with surface-A
-                      (claude-org-cmux--start-verbose "surface:A" sk)
-                      (let ((proc-a (claude-org--session-get sk :verbose-follow-process)))
+                      (code-agent-org-cmux--start-verbose "surface:A" sk)
+                      (let ((proc-a (code-agent-org--session-get sk :verbose-follow-process)))
                         (should proc-a)
                         (should (equal "surface:A"
-                                       (claude-org--session-get sk :verbose-surface-id)))
+                                       (code-agent-org--session-get sk :verbose-surface-id)))
                         ;; Start verbose with surface-B (surface changed)
-                        (claude-org-cmux--start-verbose "surface:B" sk)
-                        (let ((proc-b (claude-org--session-get sk :verbose-follow-process)))
+                        (code-agent-org-cmux--start-verbose "surface:B" sk)
+                        (let ((proc-b (code-agent-org--session-get sk :verbose-follow-process)))
                           ;; Process replaced (not the same object)
                           (should proc-b)
                           (should-not (eq proc-a proc-b))
                           (should (equal "surface:B"
-                                         (claude-org--session-get sk :verbose-surface-id)))
+                                         (code-agent-org--session-get sk :verbose-surface-id)))
                           ;; Start verbose with SAME surface-B — no restart
-                          (claude-org-cmux--start-verbose "surface:B" sk)
-                          (let ((proc-b2 (claude-org--session-get sk :verbose-follow-process)))
+                          (code-agent-org-cmux--start-verbose "surface:B" sk)
+                          (let ((proc-b2 (code-agent-org--session-get sk :verbose-follow-process)))
                             (should (eq proc-b proc-b2)))))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
-              (when sk (claude-org-cmux--stop-verbose sk)))
-            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
       (delete-file file))))
 
@@ -2242,11 +2241,11 @@ Ensures no orphan timers remain after cleanup."
               (progn
                 (with-current-buffer buf
                   (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
                   (insert test-cmux--org-content-with-surface)
                   (save-buffer))
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest _args)
                              (cond
                               ((string= subcmd "tree")
@@ -2255,23 +2254,23 @@ Ensures no orphan timers remain after cleanup."
                               (t "ok")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((sk (claude-org--current-session-key)))
+                    (let ((sk (code-agent-org--current-session-key)))
                       ;; Start verbose
-                      (claude-org-cmux--start-verbose "surface:test" sk)
-                      (should (claude-org--session-get sk :verbose-follow-process))
+                      (code-agent-org-cmux--start-verbose "surface:test" sk)
+                      (should (code-agent-org--session-get sk :verbose-follow-process))
                       ;; Stop verbose
-                      (claude-org-cmux--stop-verbose sk)
+                      (code-agent-org-cmux--stop-verbose sk)
                       ;; Timer cleared
-                      (should-not (claude-org--session-get sk :verbose-follow-process))
+                      (should-not (code-agent-org--session-get sk :verbose-follow-process))
                       ;; Stopping again is safe (no error)
-                      (claude-org-cmux--stop-verbose sk)
-                      (should-not (claude-org--session-get sk :verbose-follow-process))))))
+                      (code-agent-org-cmux--stop-verbose sk)
+                      (should-not (code-agent-org--session-get sk :verbose-follow-process))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
-              (when sk (claude-org-cmux--stop-verbose sk)))
-            (remhash "test-cmux-session-003" claude-org-terminal--workspace-to-session-key)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-surface)
-            (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
       (delete-file file))))
 
@@ -2291,25 +2290,122 @@ now only asserts the helper's idempotency — that's what the rest
 of the code (restart paths, recovery) depends on."
   :tags '(:unit :stable :e2e)
   (puthash "test-cmux-session-003" "mock-uuid-123"
-           claude-org-cmux--workspace-to-cmux-id)
+           code-agent-org-cmux--workspace-to-cmux-id)
   (unwind-protect
       (let ((sk "/tmp/test-vheal.org::test-cmux-session-003")
-            (buf1 (claude-org-cmux--create-verbose-buffer
+            (buf1 (code-agent-org-cmux--create-verbose-buffer
                    "/tmp/test-vheal.org::test-cmux-session-003"
                    "surface:heal")))
         (should buf1)
         (should (buffer-live-p buf1))
         (kill-buffer buf1)
         (should-not (buffer-live-p buf1))
-        (let ((buf2 (claude-org-cmux--create-verbose-buffer sk "surface:heal")))
+        (let ((buf2 (code-agent-org-cmux--create-verbose-buffer sk "surface:heal")))
           (should buf2)
           (should (buffer-live-p buf2))
           (should-not (eq buf1 buf2))
           (should (eq buf2 (gethash sk claude-agent--session-verbose-buffers)))
           (kill-buffer buf2)))
-    (remhash "test-cmux-session-003" claude-org-cmux--workspace-to-cmux-id)
+    (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
     (remhash "/tmp/test-vheal.org::test-cmux-session-003"
              claude-agent--session-verbose-buffers)))
+
+;;; ============================================================================
+;;; E13b: Verbose buffer memory cap (regression for 1f016b8 leak)
+;;; ============================================================================
+;;
+;; The --follow stream filter must bound the buffer size.  Before the fix,
+;; the filter appended forever, so an active session would accumulate
+;; megabytes of terminal scrollback in `*cmux: <id>*'.  Live Emacs
+;; inspection on 2026-04-24 showed 3.47 MB in one such buffer.
+
+(ert-deftest test-cmux-verbose-filter-caps-buffer-size ()
+  "Filter bounds the verbose buffer at
+`code-agent-org-cmux-verbose-buffer-max-size'.  Regression test: the
+--follow stream filter (introduced in 1f016b8) appended forever."
+  :tags '(:unit :stable :e2e)
+  (let* ((code-agent-org-cmux-verbose-buffer-max-size 1024)
+         (buf (get-buffer-create " *test-cmux-verbose-cap*"))
+         (proc-buf (generate-new-buffer " *test-proc*"))
+         (proc (start-process "test-cmux-cap" proc-buf "sleep" "60")))
+    (unwind-protect
+        (progn
+          (process-put proc 'verbose-buffer buf)
+          ;; Pump 5000 bytes through a 1024-byte cap.
+          (dotimes (i 10)
+            (let ((chunk (concat (make-string 499 (+ ?a i)) "\n")))
+              (code-agent-org-cmux--verbose-follow-filter proc chunk)))
+          (should (<= (buffer-size buf) code-agent-org-cmux-verbose-buffer-max-size))
+          ;; Most recent content is retained.
+          (should (with-current-buffer buf
+                    (goto-char (point-max))
+                    (search-backward (string (+ ?a 9)) nil t))))
+      (when (process-live-p proc) (delete-process proc))
+      (when (buffer-live-p proc-buf) (kill-buffer proc-buf))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest test-cmux-verbose-filter-trims-whole-lines ()
+  "Filter trims whole lines from the start — no half-truncated
+line at `point-min' after the cap triggers."
+  :tags '(:unit :stable :e2e)
+  (let* ((code-agent-org-cmux-verbose-buffer-max-size 100)
+         (buf (get-buffer-create " *test-cmux-whole-lines*"))
+         (proc-buf (generate-new-buffer " *test-proc2*"))
+         (proc (start-process "test-cmux-whole" proc-buf "sleep" "60")))
+    (unwind-protect
+        (progn
+          (process-put proc 'verbose-buffer buf)
+          (dotimes (i 30)
+            (code-agent-org-cmux--verbose-follow-filter
+             proc (format "line-%02d-content\n" i)))
+          (with-current-buffer buf
+            (should (<= (buffer-size) code-agent-org-cmux-verbose-buffer-max-size))
+            (goto-char (point-min))
+            (should (looking-at "^line-"))))
+      (when (process-live-p proc) (delete-process proc))
+      (when (buffer-live-p proc-buf) (kill-buffer proc-buf))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest test-cmux-verbose-buffer-kill-stops-follow-process ()
+  "Killing the *cmux: ...* buffer cleans up the follow subprocess.
+Regression test: an orphan subprocess keeps streaming into
+nothing, wasting ~34 MB RSS and a pipe per killed buffer."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-vkill-" nil ".org")))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
+                  (insert test-cmux--org-content-with-surface)
+                  (save-buffer))
+                (puthash "test-cmux-session-003" "mock-uuid-123"
+                         code-agent-org-cmux--workspace-to-cmux-id)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
+                           (lambda (_s &rest _a) "ok"))
+                          ((symbol-function 'start-process)
+                           (let ((orig (symbol-function 'start-process)))
+                             (lambda (_n _b _p &rest _a)
+                               (funcall orig "cmux-kill-test" nil "sleep" "60")))))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (let ((sk (code-agent-org--current-session-key)))
+                      (code-agent-org-cmux--start-verbose "surface:test" sk)
+                      (let ((proc (code-agent-org--session-get sk :verbose-follow-process))
+                            (vbuf (gethash sk claude-agent--session-verbose-buffers)))
+                        (should (process-live-p proc))
+                        (should (buffer-live-p vbuf))
+                        (kill-buffer vbuf)
+                        (should-not (process-live-p proc))
+                        (should-not (code-agent-org--session-get sk :verbose-follow-process)))))))
+            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
 
 ;;; ============================================================================
 ;;; E14: Story switch updates ACTIVE_STORY and renames tab
@@ -2352,7 +2448,7 @@ which calls rename-tab on the cmux workspace."
   (test-cmux--with-mock
     ;; Set up workspace-to-cmux-id so on-story-changed can find the UUID
     (puthash "test-cmux-story-switch-001" "mock-ws-uuid-switch"
-             claude-org-cmux--workspace-to-cmux-id)
+             code-agent-org-cmux--workspace-to-cmux-id)
     (unwind-protect
         (test-cmux--with-org-buffer test-cmux--org-workspace-with-stories
           ;; Navigate inside the workspace
@@ -2360,17 +2456,17 @@ which calls rename-tab on the cmux workspace."
           (re-search-forward ":CUSTOM_ID: test-cmux-story-alpha-instr" nil t)
           (forward-line 1)
           ;; Verify workspace heading found
-          (should (claude-org--find-workspace-heading))
+          (should (code-agent-org--find-workspace-heading))
           ;; No ACTIVE_STORY initially
           (should-not (save-excursion
-                        (let ((ws (claude-org--find-workspace-heading)))
+                        (let ((ws (code-agent-org--find-workspace-heading)))
                           (goto-char (cdr ws))
                           (org-entry-get nil "ACTIVE_STORY"))))
           ;; Set active story
-          (claude-org--set-active-story "Story Alpha")
+          (code-agent-org--set-active-story "Story Alpha")
           ;; ACTIVE_STORY property set
           (let ((active (save-excursion
-                          (let ((ws (claude-org--find-workspace-heading)))
+                          (let ((ws (code-agent-org--find-workspace-heading)))
                             (goto-char (cdr ws))
                             (org-entry-get nil "ACTIVE_STORY")))))
             (should (equal active "Story Alpha")))
@@ -2382,7 +2478,7 @@ which calls rename-tab on the cmux workspace."
             ;; Called with the story name
             (should (member "Story Alpha" (cdar tab-calls)))))
       ;; Cleanup
-      (remhash "test-cmux-story-switch-001" claude-org-cmux--workspace-to-cmux-id))))
+      (remhash "test-cmux-story-switch-001" code-agent-org-cmux--workspace-to-cmux-id))))
 
 ;;; ============================================================================
 ;;; E15: Apply named color
@@ -2392,16 +2488,16 @@ which calls rename-tab on the cmux workspace."
   "E15: resolve-color maps named colors to hex and passes hex through."
   :tags '(:unit :stable :e2e)
   ;; Named colors (case-insensitive)
-  (should (equal "#C0392B" (claude-org-cmux--resolve-color "Red")))
-  (should (equal "#1565C0" (claude-org-cmux--resolve-color "blue")))
-  (should (equal "#006B6B" (claude-org-cmux--resolve-color "Teal")))
-  (should (equal "#6A1B9A" (claude-org-cmux--resolve-color "PURPLE")))
+  (should (equal "#C0392B" (code-agent-org-cmux--resolve-color "Red")))
+  (should (equal "#1565C0" (code-agent-org-cmux--resolve-color "blue")))
+  (should (equal "#006B6B" (code-agent-org-cmux--resolve-color "Teal")))
+  (should (equal "#6A1B9A" (code-agent-org-cmux--resolve-color "PURPLE")))
   ;; Hex passthrough
-  (should (equal "#C0392B" (claude-org-cmux--resolve-color "#C0392B")))
+  (should (equal "#C0392B" (code-agent-org-cmux--resolve-color "#C0392B")))
   ;; Unknown returns nil
-  (should-not (claude-org-cmux--resolve-color "unknown-color"))
+  (should-not (code-agent-org-cmux--resolve-color "unknown-color"))
   ;; Nil returns nil
-  (should-not (claude-org-cmux--resolve-color nil)))
+  (should-not (code-agent-org-cmux--resolve-color nil)))
 
 (ert-deftest test-cmux-apply-color-calls-set-status ()
   "E15b: apply-color calls set-status with resolved hex color and icon."
@@ -2427,7 +2523,7 @@ test
 #+end_src
 ")
                   (save-buffer))
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
                              "ok")))
@@ -2435,7 +2531,7 @@ test
                     (goto-char (point-min))
                     (re-search-forward "#+begin_src ai" nil t)
                     (forward-line 1)
-                    (claude-org-cmux--apply-color "workspace:test")
+                    (code-agent-org-cmux--apply-color "workspace:test")
                     ;; set-status called with hex color
                     (let ((status-call (cl-find "set-status" calls
                                                :key #'car :test #'equal)))
@@ -2461,11 +2557,11 @@ test
               (progn
                 (with-current-buffer buf
                   (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
                   (insert test-cmux--org-content-with-surface)
                   (save-buffer))
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
                              (cond
@@ -2475,21 +2571,21 @@ test
                               (t "ok")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((sk (claude-org--current-session-key)))
+                    (let ((sk (code-agent-org--current-session-key)))
                       ;; Set up loop state
-                      (claude-org--session-put sk :loop-org-buffer buf)
-                      (claude-org--session-put sk :loop-block-marker
+                      (code-agent-org--session-put sk :loop-org-buffer buf)
+                      (code-agent-org--session-put sk :loop-block-marker
                                                (copy-marker (point)))
-                      (claude-org--session-put sk :loop-current 2)
-                      (claude-org--session-put sk :loop-max 5)
+                      (code-agent-org--session-put sk :loop-current 2)
+                      (code-agent-org--session-put sk :loop-max 5)
                       ;; Send
-                      (claude-org-cmux--loop-send
+                      (code-agent-org-cmux--loop-send
                        "test-cmux-session-003" "surface:existing-123"
                        "loop iteration prompt" sk)
                       ;; from-emacs flag written
                       (let ((flag-path (expand-file-name
                                         "test-cmux-session-003.from-emacs"
-                                        claude-org-terminal-status-dir)))
+                                        code-agent-org-terminal-status-dir)))
                         (should (file-exists-p flag-path))
                         (ignore-errors (delete-file flag-path)))
                       ;; Prompt sent via "send"
@@ -2500,7 +2596,7 @@ test
                       (ignore-errors
                         (delete-file (expand-file-name
                                       "test-cmux-session-003.request-id"
-                                      claude-org-terminal-status-dir)))))))
+                                      code-agent-org-terminal-status-dir)))))))
             (kill-buffer buf)))
       (delete-file file))))
 
@@ -2512,21 +2608,21 @@ test
   "E28: wait-for-ready-poll returns quickly when capture-pane shows INSERT mode."
   :tags '(:unit :stable :e2e)
   (let ((poll-count 0))
-    (cl-letf (((symbol-function 'claude-org-cmux--call)
+    (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                (lambda (subcmd &rest _args)
                  (when (string= subcmd "capture-pane")
                    (setq poll-count (1+ poll-count)))
                  "Claude Code v2.1\n❯\n  -- INSERT --"))
               ((symbol-function 'sleep-for) (lambda (&rest _) nil)))
       ;; Should return t immediately (first poll matches)
-      (should (claude-org-cmux--wait-for-ready-poll "surface:test" 10))
+      (should (code-agent-org-cmux--wait-for-ready-poll "surface:test" 10))
       ;; Only 1 poll needed (INSERT found on first capture)
       (should (= 1 poll-count)))))
 
 (ert-deftest test-cmux-wait-for-ready-poll-timeout ()
   "E28b: wait-for-ready-poll errors on timeout when screen never shows ready."
   :tags '(:unit :stable :e2e)
-  (cl-letf (((symbol-function 'claude-org-cmux--call)
+  (cl-letf (((symbol-function 'code-agent-org-cmux--call)
              (lambda (subcmd &rest _args)
                (when (string= subcmd "capture-pane")
                  "Loading Claude Code...")))
@@ -2537,7 +2633,7 @@ test
                (lambda ()
                  (setq call-count (1+ call-count))
                  (if (= call-count 1) 0.0 999.0)))))
-    (should-error (claude-org-cmux--wait-for-ready-poll "surface:test" 1)
+    (should-error (code-agent-org-cmux--wait-for-ready-poll "surface:test" 1)
                   :type 'error)))
 
 ;;; ============================================================================
@@ -2556,11 +2652,11 @@ test
               (progn
                 (with-current-buffer buf
                   (org-mode)
-                  (let ((claude-org-auto-start-mcp-server nil))
-                    (claude-org-mode 1))
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
                   (insert test-cmux--org-content-with-backend)
                   (save-buffer))
-                (cl-letf (((symbol-function 'claude-org-cmux--call)
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
                              (cond
@@ -2581,7 +2677,7 @@ test
                           ((symbol-function 'sleep-for) (lambda (&rest _) nil)))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((surface (claude-org-cmux--ensure-session)))
+                    (let ((surface (code-agent-org-cmux--ensure-session)))
                       ;; Should succeed after retry
                       (should (equal surface "surface:mock-rcv"))
                       ;; new-window was called (recovery)
@@ -2589,11 +2685,11 @@ test
                       ;; Two new-workspace attempts
                       (should (= 2 new-workspace-attempt))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (claude-org--current-session-key))))
-              (when sk (claude-org-cmux--stop-verbose sk)))
-            (remhash "test-cmux-session-002" claude-org-terminal--workspace-to-session-key)
-            (remhash "test-cmux-session-002" claude-org-cmux--workspace-to-surface)
-            (remhash "test-cmux-session-002" claude-org-cmux--workspace-to-cmux-id)
+            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-002" code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-002" code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-002" code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
       (delete-file file))))
 
@@ -2601,8 +2697,8 @@ test
   "E36: set-status then clear-status calls correct cmux commands."
   :tags '(:unit :stable :e2e)
   (test-cmux--with-mock
-    (claude-org-cmux-set-status "test_key" "test_value")
-    (claude-org-cmux-clear-status "test_key")
+    (code-agent-org-cmux-set-status "test_key" "test_value")
+    (code-agent-org-cmux-clear-status "test_key")
     ;; set-status called
     (let ((set-calls (test-cmux--mock-calls-for "set-status")))
       (should set-calls)
@@ -2617,7 +2713,7 @@ test
   "E37: set-progress calls cmux with value and optional label."
   :tags '(:unit :stable :e2e)
   (test-cmux--with-mock
-    (claude-org-cmux-set-progress "0.5" "Building...")
+    (code-agent-org-cmux-set-progress "0.5" "Building...")
     (let ((calls (test-cmux--mock-calls-for "set-progress")))
       (should calls)
       (should (member "0.5" (cdar calls)))

@@ -87,7 +87,7 @@ Replaced 8 instances of manual wait loops with `test-claude-wait-until` helper:
 - Eliminated ~54 lines of duplicated wait logic
 - Tests now more readable and maintainable
 
-### 3. test-claude-org-unit.el - Minor Simplification
+### 3. test-code-agent-org-unit.el - Minor Simplification
 
 **Simplified Two Tests**:
 
@@ -124,7 +124,7 @@ Combined multiple insert statements into single calls:
 
 **Verdict**: No changes needed ✅
 
-### 5. test-claude-org-integration.el - Already Optimized
+### 5. test-code-agent-org-integration.el - Already Optimized
 
 **Analysis**: Previously optimized by skipping 14 flaky tests
 - Remaining 6 tests use improved wait patterns via test-config helpers
@@ -154,9 +154,9 @@ All simplifications preserve 100% test coverage:
 | Suite | Tests | Passing | Status |
 |-------|-------|---------|--------|
 | claude-agent-unit | 19 | 19 (100%) | ✅ |
-| claude-org-unit | 29 | 29 (100%) | ✅ |
+| code-agent-org-unit | 29 | 29 (100%) | ✅ |
 | claude-agent-integration | 10 | 8 (80%, 2 skipped) | ✅ |
-| claude-org-integration | 20 | 6 (30%, 14 skipped) | ✅ |
+| code-agent-org-integration | 20 | 6 (30%, 14 skipped) | ✅ |
 | **Total** | **78** | **62 (79%)** | **✅** |
 
 ### Bug Fixes Applied

@@ -19,3 +19,4 @@
 | 2026-04-10 | cmux-Emacs-Phoenix System Improvements (Claude × Codex debate) | draft |
 | 2026-04-17 | OpenCode Serve Mode (JSON Stream Backend) | superseded |
 | 2026-04-19 | OpenCode ACP Backend (Direct Protocol Integration) | proposal |
+| 2026-04-24 | Tri-Protocol Backend Refactor (agents + multiplexers, tmux) | Phases 0-4 implemented |

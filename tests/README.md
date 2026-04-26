@@ -8,8 +8,8 @@ This directory contains the test suite for the Claude Agent SDK.
 tests/
 ├── test-claude-agent-unit.el         # Unit tests for claude-agent.org
 ├── test-claude-agent-integration.el  # Integration tests for claude-agent.org
-├── test-claude-org-unit.el           # Unit tests for claude-org.org
-├── test-claude-org-integration.el    # Integration tests for claude-org.org
+├── test-code-agent-org-unit.el           # Unit tests for code-agent-org.org
+├── test-code-agent-org-integration.el    # Integration tests for code-agent-org.org
 ├── fixtures/
 │   ├── test-session.org              # Demo org file for integration tests
 │   └── test-config.el                # Shared test configuration and helpers
@@ -38,7 +38,7 @@ make test-unit
 Or for specific components:
 ```bash
 make test-agent-unit    # claude-agent unit tests only
-make test-org-unit      # claude-org unit tests only
+make test-org-unit      # code-agent-org unit tests only
 ```
 
 ### Integration Tests
@@ -145,7 +145,7 @@ The main integration test fixture contains:
 
 You can manually test features by:
 1. Opening `tests/fixtures/test-session.org`
-2. Enabling `claude-org-mode`
+2. Enabling `code-agent-org-mode`
 3. Executing AI blocks with `C-c C-c`
 
 ## Test Helpers
@@ -174,7 +174,7 @@ Current test coverage:
 - [ ] Hook system (planned)
 - [ ] Usage mode-line (planned)
 
-### claude-org.org
+### code-agent-org.org
 - [x] Session ID management
 - [x] SDK UUID storage
 - [x] Session recovery

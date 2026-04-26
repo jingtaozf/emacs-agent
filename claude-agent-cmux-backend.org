@@ -1,0 +1,186 @@
+#+TITLE: Claude Agent — cmux Backend
+#+PROPERTY: literate-load yes
+
+* Claude Agent — cmux Backend
+:PROPERTIES:
+:header-args:elisp: :tangle yes
+:END:
+
+Concrete multiplexer backend for cmux, the macOS terminal multiplexer.
+Subclass of =claude-agent-multiplexer-backend= implementing Protocol 2b
+(multiplexer wire) and Protocol 3 overrides specific to cmux.
+
+This module is a *thin facade* in the current phase of the tri-protocol
+refactor: the bulk of cmux-specific Elisp still lives in
+=code-agent-org-cmux.org= (launch, send, capture, verbose, agent
+profiles, workspace color, IDE server, sidebar feedback,
+permission-needed alerts).  The Protocol 2b / Protocol 3 methods here
+delegate to those existing functions — the wire-level refactor lands
+in a later session once the backend surface has proven stable in
+practice.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'claude-agent-backend)
+(require 'claude-agent-multiplexer)
+;; code-agent-org-cmux is the legacy module that owns the actual
+;; cmux-driving code today; methods here delegate to it.
+(declare-function code-agent-org-cmux--execute-ai-block
+                  "code-agent-org-cmux" ())
+(declare-function code-agent-org-cmux-cancel
+                  "code-agent-org-cmux" ())
+(declare-function code-agent-org-cmux--send-text
+                  "code-agent-org-cmux" (surface-id text &optional socket-path))
+(declare-function code-agent-org-cmux--ensure-session
+                  "code-agent-org-cmux" ())
+(declare-function code-agent-org-cmux--start-verbose
+                  "code-agent-org-cmux" (surface-id session-key))
+(declare-function code-agent-org-cmux--stop-verbose
+                  "code-agent-org-cmux" (session-key))
+#+END_SRC
+
+** Class
+
+cmux-specific state: the Unix-domain socket path (when overridden),
+the workspace UUID returned by =cmux new-workspace=, and cosmetic
+niceties (workspace colour, icon) that cmux exposes but tmux does not.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-cmux-backend
+               (:include claude-agent-multiplexer-backend (type :cmux))
+               (:constructor claude-agent-cmux-backend--create)
+               (:copier nil))
+  "Concrete cmux-driven terminal backend.
+Slots in addition to those inherited from
+`claude-agent-multiplexer-backend':
+- `socket-path': overrides the auto-detected cmux CLI socket.
+- `workspace-uuid': cmux's workspace identifier (distinct from the
+  user-visible workspace heading name).
+- `workspace-color': hex color for the sidebar pill (cmux only).
+- `workspace-icon': SF Symbol name for the sidebar pill (cmux only)."
+  (socket-path     nil)
+  (workspace-uuid  nil)
+  (workspace-color nil)
+  (workspace-icon  nil))
+#+END_SRC
+
+** Factory
+
+#+BEGIN_SRC elisp
+(defun claude-agent-cmux-backend-create (&rest args)
+  "Create a cmux backend.
+ARGS are forwarded to `claude-agent-cmux-backend--create'.  Typical
+usage from `code-agent-org-backend-registry':
+
+  (claude-agent-cmux-backend-create
+   :session-key session-key
+   :status-dir \"/tmp/claude-agent-status\")"
+  (apply #'claude-agent-cmux-backend--create args))
+#+END_SRC
+
+** Protocol 2b — delegation methods
+
+Each Protocol 2b generic dispatches to the corresponding =code-agent-org-cmux--*=
+function in the legacy module.  When the legacy module is folded
+into this backend (follow-up session), the bodies become the
+destination rather than the delegate.
+
+*** CLI Path
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-mux-cli-path ((_backend claude-agent-cmux-backend))
+  (if (boundp 'code-agent-org-cmux-cli-path)
+      (symbol-value 'code-agent-org-cmux-cli-path)
+    "cmux"))
+#+END_SRC
+
+*** Ensure Session
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-mux-ensure-session
+  ((_backend claude-agent-cmux-backend))
+  "Delegate to the legacy ensure-session routine (picks up or launches
+a cmux workspace for the current session heading)."
+  (code-agent-org-cmux--ensure-session))
+#+END_SRC
+
+*** Start / Stop Follower
+
+=code-agent-org-cmux--start-verbose= and =--stop-verbose= already
+implement the =capture-pane --follow= stream with the 256 KB cap +
+kill-buffer-hook from the 2026-04-24 memory-leak fix.  The Protocol
+2b generics forward to them unchanged.
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-mux-start-follower
+  ((backend claude-agent-cmux-backend) _sink)
+  "Start the verbose follower for BACKEND's session.
+SINK is ignored — cmux uses an in-Emacs buffer, not a file sink."
+  (let ((sk (claude-agent-multiplexer-backend-session-key backend))
+        (sf (claude-agent-multiplexer-backend-pane-id backend)))
+    (when (and sk sf)
+      (code-agent-org-cmux--start-verbose sf sk))))
+
+(cl-defmethod claude-agent-mux-stop-follower
+  ((backend claude-agent-cmux-backend))
+  "Stop the follower subprocess for BACKEND's session."
+  (when-let* ((sk (claude-agent-multiplexer-backend-session-key backend)))
+    (code-agent-org-cmux--stop-verbose sk)))
+#+END_SRC
+
+** Protocol 3 — cmux-specific overrides
+
+*** Execute Block
+
+Delegate to the legacy =code-agent-org-cmux--execute-ai-block= which
+handles the full cmux launch/send/register/verbose-start pipeline.
+Unlike agent-family backends where Protocol 3 =execute-block=
+unpacks =block-info= explicitly, cmux's legacy function reads the
+block from point — =block-info= is effectively redundant for now
+(the caller has already navigated to the block).
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-org-backend-execute-block
+  ((_backend claude-agent-cmux-backend) _block-info)
+  "Execute the AI block at point via the cmux legacy pipeline.
+Ignores BLOCK-INFO; reads the block from `point' because that's what
+the legacy function does.  Returns no cancel handle — cancellation
+goes through `cancel-from-org' which dispatches to
+`code-agent-org-cmux-cancel'."
+  (code-agent-org-cmux--execute-ai-block)
+  ;; No meaningful cancel handle for multiplexer backends today —
+  ;; cancellation flows through send-key :escape / :ctrl-c instead.
+  nil)
+#+END_SRC
+
+*** Cancel From Org
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-org-backend-cancel-from-org
+  ((_backend claude-agent-cmux-backend) _session-key)
+  "Cancel the in-flight query in cmux's pane.
+Sends the agent profile's cancel keys (Escape for Claude, C-c for
+Copilot / OpenCode) to the surface."
+  (code-agent-org-cmux-cancel))
+#+END_SRC
+
+*** Open Terminal Tab
+
+Raise cmux's workspace tab for the current session.  Delegates to
+=code-agent-org-cmux-open-tab= which activates the workspace in the
+cmux app.
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-org-backend-open-terminal-tab
+  ((_backend claude-agent-cmux-backend))
+  "Raise cmux's workspace tab."
+  (code-agent-org-cmux-open-tab))
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-cmux-backend)
+#+END_SRC

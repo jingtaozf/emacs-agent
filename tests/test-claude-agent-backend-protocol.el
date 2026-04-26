@@ -27,50 +27,50 @@
 (ert-deftest test-f1-verbose-buffer-default-nil ()
   "Default backend-verbose-buffer should return nil."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     (should-not (claude-agent-backend-verbose-buffer backend))))
 
 (ert-deftest test-f1-ready-p-default-t ()
   "Default backend-ready-p should return t."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     (should (claude-agent-backend-ready-p backend))))
 
 ;;; F1 Phase 3: JSON Backend Specializations
 
-(ert-deftest test-f1-json-backend-verbose-buffer-nil ()
+(ert-deftest test-f1-claude-code-backend-verbose-buffer-nil ()
   "JSON backend verbose-buffer should return nil (uses shared system)."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     (should-not (claude-agent-backend-verbose-buffer backend))))
 
-(ert-deftest test-f1-json-backend-ready-p-no-query ()
+(ert-deftest test-f1-claude-code-backend-ready-p-no-query ()
   "JSON backend ready-p should return t when no active query."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     (should (claude-agent-backend-ready-p backend))))
 
-(ert-deftest test-f1-json-backend-ready-p-active-query ()
+(ert-deftest test-f1-claude-code-backend-ready-p-active-query ()
   "JSON backend ready-p should return nil when query is active."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     ;; Simulate active query via process-state
     (let ((mock-state (claude-agent--make-process-state :request-id "test")))
-      (setf (claude-agent-json-backend-process-state backend) mock-state)
+      (setf (claude-agent-claude-code-backend-process-state backend) mock-state)
       (should-not (claude-agent-backend-ready-p backend)))))
 
 ;;; F1 Phase 4: New Capabilities Queryable
 
-(ert-deftest test-f1-json-backend-hook-permissions-nil ()
+(ert-deftest test-f1-claude-code-backend-hook-permissions-nil ()
   "JSON backend should return nil for :hook-permissions."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     (should-not (claude-agent-backend-supports-p backend :hook-permissions))))
 
-(ert-deftest test-f1-json-backend-terminal-verbose-nil ()
+(ert-deftest test-f1-claude-code-backend-terminal-verbose-nil ()
   "JSON backend should return nil for :terminal-verbose."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     (should-not (claude-agent-backend-supports-p backend :terminal-verbose))))
 
 ;;; F1 Phase 5: Existing Protocol Unaffected
@@ -78,7 +78,7 @@
 (ert-deftest test-f1-filter-callbacks-unchanged ()
   "Callback filter should work identically after protocol extension."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let* ((backend (claude-agent-json-backend--create))
+  (let* ((backend (claude-agent-claude-code-backend--create))
          (callbacks (list :on-token #'ignore :on-message #'ignore
                          :on-error #'ignore :on-complete #'ignore))
          (filtered (claude-agent-backend-filter-callbacks backend callbacks)))
@@ -91,7 +91,7 @@
 (ert-deftest test-f1-existing-generics-still-work ()
   "All 8 original generics should still work after adding new ones."
   :tags '(:unit :fast :stable :isolated :backend :f1)
-  (let ((backend (claude-agent-json-backend--create)))
+  (let ((backend (claude-agent-claude-code-backend--create)))
     ;; active-p should work
     (should-not (claude-agent-backend-active-p backend))
     ;; session-id should work

@@ -9,11 +9,11 @@
 ;;; Code:
 
 (require 'ert)
-(require 'claude-org)
+(require 'code-agent-org)
 
 (ert-deftest test-plugin-scan-finds-marketplace-plugins ()
   "Test that plugin scanner finds commands in marketplace plugins."
-  (let ((commands (claude-org--scan-plugin-commands)))
+  (let ((commands (code-agent-org--scan-plugin-commands)))
     ;; Should find some plugin commands (if plugins installed)
     (should (listp commands))
     ;; All plugin commands should have namespace (contain colon)
@@ -22,7 +22,7 @@
 
 (ert-deftest test-plugin-commands-in-discovery ()
   "Test that plugin commands appear in full discovery."
-  (let ((all-commands (claude-org--discover-slash-commands)))
+  (let ((all-commands (code-agent-org--discover-slash-commands)))
     (should (> (length all-commands) 0))
     ;; Should include built-in commands
     (should (member "/help" all-commands))
@@ -34,7 +34,7 @@
 
 (ert-deftest test-plugin-namespace-format ()
   "Test that plugin commands have correct namespace format."
-  (let ((commands (claude-org--scan-plugin-commands)))
+  (let ((commands (code-agent-org--scan-plugin-commands)))
     (dolist (cmd commands)
       ;; Should start with /
       (should (string-prefix-p "/" cmd))
@@ -44,26 +44,26 @@
 (ert-deftest test-plugin-discovery-no-subdirs ()
   "Test that plugin scanner only scans flat commands directory."
   ;; This is a behavioral test - plugins should not have nested namespaces
-  (let ((commands (claude-org--scan-plugin-commands)))
+  (let ((commands (code-agent-org--scan-plugin-commands)))
     (dolist (cmd commands)
       ;; Should have exactly one colon (plugin:command, not plugin:sub:command)
       (should (= 1 (cl-count ?: cmd))))))
 
 (ert-deftest test-discover-handles-missing-plugins-dir ()
   "Test graceful handling when plugins directory doesn't exist."
-  (let ((claude-org--test-plugins-dir "/nonexistent/path/to/plugins"))
+  (let ((code-agent-org--test-plugins-dir "/nonexistent/path/to/plugins"))
     ;; Should not error, just return empty list or continue
-    (should (listp (claude-org--discover-slash-commands)))))
+    (should (listp (code-agent-org--discover-slash-commands)))))
 
 (ert-deftest test-plugin-commands-completion-integration ()
   "Test that plugin commands work in company completion."
   (with-temp-buffer
     (org-mode)
-    (claude-org-mode 1)
+    (code-agent-org-mode 1)
     (insert "#+begin_src ai\n/")
-    (let* ((prefix (claude-org-company-slash-commands 'prefix))
+    (let* ((prefix (code-agent-org-company-slash-commands 'prefix))
            (candidates (when prefix
-                        (claude-org-company-slash-commands 'candidates (car prefix)))))
+                        (code-agent-org-company-slash-commands 'candidates (car prefix)))))
       (should prefix)
       (should (consp prefix))
       (should (string= (car prefix) "/"))

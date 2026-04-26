@@ -26,7 +26,7 @@ When converting real E2E tests into fast repeatable tests:
 1. Build and run real E2E tests first (Layer 4: iTerm2 + Claude + Emacs).
 2. Capture fixture data (session IDs, status JSON, screen output).
 3. Write simulated tests that mock only the single external call point
-   (e.g., `claude-org-iterm2--call`) using captured fixtures.
+   (e.g., `code-agent-org-iterm2--call`) using captured fixtures.
 4. When a user reports a bug that simulated tests missed, reproduce it
    in the real harness first, then add a regression test to both layers.
 

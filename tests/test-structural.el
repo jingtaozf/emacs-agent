@@ -22,7 +22,7 @@
 ;;; F1 Test 1: Public API functions have docstrings
 
 (ert-deftest test-structural-public-api-documented ()
-  "All public API functions (claude-agent-* and claude-org-*) have docstrings.
+  "All public API functions (claude-agent-* and code-agent-org-*) have docstrings.
 FIX: Add a docstring as the first form after the argument list."
   :tags '(:unit :fast :stable :structural)
   ;; Only check interactively-defined functions, skip autoloads and internal
@@ -33,7 +33,7 @@ FIX: Add a docstring as the first form after the argument list."
                   (not (subrp (symbol-function sym)))
                   (let ((name (symbol-name sym)))
                     (or (string-prefix-p "claude-agent-" name)
-                        (string-prefix-p "claude-org-" name)))
+                        (string-prefix-p "code-agent-org-" name)))
                   ;; Skip internal functions (double-dash)
                   (not (string-match-p "--" (symbol-name sym)))
                   ;; Skip struct accessors/constructors
@@ -274,8 +274,8 @@ See the Extension Points section for where new modules belong."
 ;;; F8: Dependency direction enforcement
 
 (ert-deftest test-structural-no-reverse-dependency ()
-  "claude-agent.org must not require claude-org (lower layer cannot depend on upper).
-FIX: Remove (require 'claude-org...) from claude-agent.org.
+  "claude-agent.org must not require code-agent-org (lower layer cannot depend on upper).
+FIX: Remove (require 'code-agent-org...) from claude-agent.org.
 See ARCHITECTURE.org Module Boundary Diagram for allowed dependency directions."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
@@ -284,11 +284,11 @@ See ARCHITECTURE.org Module Boundary Diagram for allowed dependency directions."
         (let ((content (with-temp-buffer
                          (insert-file-contents agent-file)
                          (buffer-string))))
-          (should (or (not (string-match-p "(require 'claude-org" content))
-                      (error "claude-agent.org requires claude-org!\nFIX: Remove (require 'claude-org...) — lower layer cannot depend on upper.\nSee ARCHITECTURE.org."))))))))
+          (should (or (not (string-match-p "(require 'code-agent-org" content))
+                      (error "claude-agent.org requires code-agent-org!\nFIX: Remove (require 'code-agent-org...) — lower layer cannot depend on upper.\nSee ARCHITECTURE.org."))))))))
 
 (ert-deftest test-structural-mcp-server-independent ()
-  "emacs-mcp-server.org must not depend on claude-agent or claude-org.
+  "emacs-mcp-server.org must not depend on claude-agent or code-agent-org.
 FIX: Remove the (require 'claude-...) from emacs-mcp-server.org.
 The MCP server is an independent module. See ARCHITECTURE.org."
   :tags '(:unit :fast :stable :structural)
@@ -304,7 +304,7 @@ The MCP server is an independent module. See ARCHITECTURE.org."
 ;;; F8: Agent-mistake structural tests
 
 (ert-deftest test-structural-defcustom-has-type ()
-  "All defcustom variables in claude-agent/claude-org have :type keyword.
+  "All defcustom variables in claude-agent/code-agent-org have :type keyword.
 FIX: Add :type to the defcustom form. Example: :type 'boolean or :type 'string"
   :tags '(:unit :fast :stable :structural)
   (let ((missing-type '()))
@@ -314,7 +314,7 @@ FIX: Add :type to the defcustom form. Example: :type 'boolean or :type 'string"
                   (custom-variable-p sym)
                   (let ((name (symbol-name sym)))
                     (or (string-prefix-p "claude-agent-" name)
-                        (string-prefix-p "claude-org-" name)
+                        (string-prefix-p "code-agent-org-" name)
                         (string-prefix-p "emacs-mcp-server-" name)))
                   ;; Check if :type is specified
                   (not (get sym 'custom-type)))
@@ -368,7 +368,7 @@ FIX: Add ## Verification section to CLAUDE.md with make test-smoke, make check."
 Functions defined in source .org files without -- must be in the known
 public API list. This catches functions that should be internal but forgot
 the -- naming convention.
-FIX: Rename the function to use -- prefix (e.g., claude-org--my-func),
+FIX: Rename the function to use -- prefix (e.g., code-agent-org--my-func),
 or add it to test-structural--known-public-api if it's intentionally public."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
@@ -485,6 +485,10 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-acp-opencode-create"
     "claude-agent-acp-gemini-create"
     "claude-agent-acp-codex-create"
+    ;; claude-agent-cmux-backend (Phase 3 multiplexer factory)
+    "claude-agent-cmux-backend-create"
+    ;; claude-agent-tmux-backend (Phase 4 multiplexer factory)
+    "claude-agent-tmux-backend-create"
     ;; claude-agent-backend public API
     "claude-agent-backend-register"
     "claude-agent-backend-get"
@@ -494,116 +498,116 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-backend-send"
     "claude-agent-backend-cancel"
     "claude-agent-backend-filter-callbacks"
-    ;; claude-org: core execution
-    "claude-org-execute"
-    "claude-org-cancel"
-    "claude-org-cancel-all"
-    "claude-org-cancel-queue"
-    "claude-org-mode"
-    "claude-org-setup"
-    "claude-org-cleanup"
-    ;; claude-org: navigation & insertion
-    "claude-org-insert-ai-block"
-    "claude-org-insert-block"
-    "claude-org-insert-session-block"
-    "claude-org-insert-template"
-    "claude-org-insert-story"
-    "claude-org-next-ai-block"
-    "claude-org-prev-ai-block"
-    "claude-org-goto-story"
-    "claude-org-goto-custom-id"
-    ;; claude-org: workspace workflow
-    "claude-org-insert-workspace"
-    ;; claude-org: refine
-    "claude-org-refine"
-    "claude-org-refine-block"
-    "claude-org-refine-prompt"
-    ;; claude-org: session & connection management
-    "claude-org-session-status"
-    "claude-org-set-model"
-    "claude-org-disconnect-all-clients"
-    "claude-org-disconnect-all-sessions"
-    "claude-org-disconnect-session"
-    "claude-org-list-persistent-clients"
-    "claude-org-list-sessions"
-    "claude-org-show-session-info"
-    "claude-org-show-verbose"
-    ;; claude-org: persistent-client registry (class-based singleton)
-    "claude-org-persistent-registry-get-entry"
-    "claude-org-persistent-registry-get"
-    "claude-org-persistent-registry-alive-p"
-    "claude-org-persistent-registry-register"
-    "claude-org-persistent-registry-update-activity"
-    "claude-org-persistent-registry-disconnect"
-    "claude-org-persistent-registry-disconnect-buffer"
-    "claude-org-persistent-registry-list"
-    "claude-org-persistent-registry-count"
-    ;; claude-org: copilot title generator (class-based singleton)
-    "claude-org-copilot-title-generator-ensure-instance"
-    "claude-org-copilot-title-generator-generate"
-    ;; claude-org: response streaming (per-query state carrier)
-    "claude-org-response-stream-handle-token"
-    "claude-org-response-stream-handle-message"
-    "claude-org-response-stream-handle-error"
-    "claude-org-response-stream-handle-complete"
-    "claude-org-response-stream-callbacks"
-    ;; claude-org: execute command (input bundle for one run)
-    "claude-org-execute-command-run"
-    "claude-org-execute-command-from-block-info"
-    ;; claude-org: response
-    "claude-org-append-to-response"
-    ;; claude-org: loop
-    "claude-org-loop"
-    "claude-org-loop-abort"
-    "claude-org-loop-inject-warning"
-    ;; claude-org: scheduling
-    "claude-org-schedule-at"
-    "claude-org-schedule-at-transient"
-    "claude-org-schedule-cancel"
-    "claude-org-schedule-list"
-    "claude-org-schedule-clear-all"
-    "claude-org-scheduled-list"
-    "claude-org-scheduled-list-goto"
-    "claude-org-scheduled-list-refresh"
-    "claude-org-scheduled-scan-all"
-    "claude-org-scheduled-start"
-    "claude-org-scheduled-stop"
-    "claude-org-scheduled-run"
-    "claude-org-scheduled-cancel"
-    ;; claude-org: header line & mode
-    "claude-org-header-line"
-    "claude-org-header-line-mode"
-    ;; claude-org: permissions
-    "claude-org-permission-protect-org"
-    "claude-org-switch-permission-mode"
-    ;; claude-org: unified terminal tab
-    "claude-org-open-terminal-tab"
-    ;; claude-org: cmux backend
-    "claude-org-cmux-cancel"
-    "claude-org-cmux-restart"
-    "claude-org-cmux-clear-status"
-    "claude-org-cmux-notify"
-    "claude-org-cmux-verbose-mode"
-    "claude-org-cmux-verbose-menu"
-    "claude-org-cmux-verbose-follow"
-    "claude-org-cmux-open-tab"
-    "claude-org-cmux-set-progress"
-    "claude-org-cmux-set-status"
-    ;; claude-org: workspace bridge (terminal workflow)
-    "claude-org-get-active-story"
-    "claude-org-workspace-archive-workflow"
-    "claude-org-workspace-bridge-get-cli-session"
-    "claude-org-workspace-bridge-insert-prompt"
-    "claude-org-workspace-bridge-insert-response"
-    "claude-org-workspace-bridge-latest-instruction-custom-id"
-    "claude-org-workspace-bridge-list-sessions"
-    "claude-org-workspace-bridge-mark-cancelled"
-    "claude-org-workspace-bridge-save-cli-session"
-    "claude-org-workspace-bridge-send-prompt"
-    "claude-org-workspace-bridge-system-prompt"
-    "claude-org-workspace-bridge-update-todos"
-    ;; claude-org: company completion
-    "claude-org-company-slash-commands"
+    ;; code-agent-org: core execution
+    "code-agent-org-execute"
+    "code-agent-org-cancel"
+    "code-agent-org-cancel-all"
+    "code-agent-org-cancel-queue"
+    "code-agent-org-mode"
+    "code-agent-org-setup"
+    "code-agent-org-cleanup"
+    ;; code-agent-org: navigation & insertion
+    "code-agent-org-insert-ai-block"
+    "code-agent-org-insert-block"
+    "code-agent-org-insert-session-block"
+    "code-agent-org-insert-template"
+    "code-agent-org-insert-story"
+    "code-agent-org-next-ai-block"
+    "code-agent-org-prev-ai-block"
+    "code-agent-org-goto-story"
+    "code-agent-org-goto-custom-id"
+    ;; code-agent-org: workspace workflow
+    "code-agent-org-insert-workspace"
+    ;; code-agent-org: refine
+    "code-agent-org-refine"
+    "code-agent-org-refine-block"
+    "code-agent-org-refine-prompt"
+    ;; code-agent-org: session & connection management
+    "code-agent-org-session-status"
+    "code-agent-org-set-model"
+    "code-agent-org-disconnect-all-clients"
+    "code-agent-org-disconnect-all-sessions"
+    "code-agent-org-disconnect-session"
+    "code-agent-org-list-persistent-clients"
+    "code-agent-org-list-sessions"
+    "code-agent-org-show-session-info"
+    "code-agent-org-show-verbose"
+    ;; code-agent-org: persistent-client registry (class-based singleton)
+    "code-agent-org-persistent-registry-get-entry"
+    "code-agent-org-persistent-registry-get"
+    "code-agent-org-persistent-registry-alive-p"
+    "code-agent-org-persistent-registry-register"
+    "code-agent-org-persistent-registry-update-activity"
+    "code-agent-org-persistent-registry-disconnect"
+    "code-agent-org-persistent-registry-disconnect-buffer"
+    "code-agent-org-persistent-registry-list"
+    "code-agent-org-persistent-registry-count"
+    ;; code-agent-org: copilot title generator (class-based singleton)
+    "code-agent-org-copilot-title-generator-ensure-instance"
+    "code-agent-org-copilot-title-generator-generate"
+    ;; code-agent-org: response streaming (per-query state carrier)
+    "code-agent-org-response-stream-handle-token"
+    "code-agent-org-response-stream-handle-message"
+    "code-agent-org-response-stream-handle-error"
+    "code-agent-org-response-stream-handle-complete"
+    "code-agent-org-response-stream-callbacks"
+    ;; code-agent-org: execute command (input bundle for one run)
+    "code-agent-org-execute-command-run"
+    "code-agent-org-execute-command-from-block-info"
+    ;; code-agent-org: response
+    "code-agent-org-append-to-response"
+    ;; code-agent-org: loop
+    "code-agent-org-loop"
+    "code-agent-org-loop-abort"
+    "code-agent-org-loop-inject-warning"
+    ;; code-agent-org: scheduling
+    "code-agent-org-schedule-at"
+    "code-agent-org-schedule-at-transient"
+    "code-agent-org-schedule-cancel"
+    "code-agent-org-schedule-list"
+    "code-agent-org-schedule-clear-all"
+    "code-agent-org-scheduled-list"
+    "code-agent-org-scheduled-list-goto"
+    "code-agent-org-scheduled-list-refresh"
+    "code-agent-org-scheduled-scan-all"
+    "code-agent-org-scheduled-start"
+    "code-agent-org-scheduled-stop"
+    "code-agent-org-scheduled-run"
+    "code-agent-org-scheduled-cancel"
+    ;; code-agent-org: header line & mode
+    "code-agent-org-header-line"
+    "code-agent-org-header-line-mode"
+    ;; code-agent-org: permissions
+    "code-agent-org-permission-protect-org"
+    "code-agent-org-switch-permission-mode"
+    ;; code-agent-org: unified terminal tab
+    "code-agent-org-open-terminal-tab"
+    ;; code-agent-org: cmux backend
+    "code-agent-org-cmux-cancel"
+    "code-agent-org-cmux-restart"
+    "code-agent-org-cmux-clear-status"
+    "code-agent-org-cmux-notify"
+    "code-agent-org-cmux-verbose-mode"
+    "code-agent-org-cmux-verbose-menu"
+    "code-agent-org-cmux-verbose-follow"
+    "code-agent-org-cmux-open-tab"
+    "code-agent-org-cmux-set-progress"
+    "code-agent-org-cmux-set-status"
+    ;; code-agent-org: workspace bridge (terminal workflow)
+    "code-agent-org-get-active-story"
+    "code-agent-org-workspace-archive-workflow"
+    "code-agent-org-workspace-bridge-get-cli-session"
+    "code-agent-org-workspace-bridge-insert-prompt"
+    "code-agent-org-workspace-bridge-insert-response"
+    "code-agent-org-workspace-bridge-latest-instruction-custom-id"
+    "code-agent-org-workspace-bridge-list-sessions"
+    "code-agent-org-workspace-bridge-mark-cancelled"
+    "code-agent-org-workspace-bridge-save-cli-session"
+    "code-agent-org-workspace-bridge-send-prompt"
+    "code-agent-org-workspace-bridge-system-prompt"
+    "code-agent-org-workspace-bridge-update-todos"
+    ;; code-agent-org: company completion
+    "code-agent-org-company-slash-commands"
     ;; claude-ide: WebSocket IDE server (migrated from monet)
     "claude-ide-default-check-document-dirty-tool"
     "claude-ide-default-get-current-selection-tool"
@@ -680,7 +684,7 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
         (while (re-search-forward
                 "^(require '\\(\\(?:claude-\\|emacs-mcp-server\\)[^)]*\\))" nil t)
           (let ((req (match-string-no-properties 1)))
-            ;; Normalize: claude-org-session maps to claude-org-session
+            ;; Normalize: code-agent-org-session maps to code-agent-org-session
             ;; We need module basenames (matching .org filenames without extension)
             (push req requires)))))
     (delete-dups requires)))
@@ -691,13 +695,13 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
     ("claude-agent-permission" . 1)
     ("claude-agent-ide"        . 1)
     ("claude-agent"            . 2)   ; core
-    ("claude-org-session"      . 3)   ; org sub-modules
-    ("claude-org-queue"        . 3)
-    ("claude-org-response"     . 3)
-    ("claude-org"              . 4)   ; top-level org
-    ("claude-org-scheduled"    . 5)
-    ("claude-org-workspace-bridge" . 5) ; workspace bridge, needs org
-    ("claude-org-terminal-base" . 2)) ; shared terminal, needs agent
+    ("code-agent-org-session"      . 3)   ; org sub-modules
+    ("code-agent-org-queue"        . 3)
+    ("code-agent-org-response"     . 3)
+    ("code-agent-org"              . 4)   ; top-level org
+    ("code-agent-org-scheduled"    . 5)
+    ("code-agent-org-workspace-bridge" . 5) ; workspace bridge, needs org
+    ("code-agent-org-terminal-base" . 2)) ; shared terminal, needs agent
   "Module layer assignments from ARCHITECTURE.org.
 Higher layers may depend on same or lower layers, but not upward.")
 
@@ -883,12 +887,12 @@ FIX: Wrap the function body in (condition-case err ... (error (message ...)))."
 
 (ert-deftest test-structural-no-hardcoded-status-dir ()
   "Backend .org files must not hardcode /tmp/claude-agent-status.
-Use `claude-org-terminal-status-dir' from claude-org-terminal-base instead.
-FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `claude-org-terminal-status-dir'."
+Use `code-agent-org-terminal-status-dir' from code-agent-org-terminal-base instead.
+FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `code-agent-org-terminal-status-dir'."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
     (let ((violations nil))
-      (dolist (file '("claude-org-cmux.org"))
+      (dolist (file '("code-agent-org-cmux.org"))
         (let ((filepath (expand-file-name file test-structural--project-root)))
           (when (file-exists-p filepath)
             (let ((content (with-temp-buffer
@@ -901,7 +905,7 @@ FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `claude-org-terminal-st
                   (push (format "%s:%d: %s" file line-num (string-trim line))
                         violations)))))))
       (should-with-fix (null violations)
-        (format "Hardcoded /tmp/claude-agent-status found in backend files:\n%s\nFIX: Use `claude-org-terminal-status-dir' constant from claude-org-terminal-base.org."
+        (format "Hardcoded /tmp/claude-agent-status found in backend files:\n%s\nFIX: Use `code-agent-org-terminal-status-dir' constant from code-agent-org-terminal-base.org."
                 (mapconcat #'identity (nreverse violations) "\n"))))))
 
 ;;; F37: No stale iTerm2 references in source .org files
@@ -1013,8 +1017,8 @@ FIX: Add (and parsed (listp parsed)) guard in process-json-buffer and
 
 (ert-deftest test-structural-no-hardcoded-tmp-in-tests ()
   "Test files must not hardcode /tmp/claude-agent-status paths.
-Use `claude-org-terminal-status-dir' constant instead.
-FIX: Replace \"/tmp/claude-agent-status\" with `claude-org-terminal-status-dir'."
+Use `code-agent-org-terminal-status-dir' constant instead.
+FIX: Replace \"/tmp/claude-agent-status\" with `code-agent-org-terminal-status-dir'."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
     (let ((violations nil)
@@ -1036,7 +1040,7 @@ FIX: Replace \"/tmp/claude-agent-status\" with `claude-org-terminal-status-dir'.
                             violations)))
                   (forward-line 1)))))))
       (should-with-fix (null violations)
-        (format "Hardcoded /tmp/claude-agent-status in test files:\n%s\nFIX: Use `claude-org-terminal-status-dir' constant."
+        (format "Hardcoded /tmp/claude-agent-status in test files:\n%s\nFIX: Use `code-agent-org-terminal-status-dir' constant."
                 (mapconcat #'identity (nreverse violations) "\n"))))))
 
 ;;; F41: No commented-out test files in Makefile
@@ -1068,7 +1072,7 @@ FIX: Either enable the test (uncomment and add to correct target) or delete the 
 (ert-deftest test-structural-no-claude-cli-backend ()
   "Source .org files must not reference the dead claude-cli/eat backend.
 The claude-cli backend (CLAUDE_BACKEND=claude-cli, eat terminal) was
-removed.  Only json-stream and cmux backends are supported.
+removed.  Only claude-code and cmux backends are supported.
 FIX: Remove any claude-cli or eat-backend references from the flagged file."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
@@ -1163,20 +1167,20 @@ FIX: Extract rendering logic into helper functions."
 ;;; F45: launch-workspace orchestrator must stay thin
 
 (ert-deftest test-structural-launch-workspace-thin ()
-  "claude-org-cmux--launch-workspace should stay under 65 lines.
+  "code-agent-org-cmux--launch-workspace should stay under 65 lines.
 State persistence belongs in --persist-workspace-state, IDE setup
 in --setup-ide-after-ready.
 FIX: Extract phase-specific logic into helper functions."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let* ((file (expand-file-name "claude-org-cmux.org"
+    (let* ((file (expand-file-name "code-agent-org-cmux.org"
                                     test-structural--project-root))
            (line-count 0)
            (found nil))
       (with-temp-buffer
         (insert-file-contents file)
         (goto-char (point-min))
-        (when (search-forward "(defun claude-org-cmux--launch-workspace " nil t)
+        (when (search-forward "(defun code-agent-org-cmux--launch-workspace " nil t)
           (setq found t)
           (let ((start (line-number-at-pos)))
             (goto-char (match-beginning 0))
@@ -1184,39 +1188,39 @@ FIX: Extract phase-specific logic into helper functions."
             (setq line-count (1+ (- (line-number-at-pos) start))))))
       (when found
         (should-with-fix (<= line-count 65)
-          (format "claude-org-cmux--launch-workspace is %d lines (max 65).\nFIX: Extract state persistence into --persist-workspace-state and IDE setup into --setup-ide-after-ready."
+          (format "code-agent-org-cmux--launch-workspace is %d lines (max 65).\nFIX: Extract state persistence into --persist-workspace-state and IDE setup into --setup-ide-after-ready."
                   line-count))))))
 
 ;;; Regression: no synchronous cmux CLI calls in periodic timers
 ;;
-;; History: `claude-org-cmux--stream-tick' ran every 2 seconds via
+;; History: `code-agent-org-cmux--stream-tick' ran every 2 seconds via
 ;; `run-at-time' and called `cmux pipe-pane' synchronously via `call-process'.
 ;; Each tick blocked Emacs 200–1500 ms for the entire duration of every Claude
 ;; query.  Worse, its insertion marker was never initialised, so every tick
 ;; silently discarded the captured output — pure waste.
 ;;
 ;; Rule: any new periodic timer that talks to `cmux' MUST use `start-process'
-;; + sentinel (async), not `claude-org-cmux--call' (which is sync).
+;; + sentinel (async), not `code-agent-org-cmux--call' (which is sync).
 ;; See `.claude/rules/minimize-emacs-mcp-calls.md'.
 (ert-deftest test-structural-no-dead-cmux-streaming-timer ()
   "Ensure the dead pipe-pane streaming subsystem stays removed.
 The stream-tick timer was synchronous, hung Emacs every 2 s, and its
 insertion marker was never wired up.  Response text arrives via the
 Stop hook (handle_response → insert-response), not polling.
-FIX: Do not reintroduce `claude-org-cmux--start-streaming',
-`claude-org-cmux--stop-streaming', or `claude-org-cmux--stream-tick'.
+FIX: Do not reintroduce `code-agent-org-cmux--start-streaming',
+`code-agent-org-cmux--stop-streaming', or `code-agent-org-cmux--stream-tick'.
 If you need live terminal echo, use the async verbose mirror."
   :tags '(:unit :fast :stable :structural)
-  (let ((cmux-org (expand-file-name "claude-org-cmux.org"
+  (let ((cmux-org (expand-file-name "code-agent-org-cmux.org"
                                     test-structural--project-root)))
     (with-temp-buffer
       (insert-file-contents cmux-org)
-      (dolist (sym '("claude-org-cmux--start-streaming"
-                     "claude-org-cmux--stop-streaming"
-                     "claude-org-cmux--stream-tick"
-                     "claude-org-cmux--stream-timer"
-                     "claude-org-cmux--stream-marker"
-                     "claude-org-cmux--stream-last-len"))
+      (dolist (sym '("code-agent-org-cmux--start-streaming"
+                     "code-agent-org-cmux--stop-streaming"
+                     "code-agent-org-cmux--stream-tick"
+                     "code-agent-org-cmux--stream-timer"
+                     "code-agent-org-cmux--stream-marker"
+                     "code-agent-org-cmux--stream-last-len"))
         (goto-char (point-min))
         (should-with-fix
          (not (re-search-forward (format "^(def\\(?:un\\|var-local\\|var\\) %s"

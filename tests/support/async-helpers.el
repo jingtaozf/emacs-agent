@@ -59,7 +59,7 @@ DESCRIPTION: Description for timeout message."
 Uses adaptive backoff for efficiency.
 TIMEOUT defaults to `test-claude-default-timeout'."
   (test-claude-wait-until
-   (lambda () (not (claude-org--session-get session-key :busy)))
+   (lambda () (not (code-agent-org--session-get session-key :busy)))
    :timeout (or timeout test-claude-default-timeout)
    :initial-interval 0.05  ;; Start fast (50ms)
    :max-interval 0.3       ;; Cap at 300ms for session checks

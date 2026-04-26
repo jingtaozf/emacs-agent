@@ -1,7 +1,10 @@
 #+TITLE: Architecture
 #+DESCRIPTION: Meta-map for claude-agent — navigational aid for what falls between literate documents
 
-This file covers ONLY cross-module concerns. Each .org file documents itself.
+This file covers ONLY cross-module concerns. Each .org file documents
+itself. *Tri-protocol refactor Phases 0–4 shipped* (2026-04-24); see
+=docs/design-docs/2026-tri-protocol-backend-refactor.org= and the
+"Tri-Protocol Architecture" section below.
 
 * Module Boundary Diagram
 
@@ -10,7 +13,7 @@ This file covers ONLY cross-module concerns. Each .org file documents itself.
   ─────────────────────────────────────────────────────────
 
   ┌─────────────────────────────────────────────────────┐
-  │ TOP: claude-org.org                                 │
+  │ TOP: code-agent-org.org                                 │
   │   Org integration — AI blocks, streaming, execution │
   │   Depends on: claude-agent, org sub-modules         │
   └──────────────────────┬──────────────────────────────┘
@@ -49,6 +52,8 @@ This file covers ONLY cross-module concerns. Each .org file documents itself.
    OPTIONAL:    claude-agent-acp-opencode.org (OpenCode ACP profile)
    OPTIONAL:    claude-agent-acp-gemini.org (Gemini ACP profile)
    OPTIONAL:    claude-agent-acp-codex.org (Codex ACP profile, needs codex-acp shim)
+   TRI-PROTO:   claude-agent-agent.org claude-agent-multiplexer.org
+                claude-agent-cmux-backend.org claude-agent-tmux-backend.org
 #+end_example
 
 Load order in claude-code.el:
@@ -59,14 +64,14 @@ Load order in claude-code.el:
 |     2 | claude-agent-permission | Tool permissions, no deps      |
 |     3 | claude-agent-ide        | Buffer context, no deps        |
 |     4 | claude-agent            | UI/coordination layer, needs 1-3 |
-|     5 | claude-org-session      | Session state, needs 4         |
-|     6 | claude-org-queue        | Block queue, needs 5           |
-|     7 | claude-org-response     | Response rendering, needs 5    |
-|     8 | claude-org              | Top-level org integration      |
-|     9 | claude-org-scheduled    | Scheduled execution, needs 8   |
-|  10.5 | claude-org-workspace-bridge | Workspace bridge functions, needs 8 |
-|  10.6 | claude-org-terminal-base | Shared terminal utilities, needs 4 |
-|    11 | claude-org-cmux         | cmux terminal backend, needs 10.5/10.6 |
+|     5 | code-agent-org-session      | Session state, needs 4         |
+|     6 | code-agent-org-queue        | Block queue, needs 5           |
+|     7 | code-agent-org-response     | Response rendering, needs 5    |
+|     8 | code-agent-org              | Top-level org integration      |
+|     9 | code-agent-org-scheduled    | Scheduled execution, needs 8   |
+|  10.5 | code-agent-org-workspace-bridge | Workspace bridge functions, needs 8 |
+|  10.6 | code-agent-org-terminal-base | Shared terminal utilities, needs 4 |
+|    11 | code-agent-org-cmux         | cmux terminal backend, needs 10.5/10.6 |
 |    14 | emacs-mcp-server        | Independent, loaded last       |
 |   opt | claude-ide              | WebSocket IDE, needs websocket |
 |   opt | claude-agent-acp        | OpenCode ACP backend, needs acp pkg |
@@ -104,14 +109,14 @@ These do NOT exist in the codebase:
 
 | To add...              | Go here                                                    |
 |------------------------+------------------------------------------------------------|
-| New backend            | Create claude-agent-BACKEND.org, add to claude-code.el     |
+| New agent backend      | Subclass =claude-agent-agent-backend= (or =-acp-agent-backend= for ACP); register in =code-agent-org-backend-registry= |
+| New multiplexer backend| Subclass =claude-agent-multiplexer-backend=; register in =code-agent-org-backend-registry= |
 | New MCP tool           | Call =emacs-mcp-server-register-tool= from any module      |
 | New structural test    | Add =ert-deftest= to test-structural.el with =FIX:= msg   |
-| New org sub-module     | Create claude-org-NAME.org, add to claude-code.el/Makefile |
+| New org sub-module     | Create code-agent-org-NAME.org, add to claude-code.el/Makefile |
 | New test file          | Create tests/test-NAME.el, add to Makefile target          |
 | New behavior prompt    | Add .org file to prompts/tags/                             |
-| New agent profile      | Push =make-claude-org-cmux--agent-profile= onto registry,  |
-|                        | add launch-fn + defcustom + Python launcher + bridge hooks |
+| New agent profile      | Push onto =claude-agent-multiplexer--agent-profiles= (post Phase 3); add launch-fn + defcustom + Python launcher + bridge hooks |
 
 * Development Lifecycle
 
@@ -132,3 +137,14 @@ Key constraints for literate-elisp:
 All source lives in .org files loaded by literate-elisp. Section headings
 serve as module documentation. See =docs/literate-programming-principles.org=
 for full guidelines.
+
+* Tri-Protocol Architecture
+
+Shipped 2026-04-24 (Phases 0–4).  Spec:
+=docs/design-docs/2026-tri-protocol-backend-refactor.org=.  Four
+protocols: lifecycle (=claude-agent-backend-*=), agent-wire
+(=claude-agent-agent-*=), mux-wire (=claude-agent-mux-*=),
+org-integration (=claude-org-backend-*=).  Families: agent (claude-code,
+opencode, gemini, codex) and multiplexer (cmux, tmux), symmetric
+siblings.  Frontend dispatches via Protocol 3 generics on the backend
+instance — no =CLAUDE_BACKEND= string-match.

@@ -1,6 +1,6 @@
 ;;; test-cmux-e2e-agent-profiles.el --- E2E tests for multi-agent profile support -*- lexical-binding: t -*-
 
-;; Strategy: Mock ONLY the cmux CLI gateway (claude-org-cmux--call).
+;; Strategy: Mock ONLY the cmux CLI gateway (code-agent-org-cmux--call).
 ;; Everything else — org buffer, properties, profile dispatch, session lookup —
 ;; uses real code against real org buffers.
 ;;
@@ -28,8 +28,8 @@
   (load (expand-file-name "tests/support/test-helpers.el" project-root) nil t)
   (require 'literate-elisp)
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org-cmux.org" project-root)))
+  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent-org-cmux.org" project-root)))
 
 (defvar test-ap--project-root
   (file-name-directory
@@ -62,7 +62,7 @@
       (format "<!-- fixture %s not found -->" name))))
 
 (defun test-ap--mock-call (subcommand &rest args)
-  "Mock implementation of `claude-org-cmux--call'.
+  "Mock implementation of `code-agent-org-cmux--call'.
 Records the call and returns fixture-based or override responses."
   (push (cons subcommand args) test-ap--mock-calls)
   (let ((override (cdr (assoc subcommand test-ap--mock-responses))))
@@ -99,7 +99,7 @@ Records the call and returns fixture-based or override responses."
   (declare (indent 0))
   `(let ((test-ap--mock-calls nil)
          (test-ap--mock-responses nil))
-     (cl-letf (((symbol-function 'claude-org-cmux--call) #'test-ap--mock-call))
+     (cl-letf (((symbol-function 'code-agent-org-cmux--call) #'test-ap--mock-call))
        ,@body)))
 
 ;;; ============================================================================
@@ -133,43 +133,43 @@ Records the call and returns fixture-based or override responses."
 (ert-deftest test-ap-profile-registry-claude ()
   "Claude profile is registered and has expected fields."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'claude)))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'claude)))
     (should profile)
-    (should (equal (claude-org-cmux--agent-profile-name profile) 'claude))
-    (should (functionp (claude-org-cmux--agent-profile-launch-fn profile)))
-    (should (claude-org-cmux--agent-profile-ready-patterns profile))
-    (should (claude-org-cmux--agent-profile-busy-patterns profile))
-    (should (claude-org-cmux--agent-profile-cancel-keys profile))
-    (should (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))
+    (should (equal (code-agent-org-cmux--agent-profile-name profile) 'claude))
+    (should (functionp (code-agent-org-cmux--agent-profile-launch-fn profile)))
+    (should (code-agent-org-cmux--agent-profile-ready-patterns profile))
+    (should (code-agent-org-cmux--agent-profile-busy-patterns profile))
+    (should (code-agent-org-cmux--agent-profile-cancel-keys profile))
+    (should (code-agent-org-cmux--agent-profile-supports-ide profile))
+    (should (code-agent-org-cmux--agent-profile-supports-resume profile))
     ;; Claude Code uses vi-mode TUI (sends "i" before text)
-    (should (claude-org-cmux--agent-profile-vi-mode profile))))
+    (should (code-agent-org-cmux--agent-profile-vi-mode profile))))
 
 (ert-deftest test-ap-profile-registry-copilot ()
   "Copilot profile is registered and has expected fields."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'copilot)))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'copilot)))
     (should profile)
-    (should (equal (claude-org-cmux--agent-profile-name profile) 'copilot))
-    (should (functionp (claude-org-cmux--agent-profile-launch-fn profile)))
-    (should (claude-org-cmux--agent-profile-ready-patterns profile))
-    (should (claude-org-cmux--agent-profile-busy-patterns profile))
-    (should (claude-org-cmux--agent-profile-cancel-keys profile))
+    (should (equal (code-agent-org-cmux--agent-profile-name profile) 'copilot))
+    (should (functionp (code-agent-org-cmux--agent-profile-launch-fn profile)))
+    (should (code-agent-org-cmux--agent-profile-ready-patterns profile))
+    (should (code-agent-org-cmux--agent-profile-busy-patterns profile))
+    (should (code-agent-org-cmux--agent-profile-cancel-keys profile))
     ;; Copilot does NOT support IDE but DOES support resume
-    (should-not (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))
+    (should-not (code-agent-org-cmux--agent-profile-supports-ide profile))
+    (should (code-agent-org-cmux--agent-profile-supports-resume profile))
     ;; Copilot does NOT use vi-mode
-    (should-not (claude-org-cmux--agent-profile-vi-mode profile))))
+    (should-not (code-agent-org-cmux--agent-profile-vi-mode profile))))
 
 (ert-deftest test-ap-profile-registry-nil ()
   "nil agent-type returns nil (triggers legacy path)."
   :tags '(:unit :fast :agent-profiles)
-  (should-not (claude-org-cmux--get-agent-profile nil)))
+  (should-not (code-agent-org-cmux--get-agent-profile nil)))
 
 (ert-deftest test-ap-profile-registry-unknown ()
   "Unknown agent-type string returns nil gracefully."
   :tags '(:unit :fast :agent-profiles)
-  (should-not (claude-org-cmux--get-agent-profile 'some-unknown-agent)))
+  (should-not (code-agent-org-cmux--get-agent-profile 'some-unknown-agent)))
 
 ;;; ============================================================================
 ;;; Tests: build-launch-command dispatch
@@ -190,9 +190,9 @@ Records the call and returns fixture-based or override responses."
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'claude)
-          (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'claude)
+          (code-agent-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-001" nil)))
         (should (stringp cmd))
         (should (string-match-p "claude-workspace" cmd))
@@ -215,8 +215,8 @@ test query
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'claude))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'claude))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-resume" nil)))
         (should (stringp cmd))
         (should (string-match-p "claude-workspace" cmd))
@@ -239,9 +239,9 @@ test query
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'copilot)
-          (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'copilot)
+          (code-agent-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-002" nil)))
         (should (stringp cmd))
         (should (string-match-p "copilot-workspace" cmd))
@@ -265,9 +265,9 @@ test query
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'copilot)
-          (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'copilot)
+          (code-agent-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-copilot-resume" nil)))
         (should (stringp cmd))
         (should (string-match-p "copilot-workspace" cmd))
@@ -292,10 +292,10 @@ test query
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'copilot)
-          (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace")
-          (claude-org-cmux-extra-args '("--dangerously-skip-permissions" "--ide")))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'copilot)
+          (code-agent-org-cmux-copilot-workspace-script "uv run copilot-workspace")
+          (code-agent-org-cmux-extra-args '("--dangerously-skip-permissions" "--ide")))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-copilot-filter" nil)))
         (should (stringp cmd))
         ;; Claude-only flags must be filtered
@@ -316,8 +316,8 @@ test query
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type nil))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type nil))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-003" nil)))
         (should (stringp cmd))
         ;; Legacy path uses claude-workspace script
@@ -331,17 +331,17 @@ test query
 (ert-deftest test-ap-cancel-claude-uses-escape ()
   "Cancel for claude profile sends escape (lowercase cmux key name)."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'claude)))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'claude)))
     (should profile)
-    (let ((cancel-keys (claude-org-cmux--agent-profile-cancel-keys profile)))
+    (let ((cancel-keys (code-agent-org-cmux--agent-profile-cancel-keys profile)))
       (should (member "escape" cancel-keys)))))
 
 (ert-deftest test-ap-cancel-copilot-uses-ctrl-c-twice ()
   "Cancel for copilot profile sends C-c twice."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'copilot)))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'copilot)))
     (should profile)
-    (let ((cancel-keys (claude-org-cmux--agent-profile-cancel-keys profile)))
+    (let ((cancel-keys (code-agent-org-cmux--agent-profile-cancel-keys profile)))
       ;; Copilot needs C-c twice to interrupt
       (should (= 2 (length (cl-remove-if-not
                              (lambda (k) (string= k "C-c"))
@@ -354,24 +354,24 @@ test query
 (ert-deftest test-ap-claude-profile-has-ready-patterns ()
   "Claude profile ready-patterns contain known TUI strings."
   :tags '(:unit :fast :agent-profiles)
-  (let* ((profile (claude-org-cmux--get-agent-profile 'claude))
-         (patterns (claude-org-cmux--agent-profile-ready-patterns profile)))
+  (let* ((profile (code-agent-org-cmux--get-agent-profile 'claude))
+         (patterns (code-agent-org-cmux--agent-profile-ready-patterns profile)))
     (should (listp patterns))
     (should (> (length patterns) 0))))
 
 (ert-deftest test-ap-copilot-profile-has-ready-patterns ()
   "Copilot profile ready-patterns contain known TUI strings."
   :tags '(:unit :fast :agent-profiles)
-  (let* ((profile (claude-org-cmux--get-agent-profile 'copilot))
-         (patterns (claude-org-cmux--agent-profile-ready-patterns profile)))
+  (let* ((profile (code-agent-org-cmux--get-agent-profile 'copilot))
+         (patterns (code-agent-org-cmux--agent-profile-ready-patterns profile)))
     (should (listp patterns))
     (should (> (length patterns) 0))))
 
 (ert-deftest test-ap-copilot-profile-has-busy-patterns ()
   "Copilot profile busy-patterns contain known TUI strings."
   :tags '(:unit :fast :agent-profiles)
-  (let* ((profile (claude-org-cmux--get-agent-profile 'copilot))
-         (patterns (claude-org-cmux--agent-profile-busy-patterns profile)))
+  (let* ((profile (code-agent-org-cmux--get-agent-profile 'copilot))
+         (patterns (code-agent-org-cmux--agent-profile-busy-patterns profile)))
     (should (listp patterns))
     (should (> (length patterns) 0))))
 
@@ -382,30 +382,30 @@ test query
 (ert-deftest test-ap-claude-profile-supports-ide ()
   "Claude profile supports IDE server integration."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'claude)))
-    (should (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'claude)))
+    (should (code-agent-org-cmux--agent-profile-supports-ide profile))
+    (should (code-agent-org-cmux--agent-profile-supports-resume profile))))
 
 (ert-deftest test-ap-copilot-profile-no-ide ()
   "Copilot profile does NOT support IDE server but supports resume."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'copilot)))
-    (should-not (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'copilot)))
+    (should-not (code-agent-org-cmux--agent-profile-supports-ide profile))
+    (should (code-agent-org-cmux--agent-profile-supports-resume profile))))
 
 ;;; ============================================================================
 ;;; Tests: get-agent-profile via org property (AGENT_TYPE)
 ;;; ============================================================================
 
 (ert-deftest test-ap-get-agent-profile-respects-customization ()
-  "get-agent-profile uses claude-org-cmux-agent-type customization variable."
+  "get-agent-profile uses code-agent-org-cmux-agent-type customization variable."
   :tags '(:unit :fast :agent-profiles)
-  (let ((claude-org-cmux-agent-type 'copilot))
-    (let ((profile (claude-org-cmux--get-agent-profile)))
+  (let ((code-agent-org-cmux-agent-type 'copilot))
+    (let ((profile (code-agent-org-cmux--get-agent-profile)))
       (should profile)
-      (should (equal (claude-org-cmux--agent-profile-name profile) 'copilot))))
-  (let ((claude-org-cmux-agent-type nil))
-    (should-not (claude-org-cmux--get-agent-profile))))
+      (should (equal (code-agent-org-cmux--agent-profile-name profile) 'copilot))))
+  (let ((code-agent-org-cmux-agent-type nil))
+    (should-not (code-agent-org-cmux--get-agent-profile))))
 
 ;;; ============================================================================
 ;;; Integration Tests: launch flow with mock cmux CLI
@@ -416,13 +416,13 @@ test query
   "launch commands for claude and copilot are structurally different."
   :tags '(:integration :agent-profiles)
   (let* ((claude-cmd
-          (let ((claude-org-cmux-agent-type 'claude))
-            (claude-org-cmux--build-launch-command
+          (let ((code-agent-org-cmux-agent-type 'claude))
+            (code-agent-org-cmux--build-launch-command
              "/project" "session-001" nil)))
          (copilot-cmd
-          (let ((claude-org-cmux-agent-type 'copilot)
-                (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
-            (claude-org-cmux--build-launch-command
+          (let ((code-agent-org-cmux-agent-type 'copilot)
+                (code-agent-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
+            (code-agent-org-cmux--build-launch-command
              "/project" "session-002" nil))))
     ;; Claude uses claude-workspace
     (should (string-match-p "claude-workspace" claude-cmd))
@@ -447,9 +447,9 @@ test query
                 ":END:\n\n"
                 "#+begin_src ai\ntest\n#+end_src\n")
       (goto-char (point-min))
-      (let ((claude-org-cmux-agent-type 'copilot))
+      (let ((code-agent-org-cmux-agent-type 'copilot))
         (condition-case nil
-            (claude-org-cmux-cancel)
+            (code-agent-org-cmux-cancel)
           (error nil))
         ;; Should have issued send-key calls
         (let ((send-key-calls (test-ap--mock-calls-for "send-key")))
@@ -470,9 +470,9 @@ test query
                 ":END:\n\n"
                 "#+begin_src ai\ntest\n#+end_src\n")
       (goto-char (point-min))
-      (let ((claude-org-cmux-agent-type 'claude))
+      (let ((code-agent-org-cmux-agent-type 'claude))
         (condition-case nil
-            (claude-org-cmux-cancel)
+            (code-agent-org-cmux-cancel)
           (error nil))
         (let ((send-key-calls (test-ap--mock-calls-for "send-key")))
           ;; Escape for claude
@@ -555,13 +555,13 @@ Legacy query.
   "get-status uses copilot busy/ready patterns when agent is copilot."
   :tags '(:integration :agent-profiles)
   (test-ap--with-mock
-    (let ((claude-org-cmux-agent-type 'copilot))
+    (let ((code-agent-org-cmux-agent-type 'copilot))
       ;; Override capture-pane to return a copilot-style ready prompt
       (push (cons "capture-pane" "> ")
             test-ap--mock-responses)
       ;; get-status should not crash with copilot profile
       (let ((result (condition-case err
-                        (claude-org-cmux-get-status "surface:ap-mock-001")
+                        (code-agent-org-cmux-get-status "surface:ap-mock-001")
                       (error (format "error: %s" err)))))
         ;; Should return a status symbol or string, not crash
         (should result)))))
@@ -570,9 +570,9 @@ Legacy query.
   "get-status uses claude busy/ready patterns when agent is claude."
   :tags '(:integration :agent-profiles)
   (test-ap--with-mock
-    (let ((claude-org-cmux-agent-type 'claude))
+    (let ((code-agent-org-cmux-agent-type 'claude))
       (let ((result (condition-case err
-                        (claude-org-cmux-get-status "surface:ap-mock-001")
+                        (code-agent-org-cmux-get-status "surface:ap-mock-001")
                       (error (format "error: %s" err)))))
         (should result)))))
 
@@ -583,19 +583,19 @@ Legacy query.
 (ert-deftest test-ap-profile-registry-opencode ()
   "OpenCode profile is registered and has expected fields."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'opencode)))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'opencode)))
     (should profile)
-    (should (equal (claude-org-cmux--agent-profile-name profile) 'opencode))
-    (should (functionp (claude-org-cmux--agent-profile-launch-fn profile)))
-    (should (claude-org-cmux--agent-profile-ready-patterns profile))
-    (should (claude-org-cmux--agent-profile-busy-patterns profile))
-    (should (claude-org-cmux--agent-profile-cancel-keys profile))
+    (should (equal (code-agent-org-cmux--agent-profile-name profile) 'opencode))
+    (should (functionp (code-agent-org-cmux--agent-profile-launch-fn profile)))
+    (should (code-agent-org-cmux--agent-profile-ready-patterns profile))
+    (should (code-agent-org-cmux--agent-profile-busy-patterns profile))
+    (should (code-agent-org-cmux--agent-profile-cancel-keys profile))
     ;; OpenCode does NOT support IDE but DOES support resume and system-prompt
-    (should-not (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))
-    (should (claude-org-cmux--agent-profile-supports-system-prompt profile))
+    (should-not (code-agent-org-cmux--agent-profile-supports-ide profile))
+    (should (code-agent-org-cmux--agent-profile-supports-resume profile))
+    (should (code-agent-org-cmux--agent-profile-supports-system-prompt profile))
     ;; OpenCode does NOT use vi-mode
-    (should-not (claude-org-cmux--agent-profile-vi-mode profile))))
+    (should-not (code-agent-org-cmux--agent-profile-vi-mode profile))))
 
 (ert-deftest test-ap-build-launch-command-opencode-profile ()
   "build-launch-command with 'opencode profile builds opencode-workspace command."
@@ -612,9 +612,9 @@ Legacy query.
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'opencode)
-          (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'opencode)
+          (code-agent-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-oc-001" nil)))
         (should (stringp cmd))
         (should (string-match-p "opencode-workspace" cmd))
@@ -638,9 +638,9 @@ test query
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'opencode)
-          (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'opencode)
+          (code-agent-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-oc-resume" nil)))
         (should (stringp cmd))
         (should (string-match-p "opencode-workspace" cmd))
@@ -663,10 +663,10 @@ test query
 test query
 #+end_src
 "
-    (let ((claude-org-cmux-agent-type 'opencode)
-          (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace")
-          (claude-org-cmux-extra-args '("--dangerously-skip-permissions" "--ide")))
-      (let ((cmd (claude-org-cmux--build-launch-command
+    (let ((code-agent-org-cmux-agent-type 'opencode)
+          (code-agent-org-cmux-opencode-workspace-script "uv run opencode-workspace")
+          (code-agent-org-cmux-extra-args '("--dangerously-skip-permissions" "--ide")))
+      (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/test/project" "session-ap-oc-filter" nil)))
         (should (stringp cmd))
         ;; Claude-only flags must be filtered
@@ -676,9 +676,9 @@ test query
 (ert-deftest test-ap-cancel-opencode-uses-ctrl-c ()
   "Cancel for opencode profile sends C-c once."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'opencode)))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'opencode)))
     (should profile)
-    (let ((cancel-keys (claude-org-cmux--agent-profile-cancel-keys profile)))
+    (let ((cancel-keys (code-agent-org-cmux--agent-profile-cancel-keys profile)))
       ;; OpenCode TUI cancel is single C-c
       (should (= 1 (length cancel-keys)))
       (should (string= "C-c" (car cancel-keys))))))
@@ -686,8 +686,8 @@ test query
 (ert-deftest test-ap-opencode-profile-has-ready-patterns ()
   "OpenCode profile ready-patterns contain expected TUI strings."
   :tags '(:unit :fast :agent-profiles)
-  (let* ((profile (claude-org-cmux--get-agent-profile 'opencode))
-         (patterns (claude-org-cmux--agent-profile-ready-patterns profile)))
+  (let* ((profile (code-agent-org-cmux--get-agent-profile 'opencode))
+         (patterns (code-agent-org-cmux--agent-profile-ready-patterns profile)))
     (should (listp patterns))
     (should (> (length patterns) 0))
     ;; Must include the main OpenCode prompt symbol
@@ -696,17 +696,17 @@ test query
 (ert-deftest test-ap-opencode-profile-has-busy-patterns ()
   "OpenCode profile busy-patterns contain expected TUI strings."
   :tags '(:unit :fast :agent-profiles)
-  (let* ((profile (claude-org-cmux--get-agent-profile 'opencode))
-         (patterns (claude-org-cmux--agent-profile-busy-patterns profile)))
+  (let* ((profile (code-agent-org-cmux--get-agent-profile 'opencode))
+         (patterns (code-agent-org-cmux--agent-profile-busy-patterns profile)))
     (should (listp patterns))
     (should (> (length patterns) 0))))
 
 (ert-deftest test-ap-opencode-profile-no-ide ()
   "OpenCode profile does NOT support IDE server but supports resume."
   :tags '(:unit :fast :agent-profiles)
-  (let ((profile (claude-org-cmux--get-agent-profile 'opencode)))
-    (should-not (claude-org-cmux--agent-profile-supports-ide profile))
-    (should (claude-org-cmux--agent-profile-supports-resume profile))))
+  (let ((profile (code-agent-org-cmux--get-agent-profile 'opencode)))
+    (should-not (code-agent-org-cmux--agent-profile-supports-ide profile))
+    (should (code-agent-org-cmux--agent-profile-supports-resume profile))))
 
 (ert-deftest test-ap-org-property-agent-type-opencode ()
   "AGENT_TYPE org property is read correctly for opencode."
@@ -732,12 +732,12 @@ Do something with opencode.
   "get-status uses opencode busy/ready patterns when agent is opencode."
   :tags '(:integration :agent-profiles)
   (test-ap--with-mock
-    (let ((claude-org-cmux-agent-type 'opencode))
+    (let ((code-agent-org-cmux-agent-type 'opencode))
       ;; Override capture-pane to return an OpenCode-style ready prompt
       (push (cons "capture-pane" "❯ ")
             test-ap--mock-responses)
       (let ((result (condition-case err
-                        (claude-org-cmux-get-status "surface:ap-mock-001")
+                        (code-agent-org-cmux-get-status "surface:ap-mock-001")
                       (error (format "error: %s" err)))))
         (should result)))))
 
@@ -755,9 +755,9 @@ Do something with opencode.
                 ":END:\n\n"
                 "#+begin_src ai\ntest\n#+end_src\n")
       (goto-char (point-min))
-      (let ((claude-org-cmux-agent-type 'opencode))
+      (let ((code-agent-org-cmux-agent-type 'opencode))
         (condition-case nil
-            (claude-org-cmux-cancel)
+            (code-agent-org-cmux-cancel)
           (error nil))
         (let ((send-key-calls (test-ap--mock-calls-for "send-key")))
           ;; One C-c for opencode
@@ -767,18 +767,18 @@ Do something with opencode.
   "launch commands for claude, copilot, and opencode are structurally different."
   :tags '(:integration :agent-profiles)
   (let* ((claude-cmd
-          (let ((claude-org-cmux-agent-type 'claude))
-            (claude-org-cmux--build-launch-command
+          (let ((code-agent-org-cmux-agent-type 'claude))
+            (code-agent-org-cmux--build-launch-command
              "/project" "session-001" nil)))
          (copilot-cmd
-          (let ((claude-org-cmux-agent-type 'copilot)
-                (claude-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
-            (claude-org-cmux--build-launch-command
+          (let ((code-agent-org-cmux-agent-type 'copilot)
+                (code-agent-org-cmux-copilot-workspace-script "uv run copilot-workspace"))
+            (code-agent-org-cmux--build-launch-command
              "/project" "session-002" nil)))
          (opencode-cmd
-          (let ((claude-org-cmux-agent-type 'opencode)
-                (claude-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
-            (claude-org-cmux--build-launch-command
+          (let ((code-agent-org-cmux-agent-type 'opencode)
+                (code-agent-org-cmux-opencode-workspace-script "uv run opencode-workspace"))
+            (code-agent-org-cmux--build-launch-command
              "/project" "session-003" nil))))
     ;; Each uses its own workspace script
     (should (string-match-p "claude-workspace" claude-cmd))
@@ -797,8 +797,8 @@ Do something with opencode.
   "Multi-line text to opencode (non-vi-mode) uses shift-enter between lines."
   :tags '(:unit :fast :agent-profiles)
   (test-ap--with-mock
-    (let ((claude-org-cmux-agent-type 'opencode))
-      (claude-org-cmux--send-text
+    (let ((code-agent-org-cmux-agent-type 'opencode))
+      (code-agent-org-cmux--send-text
        test-ap--mock-surface-id "line one\nline two\nline three")
       ;; Should use 'send' for each line (3 lines = 3 send calls)
       (let ((send-calls (test-ap--mock-calls-for "send")))
@@ -817,8 +817,8 @@ Do something with opencode.
   "Single-line text to opencode (non-vi-mode) can use send directly."
   :tags '(:unit :fast :agent-profiles)
   (test-ap--with-mock
-    (let ((claude-org-cmux-agent-type 'opencode))
-      (claude-org-cmux--send-text
+    (let ((code-agent-org-cmux-agent-type 'opencode))
+      (code-agent-org-cmux--send-text
        test-ap--mock-surface-id "single line no newlines")
       ;; Single-line: 'send' is fine (no \n to misinterpret)
       (let ((send-calls (test-ap--mock-calls-for "send")))
@@ -834,8 +834,8 @@ Do something with opencode.
     ;; Mock capture-pane for ensure-insert-mode check
     (push (cons "capture-pane" "-- INSERT --")
           test-ap--mock-responses)
-    (let ((claude-org-cmux-agent-type 'claude))
-      (claude-org-cmux--send-text
+    (let ((code-agent-org-cmux-agent-type 'claude))
+      (code-agent-org-cmux--send-text
        test-ap--mock-surface-id "line one\nline two")
       ;; Claude vi-mode: 'send' is used (INSERT mode handles newlines)
       (let ((send-calls (test-ap--mock-calls-for "send")))

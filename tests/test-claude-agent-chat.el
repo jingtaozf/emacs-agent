@@ -87,7 +87,7 @@ We mock the backend query to verify it gets called."
                          'mock-handle)))
               ;; Inject a pre-created backend
               (setq claude-agent-chat--backend
-                    (claude-agent-json-backend--create :persistent-p nil))
+                    (claude-agent-claude-code-backend--create :persistent-p nil))
               (claude-agent-chat--send-input "Hello Claude")
               (should query-called))))
       (test-chat--cleanup))))
@@ -103,7 +103,7 @@ We mock the backend query to verify it gets called."
           (with-current-buffer claude-agent-chat-buffer-name
             ;; Mock backend and query handle
             (setq claude-agent-chat--backend
-                  (claude-agent-json-backend--create :persistent-p nil))
+                  (claude-agent-claude-code-backend--create :persistent-p nil))
             (setq claude-agent-chat--query-handle 'mock-handle)
             (setq claude-agent-chat--waiting t)
             ;; Mock cancel
@@ -127,7 +127,7 @@ We mock the backend query to verify it gets called."
           (with-current-buffer claude-agent-chat-buffer-name
             ;; Set a backend
             (setq claude-agent-chat--backend
-                  (claude-agent-json-backend--create :persistent-p nil))
+                  (claude-agent-claude-code-backend--create :persistent-p nil))
             ;; Mock cleanup
             (cl-letf (((symbol-function 'claude-agent-backend-cleanup)
                        (lambda (_backend) (setq cleanup-called t))))

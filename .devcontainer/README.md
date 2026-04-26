@@ -41,7 +41,7 @@ Credentials are stored in the Docker volume and persist across container restart
 make docker-status
 ```
 
-## Integration with claude-org-mode
+## Integration with code-agent-org-mode
 
 ### Basic Setup
 
@@ -136,7 +136,7 @@ docker compose exec claude ssh -T git@github.com
 
 1. Verify both `CLAUDE_HOST_PATH` and `CLAUDE_CONTAINER_PATH` are set:
    ```elisp
-   (claude-org--get-path-mappings)
+   (code-agent-org--get-path-mappings)
    ;; Should return: (("/home/user/project" . "/workspace"))
    ```
 

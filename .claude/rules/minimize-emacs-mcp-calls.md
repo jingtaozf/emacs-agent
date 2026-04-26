@@ -39,7 +39,7 @@ Hooks should filter at multiple layers so we pay the minimum cost:
    anyway (e.g. different hook config downstream), the handler checks
    `tool_name in _INTERACTIVE_TOOLS` and returns before touching MCP.
 
-3. **Elisp dispatcher** — last line of defense. `claude-org--terminal-*`
+3. **Elisp dispatcher** — last line of defense. `code-agent-org--terminal-*`
    dispatchers `cond`-out when the session isn't in the workspace hash
    table, so even an errant MCP call is cheap.
 
@@ -110,14 +110,14 @@ seconds for the full duration of the subprocess.
 
 ### Historical case (April 2026)
 
-`claude-org-cmux--stream-tick` fired every 2 seconds while Claude was running,
+`code-agent-org-cmux--stream-tick` fired every 2 seconds while Claude was running,
 calling `cmux pipe-pane --command cat` synchronously via `call-process`. Each
 tick blocked Emacs 200–1500 ms. The user experienced this as Emacs "hanging"
 intermittently for the entire duration of every Claude query.
 
-Worse, the insertion marker (`claude-org-cmux--stream-marker`) was declared
+Worse, the insertion marker (`code-agent-org-cmux--stream-marker`) was declared
 `defvar-local` but never initialised to an actual marker. The guard
-`(when (and claude-org-cmux--stream-marker ...))` was always nil, so every
+`(when (and code-agent-org-cmux--stream-marker ...))` was always nil, so every
 tick captured output, stripped ANSI, and then silently discarded the result.
 
 The whole subsystem was vestigial — response text was already being delivered

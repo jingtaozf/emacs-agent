@@ -16,9 +16,9 @@
 
 ;;; Code:
 
-;; Note: claude-agent.org and claude-org.org are loaded by Makefile
+;; Note: claude-agent.org and code-agent-org.org are loaded by Makefile
 ;; via literate-elisp-load before this file is loaded.
-;; We don't use (require 'claude-agent) or (require 'claude-org) because
+;; We don't use (require 'claude-agent) or (require 'code-agent-org) because
 ;; the features are provided by the org files, not compiled .el files.
 
 ;; Configure MCP server to use a free port (0 = auto-select) to avoid conflicts
@@ -138,23 +138,23 @@ Returns the value of PREDICATE on success, nil on timeout."
   "Wait for SESSION-KEY to complete or TIMEOUT (default 30s).
 Returns t if completed successfully, nil if timed out."
   (test-claude-wait-until
-   (lambda () (not (claude-org--session-get session-key :busy)))
+   (lambda () (not (code-agent-org--session-get session-key :busy)))
    timeout))
 
 (defun test-claude-execute-and-wait (org-file instruction-num &optional timeout)
   "Execute instruction INSTRUCTION-NUM in ORG-FILE and wait for completion.
 Returns the response text or nil if timeout."
   (with-current-buffer (find-file-noselect org-file)
-    (claude-org-mode 1)
+    (code-agent-org-mode 1)
     (goto-char (point-min))
     (when (re-search-forward
            (format "^\\*+ Instruction %d" instruction-num)
            nil t)
       ;; Find the ai block
       (when (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-        (let ((session-key (claude-org--current-session-key)))
+        (let ((session-key (code-agent-org--current-session-key)))
           ;; Execute
-          (claude-org-execute)
+          (code-agent-org-execute)
           ;; Wait for completion
           (if (test-claude-wait-for-completion session-key timeout)
               ;; Extract response - handle both with and without Response section
@@ -177,7 +177,7 @@ Returns the response text or nil if timeout."
                     (while (and (not end-pos)
                                 (re-search-forward "^\\*+ " nil t))
                       (goto-char (match-beginning 0))
-                      (unless (member claude-org-output-tag (org-get-tags nil nil))
+                      (unless (member code-agent-org-output-tag (org-get-tags nil nil))
                         (setq end-pos (point)))
                       (unless end-pos (forward-line 1)))
                     (buffer-substring-no-properties start (or end-pos (point-max))))))
@@ -211,7 +211,7 @@ Automatically sets org-mode and refreshes property cache."
 
 (defun test-claude-assert-session-uuid-stored (session-key)
   "Assert that SDK UUID is stored for SESSION-KEY."
-  (let ((uuid (claude-org--get-sdk-uuid)))
+  (let ((uuid (code-agent-org--get-sdk-uuid)))
     (should uuid)
     (should (stringp uuid))
     (should (> (length uuid) 0))))
@@ -247,12 +247,12 @@ ARGS are additional options passed to `claude-agent-options'."
 Kills active Claude processes tracked by claude-agent.
 Only kills processes registered in the unified `claude-agent--registry' and
 `claude-agent--active-queries' - does NOT kill other Claude instances."
-  ;; First, try graceful cancellation via claude-org sessions
+  ;; First, try graceful cancellation via code-agent-org sessions
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (when (bound-and-true-p claude-org-mode)
-          (ignore-errors (claude-org-cancel-all))))))
+        (when (bound-and-true-p code-agent-org-mode)
+          (ignore-errors (code-agent-org-cancel-all))))))
   ;; Then forcefully kill any remaining tracked processes
   ;; This only kills processes registered by claude-agent, NOT other sessions
   (when (fboundp 'claude-agent-kill-all-processes)

@@ -104,7 +104,7 @@ def _list_sessions(mcp: McpClient, org_file: str) -> str | None:
     """Return a tab-separated session listing from Emacs (None on failure)."""
     elisp = (
         "(let ((debug-on-error nil) (debug-on-quit nil)) "
-        f'(claude-org-workspace-bridge-list-sessions "{_escape_elisp_string(org_file)}"))'
+        f'(code-agent-org-workspace-bridge-list-sessions "{_escape_elisp_string(org_file)}"))'
     )
     return mcp.eval_elisp(elisp)
 
@@ -246,7 +246,7 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
         try:
             self.mcp.eval_elisp(
                 "(let ((debug-on-error nil) (debug-on-quit nil))"
-                "  (claude-org-cmux--ensure-ide-server "
+                "  (code-agent-org-cmux--ensure-ide-server "
                 f'"{_escape_elisp_string(self.project_root)}" '
                 f'"{_escape_elisp_string(self.session_id)}"))'
             )

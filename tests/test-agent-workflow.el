@@ -28,7 +28,7 @@ Run: emacs --batch -l literate-elisp --eval '(literate-elisp-load \"FILE.org\")'
   (when test-agent-workflow--project-root
     (let ((default-directory test-agent-workflow--project-root)
           (org-modules '("claude-agent.org"
-                         "claude-org.org"
+                         "code-agent-org.org"
                          "emacs-mcp-server.org"))
           (failures nil))
       ;; These should already be loaded by the test runner.

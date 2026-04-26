@@ -21,7 +21,7 @@
                                                  default-directory))))))))
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
   (literate-elisp-load (expand-file-name "emacs-mcp-server.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org.org" project-root)))
+  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root)))
 
 (defun emacs-e2e-start-server (port)
   "Start the MCP HTTP server on PORT for E2E testing."

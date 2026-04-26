@@ -22,7 +22,7 @@ this feature.
 
 ## Workflow
 
-1. Open `workspace-test.org` in Emacs (already has claude-org-mode)
+1. Open `workspace-test.org` in Emacs (already has code-agent-org-mode)
 2. Navigate to relevant test workspace/story
 3. Execute ai block or call functions via evalElisp
 4. Verify results via evalElisp + cmux CLI commands

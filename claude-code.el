@@ -19,16 +19,18 @@
 ;;
 ;; This is the package entry point that loads all modules via literate-elisp:
 ;; - claude-agent.org: Core SDK for process management, query API, permissions
-;; - claude-org.org: Org-mode integration with AI blocks and streaming
+;; - claude-agent-agent.org: Abstract base for AI-agent backends (Protocol 2a)
+;; - claude-agent-multiplexer.org: Abstract base for multiplexer backends (Protocol 2b)
+;; - code-agent-org.org: Org-mode integration with AI blocks and streaming
 ;; - emacs-mcp-server.org: MCP HTTP server exposing Emacs tools to Claude
 ;;
 ;; Quick Start:
 ;;   (require 'claude-code)
 ;;   M-x claude-agent-chat    ; Interactive chat
-;;   M-x claude-org-mode      ; Enable in org files
+;;   M-x code-agent-org-mode      ; Enable in org files
 ;;
 ;; For org-mode integration, add to your org file:
-;;   # -*- mode: org; eval: (claude-org-mode 1) -*-
+;;   # -*- mode: org; eval: (code-agent-org-mode 1) -*-
 ;;
 ;; See README.org for full documentation.
 
@@ -59,15 +61,32 @@
 (claude-code--load-module "claude-agent-backend")
 (claude-code--load-module "claude-agent-permission")
 (claude-code--load-module "claude-agent-ide")
+;; Abstract bases for the two backend families (Phase 0 of the
+;; tri-protocol refactor — see
+;; docs/design-docs/2026-tri-protocol-backend-refactor.org).
+;; Skeleton-only: no concrete backend inherits from these yet.
+(claude-code--load-module "claude-agent-agent")
+(claude-code--load-module "claude-agent-multiplexer")
+;; Concrete multiplexer backends register here as subclasses of the
+;; abstract multiplexer-backend and are added to
+;; `code-agent-org-backend-registry' so the frontend dispatches on the
+;; backend instance instead of string-matching CLAUDE_BACKEND.
+(claude-code--load-module "claude-agent-cmux-backend")
+(claude-code--load-module "claude-agent-tmux-backend")
+;; ACP backends (OpenCode / Gemini / Codex) are OPT-IN — users load
+;; them explicitly in their init file if they use those agents.
+;; The `code-agent-org-backend-registry' entries reference these
+;; factories by name, so invoking them without loading will raise
+;; `void-function'.  This matches ARCHITECTURE.org's OPTIONAL tag.
 (claude-code--load-module "claude-agent")
-(claude-code--load-module "claude-org-session")
-(claude-code--load-module "claude-org-queue")
-(claude-code--load-module "claude-org-response")
-(claude-code--load-module "claude-org")
-(claude-code--load-module "claude-org-scheduled")
-(claude-code--load-module "claude-org-workspace-bridge")
-(claude-code--load-module "claude-org-terminal-base")
-(claude-code--load-module "claude-org-cmux")
+(claude-code--load-module "code-agent-org-session")
+(claude-code--load-module "code-agent-org-queue")
+(claude-code--load-module "code-agent-org-response")
+(claude-code--load-module "code-agent-org")
+(claude-code--load-module "code-agent-org-scheduled")
+(claude-code--load-module "code-agent-org-workspace-bridge")
+(claude-code--load-module "code-agent-org-terminal-base")
+(claude-code--load-module "code-agent-org-cmux")
 (claude-code--load-module "emacs-mcp-server")
 
 (provide 'claude-code)

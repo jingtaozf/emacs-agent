@@ -226,7 +226,7 @@ class TestHandleResponseQueryCompleted:
         bridge._write_custom_id("instr-custom-id")
         bridge._handle_response({"last_assistant_message": "hello"})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        assert any("claude-org--terminal-query-completed" in c for c in calls)
+        assert any("code-agent-org--terminal-query-completed" in c for c in calls)
 
     def test_query_completed_called_even_without_response(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
@@ -234,7 +234,7 @@ class TestHandleResponseQueryCompleted:
         bridge = make_bridge(mcp, session_id="sid")
         bridge._handle_response({})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
-        assert any("claude-org--terminal-query-completed" in c for c in calls)
+        assert any("code-agent-org--terminal-query-completed" in c for c in calls)
 
 
 class TestEscapeElispString:
@@ -868,7 +868,7 @@ class TestHandlePermission:
         bridge = make_bridge(mcp)
         bridge._handle_permission({"tool_name": "AskUserQuestion"})
         call_arg = mcp.eval_elisp.call_args[0][0]
-        assert "claude-org--terminal-permission-needed" in call_arg
+        assert "code-agent-org--terminal-permission-needed" in call_arg
         assert "AskUserQuestion" in call_arg
         output = json.loads(capsys.readouterr().out)
         assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
@@ -905,7 +905,7 @@ class TestHandlePermissionClear:
         bridge = make_bridge(mcp)
         bridge._handle_permission_clear({"tool_name": "AskUserQuestion"})
         call_arg = mcp.eval_elisp.call_args[0][0]
-        assert "claude-org--terminal-permission-resolved" in call_arg
+        assert "code-agent-org--terminal-permission-resolved" in call_arg
         assert "sid" in call_arg
 
     def test_clears_in_emacs_for_exit_plan_mode(self):
@@ -913,7 +913,7 @@ class TestHandlePermissionClear:
         bridge = make_bridge(mcp)
         bridge._handle_permission_clear({"tool_name": "ExitPlanMode"})
         call_arg = mcp.eval_elisp.call_args[0][0]
-        assert "claude-org--terminal-permission-resolved" in call_arg
+        assert "code-agent-org--terminal-permission-resolved" in call_arg
 
     def test_skips_mcp_for_non_interactive_tool(self):
         mcp = MagicMock()

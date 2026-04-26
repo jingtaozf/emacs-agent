@@ -142,7 +142,7 @@ No backend server required - communicates directly with Claude Code CLI via subp
 
 Primary Files:
 - =claude-agent.org= - Core SDK (process management, JSON protocol, query API)
-- =claude-org.org= - Org-mode integration (AI blocks, sessions, streaming)
+- =code-agent-org.org= - Org-mode integration (AI blocks, sessions, streaming)
 
 ** Project Structure
 :PROPERTIES:
@@ -151,14 +151,14 @@ Primary Files:
 #+begin_example
 claude-agent/
 ├── claude-agent.org             # MAIN: Core SDK in literate programming format
-├── claude-org.org               # Org-mode integration (depends on claude-agent)
+├── code-agent-org.org               # Org-mode integration (depends on claude-agent)
 ├── claude-code.el               # Package entry point (requires above modules)
 ├── emacs-mcp-server.org         # MCP server for Emacs tools
 ├── README.org                   # User documentation
 ├── Makefile                     # Build and test commands
 ├── tests/                       # All test files
 │   ├── test-claude-agent-*.el   # Core SDK tests
-│   ├── test-claude-org-*.el     # Org integration tests
+│   ├── test-code-agent-org-*.el     # Org integration tests
 │   └── test-*.el                # Other tests (MCP, Docker, etc.)
 ├── reference/
 │   └── claude-agent-sdk-python/ # Official Python SDK (git submodule)
@@ -201,9 +201,9 @@ Claude Code CLI via subprocess:
 | Usage Mode-Line | API usage display |
 | Interactive Chat | Comint-based chat mode |
 
-*** Key Components in claude-org.org
+*** Key Components in code-agent-org.org
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-key-components-in-claude-org-org
+:CUSTOM_ID: claude-agent-dev-key-components-in-code-agent-org-org
 :END:
 | Section | Purpose |
 |---------+---------|
@@ -289,7 +289,7 @@ This is not optional — the user's live Emacs session runs the old code until y
 | =.el= files | =(load-file \"/path/to/file.el\")= |
 
 *When to reload*:
-- After *every* edit to =claude-agent.org= or =claude-org.org=
+- After *every* edit to =claude-agent.org= or =code-agent-org.org=
 - After *every* edit to any =.el= file that's loaded in the session
 - *Before* telling the user the feature is ready to test
 
@@ -310,7 +310,7 @@ matching instead of =pcase= string patterns.
   | File Pattern | Purpose |
   |--------------+---------|
   | =test-claude-agent-unit.el= | Core SDK unit tests |
-  | =test-claude-org-unit.el= | Org integration unit tests |
+  | =test-code-agent-org-unit.el= | Org integration unit tests |
   | =test-*-integration.el= | Integration tests (require Claude CLI) |
   | =test-behavior-prompts.el= | Tag/header behavior tests |
   | =test-slash-completion.el= | Slash command completion tests |

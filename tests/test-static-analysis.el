@@ -211,9 +211,9 @@ ELISP-STRING is the source for re-parsing struct definitions."
       default-directory))
 
 (defvar test-static--source-files
-  '("claude-agent-trace.org" "claude-agent.org" "claude-org.org"
-    "claude-org-workspace-bridge.org" "claude-org-terminal-base.org"
-    "claude-org-cmux.org" "emacs-mcp-server.org")
+  '("claude-agent-trace.org" "claude-agent.org" "code-agent-org.org"
+    "code-agent-org-workspace-bridge.org" "code-agent-org-terminal-base.org"
+    "code-agent-org-cmux.org" "emacs-mcp-server.org")
   "List of .org source files to analyze.
 Load order matters: workspace-bridge and terminal-base before backends.
 Customize this for your project.")
@@ -322,7 +322,20 @@ Returns list of warning/error messages."
     "evil-define-key"
     ;; Cross-module references (loaded at runtime)
     "emacs-mcp-server-running-p" "emacs-mcp-server-start" "emacs-mcp-server-port"
-    "claude-org--insert-block-menu-dynamic"
+    "code-agent-org--insert-block-menu-dynamic"
+    ;; workspace-bridge → code-agent-org cross-module references.  The
+    ;; bridge cannot `require code-agent-org' (circular load order), so
+    ;; these stay as forward references resolved at runtime.
+    "code-agent-org--build-system-prompt"
+    "code-agent-org--generate-instruction-custom-id"
+    "code-agent-org--set-exec-status"
+    "code-agent-org--maybe-auto-generate-title"
+    "code-agent-org--current-session-key"
+    "code-agent-org--sessions"
+    "code-agent-org-heading-tag"
+    "code-agent-org-exec-status-property"
+    "code-agent-org-cli-session-property"
+    "code-agent-org-auto-generate-title"
     ;; Emacs version-specific functions
     "parse-iso8601-time-string")
   "List of symbol names known to be external or forward-referenced.
@@ -487,7 +500,7 @@ Files with missing optional dependencies are skipped if
     (should (> loaded 0))))
 
 (defvar test-static--known-forward-declarations
-  '("claude-org-terminal--workspace-to-session-key")
+  '("code-agent-org-terminal--workspace-to-session-key")
   "Symbols that appear as forward declarations (defvar without init value)
 in one file and full definitions in another. Excluded from duplicate checks.")
 

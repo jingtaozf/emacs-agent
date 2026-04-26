@@ -25,7 +25,7 @@
     - [[#instructions-1][Instructions]]
     - [[#what-happened][What Happened?]]
     - [[#header-line-features][Header Line Features]]
-    - [[#auto-enable-claude-org-mode][Auto-enable claude-org-mode]]
+    - [[#auto-enable-code-agent-org-mode][Auto-enable code-agent-org-mode]]
   - [[#step-4-the-transient-menu-c-c-c-][Step 4: The Transient Menu (=C-c C-/=)]]
     - [[#opening-the-menu][Opening the Menu]]
     - [[#menu-structure][Menu Structure]]
@@ -40,7 +40,7 @@
     - [[#key-principles][Key Principles]]
 - [[#features][Features]]
   - [[#session-management][Session Management]]
-    - [[#in-claude-org-mode][In claude-org-mode]]
+    - [[#in-code-agent-org-mode][In code-agent-org-mode]]
     - [[#session-recovery-1][Session Recovery]]
   - [[#permission-functions][Permission Functions]]
     - [[#how-it-works][How It Works]]
@@ -50,7 +50,7 @@
     - [[#org-file-protection][Org File Protection]]
   - [[#permission-modes][Permission Modes]]
     - [[#permission-presets][Permission Presets]]
-    - [[#in-claude-org-mode-1][In claude-org-mode]]
+    - [[#in-code-agent-org-mode-1][In code-agent-org-mode]]
     - [[#pattern-syntax][Pattern Syntax]]
   - [[#ide-context][IDE Context]]
     - [[#excluding-buffers][Excluding Buffers]]
@@ -60,7 +60,7 @@
     - [[#per-section-docker-configuration][Per-Section Docker Configuration]]
     - [[#path-translation][Path Translation]]
     - [[#docker-commands][Docker Commands]]
-  - [[#project-configuration-claude-org][Project Configuration (claude-org)]]
+  - [[#project-configuration-code-agent-org][Project Configuration (code-agent-org)]]
     - [[#project_root][PROJECT_ROOT]]
     - [[#system-prompts][System Prompts]]
     - [[#environment-variables][Environment Variables]]
@@ -75,7 +75,7 @@
     - [[#manual-control][Manual Control]]
     - [[#available-tools][Available Tools]]
     - [[#registering-custom-tools][Registering Custom Tools]]
-  - [[#output-formatting-claude-org][Output Formatting (claude-org)]]
+  - [[#output-formatting-code-agent-org][Output Formatting (code-agent-org)]]
     - [[#header-normalization][Header Normalization]]
     - [[#auto-line-breaking][Auto Line Breaking]]
     - [[#auto-title-generation][Auto Title Generation]]
@@ -103,13 +103,13 @@
     - [[#skill-file-format][Skill File Format]]
   - [[#configuration-reference][Configuration Reference]]
     - [[#claude-agent][claude-agent]]
-    - [[#claude-org][claude-org]]
+    - [[#code-agent-org][code-agent-org]]
     - [[#emacs-mcp-server][emacs-mcp-server]]
     - [[#claude-agent-chat][claude-agent-chat]]
   - [[#api-reference][API Reference]]
     - [[#core-functions-claude-agent][Core Functions (claude-agent)]]
     - [[#client-functions][Client Functions]]
-    - [[#org-functions-claude-org][Org Functions (claude-org)]]
+    - [[#org-functions-code-agent-org][Org Functions (code-agent-org)]]
     - [[#mcp-server-functions][MCP Server Functions]]
   - [[#faq][FAQ]]
     - [[#installation-issues][Installation Issues]]
@@ -171,14 +171,14 @@ AI interactions into *living documents*:
 | Module             | File                   | Purpose                                              |
 |--------------------+------------------------+------------------------------------------------------|
 | *claude-agent*     | =claude-agent.org=     | Core SDK: process management, query API, permissions |
-| *claude-org*       | =claude-org.org=       | Org-mode integration: AI blocks, streaming, sessions |
+| *code-agent-org*       | =code-agent-org.org=       | Org-mode integration: AI blocks, streaming, sessions |
 | *emacs-mcp-server* | =emacs-mcp-server.org= | MCP HTTP server: exposes Emacs tools to Claude       |
 
 *** Architecture
 
 #+begin_example
 +---------------------------------------------------+
-|              claude-org.org (UI Layer)             |
+|              code-agent-org.org (UI Layer)             |
 |  Sessions, streaming, org blocks, error display   |
 +-------------------------+-------------------------+
                           |
@@ -199,7 +199,7 @@ AI interactions into *living documents*:
 +---------------+   +---------------+   +---------------+
 #+end_example
 
-The presentation layer (=claude-org.org=) never calls backend internals directly.
+The presentation layer (=code-agent-org.org=) never calls backend internals directly.
 All communication goes through the =claude-agent-backend-*= generic protocol.
 New backends can be added by implementing 8 =cl-defmethod= specializations.
 
@@ -218,8 +218,25 @@ The *cmux* backend is the recommended default. Set it via org property:
 
 | Backend | How It Works | Status |
 |---------+--------------+--------|
-| *cmux* (default) | Runs Claude Code in a [[https://github.com/manaflow-ai/cmux][cmux]] terminal multiplexer. Full TUI, response capture via hooks. | Recommended |
-| *json-stream* | Pipes prompt via =--print --output-format stream-json=. | Deprecated |
+| *cmux* (default) | Runs Claude Code in a [[https://github.com/manaflow-ai/cmux][cmux]] terminal multiplexer. Full TUI, response capture via hooks. macOS. | Recommended |
+| *tmux* | Runs Claude Code in a detached tmux session. Same TUI model as cmux, cross-platform (Linux + macOS). Phase 4 scaffolding — core loop works, cmux-specific niceties (workspace colour, sidebar) not available. | Early / cross-platform |
+| *claude-code* | Pipes prompt via =--print --output-format stream-json= (the former =json-stream=). | Deprecated |
+
+tmux example:
+
+#+begin_example
+:PROPERTIES:
+:CLAUDE_BACKEND: tmux
+:END:
+#+end_example
+
+Requires =tmux= on =$PATH=.  Override with the
+=claude-agent-tmux-cli-path= defcustom if tmux lives in a non-standard
+location.  The backend creates a detached tmux session named
+=claude-<session-key>= on first launch and drives it via =send-keys= /
+=capture-pane= / =pipe-pane=.  The Python =workspace-bridge= adapter is
+unchanged — tmux status files live in the same
+=/tmp/claude-agent-status= directory as cmux's.
 
 *Why cmux over json-stream?* The json-stream backend spawns a new Claude Code
 process per query. Under heavy use, the CLI process can exceed memory limits
@@ -227,21 +244,21 @@ and get killed by the OS (=SIGKILL= / OOM). The cmux backend uses a persistent
 terminal session that survives across queries, avoiding this issue.
 
 *cmux requires the cmux app* to be running. If cmux is not launched when you
-execute an AI block, =claude-org-cmux--call= will error with a clear message.
+execute an AI block, =code-agent-org-cmux--call= will error with a clear message.
 Launch cmux first, then retry.
 
 **** cmux Customization
 
 | Variable | Default | Purpose |
 |----------+---------+---------|
-| =claude-org-cmux-cli-path= | ="cmux"= | Path to the cmux CLI executable |
-| =claude-org-cmux-socket-path= | =nil= | Unix socket path (nil = auto-detect) |
-| =claude-org-cmux-launch-command= | ='claude-workspace= | How to launch Claude Code in cmux |
+| =code-agent-org-cmux-cli-path= | ="cmux"= | Path to the cmux CLI executable |
+| =code-agent-org-cmux-socket-path= | =nil= | Unix socket path (nil = auto-detect) |
+| =code-agent-org-cmux-launch-command= | ='claude-workspace= | How to launch Claude Code in cmux |
 
 Example for a custom cmux install:
 
 #+begin_src elisp
-(setq claude-org-cmux-cli-path "/opt/cmux/bin/cmux")
+(setq code-agent-org-cmux-cli-path "/opt/cmux/bin/cmux")
 #+end_src
 
 Per-file override via org property:
@@ -391,7 +408,7 @@ All settings can be set as org properties at the file or subtree level:
 
 Individual subtrees override by adding their own =:CLAUDE_BACKEND:=
 property.  Mix and match — one subtree runs OpenCode, another Gemini,
-another the default json-stream Claude, all in the same file.
+another the default claude-code Claude, all in the same file.
 
 * Tutorial
 :PROPERTIES:
@@ -442,7 +459,7 @@ This tutorial walks you through Emacs Claude Agent step by step.
   ;; Permission functions configuration
   (setq claude-agent-permission-functions
         '(claude-agent-permission-check-patterns
-          claude-org-permission-protect-org
+          code-agent-org-permission-protect-org
           claude-agent-permission-auto-allow))
 
   ;; Optional: Auto-analyze errors
@@ -496,16 +513,16 @@ For persistent, organized conversations, use org-mode integration.
 (find-file "/tmp/my-claude-test.org")
 #+END_SRC
 
-*2. Enable claude-org-mode:*
+*2. Enable code-agent-org-mode:*
 
 #+BEGIN_EXAMPLE
-M-x claude-org-mode
+M-x code-agent-org-mode
 #+END_EXAMPLE
 
 *3. Insert an AI block using the transient menu:*
 
 #+BEGIN_EXAMPLE
-C-c C-/ i    (or M-x claude-org-insert-block)
+C-c C-/ i    (or M-x code-agent-org-insert-block)
 #+END_EXAMPLE
 
 This opens a workflow tag selector. Press =RET= to create a simple block (no tags),
@@ -523,7 +540,7 @@ What is 2 + 2? Reply with just the number.
 
 *** What Happened?
 
-- =claude-org-insert-block= creates a new AI block with proper structure
+- =code-agent-org-insert-block= creates a new AI block with proper structure
 - =:claude_chat:= tag marks the section as an AI conversation
 - =#+begin_src ai= block contains your query
 - =C-c C-c= sends the query to Claude
@@ -532,7 +549,7 @@ What is 2 + 2? Reply with just the number.
 
 *** Header Line Features
 
-When =claude-org-mode= is active, the header line shows:
+When =code-agent-org-mode= is active, the header line shows:
 - *Session scope*: =[file-only]= or =[sec:session-id...]= for section-scoped sessions
 - *Permission mode*: Current permission preset (=RO=, =AE=, =PL=, =BP=)
 - *Active count*: Number of thinking queries (click to open session manager)
@@ -540,12 +557,12 @@ When =claude-org-mode= is active, the header line shows:
 - *Current file*: The file Claude is working with (from IDE context)
 - *Selection*: Line range and size of selected text (for context)
 
-*** Auto-enable claude-org-mode
+*** Auto-enable code-agent-org-mode
 
 Add this as the first line of your org file:
 
 #+BEGIN_EXAMPLE
-# -*- mode: org; eval: (claude-org-mode 1) -*-
+# -*- mode: org; eval: (code-agent-org-mode 1) -*-
 #+END_EXAMPLE
 
 ** Step 4: The Transient Menu (=C-c C-/=)
@@ -553,7 +570,7 @@ Add this as the first line of your org file:
 :CUSTOM_ID: step-4-transient-menu
 :END:
 
-The transient menu (=C-c C-/=) is the main user interface for claude-org. It provides
+The transient menu (=C-c C-/=) is the main user interface for code-agent-org. It provides
 quick access to all common operations.
 
 *** Opening the Menu
@@ -650,7 +667,7 @@ Task B will NOT know the password - it has a separate session.
 
 *** Session Recovery
 
-When Claude sessions expire (after inactivity), claude-org automatically:
+When Claude sessions expire (after inactivity), code-agent-org automatically:
 1. Collects conversation history from the org file
 2. Rebuilds context with a recovery prompt
 3. Retries transparently
@@ -712,7 +729,7 @@ table so Claude knows where to read and write knowledge artifacts.
 
 *** Creating an SDD Structure
 
-Use =C-c C-/= then =d= (or =M-x claude-org-insert-sdd=):
+Use =C-c C-/= then =d= (or =M-x code-agent-org-insert-sdd=):
 
 1. Enter the feature name
 2. The command creates:
@@ -728,7 +745,7 @@ By default, SDD creates =.org= files with org-mode markup. You can switch to Mar
 *Global default* (in your Emacs config):
 
 #+BEGIN_SRC elisp :eval no
-(setq claude-org-sdd-docs-format "md")  ;; "org" or "md"
+(setq code-agent-org-sdd-docs-format "md")  ;; "org" or "md"
 #+END_SRC
 
 *Per-story override* (via org property, inherited by children):
@@ -773,7 +790,7 @@ Detailed documentation for all features.
 
 Sessions preserve conversation context across queries.
 
-*** In claude-org-mode
+*** In code-agent-org-mode
 
 Sessions are automatically managed per-file. You can also create section-scoped sessions:
 
@@ -805,7 +822,7 @@ Different context here
 
 *** Session Recovery
 
-When Claude sessions expire, claude-org automatically:
+When Claude sessions expire, code-agent-org automatically:
 1. Collects conversation history from the org file
 2. Rebuilds context with a recovery prompt
 3. Retries transparently
@@ -848,7 +865,7 @@ The first non-nil result is used. If all return nil, the tool is allowed by defa
 | Function | Purpose |
 |----------+---------|
 | =claude-agent-permission-check-patterns= | Pattern-based allow/deny |
-| =claude-org-permission-protect-org= | Protect .org files from direct edits |
+| =code-agent-org-permission-protect-org= | Protect .org files from direct edits |
 | =claude-agent-permission-prompt= | Interactive y-or-n-p |
 | =claude-agent-permission-auto-allow= | Auto-approve everything |
 
@@ -857,7 +874,7 @@ Recommended configuration:
 #+BEGIN_SRC elisp :load no
 (setq claude-agent-permission-functions
       '(claude-agent-permission-check-patterns
-        claude-org-permission-protect-org
+        code-agent-org-permission-protect-org
         claude-agent-permission-auto-allow))
 #+END_SRC
 
@@ -898,12 +915,12 @@ Add your own permission logic:
 
 *** Org File Protection
 
-The =claude-org= package provides a permission function to protect .org files:
+The =code-agent-org= package provides a permission function to protect .org files:
 
 #+BEGIN_SRC elisp :load no
 ;; Enable org file protection (recommended)
 (add-to-list 'claude-agent-permission-functions
-             #'claude-org-permission-protect-org)
+             #'code-agent-org-permission-protect-org)
 #+END_SRC
 
 This blocks =Edit= and =Write= tools on .org files, directing Claude to use
@@ -928,7 +945,7 @@ Access via transient menu: =C-c C-/ p=
 (setq claude-agent-permission-preset "bypass")       ; Allow all tools
 #+END_SRC
 
-*** In claude-org-mode
+*** In code-agent-org-mode
 
 Set per-file or per-section:
 
@@ -1064,7 +1081,7 @@ make test-docker
 make test-docker-sandbox
 #+END_SRC
 
-** Project Configuration (claude-org)
+** Project Configuration (code-agent-org)
 :PROPERTIES:
 :CUSTOM_ID: ref-project-configuration
 :END:
@@ -1240,7 +1257,7 @@ when the tag is active.
 
 #+BEGIN_SRC elisp :load no
 ;; Override prompts directory (default: prompts/ in package directory)
-(setq claude-org-prompts-directory "/path/to/my/prompts")
+(setq code-agent-org-prompts-directory "/path/to/my/prompts")
 #+END_SRC
 
 ** AI Block Templates
@@ -1276,7 +1293,7 @@ Create a new file in =snippets/org-mode/= following the yasnippet format:
 # name: My Custom Template
 # key: custom
 # group: Claude AI
-# condition: (claude-org--in-ai-block-p)
+# condition: (code-agent-org--in-ai-block-p)
 # expand-env: ((yas-indent-line 'fixed))
 # --
 Your prompt text here.
@@ -1287,10 +1304,10 @@ $0
 *Option 2: Use a custom snippets directory*
 
 Keep custom templates outside the package (e.g., in your dotfiles) so they
-survive package updates. Set =claude-org-extra-snippet-dirs= in your Emacs config:
+survive package updates. Set =code-agent-org-extra-snippet-dirs= in your Emacs config:
 
 #+BEGIN_SRC elisp :load no
-(setq claude-org-extra-snippet-dirs '("~/my-snippets"))
+(setq code-agent-org-extra-snippet-dirs '("~/my-snippets"))
 #+END_SRC
 
 Your directory should follow the yasnippet structure:
@@ -1314,7 +1331,7 @@ yasnippet supports embedded elisp for dynamic content:
 # name: Review Selection
 # key: rs
 # group: Claude AI
-# condition: (claude-org--in-ai-block-p)
+# condition: (code-agent-org--in-ai-block-p)
 # expand-env: ((yas-indent-line 'fixed))
 # --
 Please review this code:
@@ -1398,7 +1415,7 @@ for creating custom tags.
 :END:
 
 The MCP server exposes Emacs operations to Claude Code CLI. It starts automatically
-when you use claude-org-mode.
+when you use code-agent-org-mode.
 
 *** Manual Control
 
@@ -1448,7 +1465,7 @@ elisp patterns for specific tasks:
             (text . ,(format "Result: %s" arg1))))))
 #+END_SRC
 
-** Output Formatting (claude-org)
+** Output Formatting (code-agent-org)
 :PROPERTIES:
 :CUSTOM_ID: ref-output-formatting
 :END:
@@ -1459,7 +1476,7 @@ When Claude outputs org headers, they're automatically adjusted to fit your docu
 
 #+BEGIN_SRC elisp :load no
 ;; Enable/disable header normalization (default: t)
-(setq claude-org-normalize-headers t)
+(setq code-agent-org-normalize-headers t)
 #+END_SRC
 
 *** Auto Line Breaking
@@ -1468,10 +1485,10 @@ Long lines can be automatically broken after sentence-ending punctuation.
 
 #+BEGIN_SRC elisp :load no
 ;; Break lines after 110 characters (at sentence boundaries)
-(setq claude-org-auto-break-line-length 110)
+(setq code-agent-org-auto-break-line-length 110)
 
 ;; Disable auto-breaking (default)
-(setq claude-org-auto-break-line-length -1)
+(setq code-agent-org-auto-break-line-length -1)
 #+END_SRC
 
 *** Auto Title Generation
@@ -1481,10 +1498,10 @@ generated using the Haiku model.
 
 #+BEGIN_SRC elisp :load no
 ;; Enable auto-title generation (default: t)
-(setq claude-org-auto-generate-title t)
+(setq code-agent-org-auto-generate-title t)
 
 ;; Only replace headings matching this pattern
-(setq claude-org-auto-title-heading-pattern "^Instruction [0-9]+$")
+(setq code-agent-org-auto-title-heading-pattern "^Instruction [0-9]+$")
 #+END_SRC
 
 ** Scheduled AI Block Execution
@@ -1508,15 +1525,15 @@ Add to your =init.el= to enable the scheduler:
 
 #+BEGIN_SRC elisp :load no
 ;; Start the scheduler (uses org-agenda-files by default)
-(claude-org-scheduled-start)
+(code-agent-org-scheduled-start)
 
 ;; Or specify custom files to scan
-(setq claude-org-scheduled-files
+(setq code-agent-org-scheduled-files
       '("~/org/tasks.org" "~/org/automation.org"))
-(claude-org-scheduled-start)
+(code-agent-org-scheduled-start)
 #+END_SRC
 
-*Note:* If =claude-org-scheduled-files= is nil, the scheduler automatically uses
+*Note:* If =code-agent-org-scheduled-files= is nil, the scheduler automatically uses
 =org-agenda-files= to find scheduled AI blocks.
 
 *** Example
@@ -1558,9 +1575,9 @@ After each execution, the =SCHEDULED= timestamp advances to the next occurrence.
 
 | Function | Description |
 |----------+-------------|
-| =claude-org-scheduled-start= | Start the scheduler timer |
-| =claude-org-scheduled-stop= | Stop the scheduler timer |
-| =claude-org-scheduled-scan-all= | Manually scan and update scheduled blocks |
+| =code-agent-org-scheduled-start= | Start the scheduler timer |
+| =code-agent-org-scheduled-stop= | Stop the scheduler timer |
+| =code-agent-org-scheduled-scan-all= | Manually scan and update scheduled blocks |
 
 ** Timestamped Response Sections
 :PROPERTIES:
@@ -1666,7 +1683,7 @@ M-x claude-agent-list-queries
 Per-session verbose buffers display CLI-like output.
 
 #+BEGIN_SRC elisp :load no
-;; In claude-org-mode
+;; In code-agent-org-mode
 C-c C-v  ; Show verbose buffer for current session
 
 ;; Or via transient menu
@@ -1688,10 +1705,10 @@ Claude Code supports loading custom skills from =~/.claude/skills/=.
 
 #+BEGIN_SRC elisp :load no
 ;; Default: load user skills from ~/.claude/skills/
-(setq claude-org-setting-sources '("user"))
+(setq code-agent-org-setting-sources '("user"))
 
 ;; Load from multiple sources
-(setq claude-org-setting-sources '("user" "project" "local"))
+(setq code-agent-org-setting-sources '("user" "project" "local"))
 #+END_SRC
 
 *** Skill File Format
@@ -1740,7 +1757,7 @@ Skills are markdown files in subdirectories of =~/.claude/skills/=:
 ;; Permission functions (recommended configuration)
 (setq claude-agent-permission-functions
       '(claude-agent-permission-check-patterns
-        claude-org-permission-protect-org
+        code-agent-org-permission-protect-org
         claude-agent-permission-auto-allow))
 
 ;; Auto-analyze errors (recommended)
@@ -1755,45 +1772,45 @@ Skills are markdown files in subdirectories of =~/.claude/skills/=:
 (setq claude-agent-error-mcp-config "~/.config/claude/mcp.json")
 #+END_SRC
 
-*** claude-org
+*** code-agent-org
 :PROPERTIES:
-:CUSTOM_ID: config-claude-org
+:CUSTOM_ID: config-code-agent-org
 :END:
 
 #+BEGIN_SRC elisp :load no
 ;; Font-lock delay during streaming (lower = more responsive)
-(setq claude-org-fontlock-delay 0.05)
+(setq code-agent-org-fontlock-delay 0.05)
 
 ;; Default tags
-(setq claude-org-heading-tag "claude_chat")
+(setq code-agent-org-heading-tag "claude_chat")
 
 ;; Include IDE context in prompts
-(setq claude-org-include-ide-context t)
+(setq code-agent-org-include-ide-context t)
 
 ;; Show system messages in response
-(setq claude-org-show-system-messages nil)
+(setq code-agent-org-show-system-messages nil)
 
 ;; Maximum line width hint for Claude
-(setq claude-org-line-width 170)
+(setq code-agent-org-line-width 170)
 
 ;; Auto-break long lines after sentence punctuation (-1 to disable)
-(setq claude-org-auto-break-line-length 110)
+(setq code-agent-org-auto-break-line-length 110)
 
 ;; Normalize org headers in output
-(setq claude-org-normalize-headers t)
+(setq code-agent-org-normalize-headers t)
 
 ;; Auto-generate titles for "Instruction N" headings
-(setq claude-org-auto-generate-title t)
-(setq claude-org-auto-title-heading-pattern "^Instruction [0-9]+$")
+(setq code-agent-org-auto-generate-title t)
+(setq code-agent-org-auto-title-heading-pattern "^Instruction [0-9]+$")
 
 ;; MCP server auto-start (default: t)
-(setq claude-org-auto-start-mcp-server t)
+(setq code-agent-org-auto-start-mcp-server t)
 
 ;; Default system prompts
-(setq claude-org-default-system-prompts '("Your custom prompt"))
+(setq code-agent-org-default-system-prompts '("Your custom prompt"))
 
 ;; Setting sources for loading skills
-(setq claude-org-setting-sources '("user"))
+(setq code-agent-org-setting-sources '("user"))
 #+END_SRC
 
 *** emacs-mcp-server
@@ -1877,23 +1894,23 @@ Skills are markdown files in subdirectories of =~/.claude/skills/=:
 | =claude-agent-client-disconnect= | Disconnect |
 | =claude-agent-client-interrupt= | Interrupt current operation |
 
-*** Org Functions (claude-org)
+*** Org Functions (code-agent-org)
 :PROPERTIES:
 :CUSTOM_ID: api-org-functions
 :END:
 
 | Function | Description |
 |----------+-------------|
-| =claude-org-mode= | Enable/disable minor mode |
-| =claude-org-execute= | Execute AI block (C-c C-c) |
-| =claude-org-cancel= | Cancel current query |
-| =claude-org-insert-block= | Insert new AI block with tag selection |
-| =claude-org-insert-sdd= | Insert SDD structure |
-| =claude-org-show-session-info= | Show session identity |
-| =claude-org-list-sessions= | List all sessions |
-| =claude-org-show-verbose= | Show verbose output |
-| =claude-org-switch-permission-mode= | Change permission mode |
-| =claude-org-menu= | Open transient menu (C-c C-/) |
+| =code-agent-org-mode= | Enable/disable minor mode |
+| =code-agent-org-execute= | Execute AI block (C-c C-c) |
+| =code-agent-org-cancel= | Cancel current query |
+| =code-agent-org-insert-block= | Insert new AI block with tag selection |
+| =code-agent-org-insert-sdd= | Insert SDD structure |
+| =code-agent-org-show-session-info= | Show session identity |
+| =code-agent-org-list-sessions= | List all sessions |
+| =code-agent-org-show-verbose= | Show verbose output |
+| =code-agent-org-switch-permission-mode= | Change permission mode |
+| =code-agent-org-menu= | Open transient menu (C-c C-/) |
 
 *** MCP Server Functions
 :PROPERTIES:
@@ -1970,7 +1987,7 @@ Skills are markdown files in subdirectories of =~/.claude/skills/=:
 
 *Symptoms:* Claude doesn't remember previous conversation.
 
-*Explanation:* Claude Code sessions expire after inactivity. claude-org automatically
+*Explanation:* Claude Code sessions expire after inactivity. code-agent-org automatically
 attempts recovery, but this may fail if:
 - The org file has been heavily modified
 - The conversation history is very long
@@ -2152,9 +2169,9 @@ attempts recovery, but this may fail if:
 
 *Solutions:*
 
-1. Verify claude-org-mode is enabled:
+1. Verify code-agent-org-mode is enabled:
    #+BEGIN_EXAMPLE
-   M-x claude-org-mode
+   M-x code-agent-org-mode
    #+END_EXAMPLE
 
 2. Check cursor is inside the =#+begin_src ai= block
@@ -2238,7 +2255,7 @@ make test-integration
 #+BEGIN_SRC elisp :load no
 (setq literate-elisp-test-p t)
 (literate-elisp-load "~/projects/claude-agent/claude-agent.org")
-(literate-elisp-load "~/projects/claude-agent/claude-org.org")
+(literate-elisp-load "~/projects/claude-agent/code-agent-org.org")
 (ert t)  ; Run all tests
 
 ;; Run only unit tests (no API)

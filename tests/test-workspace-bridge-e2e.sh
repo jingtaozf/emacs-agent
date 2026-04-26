@@ -228,7 +228,7 @@ test_system_prompt_fetch() {
   create_test_workspace "$org_file" "$session_id" >/dev/null
 
   local prompt
-  prompt=$(mcp_call "(let ((debug-on-error nil) (debug-on-quit nil) (edebug-all-defs nil) (edebug-all-forms nil)) (claude-org-workspace-bridge-system-prompt \"$org_file\" \"$session_id\"))")
+  prompt=$(mcp_call "(let ((debug-on-error nil) (debug-on-quit nil) (edebug-all-defs nil) (edebug-all-forms nil)) (code-agent-org-workspace-bridge-system-prompt \"$org_file\" \"$session_id\"))")
 
   assert_not_empty "$prompt"
   assert_contains "$prompt" "test feature"
@@ -477,9 +477,9 @@ fi
 
 # Load bridge functions into Emacs
 echo "Loading bridge functions..."
-LOAD_RESULT=$(mcp_call "(let ((debug-on-error nil) (debug-on-quit nil) (edebug-all-defs nil) (edebug-all-forms nil)) (literate-elisp-load \"$PROJECT_DIR/claude-org.org\") \"loaded\")" 2>/dev/null) || true
+LOAD_RESULT=$(mcp_call "(let ((debug-on-error nil) (debug-on-quit nil) (edebug-all-defs nil) (edebug-all-forms nil)) (literate-elisp-load \"$PROJECT_DIR/code-agent-org.org\") \"loaded\")" 2>/dev/null) || true
 if [ "$LOAD_RESULT" != "loaded" ] && [ "$LOAD_RESULT" != '"loaded"' ]; then
-  echo "WARNING: Could not reload claude-org.org (result: $LOAD_RESULT)"
+  echo "WARNING: Could not reload code-agent-org.org (result: $LOAD_RESULT)"
   echo "Bridge functions may not be available. Continuing anyway..."
 fi
 

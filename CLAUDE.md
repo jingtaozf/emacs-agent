@@ -7,7 +7,7 @@ make test-smoke         # Fast syntax check (< 2s) — run after every edit
 make test-unit          # Run all unit tests (~13s)
 make test-unit-parallel # Run unit tests in parallel (~4.5s)
 make test-agent-unit    # Run claude-agent unit tests only
-make test-org-unit      # Run claude-org unit tests only
+make test-org-unit      # Run code-agent-org unit tests only
 make test-backend-unit  # Run backend protocol unit tests
 make test-mock          # Run mock CLI tests (no API, fast)
 make test-integration   # Run integration tests (requires API key)
@@ -111,10 +111,19 @@ languages (Elisp `.org` modules and Python under `python/`):
 
 Example in this repo: `claude-agent-backend.org` defines the protocol
 (`claude-agent-backend-query`, `-cancel`, `-cleanup`, `-classify-error`,
-etc.); `claude-agent-acp-backend` and `claude-agent-json-backend` each
-`cl-defmethod` those generics. Callers in `claude-org.org` dispatch on
+etc.); `claude-agent-acp-backend` and `claude-agent-claude-code-backend` each
+`cl-defmethod` those generics. Callers in `code-agent-org.org` dispatch on
 the backend instance — they never branch on a string or symbol
 discriminator. New modules must follow the same pattern.
+
+**Tri-protocol refactor shipped** (2026-04-24, Phases 0–4): the backend
+layer is restructured into three protocols — lifecycle, agent wire,
+multiplexer wire, plus org-integration — with agent-family (Claude Code,
+OpenCode, Gemini, Codex) and multiplexer-family (cmux, tmux) as symmetric
+siblings. See `docs/design-docs/2026-tri-protocol-backend-refactor.org`
+and the Tri-Protocol Architecture section of `ARCHITECTURE.org`. Any new
+backend or cross-module dispatch site MUST follow the tri-protocol shape;
+no `CLAUDE_BACKEND` string-match branches in the frontend.
 
 ## Architecture
 
@@ -124,7 +133,7 @@ See `ARCHITECTURE.org` for module boundaries, invariants, and extension points.
 
 All source code lives in `.org` files using `literate-elisp`:
 - `claude-agent.org` — Core SDK: process management, JSON protocol, query API
-- `claude-org.org` — Org integration: AI blocks, sessions, streaming
+- `code-agent-org.org` — Org integration: AI blocks, sessions, streaming
 - `emacs-mcp-server.org` — MCP server for Emacs tools
 
 Load with: `(literate-elisp-load "claude-agent.org")`
@@ -134,14 +143,14 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 | Layer | File | Purpose |
 |-------|------|---------|
 | Core SDK | `claude-agent.org` | CLI subprocess, JSON stream parsing |
-| Org Integration | `claude-org.org` | `#+begin_src ai` blocks, response sections |
+| Org Integration | `code-agent-org.org` | `#+begin_src ai` blocks, response sections |
 | MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude |
 | Entry Point | `claude-code.el` | Package requires, autoloads |
 
 ### Data Flow
 
 1. User writes query in `#+begin_src ai` block, presses `C-c C-c`
-2. `claude-org-execute` validates block, creates session
+2. `code-agent-org-execute` validates block, creates session
 3. `claude-agent-query` spawns CLI subprocess with `--output-format stream-json`
 4. Process filter parses newline-delimited JSON, dispatches to callbacks
 5. Tokens stream into response section below the AI block
@@ -149,7 +158,7 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 ### Session Management
 
 - Sessions identified by buffer-local session keys
-- State stored in `claude-org--sessions` hash table
+- State stored in `code-agent-org--sessions` hash table
 - SDK UUID maps Emacs sessions to Claude CLI sessions
 - File-based session persistence via org properties
 
@@ -169,8 +178,8 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 ### Code Style
 - Use `defvar` for hooks (not `defcustom`) for existing hooks
 - Use `defcustom` with `:type` keyword for new user-facing options
-- Internal functions use double-dash: `claude-org--internal-fn`
-- Public API uses single-dash: `claude-org-public-fn`
+- Internal functions use double-dash: `code-agent-org--internal-fn`
+- Public API uses single-dash: `code-agent-org-public-fn`
 
 ### Literate Elisp Caveats
 - `lexical-binding: t` in org headers is **ignored** by literate-elisp
@@ -233,13 +242,14 @@ The harness grows with each mistake — rules become multipliers.
 |-------|----------|
 | Architecture map | `ARCHITECTURE.org` |
 | Design docs | `docs/design-docs/` |
+| Tri-protocol refactor (upcoming) | `docs/design-docs/2026-tri-protocol-backend-refactor.org` |
 | Research findings | `docs/research/` |
 | Product specs | `docs/product-specs/` |
 | References | `docs/references/` |
 | Elisp idioms | `docs/ELISP_IDIOMS.org` |
 | Literate programming | `docs/literate-programming-principles.org` |
 | Full API docs | `claude-agent.org` section headers |
-| Org integration | `claude-org.org` section headers |
+| Org integration | `code-agent-org.org` section headers |
 | Test fixtures | `tests/fixtures/` |
 | Mock CLI | `tests/mock-claude-cli.sh` |
 | Docker sandbox | `.devcontainer/` |

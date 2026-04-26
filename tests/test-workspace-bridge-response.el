@@ -7,7 +7,7 @@
 
 ;;; Commentary:
 
-;; Tests for `claude-org-workspace-bridge-insert-response' covering:
+;; Tests for `code-agent-org-workspace-bridge-insert-response' covering:
 ;; - Single response section per instruction (idempotent heading creation)
 ;; - Chronological ordering of appended content
 ;; - Correct creation of new response sections
@@ -30,7 +30,7 @@
   (literate-elisp-load (expand-file-name "claude-agent-trace.org" project-root))
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
   (literate-elisp-load (expand-file-name "claude-agent-backend.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org.org" project-root)))
+  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root)))
 
 ;;; ============================================================================
 ;;; Test Fixtures
@@ -122,10 +122,10 @@ not create a duplicate."
   :tags '(:unit :stable)
   (test-workspace-response--with-fixture
     ;; First insertion
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "First response content." "test-instr-1")
     ;; Second insertion for the SAME instruction
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "Second response content." "test-instr-1")
     (with-current-buffer buf (revert-buffer t t t))
     ;; There must be exactly ONE :ai_output: heading for Instruction 1
@@ -145,11 +145,11 @@ not create a duplicate."
 appear in oldest-first order (first inserted content before later content)."
   :tags '(:unit :stable)
   (test-workspace-response--with-fixture
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "ALPHA response." "test-instr-1")
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "BRAVO response." "test-instr-1")
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "CHARLIE response." "test-instr-1")
     (with-current-buffer buf (revert-buffer t t t))
     (let ((text (test-workspace-response--buffer-text buf)))
@@ -173,7 +173,7 @@ appear in oldest-first order (first inserted content before later content)."
 instruction."
   :tags '(:unit :stable)
   (test-workspace-response--with-fixture
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "New response text." "test-instr-1")
     (with-current-buffer buf (revert-buffer t t t))
     (let ((text (test-workspace-response--buffer-text buf)))
@@ -202,9 +202,9 @@ both Instruction 1 and Instruction 2 should produce two separate :ai_output:
 headings in the correct positions."
   :tags '(:unit :stable)
   (test-workspace-response--with-fixture
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "Response for instr 1." "test-instr-1")
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "Response for instr 2." "test-instr-2")
     (with-current-buffer buf (revert-buffer t t t))
     ;; Two separate :ai_output: headings
@@ -233,7 +233,7 @@ headings in the correct positions."
 QUERY_TYPE set to terminal."
   :tags '(:unit :stable)
   (test-workspace-response--with-fixture
-    (claude-org-workspace-bridge-insert-response file "test-session"
+    (code-agent-org-workspace-bridge-insert-response file "test-session"
                                             "Some output." "test-instr-1")
     (with-current-buffer buf
       (revert-buffer t t t)

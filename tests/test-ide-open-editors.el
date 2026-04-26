@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; Tests that claude-ide-default-get-open-editors-tool correctly excludes
-;; claude-org-mode buffers and applies buffer exclusion filters.
+;; code-agent-org-mode buffers and applies buffer exclusion filters.
 
 ;;; Code:
 
@@ -20,7 +20,7 @@
   (literate-elisp-load (expand-file-name "claude-agent-trace.org" project-root))
   (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
   (literate-elisp-load (expand-file-name "claude-agent-backend.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-org.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))
   (literate-elisp-load (expand-file-name "claude-ide.org" project-root)))
 
 ;;; ============================================================================
@@ -42,8 +42,8 @@
 ;;; Tests
 ;;; ============================================================================
 
-(ert-deftest test-ide-open-editors-excludes-claude-org-mode ()
-  "Buffers with claude-org-mode should be excluded from getOpenEditors.
+(ert-deftest test-ide-open-editors-excludes-code-agent-org-mode ()
+  "Buffers with code-agent-org-mode should be excluded from getOpenEditors.
 Regression: notebook files appeared in the IDE editors list, polluting
 Claude Code's file context."
   :tags '(:unit :stable)
@@ -52,11 +52,11 @@ Claude Code's file context."
     (unwind-protect
         (let ((org-buf (find-file-noselect org-file))
               (py-buf (find-file-noselect py-file)))
-          ;; Enable claude-org-mode on the org buffer (suppress MCP auto-start)
+          ;; Enable code-agent-org-mode on the org buffer (suppress MCP auto-start)
           (with-current-buffer org-buf
             (org-mode)
-            (let ((claude-org-auto-start-mcp-server nil))
-              (claude-org-mode 1)))
+            (let ((code-agent-org-auto-start-mcp-server nil))
+              (code-agent-org-mode 1)))
           ;; Get open editors
           (let ((paths (test-ide--editor-paths
                         (claude-ide-default-get-open-editors-tool))))
@@ -71,7 +71,7 @@ Claude Code's file context."
       (delete-file py-file))))
 
 (ert-deftest test-ide-open-editors-includes-normal-org ()
-  "Org buffers WITHOUT claude-org-mode should still be included."
+  "Org buffers WITHOUT code-agent-org-mode should still be included."
   :tags '(:unit :stable)
   (let ((org-file (make-temp-file "test-normal-" nil ".org")))
     (unwind-protect
