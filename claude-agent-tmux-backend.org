@@ -150,10 +150,24 @@ detached session to die instantly when launched from Elisp's
                        (list "-c" cwd))
                      launch-cmd))))
     (when rc
-      (setf (claude-agent-multiplexer-backend-multiplexer-session-id backend)
-            session-name
-            (claude-agent-multiplexer-backend-pane-id backend)
-            (format "%s:0.0" session-name))
+      ;; Resolve the actual first pane via tmux's own report, not by
+      ;; assuming `:0.0' — many users set `base-index 1' /
+      ;; `pane-base-index 1' in ~/.tmux.conf, in which case the
+      ;; first pane is `:1.1' and our hardcoded `:0.0' refers to a
+      ;; non-existent target.  display-message prints the canonical
+      ;; window:pane string for the active pane in the new session.
+      (let* ((resolved
+              (claude-agent-tmux--call
+               backend "display-message" "-p" "-t" session-name
+               "#{session_name}:#{window_index}.#{pane_index}"))
+             (resolved-trim (and (stringp resolved) (string-trim resolved)))
+             (pane-id (if (and resolved-trim (not (string-empty-p resolved-trim)))
+                          resolved-trim
+                        (format "%s:0.0" session-name))))
+        (setf (claude-agent-multiplexer-backend-multiplexer-session-id backend)
+              session-name
+              (claude-agent-multiplexer-backend-pane-id backend)
+              pane-id))
       session-name)))
 #+END_SRC
 
@@ -420,24 +434,60 @@ the agent profile's cancel keys)."
     ;; inside `bash -c' caused the session to die when launched from
     ;; Elisp (the cd somehow trips up bash's job-control state when
     ;; invoked from tmux's detached new-session in this build).
-    (unless (claude-agent-mux-ensure-session backend)
-      (let ((default-directory (file-name-as-directory project-root)))
-        (claude-agent-mux-launch-session
-         backend
-         (list "/bin/bash" "-c" claude-cmd)))
-      ;; Best-effort: wait briefly for the agent to start before typing.
-      ;; Cap the wait at 3 s to keep `evalElisp' / interactive C-c C-c
-      ;; responsive — the default 15 s blocks redisplay too long, and
-      ;; Claude Code typically prints its banner well before then.  If
-      ;; the agent isn't ready in time, we still type the prompt; the
-      ;; TUI buffers input and processes it once it boots.
-      (condition-case nil
-          (claude-agent-mux-wait-for-ready backend 3.0)
-        (error nil)))
-    ;; Type the prompt + Enter.
-    (when prompt
-      (claude-agent-mux-send-text backend prompt)
-      (claude-agent-mux-send-key backend :enter))
+    (let ((freshly-launched
+           (unless (claude-agent-mux-ensure-session backend)
+             (let ((default-directory (file-name-as-directory project-root)))
+               (claude-agent-mux-launch-session
+                backend
+                ;; Pin the claude binary the wrapper uses.  cmux's
+                ;; `/Applications/cmux.app/Contents/Resources/bin/claude'
+                ;; is a shell wrapper that searches PATH for the "real"
+                ;; claude binary, *skipping its own dir*.  Under
+                ;; Emacs's `process-environment' that lookup lands on
+                ;; nvm's older 2.0.69, which doesn't recognise
+                ;; `--name'.  Honouring `CMUX_CUSTOM_CLAUDE_PATH' is
+                ;; the wrapper's own escape hatch — pin to the user's
+                ;; ~/.local/bin claude (current TUI version), with a
+                ;; PATH prepend as belt-and-suspenders.
+                (let* ((custom (or (getenv "CMUX_CUSTOM_CLAUDE_PATH")
+                                   (when (file-executable-p (expand-file-name "~/.local/bin/claude"))
+                                     (expand-file-name "~/.local/bin/claude"))))
+                       (env-prefix
+                        (concat
+                         (when custom
+                           (format "export CMUX_CUSTOM_CLAUDE_PATH=%s; "
+                                   (shell-quote-argument custom)))
+                         "export PATH=/Applications/cmux.app/Contents/Resources/bin:\"$PATH\"; ")))
+                  (list "/bin/bash" "-c"
+                        (concat env-prefix claude-cmd)))))
+             t)))
+      ;; Send the prompt.  When freshly launched, defer the send until
+      ;; the agent's TUI has actually grabbed the PTY (claude takes
+      ;; 4–8 s to boot from `bash -c "uv run claude-workspace"').
+      ;; `claude-agent-mux-session-status' returns `:ready' for *any*
+      ;; foreground shell, including the bash that's about to `exec
+      ;; uv', so it cannot drive this wait — instead we poll
+      ;; capture-pane for the agent's banner regex via async
+      ;; run-at-time so Emacs stays responsive.
+      ;;
+      ;; `lexical-let' is mandatory: literate-elisp ignores the
+      ;; `lexical-binding' header, so a plain `let' here leaves the
+      ;; closure's references as free variables and the timer fires
+      ;; with `void-variable' errors.
+      (when prompt
+        (lexical-let* ((b backend)
+                       (p prompt)
+                       (dispatch
+                        (lambda ()
+                          (condition-case nil
+                              (progn
+                                (claude-agent-mux-send-text b p)
+                                (claude-agent-mux-send-key b :enter))
+                            (error nil)))))
+          (if freshly-launched
+              (claude-agent-tmux--send-when-agent-ready
+               backend dispatch 12.0)
+            (funcall dispatch)))))
     ;; Register the query so the bridge's Stop hook can find a request-id.
     (when workspace-session-id
       (condition-case nil
@@ -447,6 +497,64 @@ the agent profile's cancel keys)."
           (code-agent-org-terminal--write-from-emacs-flag workspace-session-id)
         (error nil)))
     nil))
+#+END_SRC
+
+** Protocol 3 — Wait Helper
+
+Async polling helper used by =execute-block= to fire the user's
+prompt only after the agent's TUI has taken the pane.  Polls
+=tmux display-message #{pane_current_command}= every second; once
+the foreground command is no longer a plain shell (which means the
+=bash -c= wrapper has exec'd into =uv= / =claude= / etc.), invokes
+=dispatch=.  Bails out after =timeout-secs= and dispatches anyway
+— better to lose a keystroke than hang forever.
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-tmux-ready-banner-regex
+  "Welcome\\|Claude Code\\|claude>\\|❯[[:space:]]*$\\|/effort"
+  "Regex matched against `tmux capture-pane' output to detect agent TUI ready.
+Defaults match the Claude Code TUI's banner / prompt; override for
+other agents (gemini-cli, codex, opencode) that have different
+welcome text."
+  :type 'regexp
+  :group 'claude-agent-tmux)
+
+(defun claude-agent-tmux--send-when-agent-ready (backend dispatch timeout-secs)
+  "Wait until BACKEND's pane has the agent's TUI banner up, then call
+DISPATCH (zero-arg lambda).  Polls `tmux capture-pane' once a second
+and matches against `claude-agent-tmux-ready-banner-regex' — more
+reliable than pane_current_command because `uv run' acts as a parent
+process that never exec's its child, so the foreground command stays
+\"uv\" while claude renders inside.  Times out after TIMEOUT-SECS
+and dispatches anyway (better lose a keystroke than hang).
+
+literate-elisp ignores `lexical-binding' headers, so we use
+`lexical-let' to make sure the timer closures capture BACKEND /
+DISPATCH / DEADLINE / TARGET — otherwise they resolve as free
+variables and the timer fires with `void-variable' errors."
+  (lexical-let* ((deadline (+ (float-time) (or timeout-secs 12.0)))
+                 (target (claude-agent-multiplexer-backend-pane-id backend))
+                 (b backend)
+                 (d dispatch)
+                 (poll-fn nil))
+    (setq poll-fn
+          (lambda ()
+            (let* ((screen (when target
+                             (condition-case nil
+                                 (claude-agent-tmux--call
+                                  b "capture-pane" "-p" "-t" target)
+                               (error nil))))
+                   (banner (and screen
+                                (string-match-p
+                                 claude-agent-tmux-ready-banner-regex
+                                 screen)))
+                   (timed-out (> (float-time) deadline)))
+              (cond
+               ((or banner timed-out)
+                (funcall d))
+               (t
+                (run-at-time 1.0 nil poll-fn))))))
+    (run-at-time 1.0 nil poll-fn)))
 #+END_SRC
 
 ** Protocol 3 — Cancel From Org
