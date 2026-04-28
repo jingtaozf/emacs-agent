@@ -451,6 +451,10 @@ or add it to test-structural--known-public-api if it's intentionally public."
     ;; claude-agent: alerts (mode-line)
     "claude-agent-add-alert"
     "claude-agent-remove-alert"
+    ;; claude-agent: rate-limit mode-line ([C:5h|7d|sonnet]) public commands
+    "claude-agent-rate-limit-mode-line-start"
+    "claude-agent-rate-limit-mode-line-stop"
+    "claude-agent-rate-limit-refresh"
     ;; claude-agent: verbose/debug
     "claude-agent-get-verbose-buffer"
     "claude-agent-show-session-verbose"
