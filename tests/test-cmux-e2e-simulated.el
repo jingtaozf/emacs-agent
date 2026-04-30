@@ -1286,11 +1286,13 @@ What is 2+2?
 "
   "Org content for archive-workflow test with CLI session and response.")
 
-(ert-deftest test-cmux-archive-workflow-clears-cli-session ()
-  "Archive-workflow clears CLAUDE_CLI_SESSION on workspace heading.
-T55: When archiving a workflow, the CLI session must be cleared so the
-next terminal launch starts a fresh conversation. Verifies the archive
-function removes CLAUDE_CLI_SESSION from the workspace heading."
+(ert-deftest test-cmux-archive-workflow-preserves-cli-session ()
+  "Archive-workflow preserves CLAUDE_CLI_SESSION on workspace heading.
+T55: Archiving a Workflow folds the old transcript into the archive file
+but is NOT a session reset. The CLI session id (and Copilot's) must
+survive so the next \"Open terminal\" still resumes the same Claude
+conversation. Regression test for the user-reported behaviour where
+opening a terminal after archive started a brand-new chat."
   :tags '(:unit :stable)
   (test-cmux--with-org-buffer test-cmux--org-archive-workflow
     ;; Verify CLI session exists before archive
@@ -1310,11 +1312,12 @@ function removes CLAUDE_CLI_SESSION from the workspace heading."
                        (end (save-excursion (org-end-of-subtree t t) (point))))
                    (delete-region beg end)))))
       (code-agent-org-workspace-archive-workflow))
-    ;; CLI session should be cleared
+    ;; CLI session must STILL be present so resume keeps working.
     (goto-char (point-min))
     (re-search-forward ":CLAUDE_SESSION_ID: sdd-archive-test")
     (org-back-to-heading t)
-    (should-not (org-entry-get nil "CLAUDE_CLI_SESSION"))))
+    (should (equal "old-session-uuid-123"
+                   (org-entry-get nil "CLAUDE_CLI_SESSION")))))
 
 (ert-deftest test-cmux-archive-workflow-creates-fresh-workflow ()
   "Archive-workflow inserts a new Workflow section with empty AI block.
