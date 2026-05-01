@@ -181,6 +181,9 @@ def _extract_full_response(transcript_path: str) -> str:
     intermediate turns ("Let me check…", result summaries) that would
     create duplicate response sections if inserted.
     """
+    # # Step 1: parse the JSONL transcript line-by-line, tolerating malformed
+    # # lines. Claude Code rotates JSONL files mid-session and may flush partial
+    # # lines that get completed on the next write.
     entries: list[dict] = []
     with open(transcript_path) as f:
         for line in f:
@@ -196,11 +199,20 @@ def _extract_full_response(transcript_path: str) -> str:
     if not entries:
         return ""
 
+    # # Step 2: locate the last user-message boundary. Everything after this
+    # # index is the assistant's response to the most recent prompt; earlier
+    # # turns are prior conversation and would create duplicate response
+    # # sections in org if we re-inserted them.
     last_user_idx = -1
     for i, entry in enumerate(entries):
         if entry.get("type") == "user":
             last_user_idx = i
 
+    # # Step 3: collect assistant text after the boundary, skipping any entry
+    # # whose content includes a ``tool_use`` block. Tool-use turns are
+    # # intermediate narration ("Let me check…", tool-result summaries) — they
+    # # would clutter the org response section with detail the user already saw
+    # # streamed live.
     texts: list[str] = []
     start = last_user_idx + 1 if last_user_idx >= 0 else 0
     for entry in entries[start:]:
@@ -219,6 +231,8 @@ def _extract_full_response(transcript_path: str) -> str:
                 if text:
                     texts.append(text)
 
+    # # Step 4: rejoin with double-newline so the org response section reads as
+    # # paragraphs, not a wall of text. Empty list yields "".
     return "\n\n".join(texts)
 
 
