@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# commit-msg hook for claude-agent
+#
+# Enforces commit message conventions per CLAUDE.md and lens #9 (telemetry):
+#
+#   1. NEVER include `Co-Authored-By:` lines (project rule).
+#   2. Prefer `Generated-by: <model>` and `Prompt-Ref: <session-uuid>:<block>`
+#      to record AI provenance — use prompt hash, never raw prompt.
+#
+# To enable locally:
+#     git config core.hooksPath .githooks
+#
+# CI runs the same checks via .github/workflows/ci.yml (TODO: add lint job).
+
+set -euo pipefail
+msg_file="$1"
+
+# 1. Forbid Co-Authored-By
+if grep -qiE "^Co-Authored-By:" "$msg_file"; then
+    cat >&2 <<EOF
+✗ Commit blocked: 'Co-Authored-By:' lines are not allowed in this repo.
+
+Why: project rule (CLAUDE.md → Git Rules; lens #9 telemetry).
+What instead: use 'Generated-by: <model-name>' if AI participated;
+optionally add 'Prompt-Ref: <session-uuid>:<block-id>' for trace correlation.
+NEVER attach the raw prompt — store only a hash/reference (compliance, lens #10).
+
+Strip the line and retry the commit.
+EOF
+    exit 1
+fi
+
+# 2. Forbid raw API keys / secrets in commit message body (defense-in-depth;
+#    gitleaks scans staged content, but the message itself isn't covered there)
+#    Patterns mirror gitleaks rules; keep narrow to avoid false-positives.
+if grep -qE "(sk-[A-Za-z0-9]{32,}|ghp_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16})" "$msg_file"; then
+    cat >&2 <<EOF
+✗ Commit blocked: commit message appears to contain a secret (API key, token).
+
+Patterns matched: OpenAI sk-*, GitHub PAT ghp_*, AWS AKIA*.
+NEVER paste secrets into commit messages — they live forever in git history.
+
+Rotate the secret immediately if it's real. Then retry without it.
+EOF
+    exit 1
+fi
+
+# 3. Soft warning: subject line >72 chars
+subject=$(head -1 "$msg_file")
+if [ ${#subject} -gt 72 ]; then
+    echo "⚠ Subject line is ${#subject} chars (target ≤72). Consider tightening."
+fi
+
+exit 0

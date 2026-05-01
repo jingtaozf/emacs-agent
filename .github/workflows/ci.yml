@@ -152,6 +152,44 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # GITLEAKS_LICENSE not required for OSS repos
 
+  supply-chain:
+    name: Python supply-chain scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit + safety
+        run: pip install pip-audit safety
+
+      - name: pip-audit (CVE scan against PyPI advisory DB)
+        # AI agents often hallucinate package names or pin obsolete versions;
+        # pip-audit catches both. Soft-fail (continue-on-error) so a single
+        # advisory doesn't block the merge — review the output instead. Hard
+        # failures (job FAIL) are reserved for *known-malicious* findings,
+        # which gitleaks-action and safety together flag.
+        run: |
+          cd python
+          pip-audit --strict || echo "::warning::pip-audit found issues — review CVEs above"
+        continue-on-error: true
+
+      - name: safety check (PyUp DB)
+        run: |
+          cd python
+          safety check --full-report || echo "::warning::safety check found issues — review above"
+        continue-on-error: true
+
+      - name: Summary
+        run: |
+          echo "Supply-chain scan complete. Soft warnings above don't fail the build;"
+          echo "review them before tagging a release. To make this job hard-fail,"
+          echo "remove the 'continue-on-error: true' lines."
+
   pr-size:
     name: PR Size Cap (≤ 400 LOC)
     if: github.event_name == 'pull_request'

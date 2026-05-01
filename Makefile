@@ -580,6 +580,24 @@ test-python:
 	@echo "Running Python package tests..."
 	cd python && uv run pytest -v
 
+# Dead-code scan via vulture (lens #6 of AI codebase mastery research).
+# Confidence 80 = high-signal only; lower thresholds get noisy because the
+# codebase uses heavy dynamic dispatch (Claude Code hook handlers, typing.Protocol
+# classes registered at runtime) that vulture can't see statically.
+# Not part of `make check` by default — run periodically (quarterly) or before
+# major refactors.
+.PHONY: vulture
+vulture:
+	@echo "Running vulture (dead-code scan, 80% confidence)..."
+	@if command -v uvx >/dev/null 2>&1; then \
+		uvx vulture python/claude_agent/ --min-confidence 80 || \
+		echo "(see findings above — may include false positives from dynamic dispatch)"; \
+	else \
+		echo "uvx not found; install uv (https://docs.astral.sh/uv/) or run:"; \
+		echo "  pip install vulture && vulture python/claude_agent/ --min-confidence 80"; \
+		exit 1; \
+	fi
+
 # Release checks - runs lint + unit tests + python tests
 .PHONY: check
 check: lint test-unit test-python

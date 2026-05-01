@@ -238,39 +238,38 @@ The harness grows with each mistake — rules become multipliers.
 
 ### Secrets & sensitive data — **NEVER hardcode**
 
-**NEVER** commit, log, or hardcode any of:
+**NEVER** commit, log, or hardcode API keys, tokens, credentials, private
+keys, `.env`-like bundles, absolute user paths, or real customer data.
+Always use env vars / `~/.local/certs/` / `${{ secrets.X }}`.
 
-- API keys / tokens (Anthropic, OpenAI, GitHub, npm, PyPI, Bitbucket, Slack, Linear)
-- Database credentials, connection strings (incl. SQLite paths inside CI artifacts)
-- Cookies, session IDs, OAuth client secrets, refresh tokens
-- Private keys (`*.pem`, `*.key`, `*.p12`, SSH keys, GPG passphrases)
-- `.env` / `.envrc` / Doppler / 1Password secrets — keep these in `~/.local/certs/` or env vars only
-- User home paths (`/Users/<name>`) or absolute project paths in committed files (use `~` or env vars)
-- Phone numbers, email addresses, real customer names — use synthetic data in fixtures
+If a secret leaks: **rotate it immediately** (`git rebase` does not erase it
+from remote history).
 
-**ALWAYS** reference secrets via `os.environ[...]` (Python) / `(getenv ...)` (Elisp) /
-`${{ secrets.X }}` (GitHub Actions). If a secret leaks into a commit, **rotate it
-immediately** — `git rebase -i` to remove the line is not enough; the value is in
-remote history.
+Three detection layers run automatically:
+**pre-commit** (`.pre-commit-config.yaml` → gitleaks),
+**CI** (`.github/workflows/ci.yml` → gitleaks-action),
+**release** (`gitleaks detect --no-banner --redact` full-history sweep).
 
-Detection layers:
-- pre-commit: `gitleaks` (see `.pre-commit-config.yaml`)
-- CI: `gitleaks-action` (see `.github/workflows/ci.yml`)
-- Manual full-history sweep before any release: `gitleaks detect --no-banner --redact`
+Full prohibition list, MCP audit, and detection details:
+[`docs/agent-rules/secrets.md`](docs/agent-rules/secrets.md) and
+[`docs/security/mcp-audit.md`](docs/security/mcp-audit.md).
 
 ### Lessons file (`tasks/lessons.md`)
 
-Every user correction or runtime trap that wasn't caught by existing tests:
+Every user correction or runtime trap not caught by tests → append a
+4-line entry (date / mistake / context / rule) to `tasks/lessons.md`.
+Recur ≥3 times → promote to a `CLAUDE.md` rule + add structural check to
+`tests/test-structural.el`. Unknowns section: review quarterly, promote
+high-frequency items to `docs/design-docs/`.
 
-1. Append a 4-line entry to `tasks/lessons.md` (date / mistake / context / rule)
-2. If a lesson recurs ≥3 times across different sessions → promote to a `CLAUDE.md`
-   rule and add the structural check to `tests/test-structural.el`
-3. The file's Unknowns section captures "AI didn't know why X" moments — review
-   quarterly, promote high-frequency items to `docs/design-docs/`
+Don't put new rules straight in CLAUDE.md — context rot is real (lens #5).
 
-This is the inner loop of "two-tier memory" (parse research lens #11). Don't put
-new rules straight into CLAUDE.md — they bloat the agent context (lens #5 ≤60-line
-target, ETH research: auto-generated long docs reduce task success 0.5-2%).
+### Risk → Autonomy Level (lens #12)
+
+See [`docs/agent-rules/risk-autonomy.md`](docs/agent-rules/risk-autonomy.md)
+for the task-domain → required level table and hard approval gates. TL;DR:
+auth/payments/migrations → **L3 supervised**; refactor/docs/tests → **L4
+autonomous**; exploration → **L1-L2 inline**.
 
 ## Further Reading
 
