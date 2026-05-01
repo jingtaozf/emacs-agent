@@ -35,7 +35,7 @@
 - mistake: `AGENTS.md` 是 `opencode_workspace.py` 的 ephemeral session inject(头有 `auto-removed on exit`),但 `atexit` cleanup 把"被污染的 original"写回去,导致 self-perpetuating 污染 + 被 git commit。文件长到 736 行(30K),严重 context rot。
 - context: 在 lens #5 (Documentation as agent context) action plan 里发现;writer 在 `python/claude_agent/opencode_workspace.py:84-97`。
 - rule: ephemeral 文件**必须**写到非 git tracked 路径(`.cache/` 或 tmp);若必须落项目根,则 .gitignore + cleanup 必须可证明幂等。
-- followup: `git rm --cached AGENTS.md .github/AGENTS.md` + .gitignore + 修 `opencode_workspace.py` cleanup 逻辑(不写 base 到 ephemeral 段)。
+- fix shipped (2026-05-01): 治标 commit `bba334b` 把 AGENTS.md 截到 60 行;治本 commit (此次) 把 cleanup 改成 *content-driven idempotent* — 加 `strip_emacs_agent_inject_blocks` + `cleanup_emacs_agent_inject` helpers 到 `workspace_launcher.py`,opencode_workspace + copilot_workspace 都改用 helper。两个 regression test 在 `test_opencode_workspace.py::test_polluted_original_does_not_self_perpetuate` 和 `test_cleanup_is_idempotent_and_strips_inject_block`。
 
 ### 2026-04-30 — `code-agent-org-workspace-archive-workflow` 删 CLAUDE_CLI_SESSION
 

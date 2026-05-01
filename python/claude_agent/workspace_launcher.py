@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -97,6 +98,58 @@ def restore_file(path: Path, original_content: str | None) -> None:
             path.unlink(missing_ok=True)
         else:
             path.write_text(original_content)
+    except Exception:
+        pass  # Best-effort — process may be torn down
+
+
+# AGENTS.md ephemeral inject block markers + helpers.
+#
+# OpenCode and Copilot launchers prepend a session-specific "system prompt"
+# block to AGENTS.md (or .github/AGENTS.md), then register an atexit hook to
+# strip it on exit. The original design captured the file's prior content as
+# ``original`` and restored it. That had a self-perpetuating bug: if a prior
+# session's atexit hook didn't fire (process killed, or the parent exec'd
+# OpenCode and exited before child cleanup), the next session would read
+# the polluted file as ``original`` and restore-back the pollution — each
+# new session adding another stacked inject block. Real instance: AGENTS.md
+# in claude-agent grew to 736 lines / 30K from this loop.
+#
+# The helpers below replace that with a content-driven, idempotent design:
+# we strip blocks delimited by the BEGIN/END markers from the current file
+# at exit (or before injecting), so cleanup works regardless of whether
+# any prior cleanup fired. See tasks/lessons.md (2026-04-30) for full RCA.
+
+_EMACS_AGENT_INJECT_RE = re.compile(
+    r"<!-- BEGIN emacs-agent session instructions[^>]*-->\n.*?"
+    r"<!-- END emacs-agent session instructions -->\n*",
+    re.DOTALL,
+)
+
+
+def strip_emacs_agent_inject_blocks(text: str) -> str:
+    """Remove every ``<!-- BEGIN/END emacs-agent ... -->`` block from TEXT.
+
+    Idempotent: returns TEXT unchanged if no markers are present.
+    """
+    return _EMACS_AGENT_INJECT_RE.sub("", text)
+
+
+def cleanup_emacs_agent_inject(path: Path, file_existed_before: bool) -> None:
+    """Strip emacs-agent inject blocks from PATH; unlink if no base remains.
+
+    Idempotent and content-driven (does not rely on a captured original).
+    Safe to call multiple times. If FILE_EXISTED_BEFORE is False and the
+    base content (after stripping inject blocks) is empty, the file is
+    removed — matching the behaviour of ``restore_file(path, None)``.
+    """
+    try:
+        if not path.exists():
+            return
+        cleaned = strip_emacs_agent_inject_blocks(path.read_text())
+        if not cleaned.strip() and not file_existed_before:
+            path.unlink()
+        else:
+            path.write_text(cleaned)
     except Exception:
         pass  # Best-effort — process may be torn down
 

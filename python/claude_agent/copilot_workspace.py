@@ -21,10 +21,12 @@ from pathlib import Path
 
 from claude_agent.workspace_launcher import (
     WorkspaceLauncher,
+    cleanup_emacs_agent_inject,
     filter_claude_args,
     is_valid_session,
     restore_file,
     split_positional_args,
+    strip_emacs_agent_inject_blocks,
 )
 
 
@@ -58,24 +60,26 @@ def _inject_emacs_mcp_into_dotgithub(project_root: str, mcp_url: str) -> None:
 def _write_agents_md(project_root: str, system_prompt: str) -> None:
     """Prepend the session system prompt to ``.github/AGENTS.md``.
 
-    The existing content is preserved with a clear header/footer so
-    session instructions are visually separate from permanent project
-    guidance. On exit the file is restored.
+    Existing content is preserved with a clear header/footer so session
+    instructions are visually separate from permanent project guidance.
+    On exit the inject block is stripped (idempotent) so multiple failed
+    cleanups don't accumulate — see tasks/lessons.md (2026-04-30) for the
+    self-perpetuating bloat bug this avoids.
     """
     agents_md_path = Path(project_root) / ".github" / "AGENTS.md"
     agents_md_path.parent.mkdir(parents=True, exist_ok=True)
 
-    original: str | None = None
-    if agents_md_path.exists():
-        original = agents_md_path.read_text()
+    file_existed_before = agents_md_path.exists()
+    raw = agents_md_path.read_text() if file_existed_before else ""
+    base = strip_emacs_agent_inject_blocks(raw)
 
     header = (
         "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
         f"{system_prompt.strip()}\n"
         "<!-- END emacs-agent session instructions -->\n\n"
     )
-    agents_md_path.write_text(header + (original or ""))
-    atexit.register(restore_file, agents_md_path, original)
+    agents_md_path.write_text(header + base)
+    atexit.register(cleanup_emacs_agent_inject, agents_md_path, file_existed_before)
     print(f"  System prompt: written to {agents_md_path}")
 
 

@@ -277,3 +277,86 @@ class TestWriteAgentsMd:
         content = (tmp_path / "AGENTS.md").read_text()
         assert "<!-- BEGIN emacs-agent session instructions" in content
         assert "<!-- END emacs-agent session instructions -->" in content
+
+    def test_polluted_original_does_not_self_perpetuate(self, tmp_path):
+        """Regression test for 2026-04-30 self-perpetuating bloat bug.
+
+        If a prior session's atexit cleanup did not fire (process killed,
+        ``open`` exec'd OpenCode and the parent atexit ran but original
+        was already polluted from the *prior* session), AGENTS.md ends
+        up with stacked BEGIN/END inject blocks. Each subsequent session
+        treats the polluted file as the durable base and prepends
+        another inject block, growing without bound.
+
+        Expected behavior: ``_write_agents_md`` strips any existing
+        BEGIN/END inject blocks from the read content before treating
+        the rest as base, so the output has *exactly one* inject block
+        regardless of input pollution.
+        """
+        agents_md = tmp_path / "AGENTS.md"
+        # Simulate a polluted file from a prior failed cleanup:
+        # 3 stacked inject blocks + a small base.
+        polluted = (
+            "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
+            "Stale instructions from session 1\n"
+            "<!-- END emacs-agent session instructions -->\n\n"
+            "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
+            "Stale instructions from session 2\n"
+            "<!-- END emacs-agent session instructions -->\n\n"
+            "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
+            "Stale instructions from session 3\n"
+            "<!-- END emacs-agent session instructions -->\n\n"
+            "# Real project base\n\nKeep this content.\n"
+        )
+        agents_md.write_text(polluted)
+
+        _write_agents_md(str(tmp_path), "Fresh session 4 instructions.")
+        result = agents_md.read_text()
+
+        # Exactly one BEGIN marker (the new one), not 4.
+        assert result.count("<!-- BEGIN emacs-agent session instructions") == 1
+        # Stale instructions from sessions 1-3 must be gone.
+        assert "Stale instructions from session 1" not in result
+        assert "Stale instructions from session 2" not in result
+        assert "Stale instructions from session 3" not in result
+        # Real base content survives.
+        assert "# Real project base" in result
+        assert "Keep this content." in result
+        # New session content present.
+        assert "Fresh session 4 instructions." in result
+
+    def test_cleanup_is_idempotent_and_strips_inject_block(self, tmp_path):
+        """Cleanup must work from current file content, not captured original.
+
+        Calling cleanup twice should be a no-op the second time. After
+        cleanup, AGENTS.md must contain no BEGIN/END markers — only the
+        durable base. If the file existed before with no base content,
+        cleanup deletes it.
+        """
+        from claude_agent.workspace_launcher import cleanup_emacs_agent_inject
+
+        # Case 1: file existed with base content; cleanup leaves base.
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("# Original base\n\nProject text.\n")
+        _write_agents_md(str(tmp_path), "Session inject.")
+        # File now has inject + base. Run cleanup:
+        cleanup_emacs_agent_inject(agents_md, file_existed_before=True)
+        result = agents_md.read_text()
+        assert "BEGIN emacs-agent" not in result
+        assert "Session inject." not in result
+        assert "# Original base" in result
+        # Idempotent — second cleanup leaves it unchanged.
+        cleanup_emacs_agent_inject(agents_md, file_existed_before=True)
+        assert agents_md.read_text() == result
+
+        # Case 2: file did NOT exist before; cleanup removes it.
+        nofile_dir = tmp_path / "nofile"
+        nofile_dir.mkdir()
+        nofile = nofile_dir / "AGENTS.md"
+        # Simulate inject created the file (no prior base):
+        from claude_agent.opencode_workspace import _write_agents_md as wam
+        wam(str(nofile_dir), "Only inject here.")
+        assert nofile.exists()
+        cleanup_emacs_agent_inject(nofile, file_existed_before=False)
+        # No durable base, so file is removed entirely.
+        assert not nofile.exists()
