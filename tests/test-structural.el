@@ -1232,5 +1232,174 @@ If you need live terminal echo, use the async verbose mirror."
                                  nil t))
          (format "Dead streaming symbol reintroduced: %s\nFIX: Remove the defun/defvar.  See rule minimize-emacs-mcp-calls.md." sym))))))
 
+;;; F44: Semantic-duplicate defun detection (lens #17 architectural drift)
+;;
+;; AI agents often emit "the same function in 4 different files" because
+;; each session re-derives an answer to the same problem from scratch.
+;; Lens #17 of the AI codebase mastery research calls these *mutant
+;; duplicates* — `grep` doesn't catch them because variable names differ;
+;; SAST doesn't catch them because individual files look fine.
+;;
+;; This test fingerprints every `defun` body across all source .org files
+;; (literate-elisp blocks) and flags any fingerprint that appears more
+;; than once. Fingerprint = the body sexp printed with whitespace
+;; collapsed, docstring stripped, but symbols + structure preserved.
+;; Bodies shorter than a token threshold are ignored — they're too small
+;; to count as meaningful duplication (`(error "not implemented")` stubs
+;; would otherwise dominate the report).
+;;
+;; cl-defmethod intentional dispatch is filtered: same protocol method
+;; implemented on different receivers will share a fingerprint by design.
+
+(defun test-structural--defun-body-fingerprint (sexp &optional min-tokens)
+  "Return a fingerprint string for SEXP if it is a defun-shaped form
+with a body of at least MIN-TOKENS (default 12) whitespace-separated
+tokens. Strips docstring; preserves all other structure.
+
+Returns nil for non-defun forms, cl-defmethod (intentional dispatch),
+and bodies smaller than the threshold."
+  (let ((min-tokens (or min-tokens 12)))
+    (when (and (consp sexp)
+               (memq (car-safe sexp) '(defun cl-defun defmacro)))
+      (let* ((body (nthcdr 3 sexp))
+             ;; Strip leading docstring (a string literal as the first body form)
+             (body (if (and body (stringp (car body))) (cdr body) body))
+             ;; Skip declare / interactive forms — they're metadata, not behaviour
+             (body (cl-remove-if
+                    (lambda (form)
+                      (and (consp form)
+                           (memq (car-safe form) '(declare interactive))))
+                    body))
+             (printed (prin1-to-string body))
+             (printed (replace-regexp-in-string "[ \t\n]+" " " printed))
+             (printed (string-trim printed)))
+        (when (>= (length (split-string printed)) min-tokens)
+          printed)))))
+
+(defun test-structural--read-sexps-from-org-elisp-blocks (file)
+  "Read top-level sexps from #+begin_src elisp blocks in FILE.
+Returns the list in reading order. Tolerates parse errors per block."
+  (let ((sexps nil))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (while (re-search-forward
+              "^#\\+\\(?:begin_src\\|BEGIN_SRC\\)[ \t]+\\(?:elisp\\|emacs-lisp\\)"
+              nil t)
+        (forward-line 1)
+        (let* ((block-start (point))
+               (block-end (save-excursion
+                            (when (re-search-forward
+                                   "^#\\+\\(?:end_src\\|END_SRC\\)" nil t)
+                              (match-beginning 0)))))
+          (when block-end
+            (save-restriction
+              (narrow-to-region block-start block-end)
+              (goto-char (point-min))
+              (let (continue)
+                (setq continue t)
+                (while continue
+                  (let ((sexp (condition-case _err
+                                  (read (current-buffer))
+                                ((end-of-file invalid-read-syntax) 'eof))))
+                    (cond
+                     ((eq sexp 'eof) (setq continue nil))
+                     ((consp sexp) (push sexp sexps)))))))
+            (goto-char block-end)))))
+    (nreverse sexps)))
+
+(defun test-structural--scan-semantic-duplicates ()
+  "Walk all source .org files, fingerprint every defun body, return a
+list of (FINGERPRINT . LIST-OF (NAME . FILE)) for fingerprints that
+appear more than once. Skips reference/, docs/, tests/, tasks/."
+  (let ((by-fp (make-hash-table :test 'equal))
+        (source-files
+         (cl-remove-if
+          (lambda (f)
+            (or (string-match-p "/reference/" f)
+                (string-match-p "/docs/" f)
+                (string-match-p "/tests/" f)
+                (string-match-p "/tasks/" f)
+                (string-match-p "/.cache/" f)))
+          (directory-files-recursively
+           test-structural--project-root "\\.org$"))))
+    (dolist (file source-files)
+      (dolist (sexp (test-structural--read-sexps-from-org-elisp-blocks file))
+        (let ((fp (test-structural--defun-body-fingerprint sexp))
+              (name (when (and (consp sexp)
+                               (memq (car-safe sexp) '(defun cl-defun defmacro))
+                               (symbolp (cadr sexp)))
+                      (symbol-name (cadr sexp)))))
+          (when (and fp name)
+            (push (cons name file) (gethash fp by-fp))))))
+    (let ((dupes nil))
+      (maphash (lambda (fp entries)
+                 (when (> (length entries) 1)
+                   (push (cons fp entries) dupes)))
+               by-fp)
+      dupes)))
+
+(ert-deftest test-structural-fingerprint-self-test ()
+  "Self-test for the fingerprint helper used by F44.
+Confirms that:
+- docstring is stripped (two functions with same body, one with docstring,
+  produce identical fingerprints)
+- different bodies produce different fingerprints
+- different argnames are NOT normalised away — fingerprint preserves
+  symbol identity (so `(+ a b)` and `(+ x y)` differ; this is a
+  conservative stance that yields false negatives, not false positives)"
+  :tags '(:unit :fast :stable :structural)
+  (let* ((sexp1 '(defun foo (x)
+                   (let ((y (+ x 1))) (when (> y 10) (* y 2 3 4 5 6)))))
+         (sexp2 '(defun bar (x)
+                   "this is a docstring"
+                   (let ((y (+ x 1))) (when (> y 10) (* y 2 3 4 5 6)))))
+         (sexp3 '(defun baz (x)
+                   (let ((y (- x 1))) (when (> y 10) (* y 2 3 4 5 6)))))
+         (fp1 (test-structural--defun-body-fingerprint sexp1 0))
+         (fp2 (test-structural--defun-body-fingerprint sexp2 0))
+         (fp3 (test-structural--defun-body-fingerprint sexp3 0)))
+    (should fp1)
+    (should fp2)
+    (should fp3)
+    (should-with-fix (equal fp1 fp2)
+      "Fingerprint helper failed to strip docstring.\nFIX: ensure the (stringp (car body)) branch fires in test-structural--defun-body-fingerprint.")
+    (should-with-fix (not (equal fp1 fp3))
+      "Fingerprint helper collapsed semantically distinct bodies.\nFIX: do not normalise symbol identity (`+` vs `-` must be preserved).")))
+
+(ert-deftest test-structural-no-semantic-duplicate-defuns ()
+  "Two or more defuns with identical normalised body fingerprints suggest
+copy-paste / AI mutant duplication. Lens #17 (architectural drift).
+
+Allowlist:
+- bodies < 12 whitespace-separated tokens (filtered by fingerprinter)
+- cl-defmethod (intentional dispatch — same body across receivers)
+- declare / interactive forms (metadata, not behaviour)
+
+FIX: If the finding is real duplication, extract a shared helper. If
+it's intentional (e.g. backend-specific stubs that legitimately do the
+same thing), add an explicit `;; intentional duplicate of <other>` comment
+just above one of them and wrap a no-op variation around the body."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((dupes (test-structural--scan-semantic-duplicates)))
+      (should-with-fix (null dupes)
+        (format
+         "Semantic-duplicate defuns found (identical normalised bodies):\n\n%s\n\nFIX: Extract a shared helper, or annotate intentional duplication."
+         (mapconcat
+          (lambda (entry)
+            (let ((fp (car entry))
+                  (occurrences (cdr entry)))
+              (format
+               "Fingerprint (truncated):\n  %s\n  duplicates:\n%s"
+               (if (> (length fp) 200) (concat (substring fp 0 200) " …") fp)
+               (mapconcat
+                (lambda (occ)
+                  (format "    - %s   in %s"
+                          (car occ)
+                          (file-name-nondirectory (cdr occ))))
+                occurrences "\n"))))
+          dupes "\n\n"))))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here
