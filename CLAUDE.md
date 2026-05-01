@@ -236,6 +236,42 @@ When an agent mistake is not caught by existing tests:
 
 The harness grows with each mistake — rules become multipliers.
 
+### Secrets & sensitive data — **NEVER hardcode**
+
+**NEVER** commit, log, or hardcode any of:
+
+- API keys / tokens (Anthropic, OpenAI, GitHub, npm, PyPI, Bitbucket, Slack, Linear)
+- Database credentials, connection strings (incl. SQLite paths inside CI artifacts)
+- Cookies, session IDs, OAuth client secrets, refresh tokens
+- Private keys (`*.pem`, `*.key`, `*.p12`, SSH keys, GPG passphrases)
+- `.env` / `.envrc` / Doppler / 1Password secrets — keep these in `~/.local/certs/` or env vars only
+- User home paths (`/Users/<name>`) or absolute project paths in committed files (use `~` or env vars)
+- Phone numbers, email addresses, real customer names — use synthetic data in fixtures
+
+**ALWAYS** reference secrets via `os.environ[...]` (Python) / `(getenv ...)` (Elisp) /
+`${{ secrets.X }}` (GitHub Actions). If a secret leaks into a commit, **rotate it
+immediately** — `git rebase -i` to remove the line is not enough; the value is in
+remote history.
+
+Detection layers:
+- pre-commit: `gitleaks` (see `.pre-commit-config.yaml`)
+- CI: `gitleaks-action` (see `.github/workflows/ci.yml`)
+- Manual full-history sweep before any release: `gitleaks detect --no-banner --redact`
+
+### Lessons file (`tasks/lessons.md`)
+
+Every user correction or runtime trap that wasn't caught by existing tests:
+
+1. Append a 4-line entry to `tasks/lessons.md` (date / mistake / context / rule)
+2. If a lesson recurs ≥3 times across different sessions → promote to a `CLAUDE.md`
+   rule and add the structural check to `tests/test-structural.el`
+3. The file's Unknowns section captures "AI didn't know why X" moments — review
+   quarterly, promote high-frequency items to `docs/design-docs/`
+
+This is the inner loop of "two-tier memory" (parse research lens #11). Don't put
+new rules straight into CLAUDE.md — they bloat the agent context (lens #5 ≤60-line
+target, ETH research: auto-generated long docs reduce task success 0.5-2%).
+
 ## Further Reading
 
 | Topic | Location |
