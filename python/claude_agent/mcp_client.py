@@ -31,6 +31,7 @@ from typing import Protocol
 # Exceptions
 # ======================================================================
 
+
 class McpElispError(Exception):
     """Raised when Emacs reports an error while evaluating elisp."""
 
@@ -43,6 +44,7 @@ class McpConnectionError(Exception):
 # Protocol — the published contract other modules depend on
 # ======================================================================
 
+
 class McpClientProtocol(Protocol):
     """Contract every MCP client implementation must satisfy.
 
@@ -53,16 +55,15 @@ class McpClientProtocol(Protocol):
     explicitly.
     """
 
-    def eval_elisp(self, code: str) -> str | None:
-        ...
+    def eval_elisp(self, code: str) -> str | None: ...
 
-    def ping(self) -> bool:
-        ...
+    def ping(self) -> bool: ...
 
 
 # ======================================================================
 # McpClient
 # ======================================================================
+
 
 class McpClient:
     """Concrete synchronous MCP client.
@@ -148,9 +149,7 @@ class McpClient:
             text = outer["result"]["content"][0]["text"]
             inner = json.loads(text)
             if not inner.get("success", True):
-                raise McpElispError(
-                    inner.get("error", "Emacs returned success=false")
-                )
+                raise McpElispError(inner.get("error", "Emacs returned success=false"))
             result = inner.get("result")
             if result is None:
                 return None

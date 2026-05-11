@@ -87,9 +87,7 @@ class TestTraceContextStoreRead:
 
     def test_parses_valid_traceparent(self, tmp_path, otel_setup):
         ctx_file = tmp_path / "sess-123.trace-context"
-        ctx_file.write_text(
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\n"
-        )
+        ctx_file.write_text("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\n")
         store = self._make_store(otel_setup, tmp_path)
         assert store.read("sess-123") is not None
 
@@ -117,9 +115,7 @@ class TestTraceContextStoreRead:
 
     def test_ignores_non_trace_context_files(self, tmp_path, otel_setup):
         generic = tmp_path / "traceparent"
-        generic.write_text(
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-        )
+        generic.write_text("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
         store = self._make_store(otel_setup, tmp_path)
         assert store.read("different-session-id") is None
 

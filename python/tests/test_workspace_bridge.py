@@ -27,6 +27,7 @@ from claude_agent.workspace_bridge import (
 # Fixture helpers
 # ----------------------------------------------------------------------
 
+
 def make_bridge(mcp=None, org_file="/tmp/f.org", session_id="sid"):
     """Return a WorkspaceBridge with a default MagicMock MCP client."""
     return WorkspaceBridge(
@@ -127,66 +128,99 @@ class TestExtractTurns:
         return str(path)
 
     def _user(self, text):
-        return {"type": "user",
-                "message": {"content": [{"type": "text", "text": text}]}}
+        return {
+            "type": "user",
+            "message": {"content": [{"type": "text", "text": text}]},
+        }
 
     def _assistant(self, text):
-        return {"type": "assistant",
-                "message": {"content": [{"type": "text", "text": text}]}}
+        return {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]},
+        }
 
     def _assistant_tool(self, text):
-        return {"type": "assistant",
-                "message": {"content": [
+        return {
+            "type": "assistant",
+            "message": {
+                "content": [
                     {"type": "text", "text": text},
                     {"type": "tool_use", "name": "Bash", "input": {}},
-                ]}}
+                ]
+            },
+        }
 
     def test_single_turn(self, tmp_path):
         from claude_agent.workspace_bridge import _extract_turns
-        path = self._write_transcript(tmp_path, [
-            self._user("q"), self._assistant("a"),
-        ])
+
+        path = self._write_transcript(
+            tmp_path,
+            [
+                self._user("q"),
+                self._assistant("a"),
+            ],
+        )
         assert _extract_turns(path) == [("q", "a")]
 
     def test_two_sequential_turns(self, tmp_path):
         from claude_agent.workspace_bridge import _extract_turns
-        path = self._write_transcript(tmp_path, [
-            self._user("q1"), self._assistant("a1"),
-            self._user("q2"), self._assistant("a2"),
-        ])
+
+        path = self._write_transcript(
+            tmp_path,
+            [
+                self._user("q1"),
+                self._assistant("a1"),
+                self._user("q2"),
+                self._assistant("a2"),
+            ],
+        )
         assert _extract_turns(path) == [("q1", "a1"), ("q2", "a2")]
 
     def test_superseded_first_turn_has_empty_assistant(self, tmp_path):
         """The PCR dev1 bug: user typed q2 before Claude finished q1."""
         from claude_agent.workspace_bridge import _extract_turns
-        path = self._write_transcript(tmp_path, [
-            self._user("q1"),
-            self._user("q2"),
-            self._assistant("a2"),
-        ])
+
+        path = self._write_transcript(
+            tmp_path,
+            [
+                self._user("q1"),
+                self._user("q2"),
+                self._assistant("a2"),
+            ],
+        )
         assert _extract_turns(path) == [("q1", ""), ("q2", "a2")]
 
     def test_tool_use_turns_skipped(self, tmp_path):
         from claude_agent.workspace_bridge import _extract_turns
-        path = self._write_transcript(tmp_path, [
-            self._user("q1"),
-            self._assistant_tool("Let me check"),
-            self._assistant("final answer"),
-        ])
+
+        path = self._write_transcript(
+            tmp_path,
+            [
+                self._user("q1"),
+                self._assistant_tool("Let me check"),
+                self._assistant("final answer"),
+            ],
+        )
         assert _extract_turns(path) == [("q1", "final answer")]
 
     def test_empty_transcript(self, tmp_path):
         from claude_agent.workspace_bridge import _extract_turns
+
         path = self._write_transcript(tmp_path, [])
         assert _extract_turns(path) == []
 
     def test_user_without_assistant(self, tmp_path):
         """Final user entry with no assistant follow-up (cancelled during generation)."""
         from claude_agent.workspace_bridge import _extract_turns
-        path = self._write_transcript(tmp_path, [
-            self._user("q1"), self._assistant("a1"),
-            self._user("q2"),
-        ])
+
+        path = self._write_transcript(
+            tmp_path,
+            [
+                self._user("q1"),
+                self._assistant("a1"),
+                self._user("q2"),
+            ],
+        )
         assert _extract_turns(path) == [("q1", "a1"), ("q2", "")]
 
 
@@ -496,9 +530,7 @@ class TestHandleResponseCopilotFormat:
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
         bridge._write_custom_id("cid")
-        bridge._handle_response(
-            {"transcriptPath": str(transcript), "sessionId": "abc"}
-        )
+        bridge._handle_response({"transcriptPath": str(transcript), "sessionId": "abc"})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("answer" in c for c in calls)
 
@@ -675,12 +707,18 @@ class TestHandleResponseSupersede:
         transcript = self._write_transcript(
             tmp_path,
             [
-                {"type": "user",
-                 "message": {"content": [{"type": "text", "text": "q1"}]}},
-                {"type": "user",
-                 "message": {"content": [{"type": "text", "text": "q2"}]}},
-                {"type": "assistant",
-                 "message": {"content": [{"type": "text", "text": "a2"}]}},
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "text", "text": "q1"}]},
+                },
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "text", "text": "q2"}]},
+                },
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "a2"}]},
+                },
             ],
         )
 
@@ -707,13 +745,31 @@ class TestHandleResponseSupersede:
         bridge._handle_prompt({"prompt": "q3"})
 
         # Transcript: q1→a1, then q2 superseded by q3, then a3.
-        transcript = self._write_transcript(tmp_path, [
-            {"type": "user", "message": {"content": [{"type": "text", "text": "q1"}]}},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a1"}]}},
-            {"type": "user", "message": {"content": [{"type": "text", "text": "q2"}]}},
-            {"type": "user", "message": {"content": [{"type": "text", "text": "q3"}]}},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "a3"}]}},
-        ])
+        transcript = self._write_transcript(
+            tmp_path,
+            [
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "text", "text": "q1"}]},
+                },
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "a1"}]},
+                },
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "text", "text": "q2"}]},
+                },
+                {
+                    "type": "user",
+                    "message": {"content": [{"type": "text", "text": "q3"}]},
+                },
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "a3"}]},
+                },
+            ],
+        )
 
         calls = []
         mcp.eval_elisp.side_effect = lambda elisp: calls.append(elisp) or None
@@ -722,10 +778,10 @@ class TestHandleResponseSupersede:
         responses = [c for c in calls if "insert-response" in c]
         cancels = [c for c in calls if "mark-cancelled" in c]
         assert len(responses) == 2, "A and C should get responses"
-        assert any("\"A\"" in c or "a1" in c for c in responses)
-        assert any("\"C\"" in c or "a3" in c for c in responses)
+        assert any('"A"' in c or "a1" in c for c in responses)
+        assert any('"C"' in c or "a3" in c for c in responses)
         assert len(cancels) == 1, "B should be cancelled"
-        assert any("\"B\"" in c for c in cancels)
+        assert any('"B"' in c for c in cancels)
         assert bridge._read_custom_ids() == []
 
 
@@ -762,13 +818,27 @@ class TestHandleResponseSentinelPrompt:
         # Transcript path exists so we don't hit the spurious-Stop branch.
         transcript = tmp_path / "t.jsonl"
         transcript.write_text(
-            json.dumps({"type": "user",
-                        "message": {"content": [{"type": "text",
-                                                 "text": "<<autonomous-loop-dynamic>>"}]}})
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "<<autonomous-loop-dynamic>>"}
+                        ]
+                    },
+                }
+            )
             + "\n"
-            + json.dumps({"type": "assistant",
-                          "message": {"content": [{"type": "text",
-                                                   "text": "Profiling done — parity OK"}]}})
+            + json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Profiling done — parity OK"}
+                        ]
+                    },
+                }
+            )
         )
 
         bridge._handle_response(
@@ -782,11 +852,13 @@ class TestHandleResponseSentinelPrompt:
 
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         joined = "\n".join(calls)
-        assert "latest-instruction-custom-id" in joined, \
+        assert "latest-instruction-custom-id" in joined, (
             "fallback should query for the newest instruction"
+        )
         # Response should be inserted under the returned latest cid.
         assert any(
-            "insert-response" in c and "instruction-52-sdd-82544" in c
+            "insert-response" in c
+            and "instruction-52-sdd-82544" in c
             and "Profiling done" in c
             for c in calls
         ), "response must be inserted under the latest instruction's cid"
@@ -804,11 +876,23 @@ class TestHandleResponseSentinelPrompt:
 
         transcript = tmp_path / "t.jsonl"
         transcript.write_text(
-            json.dumps({"type": "user", "message": {"content": [{"type": "text",
-                                                                   "text": "<<autonomous-loop-dynamic>>"}]}})
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "<<autonomous-loop-dynamic>>"}
+                        ]
+                    },
+                }
+            )
             + "\n"
-            + json.dumps({"type": "assistant",
-                          "message": {"content": [{"type": "text", "text": "some work"}]}})
+            + json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "some work"}]},
+                }
+            )
         )
         bridge._handle_response(
             {"transcript_path": str(transcript), "last_user_message": ""}
@@ -844,7 +928,9 @@ class TestHandleResponseSpuriousStop:
             elisp = call[0][0]
             assert "insert-response" not in elisp or "first" not in elisp
 
-    def test_spurious_stop_empty_queue_falls_through_legacy(self, tmp_path, monkeypatch):
+    def test_spurious_stop_empty_queue_falls_through_legacy(
+        self, tmp_path, monkeypatch
+    ):
         """When queue IS empty, the legacy path still mints a custom-id
         and inserts the response — preserves backward-compat for
         terminal-typed prompts that never fired UserPromptSubmit."""
@@ -1010,9 +1096,8 @@ class TestHandleResponsePromptInsertion:
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         # Fallback returns a fake latest-instruction cid.
-        mcp.eval_elisp.side_effect = (
-            lambda elisp: "latest-cid"
-            if "latest-instruction-custom-id" in elisp else None
+        mcp.eval_elisp.side_effect = lambda elisp: (
+            "latest-cid" if "latest-instruction-custom-id" in elisp else None
         )
         bridge = make_bridge(mcp, session_id="sid")
         bridge._handle_response({"last_assistant_message": "orphan response"})
@@ -1023,9 +1108,7 @@ class TestHandleResponsePromptInsertion:
             for c in calls
         )
 
-    def test_no_custom_id_no_user_message_no_latest_drops(
-        self, tmp_path, monkeypatch
-    ):
+    def test_no_custom_id_no_user_message_no_latest_drops(self, tmp_path, monkeypatch):
         """If there's no instruction at all, the response is dropped."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
@@ -1070,9 +1153,8 @@ class TestHandleResponsePromptInsertion:
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         (tmp_path / "sid.from-emacs").write_text("1")
         mcp = MagicMock()
-        mcp.eval_elisp.side_effect = (
-            lambda elisp: "latest-cid"
-            if "latest-instruction-custom-id" in elisp else None
+        mcp.eval_elisp.side_effect = lambda elisp: (
+            "latest-cid" if "latest-instruction-custom-id" in elisp else None
         )
         bridge = make_bridge(mcp, session_id="sid")
         bridge._handle_response(
@@ -1081,9 +1163,7 @@ class TestHandleResponsePromptInsertion:
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         # Fallback used — no NEW prompt minted, response routed to latest.
         assert all("insert-prompt" not in c for c in calls)
-        assert any(
-            "insert-response" in c and "latest-cid" in c for c in calls
-        )
+        assert any("insert-response" in c and "latest-cid" in c for c in calls)
         assert not (tmp_path / "sid.from-emacs").exists()
 
     def test_insert_prompt_failure_returns_early(self, tmp_path, monkeypatch):

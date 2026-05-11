@@ -76,6 +76,7 @@ _process_start_time = time.time()
 # session-scoped state lives on the class.
 # ======================================================================
 
+
 def _escape_elisp_string(s: str) -> str:
     """Escape STR so it can be embedded in an elisp double-quoted literal.
 
@@ -151,7 +152,7 @@ def _check_any_recent_from_emacs_flag() -> tuple[bool, str]:
 def write_status(session_id: str, status: str) -> None:
     """Write ``<STATUS_DIR>/<session_id>`` with STATUS for fast detection.
 
-    Emacs's iTerm2 and cmux backends poll this file during the short
+    Emacs's terminal backends poll this file during the short
     window between "prompt sent" and "first response token" to decide
     whether the CLI is still busy. The hook handlers flip it busy/ready
     at the obvious points.
@@ -172,6 +173,7 @@ def write_status(session_id: str, status: str) -> None:
 # skipping turns that contain tool calls to avoid inserting noisy
 # intermediate narration.
 # ======================================================================
+
 
 def _extract_full_response(transcript_path: str) -> str:
     """Collect assistant text since the last user entry in a Claude Code
@@ -357,6 +359,7 @@ def _extract_copilot_response(transcript_path: str) -> str:
 # Protocol
 # ======================================================================
 
+
 class WorkspaceBridgeProtocol(Protocol):
     """Contract every bridge implementation publishes.
 
@@ -367,13 +370,13 @@ class WorkspaceBridgeProtocol(Protocol):
     implements ``handle``.
     """
 
-    def handle(self, event: str, input_data: dict) -> None:
-        ...
+    def handle(self, event: str, input_data: dict) -> None: ...
 
 
 # ======================================================================
 # WorkspaceBridge
 # ======================================================================
+
 
 class WorkspaceBridge:
     """One bridge = one Claude CLI session = one org buffer.
@@ -385,9 +388,7 @@ class WorkspaceBridge:
     event a matter of defining ``_handle_<event>`` and nothing else.
     """
 
-    INTERACTIVE_TOOLS: frozenset[str] = frozenset(
-        {"AskUserQuestion", "ExitPlanMode"}
-    )
+    INTERACTIVE_TOOLS: frozenset[str] = frozenset({"AskUserQuestion", "ExitPlanMode"})
     """Tools that require user interaction — we notify Emacs and return
     ``{"permissionDecision": "ask"}`` so the terminal prompt appears."""
 
@@ -434,9 +435,7 @@ class WorkspaceBridge:
         """Open a span if the tracer is available; otherwise a no-op CM."""
         if self.tracer:
             attrs[_OI_KIND_ATTR] = oi_kind
-            return self.tracer.start_as_current_span(
-                name, kind=kind, attributes=attrs
-            )
+            return self.tracer.start_as_current_span(name, kind=kind, attributes=attrs)
         return nullcontext()
 
     def _span_attrs(self, custom_id: str | None = None, **extra) -> dict:
@@ -540,9 +539,7 @@ class WorkspaceBridge:
         buffer entry. Errors are warned and swallowed because this runs
         at the end of a hook — there is no user left to show them to.
         """
-        with self._span(
-            "notify-query-completed", **self._span_attrs(custom_id)
-        ):
+        with self._span("notify-query-completed", **self._span_attrs(custom_id)):
             try:
                 self._mcp_eval(
                     f"(code-agent-org--terminal-query-completed "
@@ -583,9 +580,7 @@ class WorkspaceBridge:
         fires. Best-effort — Emacs falls back to polling if cmux is
         unavailable.
         """
-        with self._span(
-            "handle-session-start", **self._span_attrs(None)
-        ):
+        with self._span("handle-session-start", **self._span_attrs(None)):
             signal_name = f"claude-ready-{self.session_id}"
             try:
                 subprocess.run(
@@ -623,9 +618,7 @@ class WorkspaceBridge:
 
             # Prefer the session-specific flag; fall back to any recent
             # flag to handle the Emacs/terminal session-id mismatch.
-            from_emacs_flag = os.path.join(
-                STATUS_DIR, f"{self.session_id}.from-emacs"
-            )
+            from_emacs_flag = os.path.join(STATUS_DIR, f"{self.session_id}.from-emacs")
             flag_exists = os.path.exists(from_emacs_flag)
             if not flag_exists:
                 flag_exists, from_emacs_flag = _check_any_recent_from_emacs_flag()
@@ -717,9 +710,8 @@ class WorkspaceBridge:
         """
         write_status(self.session_id, "ready")
 
-        transcript_path = (
-            input_data.get("transcript_path")
-            or input_data.get("transcriptPath", "")
+        transcript_path = input_data.get("transcript_path") or input_data.get(
+            "transcriptPath", ""
         )
         if not transcript_path:
             copilot_session_id = input_data.get("sessionId", "")
@@ -742,10 +734,15 @@ class WorkspaceBridge:
                 },
             ),
         ) as span:
-            transcript_exists = bool(transcript_path and os.path.isfile(transcript_path))
+            transcript_exists = bool(
+                transcript_path and os.path.isfile(transcript_path)
+            )
 
-            if pending_ids and transcript_exists and \
-                    self._looks_like_claude_transcript(transcript_path):
+            if (
+                pending_ids
+                and transcript_exists
+                and self._looks_like_claude_transcript(transcript_path)
+            ):
                 # Claude Code supersede-capable path: pair queue entries with
                 # the last N transcript turns.
                 self._render_queue_against_transcript(
@@ -774,9 +771,7 @@ class WorkspaceBridge:
             if not response:
                 response = input_data.get("last_assistant_message", "")
             if span:
-                span.set_attribute(
-                    "response.length", len(response) if response else 0
-                )
+                span.set_attribute("response.length", len(response) if response else 0)
                 span.set_attribute("output.value", (response or "")[:2000])
                 span.set_attribute("output.mime_type", "text/plain")
 
@@ -825,9 +820,7 @@ class WorkspaceBridge:
             result = self._mcp_eval(elisp)
             return result if result else None
         except (McpConnectionError, McpElispError):
-            logger.warning(
-                "Failed to find latest instruction for %s", self.session_id
-            )
+            logger.warning("Failed to find latest instruction for %s", self.session_id)
             return None
 
     # ------------------------------------------------------------------
@@ -873,13 +866,13 @@ class WorkspaceBridge:
         inside the matched window are the supersede case and get the
         same cancellation treatment.
         """
-        with self._span(
-            "extract-turns", **{"transcript.path": transcript_path}
-        ):
+        with self._span("extract-turns", **{"transcript.path": transcript_path}):
             turns = _extract_turns(transcript_path)
 
         n = len(pending_ids)
-        matched_turns = turns[-n:] if len(turns) >= n else ([("", "")] * (n - len(turns)) + turns)
+        matched_turns = (
+            turns[-n:] if len(turns) >= n else ([("", "")] * (n - len(turns)) + turns)
+        )
 
         if span:
             span.set_attribute("pending.ids_count", n)
@@ -904,8 +897,7 @@ class WorkspaceBridge:
         (queue drain, header-line refresh) run.
         """
         save_sexp = self._build_save_cli_session_sexp(
-            input_data.get("session_id")
-            or input_data.get("sessionId", "")
+            input_data.get("session_id") or input_data.get("sessionId", "")
         )
         elisp = (
             f"(progn "
@@ -1002,9 +994,7 @@ class WorkspaceBridge:
             self._notify_query_completed(None)
             return None
 
-        from_emacs_flag = os.path.join(
-            STATUS_DIR, f"{self.session_id}.from-emacs"
-        )
+        from_emacs_flag = os.path.join(STATUS_DIR, f"{self.session_id}.from-emacs")
         flag_exists = os.path.exists(from_emacs_flag)
         if not flag_exists:
             flag_exists, from_emacs_flag = _check_any_recent_from_emacs_flag()
@@ -1173,6 +1163,7 @@ class WorkspaceBridge:
 # Entry point
 # ======================================================================
 
+
 def main() -> None:
     """CLI entry — parse argv/env, construct the bridge, dispatch once.
 
@@ -1197,7 +1188,9 @@ def main() -> None:
         sys.exit(0)  # soft-fail: don't break hooks for non-workspace sessions
 
     tracer = setup_tracer("claude-agent-workspace-bridge") if setup_tracer else None
-    trace_store = TraceContextStore(STATUS_DIR) if (tracer and TraceContextStore) else None
+    trace_store = (
+        TraceContextStore(STATUS_DIR) if (tracer and TraceContextStore) else None
+    )
     ctx = trace_store.read(session_id) if trace_store else None
 
     try:

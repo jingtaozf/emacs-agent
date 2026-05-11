@@ -74,6 +74,7 @@ _META_ATTR_KEYS = {"span-kind", "oi-kind", "input", "output"}
 # Preset-id generator
 # ======================================================================
 
+
 class _PresetIdGenerator(IdGenerator):
     """IdGenerator that returns caller-supplied ids when available.
 
@@ -110,6 +111,7 @@ class _PresetIdGenerator(IdGenerator):
 # Serialization helper
 # ======================================================================
 
+
 def _serialize_value(value):
     """Serialise an arbitrary JSON-ish value to a span-attribute string."""
     if value is None:
@@ -122,6 +124,7 @@ def _serialize_value(value):
 # ======================================================================
 # OtelBridgeServer
 # ======================================================================
+
 
 class OtelBridgeServer:
     """Single-instance bridge server owning the tracer and active-span map.
@@ -140,9 +143,7 @@ class OtelBridgeServer:
                 "openinference.project.name": "emacs-agent",
             }
         )
-        self.provider = TracerProvider(
-            resource=self.resource, id_generator=self.id_gen
-        )
+        self.provider = TracerProvider(resource=self.resource, id_generator=self.id_gen)
         # Pull the tracer from *our* provider so multiple server instances
         # (e.g. across tests) don't share spans via the SDK global.
         self.tracer = self.provider.get_tracer("emacs.agent", "0.1.0")
@@ -181,22 +182,26 @@ class OtelBridgeServer:
 
     def _register_routes(self) -> None:
         self.app.add_url_rule(
-            "/health", "health",
+            "/health",
+            "health",
             lambda: jsonify({"status": "ok"}),
             methods=["GET"],
         )
         self.app.add_url_rule(
-            "/otel/status", "otel_status",
+            "/otel/status",
+            "otel_status",
             lambda: jsonify({"status": "ok"}),
             methods=["GET"],
         )
         self.app.add_url_rule(
-            "/otel/span/start", "span_start",
+            "/otel/span/start",
+            "span_start",
             self._handle_span_start,
             methods=["POST"],
         )
         self.app.add_url_rule(
-            "/otel/span/end", "span_end",
+            "/otel/span/end",
+            "span_end",
             self._handle_span_end,
             methods=["POST"],
         )
@@ -212,7 +217,9 @@ class OtelBridgeServer:
         for key in ("trace_id", "span_id", "name"):
             if key not in data:
                 return (
-                    jsonify({"status": "error", "message": f"missing required key: {key}"}),
+                    jsonify(
+                        {"status": "error", "message": f"missing required key: {key}"}
+                    ),
                     400,
                 )
 
@@ -233,7 +240,9 @@ class OtelBridgeServer:
                 int(parent_span_id, 16)
             except ValueError:
                 return (
-                    jsonify({"status": "error", "message": "invalid hex parent_span_id"}),
+                    jsonify(
+                        {"status": "error", "message": "invalid hex parent_span_id"}
+                    ),
                     400,
                 )
 
@@ -281,7 +290,9 @@ class OtelBridgeServer:
         data = request.get_json()
         if "span_id" not in data:
             return (
-                jsonify({"status": "error", "message": "missing required key: span_id"}),
+                jsonify(
+                    {"status": "error", "message": "missing required key: span_id"}
+                ),
                 400,
             )
         span_id_hex = data["span_id"]
@@ -333,6 +344,7 @@ class OtelBridgeServer:
 # ======================================================================
 # Entry point
 # ======================================================================
+
 
 def run_server() -> None:
     """Start the default OtelBridgeServer on ``CLAUDE_OTEL_HOST:PORT``."""

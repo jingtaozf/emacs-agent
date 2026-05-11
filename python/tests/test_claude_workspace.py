@@ -118,9 +118,7 @@ class TestBuildArgs:
         assert "--resume" not in args
 
     def test_extra_args(self, tmp_path):
-        launcher = _make_launcher(
-            tmp_path, extra_args=["--verbose", "--model", "opus"]
-        )
+        launcher = _make_launcher(tmp_path, extra_args=["--verbose", "--model", "opus"])
         args = launcher.build_args()
         assert "--verbose" in args and "opus" in args
 

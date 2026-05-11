@@ -182,6 +182,7 @@ def split_positional_args(argv: list[str]) -> tuple[str, str, list[str]]:
 # WorkspaceLauncher — the template-method base class
 # ======================================================================
 
+
 class WorkspaceLauncher:
     """Launch an agent CLI with workspace bridge integration.
 
@@ -223,9 +224,7 @@ class WorkspaceLauncher:
             "CLAUDE_PLUGIN_ROOT",
             str(Path(__file__).resolve().parent.parent.parent),
         )
-        self.mcp_url = os.environ.get(
-            "EMACS_MCP_URL", "http://localhost:9999/mcp"
-        )
+        self.mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
         self.model = os.environ.get("AGENT_MODEL", "")
         self.mcp = McpClient(url=self.mcp_url, read_timeout=30.0)
         # Populated during run().
@@ -386,7 +385,5 @@ class WorkspaceLauncher:
         try:
             result = subprocess.run(args)
         finally:
-            self.post_launch(
-                result.returncode if "result" in dir() else 1
-            )
+            self.post_launch(result.returncode if "result" in dir() else 1)
         sys.exit(result.returncode)

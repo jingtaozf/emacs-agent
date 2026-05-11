@@ -36,6 +36,7 @@ from claude_agent.workspace_launcher import (
 # File-based injection helpers (OpenCode's MCP + AGENTS.md + plugins)
 # ======================================================================
 
+
 def _parse_jsonc(text: str) -> dict:
     """Minimal JSONC parser — strips ``//`` and ``/* */`` comments."""
     stripped = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
@@ -120,8 +121,7 @@ def _inject_bridge_plugin(plugin_dir: str, project_root: str) -> None:
             file=sys.stderr,
         )
         print(
-            "  workspace bridge hooks will not fire — "
-            "responses won't return to Emacs",
+            "  workspace bridge hooks will not fire — responses won't return to Emacs",
             file=sys.stderr,
         )
         return
@@ -138,6 +138,7 @@ def _inject_bridge_plugin(plugin_dir: str, project_root: str) -> None:
     dest.write_text(source.read_text())
     atexit.register(restore_file, dest, original)
     if created_dir:
+
         def _cleanup_plugin_dir():
             try:
                 dest.unlink(missing_ok=True)
@@ -153,6 +154,7 @@ def _inject_bridge_plugin(plugin_dir: str, project_root: str) -> None:
 # ======================================================================
 # OpencodeWorkspaceLauncher
 # ======================================================================
+
 
 class OpencodeWorkspaceLauncher(WorkspaceLauncher):
     """WorkspaceLauncher subclass for the OpenCode TUI."""
@@ -239,6 +241,7 @@ class OpencodeWorkspaceLauncher(WorkspaceLauncher):
 # ======================================================================
 # Entry point
 # ======================================================================
+
 
 def main() -> None:
     argv = sys.argv[1:]

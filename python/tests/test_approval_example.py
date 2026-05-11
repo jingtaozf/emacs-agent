@@ -65,7 +65,13 @@ class TestFormatTodosAsElisp:
         """Baseline: one pending todo."""
         verify(
             _format_todos_as_elisp(
-                [{"content": "Review PR", "status": "pending", "activeForm": "Reviewing PR"}]
+                [
+                    {
+                        "content": "Review PR",
+                        "status": "pending",
+                        "activeForm": "Reviewing PR",
+                    }
+                ]
             ),
             options=_QUIET,
         )
@@ -75,12 +81,21 @@ class TestFormatTodosAsElisp:
         verify(
             _format_todos_as_elisp(
                 [
-                    {"content": "Done thing", "status": "completed",
-                     "activeForm": "Doing thing"},
-                    {"content": "Active thing", "status": "in_progress",
-                     "activeForm": "Working on thing"},
-                    {"content": "Future thing", "status": "pending",
-                     "activeForm": "Will do thing"},
+                    {
+                        "content": "Done thing",
+                        "status": "completed",
+                        "activeForm": "Doing thing",
+                    },
+                    {
+                        "content": "Active thing",
+                        "status": "in_progress",
+                        "activeForm": "Working on thing",
+                    },
+                    {
+                        "content": "Future thing",
+                        "status": "pending",
+                        "activeForm": "Will do thing",
+                    },
                 ]
             ),
             options=_QUIET,

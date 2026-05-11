@@ -55,6 +55,7 @@ STATUS_DIR = "/tmp/claude-agent-status"
 # condition, it just means traces go to the console exporter instead.
 # ======================================================================
 
+
 def _phoenix_is_running() -> bool:
     """Return True if Phoenix's ``/health`` endpoint answers within 2s."""
     try:
@@ -77,15 +78,19 @@ def _ensure_phoenix() -> None:
     if _phoenix_is_running():
         return
     try:
-        python_dir = os.path.join(
-            os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "python"
-        )
+        python_dir = os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "python")
         if not os.path.isdir(python_dir):
             return
         subprocess.Popen(
             [
-                "uv", "run", "--extra", "phoenix",
-                "python", "-m", "phoenix.server.main", "serve",
+                "uv",
+                "run",
+                "--extra",
+                "phoenix",
+                "python",
+                "-m",
+                "phoenix.server.main",
+                "serve",
             ],
             cwd=python_dir,
             stdout=subprocess.DEVNULL,
@@ -102,6 +107,7 @@ def _ensure_phoenix() -> None:
 # ======================================================================
 # Exporter + tracer factories
 # ======================================================================
+
 
 def create_exporter():
     """Return the best span exporter available.
@@ -157,6 +163,7 @@ def setup_tracer(service_name: str = "emacs-agent") -> trace.Tracer:
 # handles the known mismatch where Emacs keys the file on a per-heading
 # session id that doesn't match the terminal's.
 # ======================================================================
+
 
 class TraceContextStore:
     """Reads and writes W3C traceparent files under a status directory.

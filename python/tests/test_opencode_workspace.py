@@ -69,9 +69,7 @@ class TestFromArgv:
         assert launcher.extra_args == ["--verbose"]
 
     def test_org_file_with_dash_separator(self):
-        launcher = OpencodeWorkspaceLauncher.from_argv(
-            ["test.org", "--", "--verbose"]
-        )
+        launcher = OpencodeWorkspaceLauncher.from_argv(["test.org", "--", "--verbose"])
         assert launcher.session_id == ""
         assert launcher.resume_id is None
         assert launcher.extra_args == ["--verbose"]
@@ -175,7 +173,9 @@ class TestBuildArgs:
     def test_with_resume_session(self, tmp_path):
         launcher = _make_launcher(tmp_path, resume_id="oc-uuid-123")
         assert launcher.build_args() == [
-            "opencode", "--session", "oc-uuid-123",
+            "opencode",
+            "--session",
+            "oc-uuid-123",
         ]
 
     def test_with_model(self, tmp_path):
@@ -186,9 +186,7 @@ class TestBuildArgs:
         assert args[idx + 1] == "anthropic/claude-sonnet-4-5"
 
     def test_with_extra_args(self, tmp_path):
-        launcher = _make_launcher(
-            tmp_path, extra_args=["--verbose", "--debug"]
-        )
+        launcher = _make_launcher(tmp_path, extra_args=["--verbose", "--debug"])
         args = launcher.build_args()
         assert "--verbose" in args
         assert "--debug" in args
@@ -225,9 +223,7 @@ class TestInjectEmacsMcp:
 
     def test_merges_into_existing_config(self, tmp_path):
         existing = tmp_path / "opencode.jsonc"
-        existing.write_text(
-            '{"model": "gpt-4o", "mcp": {"other": {"type": "local"}}}'
-        )
+        existing.write_text('{"model": "gpt-4o", "mcp": {"other": {"type": "local"}}}')
         _inject_emacs_mcp(str(tmp_path), "http://localhost:8080/mcp")
         config = json.loads(existing.read_text())
         assert config["mcp"]["other"]["type"] == "local"
@@ -355,6 +351,7 @@ class TestWriteAgentsMd:
         nofile = nofile_dir / "AGENTS.md"
         # Simulate inject created the file (no prior base):
         from claude_agent.opencode_workspace import _write_agents_md as wam
+
         wam(str(nofile_dir), "Only inject here.")
         assert nofile.exists()
         cleanup_emacs_agent_inject(nofile, file_existed_before=False)

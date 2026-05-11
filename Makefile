@@ -715,3 +715,25 @@ config:
 	@echo ""
 	@echo "Test files:"
 	@for file in $(ALL_TESTS); do echo "  - $$file"; done
+
+# Literate programming — tangle Python sources
+PYTHON_LP_ORG := claude-agent-python.org
+
+.PHONY: tangle-python
+tangle-python:
+	@if [ ! -f "$(PYTHON_LP_ORG)" ]; then \
+	  echo "make tangle-python: $(PYTHON_LP_ORG) not found" >&2; exit 2; \
+	fi
+	$(BATCH) \
+	  --eval "(require (quote org))" \
+	  --eval "(setq org-confirm-babel-evaluate nil)" \
+	  --eval "(org-babel-tangle-file \"$(PWD)/$(PYTHON_LP_ORG)\")"
+	@ruff format --quiet python/ 2>/dev/null || true
+
+.PHONY: check-python-structure
+check-python-structure:
+	@python3 scripts/check_org_structure.py $(PYTHON_LP_ORG)
+
+.PHONY: build-python-index
+build-python-index:
+	@python3 scripts/build_index.py $(PYTHON_LP_ORG)

@@ -34,6 +34,7 @@ from claude_agent.workspace_launcher import (
 # File-based injection helpers (Copilot's MCP + system-prompt model)
 # ======================================================================
 
+
 def _inject_emacs_mcp_into_dotgithub(project_root: str, mcp_url: str) -> None:
     """Merge the Emacs MCP server entry into ``.github/mcp.json``.
 
@@ -87,6 +88,7 @@ def _write_agents_md(project_root: str, system_prompt: str) -> None:
 # CopilotWorkspaceLauncher
 # ======================================================================
 
+
 class CopilotWorkspaceLauncher(WorkspaceLauncher):
     """WorkspaceLauncher subclass for the GitHub Copilot CLI."""
 
@@ -110,9 +112,7 @@ class CopilotWorkspaceLauncher(WorkspaceLauncher):
     def build_args(self) -> list[str]:
         args = ["copilot", "--allow-all-tools"]
 
-        copilot_plugin_dir = os.path.join(
-            self.plugin_dir, "hooks", "copilot-plugin"
-        )
+        copilot_plugin_dir = os.path.join(self.plugin_dir, "hooks", "copilot-plugin")
         if os.path.isdir(copilot_plugin_dir):
             args.extend(["--plugin-dir", copilot_plugin_dir])
         else:
@@ -136,6 +136,7 @@ class CopilotWorkspaceLauncher(WorkspaceLauncher):
 # ======================================================================
 # Entry point
 # ======================================================================
+
 
 def main() -> None:
     argv = sys.argv[1:]

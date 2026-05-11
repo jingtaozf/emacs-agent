@@ -343,13 +343,23 @@ class TestSpanLifecycle:
         trace_id = "c" * 32
         parent_sid = "d" * 16
         child_sid = "e" * 16
-        client.post("/otel/span/start", json={
-            "trace_id": trace_id, "span_id": parent_sid, "name": "parent",
-        })
-        client.post("/otel/span/start", json={
-            "trace_id": trace_id, "span_id": child_sid, "name": "child",
-            "parent_span_id": parent_sid,
-        })
+        client.post(
+            "/otel/span/start",
+            json={
+                "trace_id": trace_id,
+                "span_id": parent_sid,
+                "name": "parent",
+            },
+        )
+        client.post(
+            "/otel/span/start",
+            json={
+                "trace_id": trace_id,
+                "span_id": child_sid,
+                "name": "child",
+                "parent_span_id": parent_sid,
+            },
+        )
         client.post("/otel/span/end", json={"span_id": child_sid})
         client.post("/otel/span/end", json={"span_id": parent_sid})
 

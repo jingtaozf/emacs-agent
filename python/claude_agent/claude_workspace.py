@@ -34,6 +34,7 @@ from claude_agent.workspace_launcher import (
 # Small helpers specific to Claude
 # ======================================================================
 
+
 def _normalize_story_slug(name: str) -> str:
     """Convert a story heading to a valid ``--name`` slug.
 
@@ -68,30 +69,42 @@ def _write_hooks_settings(plugin_dir: str) -> str:
     bridge = _find_workspace_bridge_path()
     hooks = {
         "hooks": {
-            "Stop": [{
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{bridge} response",
-                    "timeout": 30,
-                }],
-            }],
-            "UserPromptSubmit": [{
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{bridge} prompt",
-                    "timeout": 10,
-                }],
-            }],
-            "SessionStart": [{
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{bridge} session-start",
-                    "timeout": 10,
-                }],
-            }],
+            "Stop": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{bridge} response",
+                            "timeout": 30,
+                        }
+                    ],
+                }
+            ],
+            "UserPromptSubmit": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{bridge} prompt",
+                            "timeout": 10,
+                        }
+                    ],
+                }
+            ],
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{bridge} session-start",
+                            "timeout": 10,
+                        }
+                    ],
+                }
+            ],
         }
     }
     settings_file = os.path.join(plugin_dir, "workspace-hooks.json")
@@ -169,6 +182,7 @@ def _cleanup_ide_server(mcp: McpClient, session_id: str) -> None:
 # ClaudeWorkspaceLauncher
 # ======================================================================
 
+
 class ClaudeWorkspaceLauncher(WorkspaceLauncher):
     """WorkspaceLauncher subclass for the Claude Code CLI."""
 
@@ -190,9 +204,7 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            self.session_id = _select_session_interactive(
-                sessions, self.org_file
-            )
+            self.session_id = _select_session_interactive(sessions, self.org_file)
         super().fetch_session_metadata()
 
     # ------------------------------------------------------------------
@@ -250,9 +262,7 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
                 f'"{_escape_elisp_string(self.project_root)}" '
                 f'"{_escape_elisp_string(self.session_id)}"))'
             )
-            print(
-                f"  IDE server: started for {os.path.basename(self.project_root)}"
-            )
+            print(f"  IDE server: started for {os.path.basename(self.project_root)}")
         except Exception as e:
             print(f"  IDE server: failed to start ({e})", file=sys.stderr)
         # Register atexit cleanup; `post_launch` also runs it for the
@@ -274,6 +284,7 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
 # ======================================================================
 # Entry point
 # ======================================================================
+
 
 def main() -> None:
     argv = sys.argv[1:]

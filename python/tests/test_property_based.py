@@ -28,7 +28,9 @@ from claude_agent.workspace_bridge import _escape_elisp_string
 
 
 # Reasonable budget — pure-string functions don't need 100k iterations.
-SETTINGS = settings(max_examples=200, deadline=500, suppress_health_check=[HealthCheck.too_slow])
+SETTINGS = settings(
+    max_examples=200, deadline=500, suppress_health_check=[HealthCheck.too_slow]
+)
 
 
 class TestEscapeElispString:
@@ -56,17 +58,18 @@ class TestEscapeElispString:
         # Lesson: when writing pass-through properties, the alphabet must
         # exclude *every* char the function transforms, not just the
         # obvious ones.
-        st.text(alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E,
-                                       blacklist_characters='"\\'))
+        st.text(
+            alphabet=st.characters(
+                min_codepoint=0x20, max_codepoint=0x7E, blacklist_characters='"\\'
+            )
+        )
     )
     def test_safe_ascii_passes_through_without_added_escapes(self, s: str) -> None:
         """Inputs containing only printable ASCII (no quote/backslash, no
         control chars) must come back without spurious escape sequences.
         """
         result = _escape_elisp_string(s)
-        assert "\\" not in result, (
-            f"safe input got escapes: {s!r} → {result!r}"
-        )
+        assert "\\" not in result, f"safe input got escapes: {s!r} → {result!r}"
 
     @SETTINGS
     @given(st.text())
