@@ -4245,9 +4245,21 @@ Markers hold references to buffers; must be explicitly freed."
     (code-agent-org--session-put session-key :marker nil)))
 
 (defun code-agent-org--unregister-active-query (session-key)
-  "Cancel and clean up the active query for SESSION-KEY.
-This ensures the mode-line spinner and *Claude Queries* buffer reflect the
-terminal state immediately, without waiting for the CLI process to exit."
+  "Dispatch a backend cancel for SESSION-KEY's in-flight query.
+
+CALL THIS FROM CANCEL OR ERROR PATHS ONLY, never from a normal
+\"completed\" path.  On agent-family backends this kills any
+in-flight CLI subprocess so the mode-line spinner stops without
+waiting for the process to exit.  On multiplexer-family backends
+the override sends cancel keys (Escape / C-c) to the persistent
+pane.
+
+After a NORMAL Stop hook (status \"completed\") the prompt has
+already been delivered and the response inserted; calling this on
+that path on a multiplexer would ESC any follow-up sub-agent work
+on the same surface (the bug fixed by gating in
+`code-agent-org--cleanup-session').  For agent-family the call is a
+no-op on completion because the SDK subprocess already exited."
   (when-let* ((backend (code-agent-org--session-get session-key :backend)))
     ;; Dispatch via Protocol 3 `cancel-from-org' — multiplexer backends
     ;; override to send cancel keys (Escape / C-c) to the pane; agent
@@ -4296,7 +4308,19 @@ Operations are performed in a fixed, canonical order."
   (when clear-queue-p
     (code-agent-org--cleanup-queued-blocks session-key))
   ;; 6. Unregister from active queries (mode-line/queries buffer)
-  (code-agent-org--unregister-active-query session-key)
+  ;;
+  ;; --unregister-active-query dispatches `claude-org-backend-cancel-from-org'
+  ;; which on multiplexer-family backends (cmux/tmux) sends a real ESC keypress
+  ;; to the surface.  That's correct on cancel/error paths, but on a NORMAL
+  ;; "completed" Stop hook the prompt has been delivered, response inserted,
+  ;; and the surface is already idle (or running follow-up sub-agents on the
+  ;; user's behalf).  Sending ESC there interrupts that follow-up work — the
+  ;; reproduced bug: workspace_bridge.handle_response → workspace-insert-response
+  ;; → cleanup-session → ESC → sub-agents cancelled, next response empty.
+  ;; For agent-family backends the cancel is a no-op after a completed query
+  ;; (the SDK subprocess already exited), so gating on status doesn't regress.
+  (unless (equal status "completed")
+    (code-agent-org--unregister-active-query session-key))
   ;; 7. Refresh header line
   (code-agent-org--refresh-header-line))
 
@@ -4360,9 +4384,16 @@ iteration (including across run-at-time delays for :interval)."
       (let ((next-block (code-agent-org--dequeue-block session-key)))
         (if next-block
             (code-agent-org--execute-queued-block session-key next-block)
-          ;; Truly done - unregister from active queries so mode-line and
-          ;; *Claude Queries* buffer reflect completion immediately
-          (code-agent-org--unregister-active-query session-key))))))))
+          ;; Truly done — no follow-up call to --unregister-active-query.
+          ;; Mode-line + *Claude Queries* buffer already reflect terminal
+          ;; state via --reset-session-state (step 3) + --refresh-header-line
+          ;; (step 7) above.  --unregister-active-query only adds a backend
+          ;; cancel-from-org dispatch, which on multiplexer-family backends
+          ;; sends ESC to the persistent surface and cancels follow-up
+          ;; sub-agent work; on agent-family backends it's a no-op since the
+          ;; SDK subprocess already exited.  See the gating in --cleanup-session
+          ;; for the same rationale on the cancel/error paths.
+          )))))))
 #+END_SRC
 
 ** Error Handling
