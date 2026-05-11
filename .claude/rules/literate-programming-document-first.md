@@ -85,6 +85,40 @@ No prose, generic heading, multiple unrelated definitions stacked in
 one block. Even if the code is correct, the file is **failing as a
 literate document**.
 
+## Module Overview — three-part template
+
+Every `.org` module file leads with a `* Overview` section. This is the
+durable answer to "what is this module for, and what invariant does it
+protect?" — the question a future maintainer (human or agent) asks before
+reading 700 lines of code.
+
+Three things to put there, in order:
+
+1. **Motivation paragraph.** What does this module exist to prevent /
+   enable? Examples: "Long-lived sessions would accumulate forever without
+   this sweeper." "Thin object-oriented wrapper around the cmux CLI."
+
+2. **Invariant paragraph.** What's true about this module that callers
+   can rely on? Examples: "Cancel is O(1) and never races with fire."
+   "Time-driven, unlike the event-driven heartbeat — handles the
+   user-walked-away case hooks can't detect."
+
+3. **Design principles (optional).** 3-5 short bullets when the reasoning
+   isn't obvious from the code alone. Present the trade-off considered
+   and why this shape was chosen over alternatives.
+
+### Anti-patterns
+
+- **Empty Overview.** `* Overview` followed immediately by `*
+  Implementation` with no prose between is the AI default; resist.
+  An empty Overview means the next reader recovers intent from code
+  alone, which is exactly what the file is for.
+- **Prose that restates the type.** "This module defines a `foo` class"
+  — the `defclass` says that. Say *why* the class exists.
+- **Tutorial that belongs in `docs/`.** The Overview answers someone
+  editing this module right now. How to *use* the module from elsewhere
+  belongs in `docs/` or `CLAUDE.md`.
+
 ## Org files are the design record
 
 Every design decision, tradeoff, open question, and "why not the other

@@ -1401,5 +1401,160 @@ just above one of them and wrap a no-op variation around the body."
                 occurrences "\n"))))
           dupes "\n\n"))))))
 
+;;; F45: Module Overview must have substantive prose
+
+(ert-deftest test-structural-module-overview-exists ()
+  "Source .org files must have a * Overview section with substantive prose.
+An empty Overview means the next reader recovers intent from code alone,
+which defeats the purpose of literate programming.
+FIX: Add a * Overview with motivation, invariant, and design principles."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil)
+          (org-files (directory-files test-structural--project-root t "\\.org$")))
+      (dolist (file org-files)
+        (when (test-structural--source-org-file-p file)
+          (with-temp-buffer
+            (insert-file-contents file)
+            (let ((content (buffer-string)))
+              (when (string-match "^\\*\\s-+Overview" content)
+                (let* ((ov-start (match-end 0))
+                       (ov-end (or (and (string-match
+                                         "^\\*\\s-\\|\\#\\+begin_src"
+                                         content ov-start)
+                                        (match-beginning 0))
+                                   (length content)))
+                       (ov-text (substring content ov-start ov-end))
+                       (prose-count 0))
+                  (dolist (ln (split-string ov-text "\n"))
+                    (when (and (> (length (string-trim ln)) 10)
+                               (not (string-match-p "^\\*+" ln))
+                               (not (string-match-p "^\\s-*#" ln)))
+                      (cl-incf prose-count)))
+                  (when (< prose-count 3)
+                    (push (format "%s: Overview has %d prose lines, need 3+"
+                                  (file-name-nondirectory file) prose-count)
+                          violations))))))))
+      (should-with-fix (null violations)
+        (format "Thin Overviews:\n%s\nFIX: Add motivation + invariant + design principles."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
+;;; F46: No generic section headings in source .org files
+
+(ert-deftest test-structural-no-generic-headings ()
+  "Source .org files must not use generic headings like Functions or Helpers.
+These are phase names, not concepts. Headings should name a concept.
+FIX: Rename to describe the concept (e.g. Permission Handler, not Functions)."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil)
+          (org-files (directory-files test-structural--project-root t "\\.org$"))
+          (bad-re (concat "^\\*\\*\\s-+\\(Functions\\|Helpers\\|Utilities"
+                          "\\|Implementation\\|Misc\\|Other\\|Code\\|Stuff\\)\\b")))
+      (dolist (file org-files)
+        (when (test-structural--source-org-file-p file)
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+            (let ((lnum 0))
+              (while (not (eobp))
+                (cl-incf lnum)
+                (let ((line (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))
+                  (when (string-match-p bad-re line)
+                    (push (format "%s:%d: %s"
+                                  (file-name-nondirectory file) lnum
+                                  (string-trim line))
+                          violations)))
+                (forward-line 1))))))
+      (should-with-fix (null violations)
+        (format "Generic headings:\n%s\nFIX: Rename to a concept, not a phase."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
+;;; F47: No pcase with string literal patterns (dynamic-binding trap)
+
+(ert-deftest test-structural-pcase-string-detect ()
+  "Source .org files must not use pcase with string literal patterns.
+Under dynamic binding pcase string patterns compile differently.
+FIX: Use (cond ((equal X \"str\") body)) instead."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil)
+          (org-files (directory-files test-structural--project-root t "\\.org$")))
+      (dolist (file org-files)
+        (when (test-structural--source-org-file-p file)
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+            (let ((in-src nil)
+                  (lnum 0))
+              (while (not (eobp))
+                (cl-incf lnum)
+                (let ((line (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))
+                  (cond
+                   ((string-match-p "^#\\+begin_src\\s-+elisp" line)
+                    (setq in-src t))
+                   ((string-match-p "^#\\+end_src" line)
+                    (setq in-src nil))
+                   ((and in-src
+                         (string-match-p "(pcase\\b" line)
+                         (not (string-match-p "^\\s-*;" line)))
+                    (when (and (test-structural--pcase-has-string-arm-p)
+                               (not (test-structural--pcase-allowlisted-p file lnum)))
+                      (push (format "%s:%d: pcase with string pattern"
+                                    (file-name-nondirectory file) lnum)
+                            violations)))))
+                (forward-line 1))))))
+      (should-with-fix (null violations)
+        (format "pcase with string patterns:\n%s\nFIX: Use cond + equal for string dispatch."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
+(defun test-structural--pcase-allowlisted-p (file lnum)
+  "Return non-nil if FILE:LNUM is in the pcase string-pattern allowlist."
+  (let ((entry (assoc (file-name-nondirectory file)
+                      test-structural--pcase-string-allowlist)))
+    (and entry (memq lnum (cdr entry)))))
+
+(defvar test-structural--pcase-string-allowlist
+  '(("claude-agent-backend.org" . (2221 2253))
+    ("claude-ide.org" . (341 575 822))
+    ("code-agent-org-scheduled.org" . (214))
+    ("code-agent-org.org" . (3970 4088))
+    ("emacs-mcp-server.org" . (722)))
+  "Known pcase string-pattern violations in existing code.
+Entries are (FILENAME . (LINE-NUM ...)). These are pre-existing and need
+a separate migration effort to convert to cond + equal.")
+
+(defvar test-structural--source-org-excluded-dirs-re
+  "\\(/docs/\\|/tests/\\|/reference/\\|/prompts/\\|/scripts/\\|/tasks/\\|/\\.claude/\\)"
+  "Regex matching directory prefixes that are not source .org files.")
+
+(defvar test-structural--source-org-excluded-names
+  '("README.org" "CLAUDE.md" "ARCHITECTURE.org" "CONTRIBUTING.org" "CHANGELOG.org")
+  "Filenames at project root that are not source .org files.")
+
+(defun test-structural--source-org-file-p (file)
+  "Return non-nil if FILE is a source .org file (not docs/tests/reference)."
+  (and (not (string-match-p test-structural--source-org-excluded-dirs-re file))
+       (not (member (file-name-nondirectory file)
+                    test-structural--source-org-excluded-names))))
+
+(defun test-structural--pcase-has-string-arm-p ()
+  "Check if a pcase form at current line has a string literal arm nearby.
+Searches forward up to 10 lines for a non-comment line starting with (\"."
+  (save-excursion
+    (save-match-data
+      (let ((limit (save-excursion (forward-line 10) (point)))
+            (found nil))
+        (while (and (not found) (< (point) limit))
+          (forward-line 1)
+          (let ((ln (buffer-substring-no-properties
+                     (line-beginning-position) (line-end-position))))
+            (when (and (string-match "(\"" ln)
+                       (not (string-match-p "^\\s-*;" ln)))
+              (setq found t))))
+        found))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here
