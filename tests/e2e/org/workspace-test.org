@@ -1309,3 +1309,51 @@ I see three separate lines:
 Looks like you're testing multi-line input delivery. The lines came through correctly with proper line breaks. What are you working on — is this related to a streaming or text handling feature in the codebase?
 
 
+
+* Cmux Env Injection Test
+:PROPERTIES:
+:CUSTOM_ID: e2e-cmux-env-injection
+:CMUX_WORKSPACE: test-cmux-env-injection
+:CLAUDE_SESSION_ID: sdd-e2e-cmux-env-001
+:CLAUDE_BACKEND: cmux
+:CLAUDE_PERMISSION_MODE: bypass
+:ENV_FILE: tests/e2e/fixtures/cmux-env-test.env
+:ANTHROPIC_MODEL: env-injection-test-marker
+:END:
+
+This story exercises the env-prefix mechanism added to the cmux launch
+command builder.  When you press =C-c C-c= on the AI block below:
+
+1. emacs reads =:ENV_FILE:= + =:ANTHROPIC_MODEL:= from this section
+   (inheritance via =org-entry-get= with section + file-level fallback).
+2. =code-agent-org-cmux--build-env-prefix= produces a shell prefix:
+   =set -a; . /…/tests/e2e/fixtures/cmux-env-test.env; set +a; ANTHROPIC_MODEL=env-injection-test-marker=
+3. The prefix is prepended to the =uv run claude-workspace …= launcher
+   string sent to cmux as =new-workspace --command=.
+4. cmux's shell sources the env file and exports inline overrides, then
+   exec's =claude-workspace.py= which exec's =claude=.
+5. =claude= sees both =CMUX_ENV_FILE_MARKER= (from file) and
+   =ANTHROPIC_MODEL= (from inline export) in its =os.environ=.
+
+The AI block asks claude to dump both env vars via the Bash tool so
+the test's success is visible in the response section below.
+
+Note: =ANTHROPIC_MODEL=env-injection-test-marker= is intentionally a
+non-existent model.  Claude Code typically falls back gracefully (the
+default model still answers) — the test cares about whether the env
+var is *seen*, not whether it resolves.
+
+** Workflow :sdd:
+:PROPERTIES:
+:CUSTOM_ID: e2e-cmux-env-injection-wf
+:END:
+
+*** Verify ENV Injection :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: e2e-cmux-env-injection-instr-1
+:END:
+
+#+begin_src ai
+Use the Bash tool to run this exact command and show its output verbatim:
+echo "CMUX_ENV_FILE_MARKER=$CMUX_ENV_FILE_MARKER"; echo "ANTHROPIC_MODEL=$ANTHROPIC_MODEL"
+#+end_src
