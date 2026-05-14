@@ -3388,6 +3388,200 @@ and result messages."
       (message "No session verbose buffers"))))
 #+END_SRC
 
+* Tri-Protocol Architecture
+:PROPERTIES:
+:CUSTOM_ID: tri-protocol-architecture
+:END:
+
+The backend layer is structured as *three protocols stacked by concern*,
+each dispatched on the same backend receiver (Smalltalk "one object
+implements multiple protocols"). Shipped 2026-04-24 (Phases 0–4).
+
+** Why Two Wire-Model Families
+
+The project drives AI coding agents from Emacs through two fundamentally
+different wire models, and the architecture reflects that split:
+
+1. *JSON-stream over stdio* — the CLI subprocess emits newline-delimited
+   JSON; Emacs reads token-by-token into the response section. Used by
+   Claude Code (=--output-format stream-json=) and by three ACP agents
+   (OpenCode, Gemini, Codex) speaking JSON-RPC 2.0.
+2. *Terminal multiplexer* — the CLI runs inside a shell pane managed
+   by a multiplexer (cmux on macOS, tmux cross-platform); Emacs types
+   prompts into the pane and a Python =workspace-bridge= writes
+   response text back into the org buffer through MCP callbacks.
+
+Before this refactor the first family had a proper protocol but the
+second was a single ~1880-line ad-hoc module that the frontend
+branched into via =(string-equal CLAUDE_BACKEND "cmux")= checks at
+six call sites. The two families are *siblings* in reality, not
+master–slave; the frontend should dispatch identically through both.
+
+** Protocol Stack
+
+#+begin_example
+                ┌──────────────────────────────────────────────┐
+                │      claude-agent-backend (abstract root)    │
+                │                                              │
+                │  ★ Protocol 1: lifecycle                     │
+                │     query / cancel / cleanup / ready-p /     │
+                │     supports-p / classify-error / …          │
+                │                                              │
+                │  ★ Protocol 3: org-integration               │
+                │     execute-block / insert-prompt /          │
+                │     open-response-section / append-response /│
+                │     finalize-response / cancel-from-org /    │
+                │     permission-notify / status-badge / …     │
+                └────────────┬───────────────┬─────────────────┘
+                             │               │
+        ┌────────────────────┘               └────────────────────┐
+        │                                                         │
+┌───────▼─────────────────────────┐         ┌───────────────────▼─────────────┐
+│ claude-agent-agent-backend      │         │ claude-agent-multiplexer-backend │
+│ (abstract — AI-agent family)    │         │ (abstract — terminal multiplexer)│
+│                                 │         │                                  │
+│ ★ Protocol 2a: agent wire       │         │ ★ Protocol 2b: multiplexer wire  │
+│    handshake / send-prompt /    │         │    launch-session / send-text /  │
+│    load-session / interrupt /   │         │    send-key / capture-screen /   │
+│    handle-permission /          │         │    start-follower / stop-…  /    │
+│    stream-event / spawn-cmd     │         │    session-status / wait-for-… / │
+│                                 │         │    rename / apply-style / focus  │
+└────────────┬────────────────────┘         └─────────────────┬────────────────┘
+             │                                                │
+   ┌─────────┼─────────┐                          ┌───────────┴────────┐
+   │                   │                          │                    │
+claude-code-      acp-agent-backend          cmux-backend         tmux-backend
+backend           (abstract)
+                       │
+                ┌──────┼──────┐
+                │      │      │
+            opencode gemini codex
+#+end_example
+
+The four protocols form a clean separation:
+
+| Protocol | Receiver | Purpose |
+|----------+----------+---------|
+| 1 — lifecycle | =claude-agent-backend= | query / cancel / cleanup / introspect — what every backend does |
+| 2a — agent wire | =claude-agent-agent-backend= | handshake / send-prompt / stream-event — how to talk to an AI agent |
+| 2b — multiplexer wire | =claude-agent-multiplexer-backend= | launch-session / send-text / capture-screen — how to talk to a terminal multiplexer |
+| 3 — org-integration | =claude-agent-backend= | execute-block / append-response / cancel-from-org — how to plug a backend into a code-agent-org buffer |
+
+** Why Three Layers on the Agent Side
+
+Three of the four agents (OpenCode, Gemini, Codex) share an ACP
+JSON-RPC v1 wire format; their concrete subclasses differ only in
+spawn-cmd + capability flags. Putting =claude-agent-acp-agent-backend=
+in the middle keeps the ACP machinery written once, inherited three
+times. Claude Code's =--output-format stream-json= is *not* literally
+ACP, so it sits as a sibling to the ACP abstract, not a child of it.
+Adding a fifth agent that speaks ACP = flat subclass (cheap); adding
+one that speaks something else = new sibling (also cheap).
+
+** Why Two Layers on the Multiplexer Side
+
+cmux and tmux have almost identical APIs at the conceptual level:
+launch, send-keys, capture-pane, stream-output, query-status. The
+=multiplexer-backend= base holds the Python-bridge adapter contract
+(status files, workspace hash table, request-id persistence), the
+verbose buffer machinery (ANSI strip, 256 KB cap, kill-buffer-hook
+that stops the follower), agent-profile resolution, and the
+Claude-only-args filter. Concrete subclasses supply roughly six
+=cl-defmethod= implementations each — about 300 lines per multiplexer.
+
+** Two Canonical Execution Flows
+
+Same =C-c C-c= entry point, two shapes downstream depending on which
+family the backend belongs to.
+
+*** W1: Agent family (Claude Code / ACP)
+
+#+begin_example
+User C-c C-c in ai block
+  └─▶ code-agent-org-execute                                    [frontend, backend-agnostic]
+        ├─▶ prep: loop state, auto-title, execute-hook, queue-if-busy
+        └─▶ code-agent-org-backend-execute-block (backend, info)  ← Protocol 3
+              └─▶ method on agent-backend:
+                    ├─▶ insert-prompt (no-op; ai block IS the prompt)
+                    ├─▶ open-response-section → marker
+                    ├─▶ register-query
+                    ├─▶ send-prompt ──────▶ Protocol 2a: CLI streams events
+                    │     └─▶ on token: append-response (marker, text)
+                    │     └─▶ on permission req: handle-permission
+                    └─▶ on stream-end: finalize-response (marker, meta)
+                          └─▶ query-completed → advance loop / dequeue
+#+end_example
+
+*** W2: Multiplexer family (cmux / tmux)
+
+#+begin_example
+User C-c C-c in ai block
+  └─▶ code-agent-org-execute                                    [same frontend]
+        └─▶ code-agent-org-backend-execute-block (backend, info)  ← Protocol 3
+              └─▶ method on multiplexer-backend:
+                    ├─▶ ensure-session ────▶ Protocol 2b: launch or reuse pane
+                    ├─▶ wait-for-ready
+                    ├─▶ insert-prompt   (writes :claude_chat: instruction)
+                    ├─▶ open-response-section → marker
+                    ├─▶ register-query (writes .request-id)
+                    ├─▶ send-text (prompt)  ▶ Protocol 2b
+                    ├─▶ send-key :enter     ▶ Protocol 2b
+                    ├─▶ start-follower (if verbose mode)
+                    └─▶ return — done (response arrives async)
+
+Later, Python hook: UserPromptSubmit / PostToolUse / Stop
+  └─▶ workspace_bridge.py → MCP evalElisp
+        └─▶ code-agent-org-backend-{append-response,
+                                    finalize-response,
+                                    query-completed}            ← Protocol 3
+#+end_example
+
+The frontend never sees the difference. Backend dispatch is on the
+*instance* via Protocol 3 generics, never on a string discriminator.
+
+** Capability Matrix (authoritative for =supports-p=)
+
+Frontend code that uses an optional feature MUST guard with
+=claude-agent-backend-supports-p=. Authoritative table:
+
+| Capability | claude-code | opencode | gemini | codex | cmux | tmux |
+|------------+-------------+----------+--------+-------+------+------|
+| =:streaming-tokens= | ✓ | ✓ | ✓ | ✓ | — | — |
+| =:structured-messages= | ✓ | ✓ | ✓ | ✓ | — | — |
+| =:tool-use= | ✓ | ✓ | ✓ | ✓ | indirect | indirect |
+| =:session-resume= | ✓ | ✓ | ✓ | ✓ | ✓ (heading) | ✓ (heading) |
+| =:interactive-input= | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| =:persistent-client= | ✓ | ✓ | ✓ | ✓ | — | — |
+| =:allowed-tools-flag= | ✓ | ✓ | — | — | — | — |
+| =:permission-mode-flag= | ✓ | — | — | — | — | — |
+| =:ide-server= | ✓ | — | — | — | ✓ | — |
+| =:workspace-style= | — | — | — | — | ✓ | — |
+| =:sidebar-feedback= | — | — | — | — | ✓ | — |
+| =:verbose-follower= | — | — | — | — | ✓ | ✓ |
+
+** Design Rules (still in force)
+
+These are not historical — they constrain every change to this layer:
+
+- *No string discriminators in the frontend.* Dispatch on the receiver
+  via =cl-defmethod=. Per =.claude/rules/oop-smalltalk-protocols.md=.
+- *No backward-compatibility shims.* When a method or struct is
+  renamed, every caller is updated in the same commit; no
+  =defalias= layer. Per =.claude/rules/no-backward-compatibility.md=.
+- *Pluggability.* Adding a new agent or multiplexer is a new file
+  with a struct + =cl-defmethod= implementations + one registry
+  entry. Zero frontend changes.
+- *256 KB verbose-buffer cap and kill-buffer-hook live on the
+  =multiplexer-backend= base*, not in any concrete subclass — a
+  resource-leak fix that should not be re-derived per multiplexer.
+  Per =.claude/rules/bounded-resource-usage.md=.
+
+The concrete subprotocols and their generics are documented in their
+own modules: Protocol 2a in =claude-agent-agent.org=, Protocol 2b in
+=claude-agent-multiplexer.org=. The Backend Protocol section below
+defines Protocol 1 and the Org-Integration generics (Protocol 3) that
+both families consume.
+
 * Backend Protocol
 :PROPERTIES:
 :DEPENDS_ON: Data Structures

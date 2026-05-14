@@ -120,8 +120,9 @@ discriminator. New modules must follow the same pattern.
 layer is restructured into three protocols — lifecycle, agent wire,
 multiplexer wire, plus org-integration — with agent-family (Claude Code,
 OpenCode, Gemini, Codex) and multiplexer-family (cmux, tmux) as symmetric
-siblings. See `docs/design-docs/2026-tri-protocol-backend-refactor.org`
-and the Tri-Protocol Architecture section of `ARCHITECTURE.org`. Any new
+siblings. See the "Tri-Protocol Architecture" section of
+`claude-agent-backend.org` (full design) and `ARCHITECTURE.org`
+(meta-map). Any new
 backend or cross-module dispatch site MUST follow the tri-protocol shape;
 no `CLAUDE_BACKEND` string-match branches in the frontend.
 
@@ -277,7 +278,7 @@ autonomous**; exploration → **L1-L2 inline**.
 |-------|----------|
 | Architecture map | `ARCHITECTURE.org` |
 | Design docs | `docs/design-docs/` |
-| Tri-protocol refactor (upcoming) | `docs/design-docs/2026-tri-protocol-backend-refactor.org` |
+| Tri-protocol refactor (shipped) | `claude-agent-backend.org` → "Tri-Protocol Architecture" |
 | Research findings | `docs/research/` |
 | Product specs | `docs/product-specs/` |
 | References | `docs/references/` |
