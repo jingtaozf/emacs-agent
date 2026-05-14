@@ -263,6 +263,64 @@ No-op if WORKSPACE_COLOR is not set."
 
 * CLI Gateway
 
+Every cmux interaction goes through =code-agent-org-cmux--call=, a thin
+wrapper around the cmux Unix-domain socket. The wire exists in two
+flavours and the daemon auto-detects which one the client speaks:
+
+- *V1* (text): one line in, one line out — =<command> [args]\n= →
+  =OK ...\n= or =ERROR: ...\n=.
+- *V2* (JSON-RPC): lines beginning with ={= are treated as JSON-RPC
+  envelopes, e.g. ={"id":"uuid","method":"surface.send_text","params":{…}}=.
+
+The socket lives at =~/Library/Application Support/cmux/cmux.sock=
+(production) or under =/tmp/cmux-debug-*.sock= for the dev builds
+described in =.claude/rules/cmux-dev-build.md=. The daemon's default
+security mode is =cmuxOnly=: processes that are not descendants of the
+cmux app are refused (PID ancestry check via =sysctl KERN_PROC_PID=).
+The other modes (=automation=, =password=, =allowAll=) are dev escape
+hatches; production should never need them.
+
+Addressing follows three orthogonal axes — =--workspace=, =--pane=, and
+=--surface= — and each accepts the same three forms:
+
+| Form | Example | Use when |
+|------+---------+----------|
+| UUID | =A4B…F12= | You stored the workspace id in an org property |
+| Ref | =workspace:1= | You want the *current* leftmost workspace |
+| Index | =2= | One-shot scripting; do not persist (indexes shift) |
+
+Two convenience env vars are pre-set inside any cmux pane:
+=CMUX_WORKSPACE_ID= and =CMUX_SURFACE_ID=. Calls made *from inside* a
+pane can omit the flags and the daemon fills them in from those.
+
+Sixteen distinct subcommands are exercised by the cmux pipeline below.
+The table groups them by role so the call sites in this file remain
+discoverable:
+
+| Subcommand | Role |
+|------------+------|
+| =capture-pane= | Status detection, ready polling, INSERT-mode check |
+| =send= | Send prompt text (< 100 KB) |
+| =send-key= | Submit Enter, send Escape (cancel) |
+| =set-buffer= / =paste-buffer= | Large-text path (≥ 100 KB) |
+| =select-workspace= | Focus a workspace for paste, permission focus |
+| =new-workspace= | Create workspace launching Claude Code |
+| =new-window= | Fallback when TabManager is unavailable |
+| =list-pane-surfaces= | Resolve workspace → surface ref |
+| =rename-workspace= | Set the tab title to the story name |
+| =set-status= / =clear-status= | Sidebar agent status |
+| =set-progress= | Sidebar progress bar |
+| =notify= | Send a notification |
+| =set-app-focus= | Activate the cmux app (e.g. for permission alerts) |
+
+The =claude-hook= session store is the persistent piece that ties our
+hook handlers to cmux's: =~/.cmuxterm/claude-hook-sessions.json=,
+written under =flock(LOCK_EX)=, carries =sessionId=, =workspaceId=,
+=surfaceId=, =cwd=, =pid=, =lastSubtitle=, =lastBody=, =startedAt=,
+and =updatedAt=. Entries are pruned after seven days, and the daemon
+falls back to looking up by =surfaceId= or =workspaceId= when a
+=sessionId= is unknown.
+
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux--call (subcommand &rest args)
   "Call cmux CLI with SUBCOMMAND and ARGS. Return stdout string.
@@ -383,6 +441,35 @@ Uses ready-patterns from the active agent profile, falling back to Claude Code p
       (error "Timeout: agent not ready in cmux after %ds" timeout))
     t))
 #+END_SRC
+
+** Future: Event-Driven Ready Detection via =cmux wait-for=
+
+The poll loop above samples =capture-pane= every 1 s for up to 30 s.
+cmux ships a built-in event-driven primitive, =wait-for=, that would
+trade the 1 s sampling latency for a 50 ms sentinel poll *and* a clear
+"Claude Code is up" signal from the SessionStart hook on the Python
+side.
+
+The protocol is two halves: one process creates the signal file with
+=cmux wait-for -S <name>=, another waits for it with =cmux wait-for
+<name> --timeout 30=. Files live under =/tmp/cmux-wait-for-<name>.sig=
+and are deleted on a successful wait.
+
+The Python side would register a SessionStart hook in =hooks.json= that
+runs =cmux wait-for -S claude-ready-<session-id>= once Claude Code is
+inside its TUI. The Emacs side would replace the existing poll with a
+=wait-for= call, keeping the current =capture-pane= loop as a fallback
+for the case where the signal is missed (e.g. SessionStart fires before
+Emacs blocks on the wait).
+
+Expected gains:
+
+| Aspect | Current poll | =wait-for= |
+|--------+--------------+-----------|
+| Worst-case latency | 1 s sampling | ~50 ms |
+| CPU per ready-check | =capture-pane= every 1 s × 30 | one =wait-for=, 50 ms sleeps |
+| Signal type | regex against terminal text | explicit hook signal |
+| Failure mode | timeout only | fallback to short polling |
 
 * Send Text Helper
 
@@ -1224,6 +1311,31 @@ WORKSPACE-SESSION-ID and SURFACE-ID identify the session."
 
 * Execution
 
+The full =C-c C-c= pipeline from AI block to running cmux query is
+eight steps; every step has a matching OTel span so the trace tree
+mirrors the prose:
+
+#+begin_example
+1. C-c C-c → code-agent-org-execute → dispatch to cmux--execute-ai-block
+2. ensure-session: reuse (capture-pane liveness) or create (new-workspace)
+3. build-launch-command: claude-sdd script + optional --resume
+4. wait-for-ready: poll capture-pane for INSERT mode (up to 30 s)
+5. write from-emacs flag + custom-id + register query
+6. send-text: ensure INSERT mode → send/paste-buffer → send-key enter
+7. SDD bridge hooks fire (Python → Emacs MCP):
+   - handle_prompt: save CLI session, insert prompt (Flow B)
+   - handle_permission: notify Emacs, return "ask"
+   - handle_response: extract transcript, insert response
+8. terminal-query-completed: unregister query, handle loops
+#+end_example
+
+Eleven OTel spans cover this flow: =cmux-call=, =cmux-ensure-session=,
+=cmux-execute=, =cmux-query-completed=, =cmux-loop-send=,
+=cmux-wait-for-ready=, =cmux-send-text=, =cmux-cancel=,
+=cmux-permission-needed=, =cmux-permission-resolved=,
+=cmux-recover-session=. See =claude-agent-trace.org= for how those
+spans roll up into the per-AI-block root span.
+
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux--execute-ai-block ()
   "Execute current AI block via cmux backend.
@@ -1860,7 +1972,66 @@ C-c for GitHub Copilot CLI)."
 
 * Sidebar Feedback
 
-cmux-specific rich feedback via the sidebar API.
+cmux-specific rich feedback via the sidebar API. The wrappers below
+expose =set-status= / =clear-status= / =set-progress= / =notify= /
+=set-app-focus=; the design question of /what/ to put on the sidebar
+splits across two coexisting hook handlers.
+
+cmux ships its own =cmux claude-hook= subcommand that manages the
+sidebar natively. Our =sdd-bridge= runs in parallel — both fire on
+every event, registered in cmux's global settings and this plugin's
+=hooks.json= respectively. They overlap but do not conflict:
+
+| Event | cmux =claude-hook= | Our =sdd-bridge= |
+|-------+--------------------+------------------|
+| =SessionStart= | Set agent PID, upsert session | (not handled) |
+| =UserPromptSubmit= | Clear notifications, "Running" status | Write busy status, save CLI session |
+| =PreToolUse= | Verbose tool description ("Reading main.py") | Permission notification to Emacs |
+| =Notification= | "Needs input" status, rich notification body | (not handled) |
+| =Stop= | "Idle" status, transcript-derived notification | Write ready, insert response |
+| =SessionEnd= | Clear all state | (not handled) |
+
+cmux's =claudeCodeVerboseStatus= setting drives the per-tool sidebar
+status ("Running git status", "Editing config.yaml", "Reading main.py")
+without any code from us — we just leave it on. Port detection works
+the same way: cmux's =PortScanner= batches =ps= + =lsof= over a ~10 s
+window, so Phoenix (=:6006=) and our MCP server (=:9999=) appear in
+the sidebar within ~500 ms of starting without any per-port wiring.
+
+** Future: log query state through cmux's sidebar
+
+We currently duplicate "Running / Idle" status in Emacs's mode-line
+and via =write_status=. cmux's sidebar can also carry a richer
+per-query record without extra Emacs work. Three small upgrades on
+the Python side would land it:
+
+- =sdd_bridge.handle_prompt= → =cmux log --source emacs --workspace <id>=
+  with the prompt summary; the user gets a per-query line in the
+  sidebar's log panel, attributed to Emacs.
+- =sdd_bridge.handle_response= → same shape, summarising response
+  length and status.
+- =report_meta_block "current_query"= with markdown for richer
+  presentation — supports prompt/status/timing in one card.
+
+** Future: open the current story's design notes in the sidebar
+
+=cmux markdown open <path>= raises a live-reloading markdown panel
+with H1–H6 / code blocks / tables / blockquotes and atomic-rename-safe
+auto-reload. Wiring it to the current SDD story would surface the
+relevant design context next to the terminal:
+
+#+begin_src elisp
+(defun code-agent-org-cmux-open-design-notes ()
+  "Open the current story's design doc in cmux's sidebar panel."
+  (interactive)
+  (when-let* ((story-file (code-agent-org--current-story-doc-path)))
+    (code-agent-org-cmux--call "markdown" "open" story-file)))
+#+end_src
+
+The harder design question is /which/ document to open — once design
+docs are folded into the relevant code .org (the migration this section
+is part of), the answer becomes "the current code .org section, scrolled
+to the relevant heading" rather than a separate file.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux-set-status (key value)
@@ -1891,6 +2062,49 @@ cmux-specific rich feedback via the sidebar API.
 #+END_SRC
 
 * Permission Handling
+
+Claude Code raises a permission event through the =PreToolUse= hook for
+=AskUserQuestion= / =ExitPlanMode= (the two interactive tools — see
+=.claude/rules/minimize-emacs-mcp-calls.md= for why everything else is
+filtered out at the matcher). The Python =sdd-bridge= side returns
+=ask= and calls back into Emacs via MCP; the handlers below register a
+mode-line alert through =claude-agent-add-alert=, focus the cmux
+workspace, activate the cmux app, and post a macOS notification.
+=PostToolUse= clears the alert.
+
+The dispatch is keyed by backend: =claude-org--terminal-permission-needed=
+in =code-agent-org.org= routes to either cmux or another terminal based
+on =CLAUDE_BACKEND=; the cmux variant lives below.
+
+** Future: Pre-cache =AskUserQuestion= text for richer alerts
+
+Today the notification body is the *tool name* — "sdd-2026… needs
+approval for AskUserQuestion" — which is uninformative when the
+actual question (e.g. "Which database should I use?") sits unread
+inside =tool_input.question=. cmux's own =claude-hook pre-tool-use=
+handler at =CLI/cmux.swift:8670-8691= already caches this text into
+its session store as =lastSubtitle= / =lastBody= and uses it when the
+=Notification= hook fires. We should do the same on the bridge side
+and on Emacs.
+
+The shape: in =sdd_bridge.py handle_permission=, when =tool_name= is
+=AskUserQuestion=, extract =tool_input.question= and either write it
+into the status directory (=code-agent-org-terminal-status-dir=) as a
+=<session-id>.question= file, or pass it straight through to Emacs's
+permission-needed call. =PostToolUse= clears the cache. On the Emacs
+side, =--permission-needed= already puts =tool-name= in the tooltip
+and notification; the change is a single string substitution.
+=ExitPlanMode= is the second tool worth caching by the same path.
+
+End-user effect:
+
+#+begin_example
+Before: "sdd-20260316 needs approval for AskUserQuestion"
+After:  "sdd-20260316 asks: Which database should I use?"
+#+end_example
+
+The =permissionDecision= flow is untouched — the handler still returns
+=ask=; only the display text gets richer.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux--permission-needed (workspace-session-id tool-name)

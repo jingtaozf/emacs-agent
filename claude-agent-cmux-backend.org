@@ -6,18 +6,50 @@
 :header-args:elisp: :tangle yes
 :END:
 
-Concrete multiplexer backend for cmux, the macOS terminal multiplexer.
+Concrete multiplexer backend for cmux, the macOS-native terminal
+multiplexer (Swift + Ghostty) with first-class Claude Code integration.
 Subclass of =claude-agent-multiplexer-backend= implementing Protocol 2b
 (multiplexer wire) and Protocol 3 overrides specific to cmux.
 
-This module is a *thin facade* in the current phase of the tri-protocol
-refactor: the bulk of cmux-specific Elisp still lives in
-=code-agent-org-cmux.org= (launch, send, capture, verbose, agent
-profiles, workspace color, IDE server, sidebar feedback,
-permission-needed alerts).  The Protocol 2b / Protocol 3 methods here
-delegate to those existing functions — the wire-level refactor lands
-in a later session once the backend surface has proven stable in
-practice.
+** Why cmux Earned a Dedicated Backend
+
+cmux is not "just another terminal" — three of its properties shaped
+this backend's design:
+
+- =claude-hook= CLI subcommand: cmux natively runs hook handlers on
+  SessionStart / UserPromptSubmit / PreToolUse / Notification / Stop /
+  SessionEnd. We coexist with cmux's built-in hooks (sidebar status,
+  notification cache) instead of replacing them. =claude-hook= is
+  registered in cmux's global settings; our =sdd-bridge= is registered
+  in this plugin's =hooks.json=; both fire and they do not conflict.
+- Rich sidebar API: =cmux set-status=, =set-progress=, =report_meta_block=,
+  =markdown open= give us a per-workspace status surface that no other
+  multiplexer offers. The Sidebar Feedback section in
+  =code-agent-org-cmux.org= uses this.
+- 100+ CLI methods over a Unix-domain socket, dual-protocol (V1 text +
+  V2 JSON-RPC, auto-detected). Reliable, scriptable, and the daemon
+  exposes a =cmuxOnly= PID-ancestry security mode so any process not
+  descended from cmux is refused. The CLI Gateway section in
+  =code-agent-org-cmux.org= documents the dialect.
+
+** Two-Module Split: Facade Here, Legacy Body Elsewhere
+
+This module is a *thin facade*. The bulk of cmux-driving Elisp — the
+launch pipeline, send-text path, capture/follower, verbose buffer,
+agent profiles, workspace colour, IDE server, sidebar feedback,
+permission-needed alerts, session recovery — still lives in
+=code-agent-org-cmux.org= (2 000+ lines). The Protocol 2b / Protocol 3
+methods below delegate to that module's =code-agent-org-cmux--*=
+functions.
+
+The split is intentional and temporary. The tri-protocol refactor
+(2026-04-24) introduced this thin shim so the org-integration layer
+can dispatch through =claude-org-backend-*= generics on a typed backend
+instance instead of branching on =CLAUDE_BACKEND= strings. A later
+phase will fold the legacy body up into this file and trim the
+delegate seam; until the multiplexer family stabilises across both
+cmux and tmux, keeping the two layers separate makes the wire surface
+cheaper to evolve.
 
 ** Dependencies
 
