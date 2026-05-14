@@ -1520,7 +1520,7 @@ FIX: Use (cond ((equal X \"str\") body)) instead."
   '(("claude-agent-backend.org" . (2221 2253))
     ("claude-ide.org" . (341 575 822))
     ("code-agent-org-scheduled.org" . (214))
-    ("code-agent-org.org" . (3991 4109))
+    ("code-agent-org.org" . (4122 4240))
     ("emacs-mcp-server.org" . (738)))
   "Known pcase string-pattern violations in existing code.
 Entries are (FILENAME . (LINE-NUM ...)). These are pre-existing and need

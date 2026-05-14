@@ -558,6 +558,137 @@ Returns the warning string, or nil if none."
     warning))
 #+END_SRC
 
+*** Autonomous Mode — TODO-Driven Future Design
+
+The loop primitive above (=:loop N :interval S= header arg, plus the
+=loop-iteration-hook= and =loop-inject-warning= helpers) covers the
+"single block iterates N times" case. The next design step — *not yet
+shipped* — promotes this from "fixed iteration count" to *"run until an
+acceptance criterion is met or a circuit breaker trips"*. The notes here
+capture the agreed shape so the eventual implementation has a target.
+
+**** What the user writes
+
+A regular org TODO heading with checkboxes, executed via =C-c C-c=:
+
+#+begin_example
+,** TODO Refactor session management
+- [ ] Extract shared code into base module
+- [ ] Update tests
+- [ ] Run make check
+#+end_example
+
+System detects checkboxes → launches autonomous loop → agent works for
+minutes-to-hours → notification when done → review buffer.
+
+**** Mode selection
+
+The same =C-c C-c= chord routes to interactive or autonomous mode based
+on what point is on:
+
+| Point is on | Mode |
+|-------------+------|
+| AI block without checkboxes | Interactive (current behaviour) |
+| AI block with checkboxes | Autonomous |
+| TODO heading with checkboxes | Autonomous |
+| TODO heading without checkboxes | Interactive |
+
+Differences a user notices:
+
+| Aspect | Interactive | Autonomous |
+|--------+-------------+------------|
+| Trigger | =ai= block | TODO + checkboxes |
+| Runs for | seconds | minutes–hours |
+| User waits? | yes (streaming) | no |
+| Feedback | inline response | review buffer at end |
+| Permission mode | normal | =acceptEdits= (permissive) |
+
+**** Loop engine — which side runs the loop?
+
+*Option A — Claude Code's built-in loop* (preferred). Claude Code already
+runs autonomously; we send the TODO + checkboxes as one prompt with
+permissive settings, and let Claude Code iterate internally. Emacs's
+role shrinks to: send the spec, set the permission mode, monitor the
+verbose buffer for completion or stall, surface the review buffer.
+
+*Option B — Emacs-driven loop.* Emacs sends prompt → waits for response →
+parses checkbox state → sends "continue, these items still unchecked: …"
+→ repeats. More control but more code. Defer until Option A proves
+insufficient.
+
+**** Circuit breaker — three states
+
+Borrowed from the distributed-systems pattern; goal is to prevent
+runaway agents.
+
+- *CLOSED* (normal): agent making progress, let it continue.
+- *OPEN* (halted): agent stuck, stop the loop, notify the user.
+- *HALF-OPEN* (probe): after the user gives feedback, try one more
+  iteration before deciding whether to re-open or close.
+
+Default thresholds (configurable):
+
+| Threshold | Default | Trip condition |
+|-----------+---------+----------------|
+| no-progress | 3 | iterations with no file changes |
+| same-error | 5 | iterations producing the same error string |
+| max-iterations | 10 | hard cap on total iterations |
+| token-budget | TBD | max tokens consumed before halt |
+
+For Option A, the detector tails the verbose buffer: no edits in N
+captures = no progress; same error string repeated N times = same error;
+process exit = completion or crash.
+
+**** Review buffer
+
+When an autonomous task ends (success *or* circuit-break), Emacs renders
+a single review buffer summarizing diff, test results, and per-checkbox
+acceptance:
+
+#+begin_example
+╔══════════════════════════════════════════╗
+║  Autonomous Task Review                  ║
+║  Story: Refactor session management      ║
+║  Status: Completed (7 iterations)        ║
+╚══════════════════════════════════════════╝
+
+## Changes
+[git diff since task started]
+
+## Test Results
+✓ 650 passed, ✗ 2 failed, ○ 6 skipped
+
+## Acceptance Criteria
+- [x] Extract shared code into base module
+- [x] Update tests
+- [ ] Run make check  ← NOT MET
+
+## Actions
+[DONE] Accept changes and commit
+[REJECT] Add feedback and re-run
+[DIFF] View full diff in magit
+#+end_example
+
+**** Open questions (carried forward)
+
+1. Fresh Claude Code session per autonomous task (Ralph pattern), or
+   reuse the workspace's existing session? Fresh avoids context
+   pollution but loses workspace context.
+2. How to extract structured data (test totals, changed files) from
+   Claude Code's output to populate the review buffer?
+3. Where does the circuit breaker live — Emacs (monitoring the verbose
+   buffer) or delegated to a Claude Code hook?
+4. Partial success: re-run with only the still-unchecked items, or
+   stop and ask the user?
+5. Cost control: token/dollar budget cap per task?
+
+This design is Phase 2 of the Living Workspace direction; see the
+Living Workspace design notes (TBD when migrated) for the broader
+context. External references that informed it: the Ralph orchestrator
+(=https://github.com/frankbria/ralph-claude-code=), Anthropic's
+"Effective Harnesses" essay, and LangChain's "Reasoning Sandwich"
+write-up.
+
 *** Pre-Completion Utilities
 
 Helper functions for the query completion hook system.
