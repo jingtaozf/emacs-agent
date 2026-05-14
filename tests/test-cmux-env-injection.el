@@ -1,27 +1,33 @@
-;;; test-cmux-env-injection.el --- ENV_FILE + ANTHROPIC_* injection for cmux backend  -*- lexical-binding: t; -*-
+;;; test-cmux-env-injection.el --- ENV_FILE injection + CLI flag surfacing for cmux backend  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 ;;
-;; Regression coverage for the gap where `:CLAUDE_BACKEND: cmux' silently
-;; dropped #+PROPERTY: ENV_FILE / ANTHROPIC_*  org properties that
-;; agent-family (json-stream) backends honour via `:env' subprocess
-;; injection.  See `code-agent-org-cmux--build-env-prefix' for the prose
-;; rationale; the tests below pin the contract:
+;; Regression coverage for the env-injection contract on the cmux backend
+;; after the ENV_FILE-only refactor.  The single source of truth is
+;; `#+PROPERTY: ENV_FILE'; per-name org properties (e.g. `:ANTHROPIC_MODEL:'
+;; on a section) are no longer read.  Two CLI flags must still be surfaced
+;; on the launcher extras to beat ~/.claude/settings.json:
+;;   ANTHROPIC_MODEL         → --model VALUE
+;;   CLAUDE_CODE_EFFORT_LEVEL → --effort VALUE
+;; See `code-agent-org--env-cli-flag-map'.
 ;;
-;; 1. No properties + no ENV_FILE → empty prefix (zero behaviour change).
-;; 2. ENV_FILE only → `set -a; . FILE; set +a; '.
-;; 3. ANTHROPIC_* properties only → inline `VAR=VAL ' pairs.
-;; 4. Both → sourced file first, inline overrides second (json-stream
-;;    layering: explicit org property beats file value).
-;; 5. End-to-end via `--build-launch-command' → real launcher string is
-;;    prefixed unchanged when nothing is set, prefixed correctly otherwise.
+;; Tests pinned:
+;;
+;; 1. No ENV_FILE → empty prefix (zero behaviour change).
+;; 2. ENV_FILE only → `set -a; . FILE; set +a; ' source block, nothing inline.
+;; 3. Per-name org property without ENV_FILE → empty prefix (legacy path gone).
+;; 4. End-to-end via `--build-launch-command' → prefix prepended unchanged
+;;    when ENV_FILE present, bare launcher otherwise.
+;; 5. ENV_FILE-derived ANTHROPIC_MODEL / CLAUDE_CODE_EFFORT_LEVEL surfaced as
+;;    --model / --effort CLI flags; author intent (user-extra-args) wins.
 ;;
 ;; All tests use file-backed buffers (not `with-temp-buffer') because the
 ;; org property lookup chain reads file-level `#+PROPERTY:' lines, which
 ;; require a real buffer associated with a real file.  No cmux or claude
 ;; subprocesses are touched — these are pure string-shape assertions on
-;; `--build-env-prefix' and a controlled stub of the agent-profile
-;; launch-fn for the `--build-launch-command' wrapper test.
+;; `--build-env-prefix' / `--env-cli-fallback-args' and a controlled stub
+;; of the agent-profile launch-fn for the `--build-launch-command' wrapper
+;; test.
 
 ;;; Code:
 
@@ -63,18 +69,31 @@ because file-level `#+PROPERTY:' inheritance is resolved through
            (kill-buffer ,buf))
          (delete-file ,path)))))
 
-;; --- env-prefix helper: 4 contract cases -------------------------------
+(defmacro test-cmux-env--with-env-file (env-content &rest body-forms)
+  "Create a tmp .env file with ENV-CONTENT bound to `env-file' in BODY-FORMS."
+  (declare (indent 1) (debug t))
+  `(let ((env-file (make-temp-file "test-cmux-env-source-" nil ".env")))
+     (unwind-protect
+         (progn
+           (with-temp-file env-file (insert ,env-content))
+           ,@body-forms)
+       (delete-file env-file))))
+
+;; --- env-prefix helper -------------------------------------------------
 
 (ert-deftest test-cmux-env-prefix/empty-when-nothing-set ()
-  "No ENV_FILE, no ANTHROPIC_* → empty string (zero behaviour change)."
+  "No ENV_FILE → empty string (zero behaviour change)."
   :tags '(:cmux-env-injection :fast)
   (test-cmux-env--with-org-file
       "#+TITLE: empty\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
     (goto-char (point-max))
     (should (equal "" (code-agent-org-cmux--build-env-prefix)))))
 
-(ert-deftest test-cmux-env-prefix/anthropic-props-only ()
-  "ANTHROPIC_* org properties → inline `VAR=VAL ' shell exports."
+(ert-deftest test-cmux-env-prefix/per-name-property-is-ignored ()
+  "`#+PROPERTY: ANTHROPIC_MODEL …' alone (no ENV_FILE) → empty prefix.
+
+After the ENV_FILE-only refactor, per-name org properties are not read.
+Asserts the legacy inline VAR=VAL emission path is gone."
   :tags '(:cmux-env-injection :fast)
   (test-cmux-env--with-org-file
       (concat
@@ -84,98 +103,71 @@ because file-level `#+PROPERTY:' inheritance is resolved through
        "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
     (goto-char (point-max))
     (let ((prefix (code-agent-org-cmux--build-env-prefix)))
-      ;; Inline assignments present.  Values are passed through
-      ;; `shell-quote-argument' which on macOS/zsh may add backslash escapes
-      ;; around `:' and other tokens; we assert variable name + identifiable
-      ;; value substring rather than the literal value to stay quote-agnostic.
-      (should (string-match-p "ANTHROPIC_MODEL=mimo-v2" prefix))
-      (should (string-match-p "ANTHROPIC_BASE_URL=https" prefix))
-      (should (string-match-p "example\\.test" prefix))
-      ;; No file-sourcing block when ENV_FILE absent.
-      (should-not (string-match-p "set -a" prefix)))))
+      (should (equal "" prefix)))))
 
 (ert-deftest test-cmux-env-prefix/env-file-only ()
-  "ENV_FILE → `set -a; . FILE; set +a; ' source block, nothing inline."
+  "ENV_FILE → `set -a; . FILE; set +a; ' source block."
   :tags '(:cmux-env-injection :fast)
-  (let ((env-file (make-temp-file "test-cmux-env-source-" nil ".env")))
-    (unwind-protect
-        (progn
-          (with-temp-file env-file (insert "FOO=bar\n"))
-          (test-cmux-env--with-org-file
-              (format
-               "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
-               env-file)
-            (goto-char (point-max))
-            (let ((prefix (code-agent-org-cmux--build-env-prefix)))
-              ;; Source block syntax: `set -a; . <quoted-path>; set +a; '.
-              ;; The path is shell-quoted so there is no space between path
-              ;; and trailing `;'.
-              (should (string-match-p "set -a; \\. " prefix))
-              (should (string-match-p "; set \\+a; " prefix))
-              (should (string-match-p (regexp-quote env-file) prefix))
-              ;; No org-property-derived inline assignments here.
-              (should-not (string-match-p "ANTHROPIC_" prefix)))))
-      (delete-file env-file))))
+  (test-cmux-env--with-env-file "FOO=bar\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (let ((prefix (code-agent-org-cmux--build-env-prefix)))
+        (should (string-match-p "set -a; \\. " prefix))
+        (should (string-match-p "; set \\+a; " prefix))
+        (should (string-match-p (regexp-quote env-file) prefix))
+        ;; No inline VAR=VAL pairs — that path was removed.
+        (should-not (string-match-p "ANTHROPIC_" prefix))
+        (should-not (string-match-p "CLAUDE_CODE_" prefix))))))
 
-(ert-deftest test-cmux-env-prefix/file-and-properties-layered ()
-  "ENV_FILE comes first, then inline ANTHROPIC_* — inline wins per shell semantics."
+(ert-deftest test-cmux-env-prefix/env-file-plus-property-still-only-sources-file ()
+  "Even when both ENV_FILE and per-name `#+PROPERTY:' are set, only the file
+is sourced — per-name properties are ignored after the refactor."
   :tags '(:cmux-env-injection :fast)
-  (let ((env-file (make-temp-file "test-cmux-env-source-" nil ".env")))
-    (unwind-protect
-        (progn
-          (with-temp-file env-file (insert "ANTHROPIC_AUTH_TOKEN=tok-from-file\n"))
-          (test-cmux-env--with-org-file
-              (format
-               (concat
-                "#+TITLE: t\n"
-                "#+PROPERTY: ENV_FILE %s\n"
-                "#+PROPERTY: ANTHROPIC_MODEL claude-haiku\n"
-                "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
-               env-file)
-            (goto-char (point-max))
-            (let* ((prefix (code-agent-org-cmux--build-env-prefix))
-                   (file-idx (and (string-match "set -a; \\. " prefix)
-                                  (match-beginning 0)))
-                   (var-idx  (and (string-match "ANTHROPIC_MODEL=claude-haiku" prefix)
-                                  (match-beginning 0))))
-              (should file-idx)
-              (should var-idx)
-              ;; Layering invariant: file-source precedes inline VAR=VAL so the
-              ;; latter overrides the former at exec time.
-              (should (< file-idx var-idx)))))
-      (delete-file env-file))))
+  (test-cmux-env--with-env-file "ANTHROPIC_AUTH_TOKEN=tok-from-file\n"
+    (test-cmux-env--with-org-file
+        (format
+         (concat
+          "#+TITLE: t\n"
+          "#+PROPERTY: ENV_FILE %s\n"
+          "#+PROPERTY: ANTHROPIC_MODEL claude-haiku\n"
+          "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
+         env-file)
+      (goto-char (point-max))
+      (let ((prefix (code-agent-org-cmux--build-env-prefix)))
+        (should (string-match-p "set -a; \\. " prefix))
+        ;; ANTHROPIC_MODEL inline emission no longer occurs.
+        (should-not (string-match-p "ANTHROPIC_MODEL=" prefix))))))
 
 ;; --- end-to-end through --build-launch-command -------------------------
 
 (ert-deftest test-cmux-env-prefix/build-launch-command-prepends-prefix ()
-  "`--build-launch-command' returns prefix + bare launcher when env present.
-
-We stub the agent profile so the test doesn't depend on `uv' / paths /
-cmux being installed — the assertion is purely about string composition."
+  "`--build-launch-command' returns prefix + bare launcher when ENV_FILE
+present; the file-sourcing block comes before the launcher."
   :tags '(:cmux-env-injection :fast)
-  (test-cmux-env--with-org-file
-      (concat
-       "#+TITLE: t\n"
-       "#+PROPERTY: ANTHROPIC_MODEL test-model\n"
-       "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
-    (goto-char (point-max))
-    (cl-letf (((symbol-function 'code-agent-org-cmux--get-agent-profile)
-               (lambda () nil))
-              ((symbol-function 'code-agent-org-cmux--build-claude-legacy-launch-command)
-               (lambda (_o _s _p) "STUB_LAUNCHER")))
-      (let ((cmd (code-agent-org-cmux--build-launch-command
-                  "/tmp/fake.org" "sdd-fake" "/tmp")))
-        (should (string-match-p "ANTHROPIC_MODEL=test-model " cmd))
-        (should (string-suffix-p "STUB_LAUNCHER" cmd))
-        ;; Prefix must come BEFORE the launcher — otherwise the shell would
-        ;; treat VAR=VAL as args to STUB_LAUNCHER instead of exports.
-        (let ((var-idx (string-match "ANTHROPIC_MODEL=test-model" cmd))
-              (stub-idx (string-match "STUB_LAUNCHER" cmd)))
-          (should (< var-idx stub-idx)))))))
+  (test-cmux-env--with-env-file "ANTHROPIC_MODEL=test-model\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (cl-letf (((symbol-function 'code-agent-org-cmux--get-agent-profile)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org-cmux--build-claude-legacy-launch-command)
+                 (lambda (_o _s _p) "STUB_LAUNCHER")))
+        (let ((cmd (code-agent-org-cmux--build-launch-command
+                    "/tmp/fake.org" "sdd-fake" "/tmp")))
+          (should (string-match-p "set -a; \\. " cmd))
+          (should (string-suffix-p "STUB_LAUNCHER" cmd))
+          (let ((src-idx (string-match "set -a; \\. " cmd))
+                (stub-idx (string-match "STUB_LAUNCHER" cmd)))
+            (should (< src-idx stub-idx))))))))
 
 (ert-deftest test-cmux-env-prefix/build-launch-command-no-env-is-pass-through ()
-  "When org has no ENV_FILE and no ANTHROPIC_* properties,
-`--build-launch-command' returns the bare launcher unchanged."
+  "When org has no ENV_FILE, `--build-launch-command' returns the bare
+launcher unchanged."
   :tags '(:cmux-env-injection :fast)
   (test-cmux-env--with-org-file
       "#+TITLE: t\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
@@ -188,90 +180,151 @@ cmux being installed — the assertion is purely about string composition."
                   "/tmp/fake.org" "sdd-fake" "/tmp")))
         (should (equal "STUB_LAUNCHER" cmd))))))
 
-;; --- ANTHROPIC_MODEL → --model CLI fallback --------------------------
+;; --- ENV_FILE → CLI flag surfacing --------------------------------------
 
-(ert-deftest test-cmux-env-model/empty-when-property-unset ()
-  "No ANTHROPIC_MODEL property → no auto --model args."
+(ert-deftest test-cmux-env-cli/empty-when-no-env-file ()
+  "No ENV_FILE → no auto CLI flags."
   :tags '(:cmux-env-injection :fast)
   (test-cmux-env--with-org-file
       "#+TITLE: t\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
     (goto-char (point-max))
-    (should-not (code-agent-org-cmux--anthropic-model-fallback-args nil))))
+    (should-not (code-agent-org-cmux--env-cli-fallback-args nil))))
 
-(ert-deftest test-cmux-env-model/inject-when-property-set ()
-  "ANTHROPIC_MODEL property → (\"--model\" VALUE) list."
+(ert-deftest test-cmux-env-cli/empty-when-mapped-keys-absent ()
+  "ENV_FILE present but no mapped keys → no auto CLI flags."
   :tags '(:cmux-env-injection :fast)
-  (test-cmux-env--with-org-file
-      (concat
-       "#+TITLE: t\n"
-       "#+PROPERTY: ANTHROPIC_MODEL mimo-v2.5-pro\n"
-       "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
-    (goto-char (point-max))
-    (should (equal '("--model" "mimo-v2.5-pro")
-                   (code-agent-org-cmux--anthropic-model-fallback-args nil)))))
+  (test-cmux-env--with-env-file "FOO=bar\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (should-not (code-agent-org-cmux--env-cli-fallback-args nil)))))
 
-(ert-deftest test-cmux-env-model/skip-when-user-passes-model ()
-  "User's CLAUDE_EXTRA_ARGS already contains `--model' → skip auto-injection.
-Avoids `--model A --model B' duplicate that some parsers handle inconsistently."
+(ert-deftest test-cmux-env-cli/model-from-env-file ()
+  "ENV_FILE `ANTHROPIC_MODEL=…' → (\"--model\" VALUE) list."
   :tags '(:cmux-env-injection :fast)
-  (test-cmux-env--with-org-file
-      (concat
-       "#+TITLE: t\n"
-       "#+PROPERTY: ANTHROPIC_MODEL property-derived\n"
-       "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
-    (goto-char (point-max))
-    ;; space-separated form: ("--model" "user-value")
-    (should-not (code-agent-org-cmux--anthropic-model-fallback-args
-                 '("--dangerously-skip-permissions" "--model" "user-value")))
-    ;; `--model=value' form: single token starting with --model=
-    (should-not (code-agent-org-cmux--anthropic-model-fallback-args
-                 '("--model=user-value")))))
+  (test-cmux-env--with-env-file "ANTHROPIC_MODEL=mimo-v2.5-pro\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (should (equal '("--model" "mimo-v2.5-pro")
+                     (code-agent-org-cmux--env-cli-fallback-args nil))))))
 
-(ert-deftest test-cmux-env-model/legacy-builder-includes-model-flag ()
-  "End-to-end: --build-claude-legacy-launch-command produces a launcher
-string that includes `--model VALUE' when ANTHROPIC_MODEL is set and
-the user has not already specified --model."
+(ert-deftest test-cmux-env-cli/effort-from-env-file ()
+  "ENV_FILE `CLAUDE_CODE_EFFORT_LEVEL=…' → (\"--effort\" VALUE) list."
   :tags '(:cmux-env-injection :fast)
-  (test-cmux-env--with-org-file
-      (concat
-       "#+TITLE: t\n"
-       "#+PROPERTY: ANTHROPIC_MODEL test-marker-model\n"
-       "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
-    (goto-char (point-max))
-    (let ((code-agent-org-cmux-launch-command 'claude-workspace)
-          (code-agent-org-cmux-workspace-script "STUB_LAUNCHER")
-          (code-agent-org-cmux-extra-args nil))
-      (cl-letf (((symbol-function 'code-agent-org-terminal--find-session-property)
-                 (lambda (_p) nil))
-                ((symbol-function 'code-agent-org-terminal--goto-session-heading)
-                 (lambda () nil)))
-        (let ((cmd (code-agent-org-cmux--build-claude-legacy-launch-command
+  (test-cmux-env--with-env-file "CLAUDE_CODE_EFFORT_LEVEL=high\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (should (equal '("--effort" "high")
+                     (code-agent-org-cmux--env-cli-fallback-args nil))))))
+
+(ert-deftest test-cmux-env-cli/model-and-effort-together ()
+  "Both mapped keys → both CLI flags emitted in map order."
+  :tags '(:cmux-env-injection :fast)
+  (test-cmux-env--with-env-file
+      "ANTHROPIC_MODEL=mimo\nCLAUDE_CODE_EFFORT_LEVEL=medium\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (should (equal '("--model" "mimo" "--effort" "medium")
+                     (code-agent-org-cmux--env-cli-fallback-args nil))))))
+
+(ert-deftest test-cmux-env-cli/skip-when-user-passes-model ()
+  "User's CLAUDE_EXTRA_ARGS already contains `--model' → skip auto-injection
+for `--model' but still emit `--effort' if mapped."
+  :tags '(:cmux-env-injection :fast)
+  (test-cmux-env--with-env-file
+      "ANTHROPIC_MODEL=ignored\nCLAUDE_CODE_EFFORT_LEVEL=low\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      ;; --model A passed by user → skip --model from env, keep --effort
+      (should (equal '("--effort" "low")
+                     (code-agent-org-cmux--env-cli-fallback-args
+                      '("--dangerously-skip-permissions"
+                        "--model" "user-value"))))
+      ;; --model=VALUE form is also recognised
+      (should (equal '("--effort" "low")
+                     (code-agent-org-cmux--env-cli-fallback-args
+                      '("--model=user-value")))))))
+
+(ert-deftest test-cmux-env-cli/skip-when-user-passes-effort ()
+  "User's CLAUDE_EXTRA_ARGS already contains `--effort' → skip --effort
+auto-injection but still emit --model if mapped."
+  :tags '(:cmux-env-injection :fast)
+  (test-cmux-env--with-env-file
+      "ANTHROPIC_MODEL=mimo\nCLAUDE_CODE_EFFORT_LEVEL=ignored\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (should (equal '("--model" "mimo")
+                     (code-agent-org-cmux--env-cli-fallback-args
+                      '("--effort" "user-value")))))))
+
+(ert-deftest test-cmux-env-cli/legacy-builder-includes-model-and-effort ()
+  "End-to-end: `--build-claude-legacy-launch-command' produces a launcher
+string with `--model VALUE' and `--effort VALUE' from ENV_FILE."
+  :tags '(:cmux-env-injection :fast)
+  (test-cmux-env--with-env-file
+      "ANTHROPIC_MODEL=test-marker-model\nCLAUDE_CODE_EFFORT_LEVEL=xhigh\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (let ((code-agent-org-cmux-launch-command 'claude-workspace)
+            (code-agent-org-cmux-workspace-script "STUB_LAUNCHER")
+            (code-agent-org-cmux-extra-args nil))
+        (cl-letf (((symbol-function 'code-agent-org-terminal--find-session-property)
+                   (lambda (_p) nil))
+                  ((symbol-function 'code-agent-org-terminal--goto-session-heading)
+                   (lambda () nil)))
+          (let ((cmd (code-agent-org-cmux--build-claude-legacy-launch-command
+                      "/tmp/fake.org" "sdd-fake" "/tmp")))
+            (should (string-match-p "--model" cmd))
+            (should (string-match-p "test-marker-model" cmd))
+            (should (string-match-p "--effort" cmd))
+            (should (string-match-p "xhigh" cmd))))))))
+
+(ert-deftest test-cmux-env-cli/full-pipeline-prepends-source-and-appends-flags ()
+  "Full path through `--build-launch-command':
+- env prefix at start (set -a; . FILE; set +a;)
+- launcher + extras at end including --model and --effort CLI flags.
+Both channels active for belt-and-suspenders against settings.json pins."
+  :tags '(:cmux-env-injection :fast)
+  (test-cmux-env--with-env-file
+      "ANTHROPIC_MODEL=pipeline-model\nCLAUDE_CODE_EFFORT_LEVEL=high\n"
+    (test-cmux-env--with-org-file
+        (format
+         "#+TITLE: t\n#+PROPERTY: ENV_FILE %s\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
+         env-file)
+      (goto-char (point-max))
+      (cl-letf (((symbol-function 'code-agent-org-cmux--get-agent-profile)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org-cmux--build-claude-legacy-launch-command)
+                 (lambda (_o _s _p)
+                   "STUB_LAUNCHER --model pipeline-model --effort high")))
+        (let ((cmd (code-agent-org-cmux--build-launch-command
                     "/tmp/fake.org" "sdd-fake" "/tmp")))
-          (should (string-match-p "--model" cmd))
-          (should (string-match-p "test-marker-model" cmd)))))))
-
-(ert-deftest test-cmux-env-model/full-pipeline-prepends-env-and-appends-model ()
-  "Full path through --build-launch-command:
-- env prefix at start (ANTHROPIC_MODEL=… for runtime env)
-- launcher + extras including --model VALUE at end (CLI override)
-Both channels active for belt-and-suspenders against settings.json model pin."
-  :tags '(:cmux-env-injection :fast)
-  (test-cmux-env--with-org-file
-      (concat
-       "#+TITLE: t\n"
-       "#+PROPERTY: ANTHROPIC_MODEL pipeline-model\n"
-       "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
-    (goto-char (point-max))
-    (cl-letf (((symbol-function 'code-agent-org-cmux--get-agent-profile)
-               (lambda () nil))
-              ((symbol-function 'code-agent-org-cmux--build-claude-legacy-launch-command)
-               (lambda (_o _s _p) "STUB_LAUNCHER --model pipeline-model")))
-      (let ((cmd (code-agent-org-cmux--build-launch-command
-                  "/tmp/fake.org" "sdd-fake" "/tmp")))
-        ;; env prefix asserts the runtime channel
-        (should (string-match-p "ANTHROPIC_MODEL=pipeline-model" cmd))
-        ;; --model on stub launcher asserts the CLI channel
-        (should (string-match-p "STUB_LAUNCHER --model pipeline-model$" cmd))))))
+          ;; env prefix asserts the runtime channel
+          (should (string-match-p "set -a; \\. " cmd))
+          (should (string-match-p (regexp-quote env-file) cmd))
+          ;; CLI flags on stub launcher assert the CLI channel
+          (should (string-match-p "--model pipeline-model" cmd))
+          (should (string-match-p "--effort high" cmd)))))))
 
 (provide 'test-cmux-env-injection)
 ;;; test-cmux-env-injection.el ends here

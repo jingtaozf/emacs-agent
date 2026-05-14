@@ -1119,51 +1119,28 @@ These are automatically collected and included in queries.
 
 *** Environment Variables
 
-You can configure Claude API settings via org properties. This is useful for:
-- Using alternative API providers (e.g., [[https://www.volcengine.com/docs/82379/1928261][Volcengine/Doubao]])
-- Switching models per-file or per-section
-- Using custom API endpoints
+Configure Claude (alternative providers, custom endpoints, model
+selection, effort level, telemetry flags, etc.) by putting variables in
+a dotenv-style file and pointing =#+PROPERTY: ENV_FILE= at it.  This is
+the *single source of truth* — per-name org properties for env vars
+(e.g. =:ANTHROPIC_MODEL:= on a section) are *not* read.
 
-Supported properties:
-| Property | Description |
-|----------+-------------|
-| =ANTHROPIC_MODEL= | Model name to use |
-| =ANTHROPIC_BASE_URL= | Custom API endpoint |
-| =ANTHROPIC_AUTH_TOKEN= | API authentication token |
+*IMPORTANT SECURITY NOTICE:* Never commit API tokens or credentials to
+version control.  Keep =.env= files outside the repo (e.g. =~/.local/=)
+and =chmod 600= them.
 
-**** File-level Configuration
+*Setup*
 
-#+BEGIN_EXAMPLE
-,#+PROPERTY: ANTHROPIC_MODEL claude-sonnet-4-20250514
-,#+PROPERTY: ANTHROPIC_BASE_URL https://api.anthropic.com
-#+END_EXAMPLE
-
-**** Section-level Configuration
-
-#+BEGIN_EXAMPLE
-,* Work with Volcengine
-:PROPERTIES:
-:ANTHROPIC_BASE_URL: https://ark.cn-beijing.volces.com/api/coding
-:ANTHROPIC_AUTH_TOKEN: your-ark-api-key
-:ANTHROPIC_MODEL: claude-sonnet-4-20250514
-:END:
-#+END_EXAMPLE
-
-**** Secure Environment Variables with ENV_FILE
-
-*IMPORTANT SECURITY NOTICE:* Never commit API tokens or credentials to version control!
-
-Use =ENV_FILE= to load sensitive values from a local =.env= file with variable substitution:
-
-*Setup:*
-
-1. Create a =.env= file (use standard dotenv syntax):
+1. Create a =.env= file with any env vars Claude Code understands.
+   Anything =VAR=VALUE=-shaped is fair game — there is no allowlist:
 
    #+BEGIN_EXAMPLE
    # ~/.local/doubao.env
+   ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/coding
    ANTHROPIC_AUTH_TOKEN=sk-ant-api03-xxx
-   DOUBAO_API_KEY=your-volcengine-key
-   PROJECT_PATH=/Users/yourname/projects/myapp
+   ANTHROPIC_MODEL=claude-sonnet-4-20250514
+   CLAUDE_CODE_EFFORT_LEVEL=high
+   DISABLE_NON_ESSENTIAL_MODEL_CALLS=1
    #+END_EXAMPLE
 
 2. Secure the file:
@@ -1172,14 +1149,32 @@ Use =ENV_FILE= to load sensitive values from a local =.env= file with variable s
    chmod 600 ~/.local/doubao.env
    #+END_SRC
 
-3. Reference in org file using =${VAR}= syntax:
+3. Reference it in the org file (file-level or section-level):
 
    #+BEGIN_EXAMPLE
    ,#+PROPERTY: ENV_FILE ~/.local/doubao.env
-   ,#+PROPERTY: ANTHROPIC_AUTH_TOKEN ${ANTHROPIC_AUTH_TOKEN}
-   ,#+PROPERTY: ANTHROPIC_MODEL claude-sonnet-4-20250514
-   ,#+PROPERTY: PROJECT_ROOT ${PROJECT_PATH}
    #+END_EXAMPLE
+
+   Section-level overrides work via org property inheritance — give a
+   heading its own =:ENV_FILE:= drawer entry and that section uses a
+   different .env file:
+
+   #+BEGIN_EXAMPLE
+   ,* Work with Volcengine
+   :PROPERTIES:
+   :ENV_FILE: ~/.local/volcengine.env
+   :END:
+   #+END_EXAMPLE
+
+*ANTHROPIC_MODEL and CLAUDE_CODE_EFFORT_LEVEL: belt-and-suspenders*
+
+These two values are read from the .env file and *also* surfaced as
+=--model VALUE= / =--effort VALUE= CLI flags on the spawned =claude=
+process.  Claude Code's =~/.claude/settings.json= can override the
+env-derived =model= and =effort=, but CLI flags beat settings.json
+unconditionally, so this guarantees your .env wins.  Author intent
+still wins over auto-injection: if =CLAUDE_EXTRA_ARGS= already passes
+=--model= or =--effort=, the env-derived flag is skipped.
 
 ** Org Link Resolution
 :PROPERTIES:

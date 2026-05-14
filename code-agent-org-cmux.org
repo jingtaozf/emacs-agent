@@ -457,80 +457,76 @@ characters in the TUI input box rather than submitting each line separately."
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux--build-env-prefix ()
-  "Return a shell prefix that exports ENV_FILE + ANTHROPIC_* / CLAUDE_CODE_*
-org-property env vars for the cmux launch command, or \"\" if nothing to inject.
+  "Return a shell prefix that sources ENV_FILE for the cmux launch command,
+or \"\" if no ENV_FILE is configured / readable.
 
-Why this exists.  The agent-family (json-stream) backend reads org
-properties listed in `code-agent-org-env-properties' plus the
-`#+PROPERTY: ENV_FILE' value via `code-agent-org--get-env-vars' and
-hands them to the spawned Claude subprocess as the OS env block.  The
-cmux backend never spawns Claude directly — it asks cmux to spawn one
-inside a new terminal pane, and cmux's child shell inherits only cmux's
-own process environment.  Without help, the org properties that worked
-under json-stream silently have no effect under cmux.
+Why this exists.  The agent-family (json-stream) backend reads ENV_FILE
+via `code-agent-org--get-env-vars' and hands the parsed alist to the
+spawned Claude subprocess as the OS env block.  The cmux backend never
+spawns Claude directly — it asks cmux to spawn one inside a new terminal
+pane, and cmux's child shell inherits only cmux's own process environment.
+Without help, the ENV_FILE that worked under json-stream silently has no
+effect under cmux.
 
-The prefix we produce is plain POSIX shell so the same command string
-cmux runs (via `new-workspace --command') first sources the env file
-and then sets inline overrides before exec'ing the real launcher:
+The prefix we produce is plain POSIX shell so the command cmux runs
+(via `new-workspace --command') sources the env file before exec'ing the
+real launcher:
 
-  set -a; . /path/to/env-file; set +a; ANTHROPIC_MODEL=foo ... <launcher>
+  set -a; . /path/to/env-file; set +a; <launcher>
 
-`set -a' auto-exports every subsequent assignment, so vars in ENV_FILE
-flow into the eventual Claude process.  Inline `VAR=VALUE' pairs after
-the sourcing take precedence per shell semantics, mirroring the
-json-stream layering where explicit org properties beat ENV_FILE values.
+`set -a' auto-exports every subsequent assignment, so every VAR=VALUE in
+ENV_FILE flows into the eventual Claude process.
 
-Must run in the org buffer that owns the AI block — `--get-env-vars'
-relies on `org-entry-get' which is buffer-position sensitive.  Callers
-(currently `--launch-workspace') already meet this requirement."
-  (let* ((env-vars (ignore-errors (code-agent-org--get-env-vars)))
-         (env-file-raw (ignore-errors
+Per-name org properties (e.g. `:ANTHROPIC_MODEL:' on a section) are no
+longer read here — put values in the .env file instead.  Section-level
+overrides are still possible via `:ENV_FILE:' inheritance on a heading."
+  (let* ((env-file-raw (ignore-errors
                          (code-agent-org--get-org-property "ENV_FILE" t)))
-         (env-file (and env-file-raw (expand-file-name env-file-raw)))
-         (env-file-exists (and env-file (file-readable-p env-file))))
-    (if (and (not env-vars) (not env-file-exists))
-        ""
-      (concat
-       (when env-file-exists
-         (format "set -a; . %s; set +a; " (shell-quote-argument env-file)))
-       (mapconcat
-        (lambda (kv)
-          (format "%s=%s " (car kv) (shell-quote-argument (cdr kv))))
-        env-vars "")))))
+         (env-file (and env-file-raw (expand-file-name env-file-raw))))
+    (if (and env-file (file-readable-p env-file))
+        (format "set -a; . %s; set +a; " (shell-quote-argument env-file))
+      "")))
 
-(defun code-agent-org-cmux--anthropic-model-fallback-args (user-extra-args)
-  "Return a (\"--model\" VALUE) list when an ANTHROPIC_MODEL org property is set
-and USER-EXTRA-ARGS does not already specify a `--model' override; else nil.
+(defun code-agent-org-cmux--env-cli-fallback-args (user-extra-args)
+  "Surface ENV_FILE values for `ANTHROPIC_MODEL' / `CLAUDE_CODE_EFFORT_LEVEL'
+as Claude CLI flags (`--model' / `--effort'), skipping any flag that
+USER-EXTRA-ARGS already specifies.
 
-Why this exists.  ENV_FILE + ANTHROPIC_* injection (see
+Why this exists.  ENV_FILE sourcing (see
 `code-agent-org-cmux--build-env-prefix') makes the Claude SDK *see*
-ANTHROPIC_MODEL via the OS env at startup, but the user's
-`~/.claude/settings.json' `model' field, if present, overrides any
-env-derived model.  This was verified empirically with the xiaomi
-mimo endpoint: ENV vars reach the claude process (confirmed via `ps -E'
-on a live launch), but the displayed model still resolved to whatever
-user settings pinned because settings.json beats env in Claude Code's
-own precedence chain.  The reliable override channel is the CLI
-`--model' flag, which beats settings.json unconditionally.
+these env vars at startup, but `~/.claude/settings.json' `model' and
+`effort' fields override the env-derived values during Claude Code's
+own precedence resolution.  This was verified empirically with the
+xiaomi mimo endpoint: ENV vars reach the claude process (confirmed via
+`ps -E' on a live launch), but the displayed model still resolved to
+whatever user settings pinned, because settings.json beats env in
+Claude Code's precedence chain.  The reliable override channel is the
+CLI flag, which beats settings.json unconditionally.
 
-So when the org section pins ANTHROPIC_MODEL for cmux backend
-(e.g. xiaomi's mimo-v2.5-pro), we surface it as `--model VALUE' on
-claude-workspace's pass-through extras.  The claude-workspace launcher
-appends extras after `--', and they flow into the spawned `claude'
-process as final argv.
+So when the .env file pins ANTHROPIC_MODEL or CLAUDE_CODE_EFFORT_LEVEL,
+we surface each as `--model VALUE' / `--effort VALUE' on
+claude-workspace's pass-through extras.  The launcher appends extras
+after `--', and they flow into the spawned `claude' process as final
+argv.
 
-We bail out if USER-EXTRA-ARGS already contains `--model' or `--model='
-— author intent takes priority and we avoid the awkward
-`--model A --model B' duplicate that some CLI parsers handle
-inconsistently."
-  (let ((model (ignore-errors
-                 (code-agent-org--get-org-property "ANTHROPIC_MODEL"))))
-    (when (and model
-               (not (string-empty-p model))
-               (not (or (cl-find "--model" user-extra-args :test #'string=)
-                        (cl-some (lambda (a) (string-prefix-p "--model=" a))
-                                 user-extra-args))))
-      (list "--model" model))))
+We bail out per-key if USER-EXTRA-ARGS already contains the flag (either
+`--flag VALUE' or `--flag=VALUE') — author intent takes priority and we
+avoid the awkward `--flag A --flag B' duplicate that some CLI parsers
+handle inconsistently.  See `code-agent-org--env-cli-flag-map' for the
+authoritative ENV → CLI mapping; add an entry there if a third case
+appears."
+  (let ((env-alist (ignore-errors (code-agent-org--load-env-file)))
+        (out nil))
+    (pcase-dolist (`(,env-key . ,flag) code-agent-org--env-cli-flag-map)
+      (let ((val (cdr (assoc env-key env-alist))))
+        (when (and val
+                   (not (string-empty-p val))
+                   (not (or (cl-find flag user-extra-args :test #'string=)
+                            (cl-some (lambda (a)
+                                       (string-prefix-p (concat flag "=") a))
+                                     user-extra-args))))
+          (setq out (append out (list flag val))))))
+    out))
 
 (defun code-agent-org-cmux--build-launch-command (org-file workspace-session-id project-root)
   "Build the shell command to launch the configured code agent in cmux.
@@ -541,8 +537,8 @@ Dispatches to the active agent profile's launch-fn.  Falls back to the
 legacy `code-agent-org-cmux-launch-command' path when no agent profile is set.
 The dispatched builder produces the bare launcher command; we prepend a
 shell env prefix (see `code-agent-org-cmux--build-env-prefix') so that
-ENV_FILE + ANTHROPIC_* org properties also reach the cmux-spawned Claude
-process — the json-stream-equivalent of `:env' subprocess injection."
+the ENV_FILE values also reach the cmux-spawned Claude process — the
+json-stream-equivalent of `:env' subprocess injection."
   (let* ((profile (code-agent-org-cmux--get-agent-profile))
          (base-cmd
           (if profile
@@ -563,12 +559,12 @@ PROJECT-ROOT the working directory."
   (let* ((prop-args (code-agent-org-terminal--find-session-property "CLAUDE_EXTRA_ARGS"))
          (user-extra-args (append code-agent-org-cmux-extra-args
                                   (when prop-args (split-string prop-args))))
-         ;; Surface ANTHROPIC_MODEL org property as a CLI flag when set —
-         ;; env-only injection loses to ~/.claude/settings.json model field;
-         ;; the CLI flag beats settings.json.  See `--anthropic-model-fallback-args'.
-         (model-args (code-agent-org-cmux--anthropic-model-fallback-args
-                      user-extra-args))
-         (all-extra (append user-extra-args model-args))
+         ;; Surface ENV_FILE-derived ANTHROPIC_MODEL / CLAUDE_CODE_EFFORT_LEVEL
+         ;; as CLI flags — env-only injection loses to ~/.claude/settings.json,
+         ;; CLI flags beat settings.json.  See `--env-cli-fallback-args'.
+         (cli-flag-args (code-agent-org-cmux--env-cli-fallback-args
+                         user-extra-args))
+         (all-extra (append user-extra-args cli-flag-args))
          (extra (mapconcat #'shell-quote-argument all-extra " ")))
     (cond
      ;; claude-workspace: passes org-file and session-id
@@ -634,10 +630,10 @@ Used when `code-agent-org-cmux-agent-type' is `claude'."
   (let* ((prop-args (code-agent-org-terminal--find-session-property "CLAUDE_EXTRA_ARGS"))
          (user-extra-args (append code-agent-org-cmux-extra-args
                                   (when prop-args (split-string prop-args))))
-         ;; ANTHROPIC_MODEL → --model fallback (see legacy builder above).
-         (model-args (code-agent-org-cmux--anthropic-model-fallback-args
-                      user-extra-args))
-         (all-extra (append user-extra-args model-args))
+         ;; ENV_FILE → CLI flag fallback (see legacy builder above).
+         (cli-flag-args (code-agent-org-cmux--env-cli-fallback-args
+                         user-extra-args))
+         (all-extra (append user-extra-args cli-flag-args))
          (extra (mapconcat #'shell-quote-argument all-extra " "))
          ;; Emacs is the state owner for --resume (reads CLAUDE_CLI_SESSION).
          ;; Read directly from the session heading (no inheritance).

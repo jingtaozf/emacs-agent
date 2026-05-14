@@ -730,19 +730,30 @@ does not clobber the other agent's session.")
 (defconst code-agent-org-setting-sources-property "CLAUDE_SETTING_SOURCES"
   "Org property name for setting sources (comma-separated list).")
 
-(defconst code-agent-org-env-properties
-  '("ANTHROPIC_MODEL" "ANTHROPIC_BASE_URL" "ANTHROPIC_AUTH_TOKEN" "ANTHROPIC_API_KEY"
-    "CLAUDE_CODE_EFFORT_LEVEL" "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" "CLAUDE_CODE_UNATTENDED_RETRY")
-  "List of environment variable org properties to pass to Claude CLI.
-These can be set as org properties (file-level or section-level) and will
-be passed as environment variables when starting the Claude process.
+;; ENV vars are no longer enumerated as a hard-coded org-property
+;; allowlist.  The single source of truth is the `ENV_FILE' org property,
+;; which points at a dotenv-style file whose VAR=VALUE lines are sourced
+;; into the spawned Claude process.  See `code-agent-org--get-env-vars'.
 
-Claude Code specific variables:
-  CLAUDE_CODE_EFFORT_LEVEL     - Thinking effort: low, medium, high
-  CLAUDE_CODE_AUTO_COMPACT_WINDOW - Context % before auto-compact (0-100)
-  CLAUDE_AUTOCOMPACT_PCT_OVERRIDE - Override compact threshold %
-  CLAUDE_CODE_UNATTENDED_RETRY - Number of retries for unattended mode")
+(defconst code-agent-org--env-cli-flag-map
+  '(("ANTHROPIC_MODEL"          . "--model")
+    ("CLAUDE_CODE_EFFORT_LEVEL" . "--effort"))
+  "Map ENV_FILE keys to Claude CLI flags that must be surfaced explicitly.
+
+Both `ANTHROPIC_MODEL' and `CLAUDE_CODE_EFFORT_LEVEL' do reach the
+spawned Claude process through ENV_FILE sourcing, but Claude Code's
+~/.claude/settings.json values for `model' and `effort' override the
+env-derived values during startup.  CLI flags beat settings.json
+unconditionally, so we re-surface these two keys as `--model VALUE' /
+`--effort VALUE' on the launcher extras.
+
+Author intent wins: when USER-EXTRA-ARGS already specifies the flag
+(either `--flag VALUE' or `--flag=VALUE'), we skip auto-injection to
+avoid `--flag A --flag B' duplicates whose CLI-parser handling is
+inconsistent across releases.
+
+Add a new entry only when a second case appears whose env value is
+silently overridden by settings.json; do not generalise speculatively.")
 
 (defconst code-agent-org--permission-mode-map
   '(("readonly"      . (:cli "default"            :short "RO"))
@@ -1345,28 +1356,20 @@ Set NO-EXPAND to t to disable variable expansion."
         (code-agent-org--expand-env-vars raw-value env-alist)))))
 
 (defun code-agent-org--get-env-vars ()
-  "Collect environment variables from org properties and ai block header args.
-Returns an alist of (VAR-NAME . VALUE) for all properties in
-`code-agent-org-env-properties' that have values set.
+  "Return env-var alist to inject into the spawned Claude process.
 
-Also reads :effort header arg from current ai block:
-  #+begin_src ai :effort high
-maps to CLAUDE_CODE_EFFORT_LEVEL=high."
-  (let (env-vars)
-    (dolist (prop code-agent-org-env-properties)
-      (let ((value (code-agent-org--get-org-property prop)))
-        (when (and value (not (string-empty-p value)))
-          (push (cons prop value) env-vars))))
-    ;; Check :effort header arg on the current ai block
-    (let* ((header-args (ignore-errors (code-agent-org--get-block-header-args)))
-           (effort (plist-get header-args :effort)))
-      (when (and effort (stringp effort))
-        ;; Header arg overrides org property
-        (setq env-vars (cl-remove-if
-                        (lambda (pair) (equal (car pair) "CLAUDE_CODE_EFFORT_LEVEL"))
-                        env-vars))
-        (push (cons "CLAUDE_CODE_EFFORT_LEVEL" effort) env-vars)))
-    (nreverse env-vars)))
+The single source of truth is the `ENV_FILE' org property — see
+`code-agent-org--load-env-file'.  Hard-coded per-name org properties
+(e.g. `:ANTHROPIC_MODEL:' on a section) are no longer read here; put
+every VAR=VALUE in the .env file pointed at by ENV_FILE.
+
+Section-level overrides remain available by setting `ENV_FILE' on a
+heading's property drawer — org-entry-get inheritance picks the closest
+enclosing value, so different sections can point at different .env
+files.
+
+Returns nil when no ENV_FILE is configured or the file is unreadable."
+  (code-agent-org--load-env-file))
 #+END_SRC
 
 ** Permission Mode Setter
