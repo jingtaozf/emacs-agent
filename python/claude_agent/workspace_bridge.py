@@ -66,7 +66,6 @@ _OI_KIND_ATTR = "openinference.span.kind"
 # invocations or consume unrelated flags.
 _process_start_time = time.time()
 
-
 # ======================================================================
 # Stateless helpers
 #
@@ -988,6 +987,31 @@ class WorkspaceBridge:
         prompt hook. Returns the new id, or ``None`` after notifying
         query-completed if we can't recover (in which case the caller
         should abort).
+
+        Staleness guard.  A ``<session>.from-emacs`` flag means Emacs
+        recently sent a prompt via the org-mode AI block path and the
+        following hook chain should route the response to the queued
+        ``.custom-id``.  But the flag has no built-in expiry — if the
+        prompt hook *failed* (e.g. corrupted hooks.json, missing python
+        deps, network blip), the flag stays on disk and gets consumed by
+        the next unrelated terminal-typed Stop hook, routing that
+        response to the *previous* failed ai block's instruction.
+
+        We mirror the freshness rule already enforced by
+        ``_check_any_recent_from_emacs_flag``: the flag must be newer
+        than this Python process started.  Per-hook invocation the
+        process is freshly spawned, so this caps the flag's effective
+        lifetime to the hook's own latency (sub-second normally).  Any
+        leftover flag from a previous failed ai block is treated as
+        stale, deleted, and the function falls through to the
+        terminal-typed prompt path.
+
+        Observed 2026-05-14 ASM-dev1 incident: corrupted hooks.json made
+        the 12:48 ai-block's prompt+Stop hooks silently no-op, leaving
+        a stale ``.from-emacs`` flag.  A user terminal prompt 15 min
+        later fired its Stop hook in a fresh bridge process; without
+        this guard the bridge consumed the stale flag and inserted the
+        terminal response under the failed 12:48 instruction.
         """
         last_user_message = input_data.get("last_user_message", "")
         if not last_user_message:
@@ -996,6 +1020,15 @@ class WorkspaceBridge:
 
         from_emacs_flag = os.path.join(STATUS_DIR, f"{self.session_id}.from-emacs")
         flag_exists = os.path.exists(from_emacs_flag)
+        if flag_exists:
+            try:
+                # Stale-flag guard: a flag older than this process's start
+                # belongs to a previous (probably failed) hook chain.
+                if os.path.getmtime(from_emacs_flag) < _process_start_time:
+                    os.remove(from_emacs_flag)
+                    flag_exists = False
+            except OSError:
+                flag_exists = False
         if not flag_exists:
             flag_exists, from_emacs_flag = _check_any_recent_from_emacs_flag()
 

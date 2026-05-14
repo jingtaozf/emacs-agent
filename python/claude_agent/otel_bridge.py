@@ -57,6 +57,7 @@ _SPAN_KIND_MAP = {
 # defaults drive the Phoenix UI's colour coding and are overridable by
 # the caller via ``openinference_kind`` in the start payload.
 _OI_KIND_ATTR = "openinference.span.kind"
+
 _OI_KIND_DEFAULTS = {
     "SERVER": "CHAIN",
     "CONSUMER": "CHAIN",
@@ -68,7 +69,6 @@ _OI_KIND_DEFAULTS = {
 # Keys the bridge consumes for its own routing — never forwarded as
 # span attributes because they're not part of the semantic schema.
 _META_ATTR_KEYS = {"span-kind", "oi-kind", "input", "output"}
-
 
 # ======================================================================
 # Preset-id generator

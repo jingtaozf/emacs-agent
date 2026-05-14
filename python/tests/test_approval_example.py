@@ -34,6 +34,7 @@ import pytest
 
 # approvaltests is a dev dep — skip cleanly if it's not installed locally.
 approvaltests = pytest.importorskip("approvaltests")
+
 from approvaltests import verify, Options  # noqa: E402
 from approvaltests.reporters import PythonNativeReporter  # noqa: E402
 

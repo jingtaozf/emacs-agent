@@ -43,9 +43,10 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 PHOENIX_ENDPOINT = os.environ.get(
     "CLAUDE_OTEL_ENDPOINT", "http://localhost:6006/v1/traces"
 )
-PHOENIX_HEALTH_URL = PHOENIX_ENDPOINT.rsplit("/v1/traces", 1)[0] + "/health"
-STATUS_DIR = "/tmp/claude-agent-status"
 
+PHOENIX_HEALTH_URL = PHOENIX_ENDPOINT.rsplit("/v1/traces", 1)[0] + "/health"
+
+STATUS_DIR = "/tmp/claude-agent-status"
 
 # ======================================================================
 # Phoenix auto-start

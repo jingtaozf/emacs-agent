@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from claude_agent.claude_workspace import (
     ClaudeWorkspaceLauncher,

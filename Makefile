@@ -683,7 +683,7 @@ test-workspace-bridge:
 .PHONY: otel-server
 otel-server:
 	@echo "Starting OTel bridge server on port 7331..."
-	cd python && uv run --extra tracing python -m claude_agent.otel_bridge
+	cd python && uv run python -m claude_agent.otel_bridge
 
 .PHONY: phoenix-start
 phoenix-start:

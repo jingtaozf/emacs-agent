@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from claude_agent.mcp_client import McpConnectionError
 
@@ -1178,15 +1178,100 @@ class TestHandleResponsePromptInsertion:
         assert all("insert-response" not in c for c in calls)
 
     def test_custom_id_written_after_prompt_insertion(self, tmp_path, monkeypatch):
-        """After successful insert-prompt, custom_id is persisted to disk."""
+        """After successful insert-prompt, custom_id is persisted to disk during execution."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = ["new-custom-id", None, None]
         bridge = make_bridge(mcp, session_id="sid")
-        bridge._handle_response(
-            {"last_assistant_message": "resp", "last_user_message": "prompt"}
+
+        # We wrap _write_custom_id to verify it was called, since _handle_response
+        # clears it at the very end.
+        with patch.object(
+            bridge, "_write_custom_id", wraps=bridge._write_custom_id
+        ) as mock_write:
+            bridge._handle_response(
+                {"last_assistant_message": "resp", "last_user_message": "prompt"}
+            )
+            mock_write.assert_called_once_with("new-custom-id")
+
+    def test_stale_from_emacs_flag_does_not_route_to_stale_cid(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression for 2026-05-14 ASM-dev1 incident.
+
+        Without the staleness guard, this exact sequence routes a
+        terminal-typed response to the wrong ai-block:
+
+          1. Emacs ai block runs, writes ``.from-emacs`` + queues
+             ``.custom-ids = [old-cid]``.
+          2. Hook chain breaks (corrupted hooks.json) → response never
+             inserted; flag + queue stay on disk.
+          3. Much later a fresh bridge process fires for a terminal
+             prompt's Stop.  ``_mint_missing_custom_id`` sees the flag,
+             consumes it, reads ``old-cid`` from the queue, returns
+             ``old-cid`` — and the unrelated terminal response gets
+             inserted under the original failed ai-block's heading.
+
+        With the guard: any flag whose mtime precedes
+        ``_process_start_time`` is deleted before the consume branch
+        runs, so ``old-cid`` is never returned.
+        """
+        import os
+        import time
+
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        flag = tmp_path / "sid.from-emacs"
+        flag.write_text("1")
+        stale_mtime = time.time() - 120  # 2 minutes ago
+        os.utime(flag, (stale_mtime, stale_mtime))
+        (tmp_path / "sid.custom-ids").write_text("stale-old-cid\n")
+        # Bridge process started AFTER the stale flag was written.
+        monkeypatch.setattr(
+            "claude_agent.workspace_bridge._process_start_time", time.time()
         )
-        assert bridge._read_custom_id() == "new-custom-id"
+        # MCP returns a deterministic minted cid so we can assert the
+        # value the bridge returns is the fresh one, not the stale one.
+        mcp = MagicMock()
+        mcp.eval_elisp.return_value = "freshly-minted-cid"
+        bridge = make_bridge(mcp, session_id="sid")
+        result = bridge._mint_missing_custom_id(
+            {"last_user_message": "terminal-typed prompt"}, None
+        )
+        # Stale flag was cleaned up.
+        assert not flag.exists()
+        # Critically: we did NOT return the stale queued cid.
+        assert result != "stale-old-cid"
+        # Path proceeded to mint a fresh instruction via MCP.
+        assert result == "freshly-minted-cid"
+        joined = " ".join(str(c) for c in mcp.eval_elisp.call_args_list)
+        assert "insert-prompt" in joined
+        assert "stale-old-cid" not in joined
+
+    def test_fresh_from_emacs_flag_still_routes_to_queued_cid(
+        self, tmp_path, monkeypatch
+    ):
+        """Sanity check: a fresh flag (newer than process start) +
+        non-empty queue still takes the consume branch.
+
+        This guarantees the staleness guard didn't accidentally break
+        the normal happy path where Emacs's prompt hook ran successfully
+        and queued ``recent-cid`` just before the bridge subprocess
+        spawned.
+        """
+        import time
+
+        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        flag = tmp_path / "sid.from-emacs"
+        flag.write_text("1")
+        (tmp_path / "sid.custom-ids").write_text("recent-cid\n")
+        # Flag mtime is now (fresh); bridge started 5s earlier.
+        monkeypatch.setattr(
+            "claude_agent.workspace_bridge._process_start_time", time.time() - 5
+        )
+        bridge = make_bridge(MagicMock(), session_id="sid")
+        result = bridge._mint_missing_custom_id({"last_user_message": "prompt"}, None)
+        assert not flag.exists()
+        assert result == "recent-cid"
 
 
 class TestWorkspaceBridgeProtocol:

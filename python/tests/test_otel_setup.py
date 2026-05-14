@@ -13,8 +13,11 @@ import pytest
 # not be installed in the test environment.
 
 _mock_trace = MagicMock()
+
 _mock_sdk_trace = MagicMock()
+
 _mock_sdk_export = MagicMock()
+
 _mock_sdk_resources = MagicMock()
 
 _OTEL_MODULES = {

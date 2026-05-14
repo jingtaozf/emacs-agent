@@ -26,7 +26,6 @@ from hypothesis import given, strategies as st, settings, HealthCheck
 
 from claude_agent.workspace_bridge import _escape_elisp_string
 
-
 # Reasonable budget — pure-string functions don't need 100k iterations.
 SETTINGS = settings(
     max_examples=200, deadline=500, suppress_health_check=[HealthCheck.too_slow]
