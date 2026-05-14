@@ -1,4 +1,0 @@
-# References Index
-
-| Topic | Description |
-|-------|-------------|

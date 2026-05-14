@@ -424,28 +424,6 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (goto-char (point-min))
     (should-not (re-search-forward "^\\*\\*\\* Features" nil t))))
 
-;;; Structural Tests - docs/ Directory
-
-(ert-deftest test-workspace-docs-directories-exist ()
-  "Test that required docs/ subdirectories exist."
-  :tags '(:unit :fast :stable :structural :sdd :tdd)
-  (let ((project-root (locate-dominating-file default-directory "code-agent-org.org")))
-    (skip-unless project-root)
-    (should (file-directory-p (expand-file-name "docs/research" project-root)))
-    (should (file-directory-p (expand-file-name "docs/design-docs" project-root)))
-    (should (file-directory-p (expand-file-name "docs/product-specs" project-root)))
-    (should (file-directory-p (expand-file-name "docs/references" project-root)))))
-
-(ert-deftest test-workspace-docs-index-files-exist ()
-  "Test that INDEX.md files exist in docs/ subdirectories."
-  :tags '(:unit :fast :stable :structural :sdd :tdd)
-  (let ((project-root (locate-dominating-file default-directory "code-agent-org.org")))
-    (skip-unless project-root)
-    (dolist (subdir '("research" "design-docs" "product-specs" "references"))
-      (should (file-exists-p
-               (expand-file-name (format "docs/%s/INDEX.md" subdir) project-root))))))
-
-
 ;;; Unit Tests - Configurable Docs Format
 
 (ert-deftest test-workspace-docs-format-default ()

@@ -251,8 +251,8 @@ Three detection layers run automatically:
 **release** (`gitleaks detect --no-banner --redact` full-history sweep).
 
 Full prohibition list, MCP audit, and detection details:
-[`docs/agent-rules/secrets.md`](docs/agent-rules/secrets.md) and
-[`docs/security/mcp-audit.md`](docs/security/mcp-audit.md).
+[`.claude/rules/secrets.md`](.claude/rules/secrets.md) and
+the *Security Audit* section of [`emacs-mcp-server.org`](emacs-mcp-server.org).
 
 ### Lessons file (`tasks/lessons.md`)
 
@@ -266,7 +266,7 @@ Don't put new rules straight in CLAUDE.md — context rot is real (lens #5).
 
 ### Risk → Autonomy Level (lens #12)
 
-See [`docs/agent-rules/risk-autonomy.md`](docs/agent-rules/risk-autonomy.md)
+See [`.claude/rules/risk-autonomy.md`](.claude/rules/risk-autonomy.md)
 for the task-domain → required level table and hard approval gates. TL;DR:
 auth/payments/migrations → **L3 supervised**; refactor/docs/tests → **L4
 autonomous**; exploration → **L1-L2 inline**.
