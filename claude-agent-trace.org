@@ -19,6 +19,109 @@ same root. Without that invariant, Phoenix shows a forest of disconnected
 traces for what is logically one interaction, and the Python hook chain is
 unattributable to the Emacs work that triggered it.
 
+** Why This Module Exists
+
+When an AI block fails silently — response never appears, hook crashes
+mid-stream, MCP call times out — the user has historically had no way to
+trace what happened across the three process boundaries. Each layer logged
+to a different sink:
+
+| Process | Language | Pre-tracing logging |
+|---------+----------+---------------------|
+| Emacs | Elisp | =claude-agent--debug-log= → =*Messages*= (only when debug=t) |
+| SDD bridge | Python | =logging.warning= → stderr (invisible from Emacs) |
+| Claude CLI | N/A | Internal hooks, no user access |
+
+A real failure in March 2026 illustrated the gap: an AI block executed,
+=Sent to terminal= was logged, the response never appeared, and there was
+no way to discover whether the Python =Stop= hook fired, what Elisp it
+evaluated, or where the chain broke. OpenTelemetry-native tracing solves
+that by giving every execution a single =trace-id= that follows the work
+across all three processes.
+
+** ID Landscape
+
+Before tracing, the system already had ten distinct ID namespaces, none
+correlated with each other:
+
+| ID | Scope | Created by | Example |
+|----+-------+------------+---------|
+| =session-key= | Emacs session | =claude-agent--make-session-key= | =/path/file.org::sdd-20260212-135618= |
+| =request-id= | Single query | =claude-agent--generate-request-id= | =req-42-1709299815= |
+| =sdd-session-id= | SDD story | org property | =sdd-20260212-135618= |
+| =CUSTOM_ID= | Org heading | =generate-instruction-custom-id= | =mega-code-dev-instr-5-sdd-...-141402= |
+| =block-id= | Block history | =record-block-execution= | =block-135618-141402-143025= |
+| =sdk-uuid= | Claude CLI | CLI =system= message | =abc123-uuid= |
+| =terminal-id= | Terminal tab | terminal CLI launch | =MOCK-UUID-1234-5678= |
+| =query-id= | Response section | =generate-query-id= | =20260204-103025-a7f3= |
+| =control-req-id= | Permission round-trip | CLI =control_request= | (integer from CLI) |
+| =cli-session= | CLI resume | org property | UUID from Claude CLI |
+
+The =trace-id= is the eleventh ID, but unlike the others it carries
+*every* span from every process for one execution. Span attributes embed
+the relevant scoped IDs (=session.id=, =custom.id=, =sdd.session.id=) so
+that a Phoenix query can pivot from any pre-existing handle into the
+trace tree.
+
+** Architecture
+
+Three processes, one shared trace:
+
+#+begin_example
+┌──────────────────────────────────────────────────┐
+│ Emacs                                            │
+│   (claude-agent-with-trace "execute-ai-block"    │
+│       '(:session-id "sdd-..." :custom-id "..."   │
+│         :oi-kind "CHAIN")                        │
+│     (claude-agent-with-span "register-query" ... │
+│       ...))                                      │
+│                                                  │
+│  Macros POST span/start, span/end via url.el to  │
+│  the local OTel bridge (no external Emacs deps). │
+└─────────────────┬────────────────────────────────┘
+                  │ HTTP POST localhost:7331
+                  ▼
+┌──────────────────────────────────────────────────┐
+│ python/claude_agent/otel_bridge.py (Flask :7331) │
+│                                                  │
+│   POST /otel/span/start — create OTel span       │
+│   POST /otel/span/end   — end span, auto-export  │
+│   GET  /otel/status     — health check           │
+│                                                  │
+│   SimpleSpanProcessor auto-exports on span.end() │
+└─────────────────┬────────────────────────────────┘
+                  │ OTLP HTTP exporter
+                  ▼
+┌──────────────────────────────────────────────────┐
+│ Arize Phoenix (default local collector)          │
+│   OTLP HTTP receiver on :6006/v1/traces          │
+│   Web UI at http://localhost:6006                │
+│   SQLite storage at ~/.phoenix/                  │
+│   MCP server for AI agent trace queries          │
+└──────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────┐
+│ python/claude_agent/sdd_bridge.py                │
+│   Uses opentelemetry-sdk directly (same exporter │
+│   via otel_setup.py). Reads trace-id from a      │
+│   .trace-context file written by Emacs and joins │
+│   the same trace tree.                           │
+└─────────────────┬────────────────────────────────┘
+                  │ same OTLP HTTP exporter
+                  ▼
+             (same Phoenix instance)
+#+end_example
+
+Component roles, including which library each piece reuses:
+
+| Component | Role | Reused library |
+|-----------+------+----------------|
+| Emacs macros | Lispy span creation, ID generation, context propagation | built-in =url= |
+| =otel_bridge.py= | HTTP → OTel span bridge (Flask, ~120 lines) | =opentelemetry-sdk=, =flask= |
+| =sdd_bridge.py= | Python-side spans for hook events | =opentelemetry-sdk= |
+| Arize Phoenix | Collector + UI + MCP query server | =arize-phoenix= |
+| =.trace-context= file | Cross-process trace-id propagation | W3C Trace Context format |
+
 ** Shipped Wrapper
 
 The root span is created by =claude-agent-with-trace "execute-ai-block"=
@@ -139,6 +242,17 @@ Must match STATUS_DIR in Python otel_setup.py for cross-process propagation."
   :group 'claude-agent)
 #+END_SRC
 
+The downstream exporter is *not* configured here — it is configured by the
+Python =otel_bridge.py= via the =CLAUDE_OTEL_ENDPOINT= environment variable.
+Both =otel_bridge.py= and =sdd_bridge.py= read it from =otel_setup.py= so
+they share one collector destination:
+
+| Scenario | =CLAUDE_OTEL_ENDPOINT= | What happens |
+|----------+------------------------+--------------|
+| Default (Phoenix local) | =http://localhost:6006/v1/traces= | Spans go to local Phoenix |
+| Remote collector | e.g. =https://otel.example.com/v1/traces= | Spans go to a remote OTLP receiver |
+| Phoenix not running | (default, but nothing listening) | Export fails silently; SimpleSpanProcessor drops the span; the application is unaffected |
+
 * ID Generation
 
 #+BEGIN_SRC elisp
@@ -169,6 +283,22 @@ Use this to pass context across async boundaries."
 #+END_SRC
 
 * HTTP Communication
+
+The Emacs side talks to =otel_bridge.py= over a tiny three-endpoint HTTP
+contract. The bridge registers each span in an in-memory map keyed by the
+hex span-id Emacs supplies, so =span/end= only needs the id back.
+
+| Method | Path | Request body | Response |
+|--------+------+--------------+----------|
+| =POST= | =/otel/span/start= | ={trace_id, span_id, parent_span_id?, name, attrs?, start_time_ns}= | ={"status":"ok"}= |
+| =POST= | =/otel/span/end= | ={span_id, status, error_message?, end_time_ns}= | ={"status":"ok"}= |
+| =GET= | =/otel/status= | — | ={"status":"ok"}= |
+
+=span/start= must be synchronous so the span is registered before any
+=span/end= can race ahead — without that ordering the bridge returns 404.
+=span/end= is fire-and-forget; once a span exists, ending it is racy-safe.
+Both calls swallow errors so tracing failures never break the user's
+workflow.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-trace--request (path data)
@@ -388,6 +518,19 @@ inside the wrapped Elisp of every =mcp.eval_elisp()= call. The disk file is
 what lets sdd_bridge attach Python spans to the Emacs root; the wrapped
 Elisp is what lets MCP callbacks attach to whichever Python span triggered
 them.
+
+The on-disk format is the standard W3C =traceparent= header serialized to
+a file:
+
+#+begin_example
+traceparent: 00-{trace-id}-{span-id}-{flags}
+
+trace-id:  32-char lowercase hex (16 bytes)
+span-id:   16-char lowercase hex (8 bytes)
+flags:     "01" = sampled
+
+Example: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+#+end_example
 
 The Python side wraps Elisp so it sets =claude-agent-trace--current-context=
 before running the body:
@@ -714,6 +857,41 @@ Waits for Phoenix to be ready before opening the browser."
    60))
 #+END_SRC
 
+** External Setup
+
+The Service Class above only manages the *processes*. The Python deps and
+the Phoenix MCP server need a one-time install before any of this works:
+
+#+begin_src shell
+pip install arize-phoenix opentelemetry-sdk \
+            opentelemetry-exporter-otlp-proto-http
+#+end_src
+
+Phoenix exposes three things on its default port:
+
+| Endpoint | Purpose |
+|----------+---------|
+| =http://localhost:6006= | Web UI — trace waterfall, span details, search |
+| =http://localhost:6006/v1/traces= | OTLP HTTP receiver (this is what =CLAUDE_OTEL_ENDPOINT= points at) |
+| gRPC =:4317= | OTLP gRPC receiver (unused by this project) |
+
+Storage is SQLite under =~/.phoenix/= and persists across restarts.
+
+Phoenix also ships a separate MCP server for AI agent trace queries —
+register it in =~/.claude/mcp.json= so an agent can ask Phoenix questions
+like "show me all error spans for session sdd-..." directly:
+
+#+begin_src json
+{
+  "mcpServers": {
+    "phoenix": {
+      "command": "python",
+      "args": ["-m", "phoenix.server.mcp"]
+    }
+  }
+}
+#+end_src
+
 * Verifying Trace Trees
 
 After implementing or debugging the single-root invariant, the cheapest
@@ -765,6 +943,22 @@ blockers, but each is worth revisiting when the relevant pain shows up.
    Resolving it requires either keeping the root span open until
    =handle-complete= fires, or marking the root span as a "trace anchor"
    that allows post-close children.
+
+4. *Trace MCP server requests too?* =emacs-mcp-server.org= currently emits
+   no spans of its own — every =evalElisp= call is invisible to Phoenix
+   unless the elisp body itself uses =with-span=. Wrapping the MCP server
+   would give a uniform top-level view, but adds latency to every call
+   (and Emacs's main thread is the resource we are trying to protect).
+
+5. *Auto-start the bridge with Emacs?* Today =--ensure-bridge= fires lazily
+   when the first span is recorded. An Emacs-startup option would remove
+   the cold-start latency on the first AI-block of a session, at the cost
+   of always paying the bridge process cost.
+
+6. *=claude-agent-trace-setup= one-shot installer?* A single command that
+   runs =pip install arize-phoenix=, writes the Phoenix MCP config into
+   =~/.claude/mcp.json=, and verifies =OTel ↔ Phoenix= connectivity would
+   shorten the first-time setup from a checklist to one =M-x=.
 
 * Package Footer
 
