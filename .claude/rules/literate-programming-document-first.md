@@ -178,3 +178,40 @@ This style has a cost: writing prose takes time. Pay the cost. The
 codebase is small enough that future you (and reviewers, and other
 agents) will read every module multiple times. One extra paragraph at
 authoring saves hours of "what does this do?" archaeology later.
+
+## Mechanical org conventions (the boring details that still matter)
+
+Beyond the document-first principles above, four mechanical conventions
+keep org sources consistent across the project. Violating them isn't
+"wrong" but mixed usage produces files that read inconsistently.
+
+### Heading levels — what each depth means
+
+| Depth | Use for |
+|-------|---------|
+| `*` | Top-level concept / module section (one per major topic) |
+| `**` | Major feature, lifecycle phase, or logical grouping |
+| `***` | Specific implementation, helper class, function group |
+| `****` | Reach for sparingly — usually a sign the parent should split |
+
+### Block naming
+
+Code blocks rarely need names, but when one is referenced via `:noweb`,
+`:tangle`, or in prose, name it with `#+NAME:` and use kebab-case with
+a domain prefix: `db-connect`, `api-validate`, `mcp-dispatch-handler`.
+Names should read as a natural-language phrase — not `block1` or `helper`.
+
+### Editing existing blocks
+
+- Preserve `#+NAME:` values (they may be cross-referenced).
+- When changing a block's behaviour, update the surrounding prose in
+  the same edit — stale prose is worse than no prose.
+- Maintain top-to-bottom executability: code that runs at load time
+  must be defined before the first call site.
+
+### Property inheritance
+
+- Section-level: drop a `:PROPERTIES:` drawer under the heading. Org
+  inherits these into descendants automatically.
+- File-level: use `#+PROPERTY:` lines in the file header for globals
+  (load order, tangle target, default header args).

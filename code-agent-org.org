@@ -689,6 +689,85 @@ context. External references that informed it: the Ralph orchestrator
 "Effective Harnesses" essay, and LangChain's "Reasoning Sandwich"
 write-up.
 
+*** External Pattern Studies — Ralph and Atomic
+
+Two outside methodologies were studied before settling on the shape of
+the loop primitive and the autonomous-mode design above. The notes here
+record what we adopted and what we deliberately did not, so future
+contributors do not have to re-derive the rejections.
+
+**** Ralph (overnight loop method)
+
+Source: Geoffrey Huntley's "Ralph Wiggum" technique
+([[https://ghuntley.com/ralph/]]) plus the production-grade
+=frankbria/ralph-claude-code= shell harness. The simplest form is
+literally =while :; do cat PROMPT.md | claude ; done=, with a circuit
+breaker and a structured-status protocol layered on top to keep it from
+running forever.
+
+*Adopted*:
+
+- *Three-state circuit breaker* (CLOSED / HALF-OPEN / OPEN). Designed
+  into the autonomous-mode subsection above; built on top of the
+  shipped =:loop= primitive.
+- *Loop iteration hook + warning injection* (=loop-iteration-hook=,
+  =loop-inject-warning=) — the building blocks a Ralph-style harness
+  would attach to. Already in this file (see Loop Detection Utilities).
+
+*Not adopted*:
+
+- The structured =---RALPH_STATUS---= block with =STATUS= /
+  =EXIT_SIGNAL= / =RECOMMENDATION= fields in the model output. Phoenix
+  spans carry the same completion-detection signal with less prompt
+  surface area and generalise to non-Ralph flows.
+- Geoffrey Huntley's iteration-section-per-loop org layout
+  (=Iteration 1 :ralph_iter:=, =Iteration 2 :ralph_iter:=, …). The
+  =:loop= header arg appends responses with =(N/M)= suffixes inside one
+  response section, which keeps the file flatter and folds cleanly.
+
+References to revisit when implementing the Future Design:
+=https://github.com/frankbria/ralph-claude-code=,
+=https://github.com/mikeyobrien/ralph-orchestrator=,
+=https://anandchowdhary.com/blog/2025/running-claude-code-in-a-loop=.
+
+**** Atomic (SDLC-style harness, flora131/agent-instructions)
+
+Source: =flora131/agent-instructions=
+([[https://github.com/flora131/agent-instructions]]), documented case study
+at [[https://alexlavaee.me/blog/ai-coding-infrastructure/]] ("100k LOC in two
+weeks"). Atomic separates *commands* (orchestration:
+=/research-codebase=, =/create-spec=, =/implement-feature=, …), *agents*
+(specialised executors: locator, analyzer, pattern-finder), and *skills*
+(domain knowledge injection).
+
+*Adopted*:
+
+- *Slash command discovery and completion* in AI blocks (see "Slash
+  Command Completion" later in this file). The mechanism is exposed;
+  the catalog is the user's, not a fixed Atomic one.
+- *yasnippet templates as the prompt-template surface* ("Template
+  Insertion (yasnippet)" later in this file). Functionally equivalent
+  to Atomic's static-prompt commands, with TAB-stop fields for the
+  parts a human must fill in.
+- *Specialised sub-agents via Claude Code's subagent mechanism* —
+  codebase-locator, codebase-analyzer, etc. are first-class skills the
+  user invokes; the project does not redefine them.
+
+*Not adopted*:
+
+- =feature-list.json= as the ground-truth task ledger. Org checkboxes
+  on a =** TODO= heading serve the same role natively; the autonomous-
+  mode design above builds on that.
+- =progress.txt= as a separate handoff document. Org properties on the
+  story heading (=:CLAUDE_SESSION_ID:=, =:CLAUDE_BACKEND:=, …) already
+  carry the equivalent state.
+- The "competing agents" psychological framing in prompts. Not used —
+  no measurable win observed, and it complicates prompt audit.
+
+The fuller comparison-and-recommendation matrix is preserved in git
+history; the lessons that mattered are folded into the autonomous-mode
+design above and the shipped =:loop= primitive.
+
 *** Pre-Completion Utilities
 
 Helper functions for the query completion hook system.

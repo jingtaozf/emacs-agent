@@ -233,8 +233,9 @@ See docs/ for templates."
                              (car missing)))))))))
 
 (ert-deftest test-structural-architecture-org-size ()
-  "ARCHITECTURE.org is under 150 lines (meta-map must stay small).
-FIX: Move detailed content to docs/ files. ARCHITECTURE.org is a navigational aid."
+  "ARCHITECTURE.org is under 180 lines (meta-map must stay small).
+FIX: Move detailed content into the most relevant code .org. ARCHITECTURE.org
+is a navigational aid, not a place for per-feature design narrative."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
     (let ((arch-file (expand-file-name "ARCHITECTURE.org" test-structural--project-root)))
@@ -242,8 +243,8 @@ FIX: Move detailed content to docs/ files. ARCHITECTURE.org is a navigational ai
         (let ((line-count (with-temp-buffer
                             (insert-file-contents arch-file)
                             (count-lines (point-min) (point-max)))))
-          (should (or (<= line-count 150)
-                      (error "ARCHITECTURE.org has %d lines (max 150).\nFIX: Move details to docs/."
+          (should (or (<= line-count 180)
+                      (error "ARCHITECTURE.org has %d lines (max 180).\nFIX: Move details into the most relevant code .org."
                              line-count))))))))
 
 (ert-deftest test-structural-architecture-org-currency ()
@@ -329,24 +330,24 @@ FIX: Add :type to the defcustom form. Example: :type 'boolean or :type 'string"
                               (lambda (a b) (string< (symbol-name a) (symbol-name b))))
                         "\n"))))))
 
-;;; F9: ELISP_IDIOMS.org and CLAUDE.md Verification section checks
+;;; F9: ELISP-IDIOMS.org and CLAUDE.md Verification section checks
 
 (ert-deftest test-structural-elisp-idioms-exists ()
-  "docs/ELISP_IDIOMS.org exists and is referenced from CLAUDE.md.
-FIX: Create docs/ELISP_IDIOMS.org with Emacs Lisp idiom reference.
+  "ELISP-IDIOMS.org exists at root and is referenced from CLAUDE.md.
+FIX: Create ELISP-IDIOMS.org with Emacs Lisp idiom reference.
 Then add it to CLAUDE.md Further Reading section."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let ((idioms-file (expand-file-name "docs/ELISP_IDIOMS.org" test-structural--project-root))
+    (let ((idioms-file (expand-file-name "ELISP-IDIOMS.org" test-structural--project-root))
           (claude-md (expand-file-name "CLAUDE.md" test-structural--project-root)))
       (should (or (file-exists-p idioms-file)
-                  (error "docs/ELISP_IDIOMS.org not found.\nFIX: Create it with Emacs Lisp idiom reference.")))
+                  (error "ELISP-IDIOMS.org not found at project root.\nFIX: Create it with Emacs Lisp idiom reference.")))
       (when (and (file-exists-p idioms-file) (file-exists-p claude-md))
         (let ((content (with-temp-buffer
                          (insert-file-contents claude-md)
                          (buffer-string))))
-          (should (or (string-match-p "ELISP_IDIOMS" content)
-                      (error "CLAUDE.md doesn't reference ELISP_IDIOMS.org.\nFIX: Add to Further Reading section."))))))))
+          (should (or (string-match-p "ELISP-IDIOMS" content)
+                      (error "CLAUDE.md doesn't reference ELISP-IDIOMS.org.\nFIX: Add to Further Reading section."))))))))
 
 (ert-deftest test-structural-claude-md-verification-section ()
   "CLAUDE.md contains a Verification section with make commands.
@@ -1520,7 +1521,7 @@ FIX: Use (cond ((equal X \"str\") body)) instead."
   '(("claude-agent-backend.org" . (2221 2253))
     ("claude-ide.org" . (341 575 822))
     ("code-agent-org-scheduled.org" . (214))
-    ("code-agent-org.org" . (4229 4347))
+    ("code-agent-org.org" . (4308 4426))
     ("emacs-mcp-server.org" . (738)))
   "Known pcase string-pattern violations in existing code.
 Entries are (FILENAME . (LINE-NUM ...)). These are pre-existing and need

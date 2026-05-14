@@ -31,7 +31,7 @@ make check             # lint + test-unit (pre-commit gate)
 
 Before claiming code is buggy:
 - Evaluate the expression via `evalElisp` to confirm behavior
-- See `docs/ELISP_IDIOMS.org` for common Emacs Lisp traps
+- See `ELISP-IDIOMS.org` for common Emacs Lisp traps
 
 ## Environment: cmux + Emacs + Phoenix
 
@@ -281,8 +281,8 @@ autonomous**; exploration → **L1-L2 inline**.
 | Research findings | `docs/research/` |
 | Product specs | `docs/product-specs/` |
 | References | `docs/references/` |
-| Elisp idioms | `docs/ELISP_IDIOMS.org` |
-| Literate programming | `docs/literate-programming-principles.org` |
+| Elisp idioms | `ELISP-IDIOMS.org` |
+| Literate programming | `.claude/rules/literate-programming-document-first.md` |
 | Full API docs | `claude-agent.org` section headers |
 | Org integration | `code-agent-org.org` section headers |
 | Test fixtures | `tests/fixtures/` |
