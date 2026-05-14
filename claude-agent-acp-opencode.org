@@ -11,9 +11,59 @@ OpenCode speaks ACP natively via =opencode acp= on stdio.  It uses
 its own credentials from =opencode auth login=, so no ACP-level
 =authenticate= RPC is needed.
 
+** Why OpenCode Gets a Dedicated Profile
+
+OpenCode (https://opencode.ai) is MIT-licensed, provider-agnostic
+(Claude / OpenAI / Gemini / local models — any provider with an OpenAI-
+compatible endpoint), and ships a *real client/server split*:
+=opencode serve= exposes an HTTP + SSE API, the TUI is just one client
+of it. That combination — non-Anthropic provider support, structured
+non-TUI output, native MCP support via =opencode.jsonc=, and a JS/TS
+plugin system — is the reason it gets a first-class profile rather
+than living behind a generic shell command.
+
+** Two Integration Paths to the Same Agent
+
+This codebase supports OpenCode through two coexisting integrations.
+They share zero code and they target different use cases; both are
+shipped.
+
+| Path | Mechanism | Best for |
+|------+-----------+----------|
+| *cmux profile* (=code-agent-org-cmux.org= → Agent Profiles) | OpenCode TUI inside a cmux pane, driven by =cmux send= / =cmux capture-pane= — same shape as the Claude / Copilot profiles | watching the agent think in a terminal, mixed Emacs+terminal workflows, themes/visuals |
+| *Direct ACP* (*this module*) | =opencode acp= subprocess speaking ACP/JSON-RPC over stdio — no terminal, no screen-scraping | structured token streaming, multi-turn programmatic use, scripts/tests that don't want a cmux app at all |
+
+The cmux profile shipped first (2026-04-17, see git history) and uses
+the agent-profile system documented in =code-agent-org-cmux.org=. This
+ACP profile is the structurally preferred path for new work: same agent,
+no screen-scraping, no =opencode.jsonc=/=AGENTS.md= injection dance, and
+the multi-turn session lives in OpenCode's own session store via the
+=session/load= ACP method.
+
+** Differences vs the cmux Profile
+
+The two paths handle the same five OpenCode quirks differently — useful
+to know which path absorbs which cost:
+
+| OpenCode quirk | cmux profile | Direct ACP (this module) |
+|----------------+--------------+--------------------------|
+| MCP config via =opencode.jsonc= (file, not flag) | =opencode_workspace.py= merges Emacs MCP entry into the project's =opencode.jsonc=, =atexit= restores original | OpenCode's own MCP config — we don't inject; the agent picks up its own =opencode.jsonc= as usual |
+| System prompt via =AGENTS.md= | launcher prepends session prompt to =AGENTS.md=, restores on exit | system prompt is passed as ACP =session/new= attributes, no file mutation |
+| Hook events via JS/TS plugin (=.opencode/plugins/emacs-bridge.ts=) | injected at launch, removed on exit; events POST to =workspace_bridge= | not used — ACP RPCs replace plugin events |
+| Session resume | =OPENCODE_SESSION_ID= org property → =--session <id>= flag | ACP =session/load= with the OpenCode session id |
+| Auth | =opencode auth login= one-time, no per-launch handling | same — no ACP-level =authenticate= needed; =needs-authenticate= is =nil= in the constructor below |
+
+The injection-and-restore dance is the main argument for using ACP for
+anything more than light interactive use: the cmux profile mutates files
+in the user's repo during a session, and a crash before =atexit= runs
+leaves the project in a partially-modified state. ACP avoids the whole
+class of problem because OpenCode reads its own config and we never
+touch it.
+
 References:
 - https://opencode.ai
 - reference/agent-shell/agent-shell-opencode.el
+- =code-agent-org-cmux.org= → "Agent Profiles" for the cmux-pane profile
 
 ** Dependencies
 
