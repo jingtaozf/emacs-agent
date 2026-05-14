@@ -920,6 +920,61 @@ Expectations:
 The =.claude/rules/e2e-trace-verification.md= rule has a fuller live-Emacs
 runbook (fixture file, =C-c C-c=, GraphQL query) for end-to-end debugging.
 
+** Programmatic Trace Verification — Future Design
+
+The curl + jq recipe above is fine for one-off debugging; turning the
+*same* checks into automated post-test assertions is the next step,
+*not yet built*. Anthropic's "Harness Design for Long-Running
+Application Development" essay frames the motivation: dedicated
+evaluators outperform self-evaluation, and an evaluator that uses
+trace data is using the real system, not a mock.
+
+The intended shape:
+
+- A reusable assertion library at =tests/e2e/trace-assertions.el=
+  exposing primitives that wrap the Phoenix GraphQL endpoint:
+  =trace-assert--query-phoenix=, =trace-assert--recent-spans=,
+  =trace-assert--spans-by-session=, =trace-assert--find-span=,
+  =trace-assert--assert-parent-child=, =trace-assert--assert-no-errors=,
+  =trace-assert--assert-latency-within=, =trace-assert--assert-span-tree=.
+
+- A *declarative tree spec* format so tests assert on tree shape, not
+  on individual span lookups:
+
+  #+begin_example
+  '(("execute-ai-block" :kind "SERVER"
+     :children (("cmux-ensure-session" :kind "INTERNAL")
+                ("cmux-execute" :kind "INTERNAL"
+                 :children (("cmux-send-text" :kind "INTERNAL"))))))
+  #+end_example
+
+- *Per-test assertions* added beneath each E2E behavioural test as a
+  =,*** Trace Assertions= subsection — a small =evalElisp= block sleeps
+  long enough for Phoenix ingestion, then makes targeted assertions
+  about the trace produced by the just-finished test.
+
+- A *standalone health check* (=make test-trace-health=) that queries
+  Phoenix for the last N traces and flags four anomaly classes
+  independent of any specific test: ERROR spans, orphan roots (no
+  children), orphan children (=parent_id= not in trace), and latency
+  outliers (> 60 s). The target exits non-zero on any anomaly so CI
+  can gate on it.
+
+Timing matters because Phoenix ingestion is async even when the
+exporter is =SimpleSpanProcessor=. Existing E2E tests use a 3 s sleep
+successfully; the evaluator should default to 5 s plus a one-retry
+fallback to absorb the long tail.
+
+Risks that would shape the implementation:
+
+- *Phoenix API churn* — pin the version and route every query through
+  one wrapper so an API change is a one-file patch.
+- *Timing flakiness* — the 5 s + retry-once budget; only escalate if
+  Phoenix gets significantly slower.
+- *Span-name coupling* — span names map 1:1 to functions, but a rename
+  silently breaks assertions. The declarative tree spec localises the
+  breakage to one fixture per test.
+
 * Open Questions
 
 Carried over from the original single-root-span design — none are
