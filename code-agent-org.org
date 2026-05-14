@@ -3821,6 +3821,89 @@ AI block templates are yasnippet snippets in =snippets/org-mode/=.
 Supports static text, tab stops (=$1=, =${1:default}=), mirrors,
 embedded elisp (=`(elisp)`=), and =$0= exit points.
 
+The previous template system was a hand-rolled alist
+(=claude-org-templates.el=) that read =(NAME . VALUE)= pairs from disk on
+every invocation. 9 of 10 templates were static strings; the 10th was a
+function reference that returned a whole string. Migrating to yasnippet
+deleted the loader code (~75 lines) and bought four capabilities the
+alist could not express: user-editable fields (=$1=, =${1:default}=, =$0=),
+auto-mirroring (the same =$1= repeated produces synchronized fields),
+inline elisp evaluation anywhere in the body via =`(form)`=, and TAB
+navigation between fields. yasnippet became a hard requirement of the
+package — not an optional integration — because every existing template
+relies on it. Backward compatibility with the old alist file was an
+explicit non-goal; the migration was a one-shot replacement.
+
+** Snippet File Conventions
+
+Each snippet file in =snippets/org-mode/= uses standard yasnippet syntax
+plus four conventions this package relies on:
+
+| Header | Purpose |
+|--------+---------|
+| =# name:= | Human label shown in =completing-read= and =yas-insert-snippet= menus |
+| =# key:= | Two- or three-letter trigger for =KEY + TAB= expansion inside an AI block |
+| =# group: Claude AI= | All bundled snippets use this group; =insert-template= filters by it so user snippets in other groups are not mixed in |
+| =# condition:= | =(code-agent-org--in-ai-block-p)= for AI-block-only snippets, or =(get-buffer "*Backtrace*")= for ones that need a specific buffer present |
+| =# expand-env: ((yas-indent-line 'fixed))= | Stops yasnippet from re-indenting the body — org-mode auto-indent disagrees with template literal whitespace |
+
+A typical snippet — =ai-fix-error= — has two free-text fields and an exit
+point:
+
+#+begin_example
+,# -*- mode: snippet -*-
+,# name: Fix Error
+,# key: fe
+,# group: Claude AI
+,# condition: (code-agent-org--in-ai-block-p)
+,# expand-env: ((yas-indent-line 'fixed))
+,# --
+Please help fix this error:
+
+Error:
+${1:paste error here}
+
+Context:
+${2:describe what you were doing}
+
+$0
+#+end_example
+
+A snippet with a *mirror field* — =ai-merge-worktree= — types the branch
+name once and replays it everywhere the same =$1= appears:
+
+#+begin_example
+Please merge the worktree branch into master:
+1. Exit the worktree if still inside
+2. git checkout master
+3. git merge --squash ${1:branch-name}
+4. Run make check
+5. If tests pass, commit with a descriptive message
+6. Clean up: git worktree remove .claude/worktrees/$1 && git branch -d $1
+$0
+#+end_example
+
+A snippet with *embedded elisp* — =ai-analyze-backtrace= — runs Lisp at
+expansion time to inject context the user shouldn't have to paste:
+
+#+begin_example
+Please analyze this Emacs backtrace:
+
+\`\`\`
+,`(code-agent-org-template--backtrace-text)`
+\`\`\`
+
+Provide:
+1. Root cause
+2. Which function failed and why
+3. Suggested fix
+4. How to prevent it
+$0
+#+end_example
+
+The companion helper (=code-agent-org-template--backtrace-text=, defined
+below) reads the =*Backtrace*= buffer.
+
 ** Setup
 
 #+BEGIN_SRC elisp
@@ -3881,6 +3964,30 @@ Called by the Analyze Backtrace yasnippet via embedded elisp."
 #+END_SRC
 
 ** Template Insertion Command
+
+There are two ways to invoke a template, both producing the same result —
+the choice is discoverability vs speed:
+
+| Method | How | Best for |
+|--------+-----+----------|
+| Menu | =C-c C-/ t= → =completing-read= → select → expand | discovering what's available; works regardless of context |
+| Keyboard | inside an AI block, type the snippet =# key:= (e.g. =fe=) + =TAB= | fast for the templates a user uses daily |
+
+The keyboard method only triggers when the snippet's =# condition:= is
+true (almost always =(code-agent-org--in-ai-block-p)=), so two-letter
+keys like =fe= or =mw= don't fire on ordinary prose typing.
+
+A few yasnippet pitfalls in org-mode are worth knowing about; the
+snippet conventions above already mitigate them, but understanding them
+helps when authoring new snippets:
+
+| Issue | What goes wrong | Mitigation already applied |
+|-------+-----------------+----------------------------|
+| Indent mangling | yasnippet re-indents the body to match surrounding code, breaking literal whitespace inside =ai= blocks | =# expand-env: ((yas-indent-line 'fixed))= in every snippet |
+| =TAB= conflict with =org-cycle= | TAB normally folds the heading instead of advancing fields | =yas-maybe-expand= conditional binding handles this — yasnippet wins inside an active expansion, =org-cycle= wins otherwise |
+| Literal =$= in body | yasnippet treats =$N= as a field marker | Escape as =\$= |
+| Literal backtick | Backticks delimit embedded elisp | Escape as =\`= |
+| =yas-minor-mode= must be on | Otherwise =yas-expand-snippet= silently does nothing | =insert-template= flips it on if needed; users with =yas-global-mode= already pay no attention |
 
 #+BEGIN_SRC elisp
 ;;;###autoload
