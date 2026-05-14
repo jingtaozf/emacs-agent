@@ -1437,8 +1437,55 @@ via the async =Verbose Output= mirror below.)
 * Verbose Output (Live Output Mirror)
 
 Stream cmux terminal output into a read-only Emacs buffer accessible via
-=code-agent-org-menu → v → Verbose output=. Uses async =capture-pane= polling
-with diff-based deduplication.
+=code-agent-org-menu → v → Verbose output=. The user gets Claude Code's
+live thinking — tool calls, file edits, intermediate output — without
+having to alt-tab into the cmux app, and the canonical response still
+arrives through the =Stop= hook into the org buffer. Both surfaces are
+useful: the verbose buffer is for /watching the work happen/; the org
+response is for /referring back to the final answer/.
+
+** Data-Source Choice — Why Async Polling Won the First Round
+
+Three data-source options were considered before settling on the
+current implementation. The shipped path is the middle of the road —
+it works today and the upgrade path is clean.
+
+| Option | Mechanism | Latency | Cost |
+|--------+-----------+---------+------|
+| 1. cmux =pipe-pane --follow= | persistent socket subscription from cmux side | ~0, event-driven | requires a Swift change in cmux (~30 lines + Ghostty content-update callback) |
+| 2. Async =capture-pane= polling (*shipped*) | =start-process= every ~1 s, diff against previous | ~1 s sampling | needs no cmux changes; capture cost grows with scrollback |
+| 3. FIFO + =file-notify= | =pipe-pane= writing to a log file, FSEvents on Emacs side | ~100 ms | =pipe-pane= is one-shot (needs re-invocation); log file grows unbounded |
+
+Option 2 ships because it works against the current cmux release; the
+Emacs-side buffer infrastructure is data-source-agnostic, so the
+=verbose-tick= process filter could be swapped for a
+=make-network-process= socket whenever cmux gains =pipe-pane --follow=
+without touching the buffer / mode / menu surfaces.
+
+** Two Predecessor Bugs Worth Remembering
+
+The current shape is partly defined by what came before it failing.
+
+*The =call-process= leak (commit =1f016b8=, fixed in =01b4143=).* The
+first attempt used =call-process= inside a 1 Hz timer to poll
+=capture-pane=. Two compounding bugs: (a) =call-process= is
+synchronous, so every tick blocked Emacs's main thread for 200–1500 ms;
+(b) the insertion marker was declared but never initialised, so the
+guard around the insertion was always nil and the captured text was
+silently discarded. The result: a permanent Emacs hang for every
+Claude query, doing work no user could observe. The fix replaced
+=call-process= with =start-process= + filter + sentinel; the rule
+=.claude/rules/minimize-emacs-mcp-calls.md= now forbids periodic
+timers that =call-process=.
+
+*The unbounded buffer leak (2026-04-22).* Once the follower /did/
+deliver text, it appended forever. A box left overnight accumulated
+several megabytes per chatty session — nine live =*cmux: <id>*=
+buffers held ~8 MB combined in one inspection, visibly swelling Emacs
+RSS. The fix is in the Verbose Buffer Memory Cap subsection further
+down: a configurable byte ceiling with whole-line trim from the front,
+plus a =kill-buffer-hook= that stops the follower subprocess when the
+user dismisses the buffer.
 
 ** Verbose Mode
 
