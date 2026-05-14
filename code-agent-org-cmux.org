@@ -117,6 +117,101 @@ guards (IDE integration, session resume).  Adding a new agent requires only
 pushing a new profile onto =code-agent-org-cmux--agent-profiles= — no other elisp
 changes are needed.
 
+** Why a Profile Layer Was Needed
+
+Before profiles, the cmux backend hard-coded *five* coupling points with
+Claude Code specifically; supporting GitHub Copilot (and later OpenCode,
+Gemini, Codex) without a unifying abstraction would have meant five
+parallel branches threaded through unrelated code:
+
+| Coupling point | Claude Code shape | First non-Claude agent (Copilot) |
+|----------------+-------------------+-----------------------------------|
+| Launch command | =claude-workspace= → =claude= CLI | =copilot-workspace= → =copilot= CLI |
+| CLI flags | =--mcp-config=, =--system-prompt=, =--ide=, =--resume=, =--chrome= | =--allow-all-tools=, =--model= |
+| Session resume | =--resume <id>= from =CLAUDE_CLI_SESSION= property | not supported (ephemeral sessions) |
+| Hook events | =SessionStart=, =UserPromptSubmit=, =PreToolUse=, =PostToolUse=, =Stop= | =sessionStart=, =userPromptSubmitted=, =preToolUse=, =postToolUse=, =sessionEnd= |
+| Ready detection | ="type a message"= / ="-- INSERT --"= | ="> "= / ="copilot>"= |
+
+The rest of the cmux integration (workspace creation, send/capture, mode
+line, verbose buffer, status file plumbing, loop / story-changed hook,
+sidebar feedback) is genuinely agent-agnostic and never had to change.
+Five thin agent-specific layers became five fields on the profile struct
+plus a single dispatcher.
+
+** Capability Flags — Why Each Slot Exists
+
+The boolean capability slots aren't decoration — each one gates a code
+path that would crash, write the wrong property, or expose a
+non-functional UI on an agent that doesn't support the feature:
+
+- =supports-resume= — if =nil=, we don't read or write =CLAUDE_CLI_SESSION=
+  after =SessionStart=; the session is ephemeral by design (Copilot
+  case). Skipping the write avoids leaving stale session IDs in org
+  properties that would confuse the next launch.
+- =supports-ide= — if =nil=, =--ensure-ide-server= is skipped at launch
+  and the mode-line IDE indicator is hidden. Wiring it for an agent
+  without WebSocket support would spin up a server nothing connects to.
+- =supports-system-prompt= — gates the inline =--system-prompt= flag.
+  File-based agents (Copilot's =.github/AGENTS.md=) use a different
+  injection path inside their Python launcher; the elisp side just
+  needs to know which path to take.
+- =vi-mode= — agents like Claude Code use a Vim-style modal TUI and
+  expect =i= to enter insert mode before text input; =send-text= sends
+  this prefix only when the slot is =t=.
+
+** Gap Handling — How Copilot Slotted In
+
+Copilot exposed every limitation the profile system was designed to
+absorb. The six gaps and the way each was handled illustrate the seam:
+
+| Gap | Where it bites | Mitigation |
+|-----+----------------+------------|
+| No =--resume= | session continuity across Emacs restarts | =supports-resume nil=; skip =CLAUDE_CLI_SESSION= reads/writes; workspace persists but conversation history does not |
+| MCP via =.github/mcp.json= (file, not flag) | bridge registration | Python launcher merges Emacs MCP entry into the file, registers =atexit= to restore original; documented race with subprocess-outliving-launcher accepted |
+| System prompt via =.github/AGENTS.md= | session-scoped instructions | Same pattern: prepend session block, restore on exit |
+| Different ready / busy screen patterns | =wait-for-ready-poll= regex | =ready-patterns= / =busy-patterns= slots; no structural change to the polling loop |
+| No =stream-json= structured output | per-token streaming | Response arrives once via =sessionEnd= hook → =workspace_bridge= → MCP → org insert. Live terminal echo remains available via the verbose-output mirror. |
+| No IDE WebSocket | mode-line IDE indicators | =supports-ide nil= guards both the launcher's =--ensure-ide-server= call and the mode-line display |
+
+The pattern: agents that lack a feature pay zero indirection cost on
+the elisp side (the guard is a single =when=), and the rest of the
+cmux infrastructure works unchanged.
+
+** Extension Protocol — Adding a Third Agent
+
+To register a new agent (e.g. Cursor, Gemini CLI, Codex) without
+touching this module:
+
+1. Write =python/claude_agent/<agent>_workspace.py= as a stateless
+   launcher mirroring the Claude/Copilot ones — it receives org-file
+   and session-id as CLI args, injects MCP config in whichever style
+   the agent wants, and execs into the agent's binary.
+2. Add =hooks/<agent>_hooks.json= with the agent's hook event names
+   pointing at =workspace-bridge <event>=.
+3. Add aliases in =workspace_bridge.py='s =EVENT_HANDLERS= dict so the
+   new event names route to the existing handlers (they are
+   protocol-agnostic).
+4. Push a new =code-agent-org-cmux--agent-profile= struct onto
+   =code-agent-org-cmux--agent-profiles= with the agent's launch-fn,
+   patterns, cancel keys, and capability flags. *No other elisp change
+   is required.*
+5. Add the launcher's entry point to =python/pyproject.toml=.
+
+The =launch-fn= field is the only piece that has any agent-specific
+elisp; everything else is data.
+
+** Relationship to the Tri-Protocol Refactor
+
+The profile system shipped before the tri-protocol refactor (2026-04-24)
+and is now structurally subsumed by it: agent identity has moved into
+the agent-family classes (=claude-agent-acp-*=, the Protocol-1 lifecycle
+layer), and the cmux backend sees agents through the agent-profile
+slot rather than dispatching on agent type directly. The profile struct
+here remains the operational data — patterns, cancel keys, capability
+flags — that the agent-family layer hands down to the multiplexer for
+its concrete behaviour. See =ARCHITECTURE.org= → "Tri-Protocol
+Architecture" for the upper layers.
+
 #+BEGIN_SRC elisp
 (cl-defstruct code-agent-org-cmux--agent-profile
   "Describes how to launch and integrate with a code agent in cmux."
