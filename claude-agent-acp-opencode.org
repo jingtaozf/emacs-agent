@@ -60,6 +60,56 @@ leaves the project in a partially-modified state. ACP avoids the whole
 class of problem because OpenCode reads its own config and we never
 touch it.
 
+** What Direct ACP Removed From the Stack
+
+Concretely, picking the ACP path for OpenCode removed the following
+moving parts from the codebase's hot path:
+
+| Component | Status under cmux profile | Status under ACP |
+|-----------+---------------------------+------------------|
+| =cmux= terminal surface | one cmux workspace per session | not used — OpenCode runs as a child subprocess |
+| =capture-pane= polling + ready-pattern regexes | every launch | gone — =initialize= → =session/new= replaces the wait-for-ready handshake |
+| =cmux send= / =send-key= / =paste-buffer= for prompts | every turn | gone — =session/prompt= takes the text as structured RPC params |
+| =workspace_bridge.py= Python process | active for every hook event | not needed — events arrive as ACP notifications |
+| =opencode_workspace.py= Python launcher | invoked per session | not needed — the elisp side spawns =opencode acp= directly |
+| =emacs-bridge.ts= JS plugin | injected into =.opencode/plugins/=, removed at exit | not needed — plugin events become ACP notifications |
+| =opencode.jsonc= / =AGENTS.md= injection-and-restore | every session | not needed — OpenCode reads its own config; we never write into the repo |
+| =.from-emacs= / =.custom-id= / =.status= status files | every interaction | not needed — RPC state lives in process memory |
+| JSONL transcript post-hoc parsing | =Stop= hook fallback | not needed — token chunks arrive live via =agent_message_chunk= |
+| MCP =evalElisp= round-trips from Python | every Emacs-side mutation | not needed — Emacs is already the orchestrator |
+| Multi-line paste workarounds (shift-enter / 100 KB =paste-buffer=) | every long prompt | not needed — JSON strings have no terminal-pasting limits |
+
+What remained shared between the two paths (so neither profile is its
+own silo):
+
+| Component | Shared origin |
+|-----------+---------------|
+| =code-agent-org-execute= dispatch | reads =CLAUDE_BACKEND= and routes to the right backend instance |
+| System prompt assembly | =code-agent-org--build-system-prompt= regardless of backend |
+| Token streaming into the org buffer | =:on-token= callback, identical signature both sides |
+| Session property management | org properties (=CLAUDE_SESSION_ID=, =OPENCODE_SESSION_ID=) |
+| Permission UI | same Emacs prompt, dispatched via =:on-permission= |
+| Mode-line indicators | activity + usage rendered from the same data fields |
+
+** Open Questions Carried Forward
+
+Most of the original ACP-design open questions resolved into the
+shipped form, but two remain worth revisiting when the relevant pain
+shows up:
+
+- *Session persistence across Emacs restart.* ACP exposes =session/load=
+  with a sessionId, and OpenCode keeps server-side sessions. We could
+  persist the sessionId into the org =OPENCODE_SESSION_ID= property and
+  call =session/load= on resume instead of =session/new=. Not wired today
+  because every session reach we have is intra-Emacs-process so far.
+- *Filesystem RPCs from agent to client.* ACP defines =fs/read_text_file=
+  and =fs/write_text_file= so the agent can ask the client (us) to do
+  the I/O. Implementing them would let OpenCode read/write files
+  through Emacs rather than the OS filesystem directly — useful for
+  honouring buffer edits that aren't saved yet, sandboxing, or
+  rejecting writes outside the project root. Not implemented; the
+  default behaviour (OpenCode reads from disk) is fine for now.
+
 References:
 - https://opencode.ai
 - reference/agent-shell/agent-shell-opencode.el

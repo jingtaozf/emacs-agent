@@ -14,6 +14,83 @@ Uses =claude-agent-jsonrpc= for wire-level transport.  No external
 Spec: https://agentclientprotocol.com/protocol/schema
 Reference: =reference/agent-shell/agent-shell.el= (xenodium)
 
+** Protocol Overview
+
+ACP is to AI agents what LSP is to language servers: a JSON-RPC 2.0
+protocol over stdio, one persistent subprocess, bidirectional, with a
+small fixed message vocabulary. The flow a single =C-c C-c= takes
+through this module:
+
+#+begin_example
+Emacs (client)                        acp subprocess (server)
+  |                                          |
+  |-- spawn "<agent> acp" subprocess ------->|
+  |-- subscribe (notifications, requests) -->|
+  |-- initialize {protocolVersion: 1} ------>|
+  |<-- initialize response ------------------|  (capabilities, authMethods)
+  |-- authenticate {methodId: "..."} ------->|  (skipped when needs-authenticate is nil)
+  |<-- authenticate response ----------------|  (success)
+  |-- session/new {cwd: "/path"} ----------->|
+  |<-- session/new response -----------------|  (sessionId)
+  |                                          |
+  |-- session/prompt {sessionId, prompt} --->|
+  |<-- session/update (agent_message_chunk) -|  (streaming text)
+  |<-- session/update (tool_call) -----------|  (tool invocation)
+  |<-- session/request_permission -----------|  (server → client request)
+  |-- permission response ------------------>|  (user decision)
+  |<-- session/update (tool_call_update) ----|  (tool result)
+  |<-- session/update (agent_message_chunk) -|  (more text)
+  |<-- prompt response (stopReason) ---------|  (turn complete)
+  |                                          |
+  |-- session/cancel notification ---------->|  (interrupt)
+  |                                          |
+  |-- session/prompt (next turn) ----------->|  (reuse same process)
+#+end_example
+
+The bidirectional design is the property that makes ACP worth wiring
+to. =session/request_permission= flows /from/ the agent /to/ Emacs so
+the user is asked through the editor's normal permission UI; the agent
+side waits for the response before continuing. That single capability
+is what eliminates the entire screen-scraping / TUI-watching layer that
+multiplexer-based backends need.
+
+The Notification Handler section below maps each ACP =session/update=
+into our existing callback shape — same callback signatures as the
+Claude Code JSON-stream backend, so any frontend that subscribes to
+=:on-token= / =:on-message= / =:on-thought= / =:on-complete= /
+=:on-permission= / =:on-error= works against either family without
+changes:
+
+| ACP =session/update= | Our callback | Notes |
+|----------------------+--------------+-------|
+| =agent_message_chunk= | =:on-token= | Text chunks for streaming |
+| =tool_call= | =:on-message= | Tool invocation (name, input) |
+| =tool_call_update= | =:on-message= | Tool result (output, status) |
+| =agent_thought_chunk= | =:on-thought= | Extended thinking content |
+| =turn_complete= | =:on-complete= | Final stop, usage stats |
+| =session/request_permission= | =:on-permission= | Permission dialog request |
+| =error= | =:on-error= | API or agent errors |
+
+The contrast with the other shipped backend family — Claude Code's
+NDJSON stream — explains when each family is the right choice. They
+are not interchangeable on every axis:
+
+| Dimension | Claude Code NDJSON stream | ACP (this module) |
+|-----------+---------------------------+-------------------|
+| Transport | NDJSON over stdout | JSON-RPC 2.0 over stdio (request/response + notifications) |
+| Direction | one-way (we read) | bidirectional (server can call client) |
+| Process lifetime | one process per query | one persistent subprocess per session |
+| Session start | CLI flag =--session-key= or fresh | =session/new= RPC returns the id |
+| Streaming granularity | token-by-token deltas | chunk-level =agent_message_chunk= |
+| Permissions | CLI prompt / shell hooks | =session/request_permission= RPC to client |
+| Cancellation | kill process / SIGINT | =session/cancel= notification |
+| Multi-turn | new process per turn | same process, new =session/prompt= |
+
+Both families share the same callback interface in this codebase, so
+the frontend (=code-agent-org.org=) dispatches on the backend
+*instance* via Protocol 3 generics rather than caring which wire each
+agent speaks.
+
 ** Dependencies
 
 #+BEGIN_SRC elisp
