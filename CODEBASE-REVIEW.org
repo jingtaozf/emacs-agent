@@ -56,56 +56,13 @@ places with no synchronization.
 =claude-agent.org= and =claude-org.org=, or make it clearly conditional (only when loaded
 standalone for development).
 
-** A4. Session-to-Backend Mapping is a Fourth Tracking Structure (MEDIUM)
-
-=claude-agent-claude-backend--session-registry= (line 4287) maps =session_id → backend=,
-overlapping with the unified registry's =sessions= field and =claude-agent--session-mapping=.
-
-*Proposal*: Integrate into the unified registry. Document the relationships between session-key,
-sdk-uuid, and backend handle.
-
-** A5. Native Terminal Calls Private Backend Function (MEDIUM)
-
-=claude-org-native.org:171= calls =claude-agent-claude-backend--build-switches= (double-dash =
-private).
-
-*Proposal*: Create a public =claude-agent-build-cli-switches= wrapper.
-
 ** A6. =claude-ide.org= Has No Dedicated Test Suite (MEDIUM)
 
-2,212-line module with WebSocket lifecycle, MCP protocol, deferred responses — only tested
-incidentally via =test-iterm2-e2e-simulated.el=.
+2,200+-line module with WebSocket lifecycle, MCP protocol, deferred responses — only tested
+incidentally via other E2E tests.
 
 *Proposal*: Create =tests/test-claude-ide.el= with unit tests for session lifecycle, ping timer,
 deferred response handling, and lockfile management.
-
-** A7. Stale TOC Entries After Backend Extraction (LOW)
-
-=claude-org.org= (lines 132–142) contains a full "Native Terminal" outline from before the
-extraction to =claude-org-native.org=.
-
-*Proposal*: Remove stale TOC entries. Each file documents itself.
-
-** A8. iTerm2/Native Backends Bypass the Backend Protocol (MEDIUM)
-
-The =cl-defgeneric= protocol (=backend-query=, =backend-cancel=, etc.) is well-designed but only
-the JSON stream backend implements it. iTerm2 and native terminal backends dispatch through ad-hoc
-function calls, reaching directly into =claude-agent--active-queries= to register stub
-process-states. A new backend implementer would follow the documented protocol but find it
-insufficient for mode-line integration.
-
-*Proposal*: Create =claude-agent-iterm2-backend= and =claude-agent-native-backend= structs that
-implement the =cl-defgeneric= protocol. Route =claude-org-execute= through protocol dispatch
-instead of backend-specific branching.
-
-** A9. iTerm2-Specific State in SDK Layer (MEDIUM)
-
-=claude-agent--pending-permissions= (=claude-agent.org:181=) maps SDD session-ids to tool names.
-The mode-line code in =claude-agent.org= parses SDD session-id format strings
-(=sdd-YYYYMMDD-HHMMSS=) — an iTerm2 implementation detail at the wrong layer.
-
-*Proposal*: Replace with a generic =claude-agent-pending-alerts= alist of =(label .
-click-action-fn)= entries. Move SDD-specific label formatting to =claude-org-iterm2.org=.
 
 ** A10. =:org-section= Concept Leaked Into Core SDK (LOW)
 
@@ -147,29 +104,13 @@ writes no custom-id, and the response insertion later fails with "Instruction no
 *Proposal*: Return structured result — ={"success": True, "result": ...}= vs ={success: False,
 "error": ...}=. Raise distinct exceptions for connection failures vs Emacs errors.
 
-** Q3. =query-completed= Fires Before Response Insertion (MEDIUM)
-
-=sdd_bridge.py:130= — =claude-org-iterm2--query-completed= runs unconditionally at the top of
-=handle_response=, before transcript parsing and response insertion. If response extraction fails,
-mode-line shows "idle" while the query is still unresolved.
-
-*Proposal*: Reorder — insert response first, then mark complete.
-
 ** Q4. Status Set to "busy" With No Reset on MCP Failure (MEDIUM)
 
-=sdd_bridge.py:84= — =write_status(session_id, "busy")= runs before the MCP call. If MCP fails,
-status stays "busy" forever. No cleanup path exists.
+In =workspace_bridge.py= — =write_status(session_id, "busy")= runs before
+the MCP call. If MCP fails, status stays "busy" forever. No cleanup path
+exists.
 
 *Proposal*: Wrap MCP call in try/except; reset status to "ready" on failure.
-
-** Q5. Hash Tables Never Cleaned Up (MEDIUM)
-
-=claude-org-iterm2--sdd-to-iterm2= and =claude-org-iterm2--sdd-to-session-key= (lines 902, 905)
-grow forever. No =remhash= exists for these tables. Long-running Emacs sessions accumulate stale
-entries.
-
-*Proposal*: Add cleanup in =claude-org-iterm2--query-completed= or a periodic sweep that removes
-entries for dead sessions.
 
 ** Q6. =error= Inside =maphash= in =claude-ide= (MEDIUM)
 
@@ -188,22 +129,17 @@ steals the ping timer from the first, whose connection may time out.
 
 ** Q8. =_escape_elisp_string= Missing Tab/Null Escaping (LOW-MEDIUM)
 
-=sdd_bridge.py:53–60= — tab characters and null bytes are not escaped. Claude responses containing
-tab-indented code will produce valid but potentially misaligned org properties.
+In =workspace_bridge.py='s =_escape_elisp_string= — tab characters and
+null bytes are not escaped. Claude responses containing tab-indented
+code will produce valid but potentially misaligned org properties.
 
 *Proposal*: Add =\t= and =\x00= escaping.
 
-** Q9. =atexit= + Manual Cleanup Double-Call Risk (LOW)
-
-=claude_sdd.py:282–289= — =cleanup_ide_server= can fire twice: manually after =subprocess.run=,
-then again via =atexit= if =unregister= is skipped due to an exception.
-
-*Proposal*: Move =atexit.unregister= before the manual call, or use try/finally.
-
 ** Q10. =save-cli-session= Not Persisted (LOW)
 
-=claude-org-sdd-bridge-save-cli-session= writes a property but doesn't call =save-buffer=. Python
-callers have no way to trigger save afterwards. Property is lost on unexpected Emacs exit.
+=code-agent-org-workspace-bridge-save-cli-session= writes a property but
+doesn't call =save-buffer=. Python callers have no way to trigger save
+afterwards. Property is lost on unexpected Emacs exit.
 
 *Proposal*: Add =save-buffer= call (with =inhibit-message= t) inside the function.
 
@@ -232,16 +168,18 @@ Tests in =test-claude-agent-sentinel.el=:
 
 ** Q13. Loop Timer Fires After Buffer Kill (MEDIUM)
 
-=claude-org--maybe-continue-loop= schedules a =run-at-time= timer. If the buffer is killed between
-timer arm and fire, the marker check prevents a crash but =claude-org--cleanup-session= may not
-cancel an already-armed timer in time.
+=code-agent-org--maybe-continue-loop= schedules a =run-at-time= timer.
+If the buffer is killed between timer arm and fire, the marker check
+prevents a crash but =code-agent-org--cleanup-session= may not cancel
+an already-armed timer in time.
 
-*Proposal*: Add a cancelled-session guard in =claude-org--execute-loop-iteration=.
+*Proposal*: Add a cancelled-session guard in =code-agent-org--execute-loop-iteration=.
 
 ** Q14. Stdin Close Timer Not Cancellable (LOW)
 
-=claude-agent--maybe-close-stdin= (=claude-agent-backend.org:2047=) creates a 0.1s timer with no
-stored handle. If the process is killed while the timer is pending, it fires uselessly.
+=claude-agent--maybe-close-stdin= creates a 0.1 s timer with no stored
+handle. If the process is killed while the timer is pending, it fires
+uselessly.
 
 *Proposal*: Store timer in process state; cancel in kill/interrupt functions.
 
@@ -252,27 +190,22 @@ freezing the Emacs UI.
 
 *Proposal*: Convert to timer-based async retry with progress display.
 
-** Q16. Missing =lexical-let= in =claude-org--send-request= (LOW)
+** Q16. Missing =lexical-let= in =code-agent-org--send-request= (LOW)
 
-The =mk= helper lambda is defined via plain =lambda= inside a =let*=. Works today because it is
-called immediately, but fragile — any refactor to async invocation would break under dynamic
-binding.
+The =mk= helper lambda is defined via plain =lambda= inside a =let*=.
+Works today because it is called immediately, but fragile — any
+refactor to async invocation would break under dynamic binding.
 
 *Proposal*: Wrap =mk= in =lexical-let= for defensive correctness.
 
 ** Q17. Three Near-Identical "Find Previous Section Level" Functions (LOW)
 
-=claude-org--find-previous-chat-level=, =--find-previous-story-level=, =--find-previous-sdd-level=
-each implement the same backwards-scan with different predicates.
+=code-agent-org--find-previous-chat-level=,
+=--find-previous-story-level=, =--find-previous-workspace-level= each
+implement the same backwards-scan with different predicates.
 
-*Proposal*: Unify into =claude-org--find-previous-section-level (predicate)=.
-
-** Q18. Public iTerm2 Functions Use Internal Double-Dash Naming (LOW)
-
-=claude-org-iterm2--query-completed= and =--loop-send= are called from Python via MCP (external
-contract) but use the internal =--= prefix.
-
-*Proposal*: Promote to single-dash public names.
+*Proposal*: Unify into =code-agent-org--find-previous-section-level (predicate)=
+(a generic version already exists at L6233; finish the consolidation).
 
 ** DONE Q19. Stale iTerm2 References in Source Files (MEDIUM) :done:
 
@@ -380,14 +313,17 @@ Bug-fix tests are scattered across test files with no easy way to run "just the 
 
 ** T6. E2E Test Infrastructure for CI (MEDIUM)
 
-Real E2E tests (iTerm2 + Claude Code + Emacs) can only run on macOS with a GUI. No CI pipeline
-exists.
+Real E2E tests (cmux/tmux + Claude Code + Emacs) can only run on
+macOS-with-cmux for the multiplexer family; tmux pieces could in
+principle run on Linux. No CI pipeline exercises the live multiplexer
+stack today; tests/e2e/E2E_TASKS.org is human-driven via /loop.
 
 *Proposal*:
-1. Create a macOS GitHub Actions runner with iTerm2 installed
-2. Use =MOCK_SCENARIO= for Claude API calls (no real API key needed)
-3. Run headless Emacs with =make test-integration=
-4. Record session transcripts for debugging failures
+1. macOS GitHub Actions runner for the cmux + Claude Code path
+2. Linux runner for the tmux primitive tests (cmux unavailable)
+3. Use =MOCK_SCENARIO= for Claude API calls (no real API key needed)
+4. Run headless Emacs with =make test-integration=
+5. Record session transcripts for debugging failures
 
 ** DONE T7. Process Sentinel Has Zero Explicit Tests (HIGH) :done:
 
@@ -473,7 +409,6 @@ Ranked by impact on reliability and developer productivity:
 | P0 | T7: Test process sentinel explicitly (DONE 2026-03-29) | S | Tests most dangerous untested path |
 | P1 | T1: Error injection in mock CLI | M | Catches failure-mode bugs |
 | P1 | Q2: Structured MCP error returns | S | Prevents silent Python failures |
-| P1 | Q3: Reorder query-completed after response | S | Correct mode-line state |
 | P1 | Q4: Reset status on MCP failure | S | Prevents permanent "busy" |
 | P1 | Q11: Remove duplicate extract-error-message (DONE 2026-03-29) | S | Eliminates shadow defun |
 | P1 | Q12: Clear path-mappings on abnormal exit (DONE 2026-03-29) | S | Prevents stale Docker paths |
@@ -483,16 +418,13 @@ Ranked by impact on reliability and developer productivity:
 | P2 | T8: Permission round-trip tests (DONE 2026-03-29) | M | Tests permission round-trip |
 | P2 | T9: Sentinel edge cases + non-object JSON fix (DONE 2026-03-29) | S | Tests common user action + bug fix |
 | P2 | A3: Single load path | S | Prevents double-init bugs |
-| P2 | A8: iTerm2/native implement backend protocol | L | Makes extension point real |
-| P2 | Q5: Hash table cleanup | S | Prevents memory leaks |
 | P2 | A6: claude-ide test suite | M | Tests 2K-line module |
 | P3 | T4: Fixture capture mode | M | Systematic test data |
 | P3 | T5: Regression tag | S | Fast regression runs |
 | P3 | T10: Chat mode test suite | M | Tests zero-coverage module |
 | P3 | A2: MCP server boundary fix | S | Clean layering |
-| P3 | A9: Generic pending-alerts (remove iTerm2 state from SDK) | S | Clean layering |
 | P3 | Hardcoded /tmp paths in tests (DONE 2026-03-29) | S | Use constant, structural test F40 |
-| P3 | Q6-Q10, Q13-Q18: Minor fixes | S each | Correctness polish |
+| P3 | Q6, Q8, Q10, Q13-Q17: Minor fixes | S each | Correctness polish |
 | P3 | Q20: Extract ensure-session (154→30 lines) (DONE 2026-03-29) | S | Readability, 4 focused helpers |
 | P3 | Q21: Stale verbose output docstring (DONE 2026-03-29) | S | Docstring accuracy |
 
