@@ -176,32 +176,38 @@ AI interactions into *living documents*:
 
 *** Architecture
 
+Two backend families live as parallel siblings under one root protocol;
+the frontend dispatches on the receiver type via =cl-defmethod=, never
+on a backend-name string.
+
 #+begin_example
-+---------------------------------------------------+
-|              code-agent-org.org (UI Layer)             |
-|  Sessions, streaming, org blocks, error display   |
-+-------------------------+-------------------------+
-                          |
-              claude-agent-backend-query
-              claude-agent-backend-cancel
-              claude-agent-backend-supports-p
-              claude-agent-backend-filter-callbacks
-                          |
-+-------------------------+-------------------------+
-|         Backend Protocol (claude-agent.org)        |
-|  cl-defgeneric dispatch: 8 generic functions      |
-+-------+-------------------+-----------------------+
-        |                   |
-+-------+-------+   +-------+-------+   +-------+-------+
-| JSON Stream   |   | Claude CLI    |   | Native        |
-| Backend       |   | Backend (eat) |   | Terminal      |
-| CLI subprocess|   | Automated TUI |   | (vterm/eat)   |
-+---------------+   +---------------+   +---------------+
++--------------------------------------------------------------------+
+|              code-agent-org.org (UI Layer)                         |
+|  Sessions, streaming, org blocks, error display                    |
++--------------------------+-----------------------------------------+
+                           | Protocol 3 (org-integration)
+                           | execute-block / append-response /
+                           | cancel-from-org / permission-notify
++--------------------------+-----------------------------------------+
+|          Backend Protocols (claude-agent-backend.org)              |
+|     Protocol 1: lifecycle  (query / cancel / cleanup / ...)        |
++----------------+--------------------------------+------------------+
+                 |                                |
++----------------+--------+        +--------------+----------------+
+| Agent family base       |        | Multiplexer family base       |
+| (Protocol 2a — JSON-RPC)|        | (Protocol 2b — TUI shell)     |
++--+--------+-------+-----+        +-------+----------+------------+
+   |        |       |                      |          |
+claude-  opencode  gemini / codex        cmux       tmux
+code     (ACP)
+(stream-                                  (Phoenix-traced; cmux ships
+json)                                      sidebar / IDE / colour;
+                                           tmux is cross-platform)
 #+end_example
 
-The presentation layer (=code-agent-org.org=) never calls backend internals directly.
-All communication goes through the =claude-agent-backend-*= generic protocol.
-New backends can be added by implementing 8 =cl-defmethod= specializations.
+Detailed contract — each protocol's generic list, the capability
+matrix that gates =supports-p=, and the design rules — is in
+=claude-agent-backend.org= → "Tri-Protocol Architecture".
 
 *** Terminal Backends
 :PROPERTIES:
@@ -684,18 +690,17 @@ development work. It guides Claude through Research → Design → Planning → 
 
 *** docs/ as the Single Source of Truth
 
-SDD stores all knowledge artifacts in the =docs/= folder, not in the notebook:
+SDD stores per-story knowledge artifacts under =docs/=:
 
 | Directory | Purpose | File Format |
 |-----------+---------+-------------|
 | =docs/research/= | Research findings, codebase patterns, relevant files | =YYYY-slug.EXT= |
 | =docs/design-docs/= | Goals, non-goals, technical design, features TODOs | =YYYY-slug.EXT= |
-| =docs/product-specs/= | Cross-story product-level specifications | =name.EXT= |
-| =docs/references/= | Curated external references and resources | =topic.EXT= |
 
-Where =EXT= is =org= or =md= depending on the =SDD_DOCS_FORMAT= property (default: =org=).
-
-Each subdirectory has an =INDEX.md= tracking all docs with status (draft/complete/approved).
+Where =EXT= is =org= or =md= depending on the =SDD_DOCS_FORMAT=
+property (default: =org=). The two directories are auto-created on
+first SDD workspace use; the project's own =docs/= got migrated into
+the relevant code .org files (see =RATIONALE.md= for the design log).
 
 *** Notebook Structure
 
@@ -736,7 +741,6 @@ Use =C-c C-/= then =d= (or =M-x code-agent-org-insert-sdd=):
    - Notebook sections (System Prompt + Workflow with first AI block)
    - =docs/research/YYYY-slug.EXT= — research file from template
    - =docs/design-docs/YYYY-slug.EXT= — design doc from template
-   - =INDEX.md= entries in both directories
 
 *** Docs File Format Configuration
 
