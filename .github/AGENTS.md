@@ -339,16 +339,19 @@ Docs files for this story:
 - *Research*: =docs/research/2026-native-claude-code-backend.org=
 - *Design Doc*: =docs/design-docs/2026-native-claude-code-backend.org=
 
-docs/ directory layout:
+docs/ directory layout (auto-created on first SDD workspace use; the LP
+migration emptied them, but the per-story workflow still wants a place
+for research + design files):
 
 | Directory | Purpose |
 |-----------+---------|
 | =docs/research/= | Research findings |
 | =docs/design-docs/= | Design docs (goals, spec, features) |
-| =docs/product-specs/= | Cross-story product specs |
-| =docs/references/= | Curated external references |
 
-After creating or updating any doc, update its row in the subdirectory's =INDEX.md=.
+For per-module design intent (the kind that used to live as standalone
+design docs), prefer weaving it into the most relevant code .org as a
+Background / Future Design subsection — see =RATIONALE.md= for the
+project's "why" log and =CODEBASE-REVIEW.org= for the active backlog.
 
 References:
 - claude-code.el: /Users/jingtao/.emacs.d/straight/repos/claude-code.el/

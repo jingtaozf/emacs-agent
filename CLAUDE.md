@@ -281,7 +281,7 @@ autonomous**; exploration → **L1-L2 inline**.
 | Tech-debt backlog | `CODEBASE-REVIEW.org` |
 | Design rationale ("why") log | `RATIONALE.md` |
 | Tri-protocol refactor (shipped) | `claude-agent-backend.org` → "Tri-Protocol Architecture" |
-| Research findings | `docs/research/` |
+| Research findings | woven into the relevant code .org as Background / Research subsections (the LP migration emptied docs/research/; SDD workflow auto-recreates the dir per-story when needed) |
 | Elisp idioms | `ELISP-IDIOMS.org` |
 | Literate programming | `.claude/rules/literate-programming-document-first.md` |
 | Full API docs | `claude-agent.org` section headers |
