@@ -4007,6 +4007,133 @@ CLI's focus/activate command."
 The Claude Code backend wraps the existing process layer. It handles
 both per-query (one-shot) and persistent-client (bidirectional) modes.
 
+** Design Heritage
+
+This backend's current shape is the result of two extraction passes
+that preceded the Tri-Protocol Refactor. Both moves are shipped; the
+notes below preserve the *why* now that the as-was layout is gone.
+
+- *2026-03-09 — JSON-stream extraction.* The pre-refactor
+  =claude-agent.org= was ~5000 lines and conflated two concerns:
+  generic SDK coordination (sessions, query registry, mode-line, hooks)
+  versus JSON-stream wire mechanics (process spawn, filter, JSON
+  parse, control protocol, stdin management, message structs). The
+  =backend-query= generic existed but the JSON-stream method just
+  delegated back into the same file — the abstraction was a pretty
+  facade over a monolith. Extraction created a dedicated backend
+  module so callers depend only on generics; backend code stops
+  mutating shared state directly.
+- *2026-03-10 — per-backend split on the org-integration side.* The
+  same shape repeated one layer up: =claude-org.org= was carrying ~1000
+  lines of two now-removed terminal backends (deleted in commit
+  =1038144= once the multiplexer family covered the same ground). Each
+  backend got its own file so per-backend changes stop touching
+  unrelated code. The backends themselves are gone; the structural
+  pattern survived as the cmux / tmux split today.
+- *2026-04-24 — Tri-Protocol formalisation.* The two earlier splits
+  produced the right *files* but the *interfaces* between them were
+  still ad-hoc — the frontend branched on =CLAUDE_BACKEND= strings,
+  agent identity wasn't modelled. The refactor formalised everything
+  into the four protocols documented in =* Tri-Protocol
+  Architecture= above. The JSON-stream backend now lives as
+  =claude-agent-claude-code-backend= (Protocol 1 + Protocol 2a
+  agent-wire), sibling to the ACP family which speaks JSON-RPC over
+  the same agent-wire generics.
+
+** Stream Lifecycle
+
+Six components carry a single CLI invocation from spawn to completion;
+each stage is one =defun= in this file. Reading them top-to-bottom is
+the cleanest way to understand the wire.
+
+| Stage | Function | What it does |
+|-------+----------+--------------|
+| 1 | =--start-process= | Spawns =claude --print --output-format stream-json=, attaches filter + sentinel, stores =--process-state= |
+| 2 | =--process-filter= | Accumulates raw bytes into =json-buffer=, guards overflow, peels complete JSONL lines |
+| 3 | =--process-json-buffer= | Parses each line; =control_request= → control handler, otherwise =handle-message= generic |
+| 4 | =--process-normal-message= | Sets =got-result= on result type, fires token / message callbacks, captures =session-id=, calls =--maybe-close-stdin= |
+| 5 | =--maybe-close-stdin= | After a =result= message, schedules EOF on stdin so the CLI exits |
+| 6 | =--process-sentinel= | Process exit; flushes buffer; calls =on-complete= or triggers auto-recovery |
+
+The =--process-state= struct holds every per-query field the chain
+needs:
+
+| Field | Role |
+|-------+------|
+| =process= / =json-buffer= | Process handle + JSONL accumulator |
+| =callback= / =token-callback= / =error-callback= / =complete-callback= | Four lifecycle callbacks the org layer subscribes to |
+| =got-result= | Set when the protocol-level =result= message arrives — sole differentiator between normal exit and crash |
+| =closed= / =ready= / =cancelled= | Sentinel flags; filter ignores output when =ready= is nil |
+| =session-id= | Captured from =system/init=; required for =--resume= |
+| =session-key= / =request-id= | Owner identity for verbose logging and registry lookups |
+
+** Real-World Protocol Facts
+
+Audited from 698 real Claude Code sessions plus 24 fixtures
+(2026-03 analysis). These are invariants the lifecycle code can rely
+on; deviations would be CLI-side regressions, not Emacs bugs.
+
+- *Exactly one =result= per CLI invocation.* Zero exceptions in the
+  audit. Crashed/killed processes emit zero. Code that "defends" by
+  expecting more is dead.
+- *Background agents complete BEFORE =result=.* When the assistant
+  launches a Task tool, the CLI waits for the agent internally and
+  streams its output back as ordinary =assistant= messages. By the
+  time =result= arrives, every byte of agent output is already in
+  the org buffer. The SDK does not need to keep stdin open for
+  background agents — see the dead-but-harmless tracker note below.
+- *Parallel tool use is normal.* Up to 31 parallel tool calls
+  observed in a single =assistant= message; 333 instances of
+  2-parallel. All =tool_result= blocks for a parallel batch arrive
+  in one =user= message. Each =tool_result= triggers PostToolUse
+  hooks individually.
+- *Message-type taxonomy.* =system= (init, always first) /
+  =assistant= (streaming tokens or tool_use blocks) / =user= (tool
+  results) / =result= (final, exactly one) / =rate_limit_event=
+  (warning, non-fatal) / =control_request= (bidirectional mode,
+  permission gating).
+- *=stop_reason= values.* =null= (more tokens coming) / =end_turn=
+  (assistant finished naturally) / =tool_use= (pausing for tool) /
+  =stop_sequence= (CLI-initiated interrupt — dequeue path).
+
+** Completion Model — Three Phases
+
+The current completion path is a three-phase model. Earlier code was
+two-phase (protocol-level signal + sentinel) and had a documented
+hang: when control requests were pending at the moment =result=
+arrived, =--maybe-close-stdin= would log-and-give-up with no retry,
+the process never received EOF, and =on-complete= never fired. The
+session stayed =:busy t= forever.
+
+| Phase | Trigger | Action | Failure guard |
+|-------+---------+--------+---------------|
+| 1 — Protocol | =result= message received | Set =got-result=, fire result-received hook, schedule stdin close | — |
+| 2 — Stdin Close | Polling retry up to 5 s | Close stdin when control requests clear | Force-close after =max-attempts × delay= |
+| 3 — Process Exit | Sentinel fires | Call =on-complete=, cancel watchdog | Watchdog kills runaway process at =claude-agent-query-timeout= (default 5 min) |
+
+Three lessons from this design fold back into invariants the code
+must keep:
+
+- *No "give up" branches in stdin-close.* Either retry until clear,
+  force-close after a max budget, or watchdog-kill — never log and
+  return. The hang lived in exactly that gap.
+- *Background-task tracker is dead but harmless.* It checks
+  =(plist-get tool-use-result :isAsync)= but real Task results return
+  *plain text*, not JSON, so =:isAsync= is never present and the
+  tracker never registers any task. Removing it would simplify code,
+  but since the CLI internally waits for background agents, the
+  always-empty tracker does not block anything either. The tracker
+  remains for informational display (mode-line, session manager) and
+  must NOT block stdin close.
+- *=got-result= is the abnormal-exit oracle.* The sentinel decides
+  recovery via =--is-abnormal-exit-p=, which returns =t= when ALL
+  of: auto-recovery enabled, =session-id= captured, =got-result= NOT
+  set, =cancelled= NOT set, exit event matches "killed" / "exited
+  abnormally" / "finished". A "finished" exit *without* =got-result=
+  is treated as a crash and triggers =--resume-session=. Anything
+  that mutates =got-result= prematurely (or skips setting it on the
+  result message) breaks recovery.
+
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent-claude-code-backend
                (:include claude-agent-backend (type :claude-code))
