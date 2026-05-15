@@ -2513,6 +2513,81 @@ Returns non-nil if status was successfully set."
 
 Workspace-related context detection functions.
 
+** The Living Workspace Model
+
+Mental model that shaped the workspace / story / =ACTIVE_STORY= machinery
+in this section: the org file is a *Lisp image*. A workspace is a
+persistent process that outlives any individual story; stories are
+incremental modifications under the workspace heading; =C-c C-c= is the
+REPL =eval=, always available. You don't restart Claude Code between
+stories — you switch =ACTIVE_STORY= and the same session keeps going.
+
+#+begin_example
+,* claude-agent-dev                        ← workspace heading
+:PROPERTIES:
+:CMUX_WORKSPACE: claude-agent-dev          ← user-set: human-readable name
+:CLAUDE_SESSION_ID: sdd-20260326-dev       ← session identity
+:CLAUDE_CLI_SESSION: abc-def-123           ← auto-set: for --resume
+:CMUX_SURFACE_ID: surface:5                ← auto: cached surface ref
+:ACTIVE_STORY: Fix parser bug              ← auto: persists after completion
+:END:
+
+,** Fix parser bug                         ← story (lightweight, no properties)
+,*** System Prompt                         ← optional, sent on story switch
+,*** Workflow                              ← all prompts + responses go here
+,#+begin_src ai
+…
+,#+end_src
+
+,** Add new API endpoint                   ← another story, same workspace
+#+end_example
+
+| Property | Who Sets | Purpose |
+|----------+----------+---------|
+| =CMUX_WORKSPACE= | User | Human-readable workspace name; binds to the cmux pane |
+| =CLAUDE_SESSION_ID= | User or auto | Session identity for routing and inheritance |
+| =CLAUDE_CLI_SESSION= | Auto | Claude Code SDK UUID for =--resume= |
+| =CMUX_SURFACE_ID= | Auto | Cached surface ID, avoids re-detection |
+| =ACTIVE_STORY= | Auto | Current story heading, *persists after completion* |
+
+Stories themselves have *zero required properties* — everything
+inherits from the workspace heading.
+
+*** Two Channels, Same Session
+
+Both routes through the same workspace's Claude Code:
+
+| Channel | Trigger | Routing |
+|---------+---------+---------|
+| A — ai block | =C-c C-c= inside an =ai= block | Auto-selects nearest ancestor =CMUX_WORKSPACE=; per-session =:marker= identifies insert point |
+| B — direct cmux input | User types in the cmux terminal directly | =workspace-bridge= reads =ACTIVE_STORY= via MCP, navigates to that story's =Workflow= subsection, inserts at end |
+
+If =ACTIVE_STORY= is nil, Channel B has no org routing — terminal-only
+interaction.
+
+*** =ACTIVE_STORY= Lifecycle
+
+The property *persists* across the busy → ready transition. It only
+changes on:
+
+- A =C-c C-c= execution from a /different/ story under the same
+  workspace → auto-switch (fires =active-story-changed-hook=).
+- =org-archive-subtree= on the active story → cleared.
+- Manual user clear.
+
+Concurrency is handled by the busy-state machine: =C-c C-c= on a
+*different* story while the workspace is busy raises a wait/queue/
+interrupt prompt rather than silently switching mid-flight.
+
+*** Per-Story System Prompt
+
+When =ACTIVE_STORY= changes, =active-story-changed-hook= runs. The
+default handlers (1) inject the new story's =System Prompt= subsection
+into the workspace's Claude Code as the next message, and (2) rename
+the cmux pane to =workspace: story=. The injection happens *once* on
+story switch — not on every ai block — so per-story context loads at
+the natural seam without repeating it on each prompt.
+
 ** Workspace Root Detection
 
 #+BEGIN_SRC elisp
