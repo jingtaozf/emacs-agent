@@ -10,6 +10,77 @@ Functions for bridging between Claude Code CLI (running in a terminal) and
 org-mode workspace sections. Called non-interactively via MCP ~evalElisp~ from
 hook scripts.
 
+** Architecture
+
+When the user types a prompt directly into the Claude Code terminal
+(no =C-c C-c= involved), Claude's =UserPromptSubmit= and =Stop= hooks
+fire, =workspace_bridge.py= relays them over MCP, and the functions in
+this file mutate the org buffer to reflect the conversation. Five hops:
+
+#+begin_example
+Terminal user types prompt
+  ↓
+Claude CLI fires UserPromptSubmit hook (per hooks.json matcher)
+  ↓
+python/claude_agent/workspace_bridge.py handle_prompt()
+  ↓
+MCP evalElisp → code-agent-org-workspace-bridge-insert-prompt
+  ↓
+Org buffer gains: ,*** Instruction N + ,#+begin_src ai prompt ,#+end_src
+                  + new ,*** Response N :ai_output: skeleton
+                  + active-queries entry (mode-line / Query Manager)
+
+Claude responds, CLI fires Stop hook
+  ↓
+workspace_bridge.py handle_response()
+  ↓
+MCP evalElisp → code-agent-org-workspace-bridge-insert-response
+                + run-hook-with-args 'code-agent-org-complete-hook
+                + --query-completed (unregister, advance loop)
+#+end_example
+
+** Module Rename — From "SDD Bridge"
+
+This module was originally called the "SDD bridge" in the design doc
+(2026-03-06) and shipped under that name. It was renamed to
+*workspace bridge* in 2026-04 once it became clear the same hook
+plumbing serves any terminal-typed prompt — not just SDD stories.
+Only the names changed; the wire format (hook JSON over stdin →
+=workspace_bridge.py= → MCP =evalElisp=) is unchanged. The Python
+file is =python/claude_agent/workspace_bridge.py=; older history
+referring to =sdd_bridge.py= or "SDD hook" describes the same code.
+
+** Lifecycle Parity Across Entry Points
+
+Two entry points reach this file's =insert-prompt= / =insert-response=:
+=C-c C-c= on an =ai= block, *and* prompts typed directly in the
+terminal. Both must result in the same Emacs-side state — same
+=active-queries= entry, same exec-status property, same complete-hook
+firing — otherwise downstream features (mode-line spinner, Query
+Manager, "Jump to AI block" via =goto-story=, telemetry persistence)
+silently break for the terminal-typed path.
+
+The shipped strategy: =workspace-bridge-insert-prompt= fires
+=code-agent-org-execute-hook= itself, after the org structure is in
+place. This reuses the existing hook chain — the same chain that
+=code-agent-org-execute= fires for =C-c C-c= — so every hook function
+treats both paths identically.
+
+The dedup mechanism that lets both paths coexist without
+double-insertion is the =.from-emacs= flag (see
+=code-agent-org-terminal-base.org= → "Status File I/O"): =C-c C-c=
+writes the flag *before* sending the prompt; the bridge's
+=insert-prompt= sees the flag set and skips insertion (the org
+structure was already created on the Emacs side); =PostToolUse=
+clears the flag.
+
+Telemetry (token counts, duration, cost) is the one feature where
+parity is intentionally partial — the =Stop= hook JSON carries
+=duration_ms= and =usage= fields, but they don't currently flow into
+the Emacs side. Adding them is a small additive change to
+=workspace_bridge.handle_response= plus a Protocol 3 method on the
+backend; left as a follow-up because no current consumer needs it.
+
 ** Dependencies
 
 #+BEGIN_SRC elisp
