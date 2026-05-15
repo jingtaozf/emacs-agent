@@ -1519,7 +1519,7 @@ FIX: Use (cond ((equal X \"str\") body)) instead."
 
 (defvar test-structural--pcase-string-allowlist
   '(("claude-agent-backend.org" . (2221 2253))
-    ("claude-ide.org" . (341 575 822))
+    ("claude-ide.org" . (420 654 901))
     ("code-agent-org-scheduled.org" . (214))
     ("code-agent-org.org" . (4308 4426))
     ("emacs-mcp-server.org" . (738)))

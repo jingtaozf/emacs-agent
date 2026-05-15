@@ -7,6 +7,85 @@ Implement Claude Code IDE support in Emacs using websockets + MCP.
 
 Based on [[https://github.com/stevemolitor/monet][monet.el]] by Stephen Molitor, adapted for the claude-agent SDK.
 
+* Overview
+
+Claude Code's IDE integration protocol gives the agent rich editor
+context: open files, diagnostics, selection tracking, interactive diff
+review, workspace folders. This module implements the Emacs side — a
+WebSocket MCP server that Claude Code discovers via lockfile.
+
+** Discovery Protocol
+
+#+begin_example
+1. claude-ide-start-server picks a random port, starts a WebSocket
+   server on localhost, writes ~/.claude/ide/<port>.lock with:
+   - pid, workspaceFolders [list], ideName, transport: "ws", authToken
+2. Claude Code (launched with --ide) reads ~/.claude/ide/*.lock, picks
+   the file whose workspaceFolders matches its --cwd
+3. Claude Code connects via WebSocket; tools/list / tools/call dispatched
+   over MCP JSON-RPC 2.0
+4. claude-ide-stop-server closes the WebSocket, removes the lockfile
+#+end_example
+
+The lockfile is the contract — its presence + matching =workspaceFolders=
+is how the agent finds us. Stale lockfiles after Emacs crash are not
+auto-cleaned; users with this problem can =rm ~/.claude/ide/*.lock=
+to reset.
+
+** Tool Surface
+
+The MCP tools served over the WebSocket are organised in this file as:
+
+| Section | Tools |
+|---------+-------|
+| Selection | =getCurrentSelection=, =openFile=, =getOpenEditors= |
+| Diagnostics | =getDiagnostics= (flymake/flycheck normalised) |
+| Workspace | =getWorkspaceFolders= |
+| File ops | Routed via =openFile= with a marker offset |
+| Diff review | Two flavours — =openDiff= simple, =openDiffEdit= for the deferred-response review pattern (the agent waits for an Emacs reply before proceeding) |
+
+External packages can register additional tools at runtime via the
+"External Tool API" section near the bottom.
+
+** Lifecycle — One Server Per cmux Workspace
+
+The IDE server is started per cmux workspace, not per Emacs session.
+The catalysts:
+
+- Each cmux workspace has its own =--cwd= and its own Claude Code
+  instance; one global server would mean every Claude instance saw
+  every workspace's files, which defeats the workspace boundary.
+- Lockfile match is by =workspaceFolders=; two simultaneous workspaces
+  need two distinct lockfiles, so two distinct servers.
+
+The cmux backend (=code-agent-org-cmux.org= → "IDE Server") owns the
+=--ensure-ide-server= call that fires before each cmux launch and the
+matching shutdown when the cmux session ends. The Python launcher
+(=python/claude_agent/claude_workspace.py=) does *not* manage the IDE
+server itself — Emacs owns the lifecycle, Python just passes =--ide=
+to the CLI.
+
+** Why Not the JSON-Stream Backend
+
+JSON-stream =claude --print --output-format stream-json= is a one-shot
+subprocess started with explicit stdin; it doesn't go scanning
+=~/.claude/ide/= for lockfiles. The =--ide= mechanism is a TUI-mode
+feature. The JSON-stream side gets an equivalent in spirit through
+the IDE-context attributes attached to span tracing
+(=claude-agent-ide.org=), which surfaces selection / open editors /
+diagnostics into the trace metadata for post-hoc analysis.
+
+** Migration History
+
+Origin: =monet.el= by Stephen Molitor. Adapted into this file for the
+claude-agent SDK in 2026-03 — the =monet-= prefix renamed to
+=claude-ide-= and the file converted to literate org. The protocol
+specifics are unchanged; bug-for-bug compatibility with monet's
+WebSocket + MCP wire was the design intent so existing clients (Claude
+Code's =--ide= flag) continue to work without server-side changes.
+The companion test (=test-diff-visibility.el=) also moved from monet
+into =tests/test-claude-ide-diff.el= with the same prefix rename.
+
 * Dependencies
 
 #+BEGIN_SRC elisp
