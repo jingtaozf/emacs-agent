@@ -1085,10 +1085,15 @@ FIX: Remove any claude-cli or eat-backend references from the flagged file."
           (org-files (directory-files test-structural--project-root
                                      t "\\.org$")))
       (dolist (file org-files)
-        ;; Skip docs/ and tests/ — only check source .org files
+        ;; Skip docs/, tests/, and root-level review/backlog files that
+        ;; may legitimately reference removed code in their historical
+        ;; prose (CODEBASE-REVIEW.org carries pre-removal review items).
         (unless (or (string-match-p "/docs/" file)
                     (string-match-p "/tests/" file)
-                    (string-match-p "/reference/" file))
+                    (string-match-p "/reference/" file)
+                    (member (file-name-nondirectory file)
+                            '("CODEBASE-REVIEW.org" "ELISP-IDIOMS.org"
+                              "RATIONALE.md")))
           (with-temp-buffer
             (insert-file-contents file)
             (goto-char (point-min))

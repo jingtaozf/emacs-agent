@@ -261,7 +261,8 @@ Every user correction or runtime trap not caught by tests → append a
 4-line entry (date / mistake / context / rule) to `tasks/lessons.md`.
 Recur ≥3 times → promote to a `CLAUDE.md` rule + add structural check to
 `tests/test-structural.el`. Unknowns section: review quarterly, promote
-high-frequency items to `docs/design-docs/`.
+high-frequency items into the most relevant code .org as a "Future Design"
+subsection (the LP migration emptied `docs/design-docs/`).
 
 Don't put new rules straight in CLAUDE.md — context rot is real (lens #5).
 
@@ -277,11 +278,10 @@ autonomous**; exploration → **L1-L2 inline**.
 | Topic | Location |
 |-------|----------|
 | Architecture map | `ARCHITECTURE.org` |
-| Design docs | `docs/design-docs/` |
+| Tech-debt backlog | `CODEBASE-REVIEW.org` |
+| Design rationale ("why") log | `RATIONALE.md` |
 | Tri-protocol refactor (shipped) | `claude-agent-backend.org` → "Tri-Protocol Architecture" |
 | Research findings | `docs/research/` |
-| Product specs | `docs/product-specs/` |
-| References | `docs/references/` |
 | Elisp idioms | `ELISP-IDIOMS.org` |
 | Literate programming | `.claude/rules/literate-programming-document-first.md` |
 | Full API docs | `claude-agent.org` section headers |

@@ -18,7 +18,9 @@ ACP-compatible agents (Codex, Gemini, OpenCode), and a tri-protocol backend.
 - **Primary agent rules**: `CLAUDE.md` (this repo's root). Read it first.
 - **Architecture**: `ARCHITECTURE.org` — module boundaries, invariants, extension points.
 - **Lessons**: `tasks/lessons.md` — past mistakes promoted into rules.
-- **Design docs**: `docs/design-docs/` — why the code is shaped this way.
+- **Design rationale**: `RATIONALE.md` — why-we-decided-X log.
+- **Tech-debt backlog**: `CODEBASE-REVIEW.org` — prioritised review findings.
+- **Per-module design**: prose woven into the relevant code .org file (the docs/design-docs/ migration absorbed the historical separate design docs into LP-style preambles). New design notes live next to their code.
 
 ## Hard rules (excerpt — see CLAUDE.md for full)
 
