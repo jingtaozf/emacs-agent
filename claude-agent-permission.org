@@ -4,6 +4,37 @@
 Permission system for controlling tool access via pattern matching.
 Extracted from claude-agent.org as part of modular decomposition.
 
+* Overview
+
+This module owns Emacs's side of the *tool permission decision* — when
+the agent asks "may I run this Bash / Edit this file / WebFetch this
+URL", the answer comes from here. Three layers stack to produce a
+verdict:
+
+| Layer | What it provides | When it fires |
+|-------+------------------+---------------|
+| Pattern lists | Allow / deny / ask globs scoped per tool | Before the interactive prompt; first match wins |
+| Cache | Per-session decisions (e.g. "always allow Bash(npm test)") | Between prompts in the same session, so the user isn't asked twice |
+| Interactive prompt | =completing-read= y/n/always with the decision threaded back through the agent's =can_use_tool= control-request or ACP =session/request_permission= | Whenever the prior layers don't produce a definite answer |
+
+The module exposes one entry point — =claude-agent-permission-check= —
+which the JSON-stream agent backend calls from its control-request
+handler and the ACP backend calls from its permission-request handler.
+The decision is returned as a structured plist (=:allow= / =:deny= /
+=:ask= plus optional =:updated-input= for tool-input rewriting).
+
+Three invariants the rest of the system relies on:
+
+- *Deny on error.* If a permission function signals, the result is
+  =deny=, never =allow=. Tested in =test-permission-round-trip.el=.
+- *Cache is per-session-key.* No global cache; the cache lives on
+  the session struct so different stories never share permission
+  decisions.
+- *Pattern hooks are user-extensible.* Project-specific allow/deny
+  rules live in =.dir-locals.el= or user init via
+  =claude-agent-permission-functions=; this module ships defaults
+  but never overrides user functions.
+
 * Dependencies
 
 #+BEGIN_SRC elisp
