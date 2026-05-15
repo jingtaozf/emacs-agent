@@ -3712,20 +3712,18 @@ it marks the protocol as the org-level interaction surface, visible
 to the frontend (=code-agent-org.org=), while Protocols 1/2 are
 wire-level contracts internal to the SDK layer.
 
-*Phase 1 note on =block-info= plist*: Phase 1 callers populate only
-=:prompt=, =:callbacks=, =:props=, =:session-key=.  The fuller keys
-listed on each generic's contract (=:target-heading=, =:custom-id=,
-=:source-buffer=, =:source-marker=, =:loop-max=, =:loop-interval=)
-arrive from Phase 2 onwards as the frontend integration deepens.
+The =block-info= plist carries =:prompt=, =:callbacks=, =:props=,
+=:session-key=, plus the optional surface keys (=:target-heading=,
+=:custom-id=, =:source-buffer=, =:source-marker=, =:loop-max=,
+=:loop-interval=) that concrete backends consume when present.
 
 *** Execute Block
 
 =execute-block= is the primary frontend entry point — called once
 per C-c C-c on an AI block.  The default method on
-=claude-agent-backend= is the Phase 1 shim: unpack =block-info= and
-delegate to =claude-agent-backend-query=.  Concrete agent backends
-(Phase 2+) and multiplexer backends (Phase 3+) override with their
-own orchestration.
+=claude-agent-backend= unpacks =block-info= and delegates to
+=claude-agent-backend-query=.  Concrete agent and multiplexer
+backends override with their own orchestration.
 
 #+BEGIN_SRC elisp
 (cl-defgeneric claude-org-backend-execute-block (backend block-info)
@@ -3741,10 +3739,9 @@ shims to `claude-agent-backend-query' below.")
   ((backend claude-agent-backend) block-info)
   "Default execute-block: dispatch BLOCK-INFO's :prompt through
 `claude-agent-backend-query' on BACKEND.
-Phase 1 shim — keeps the current JSON/ACP execution path running
-unchanged while the frontend starts calling through Protocol 3.
-Concrete agent/multiplexer backends in later phases override this
-with their own orchestration."
+Default shim — keeps the JSON/ACP execution path running unchanged
+when the frontend calls through Protocol 3.  Concrete agent and
+multiplexer backends override with their own orchestration."
   (let* ((prompt (plist-get block-info :prompt))
          (callbacks (plist-get block-info :callbacks))
          (props (plist-get block-info :props))
@@ -3835,15 +3832,15 @@ Default: no-op — subclasses add footer / persist telemetry / save."
 
 Book-keeping on query start: record the request id so hooks can find
 the active query, set =:busy= in session state.  Default is a no-op
-placeholder — concrete agent backends and the frontend use their own
-existing registration routines in Phase 1; Phase 2+ folds those into
-the generic.
+placeholder — concrete agent backends and the frontend currently use
+their own =claude-agent--register-query= path; this generic exists
+for callers that prefer Protocol 3 dispatch.
 
 #+BEGIN_SRC elisp
 (cl-defgeneric claude-org-backend-register-query (backend block-info)
   "Register BLOCK-INFO as an in-flight query on BACKEND.
-Default: no-op — Phase 1 callers still use `claude-agent--register-query'
-directly; Phase 2+ routes through here."
+Default: no-op — most callers still use `claude-agent--register-query'
+directly; this generic is the Protocol-3-dispatch alternative."
   (ignore backend block-info)
   nil)
 #+END_SRC
