@@ -85,19 +85,16 @@ FIX: Check the failing test file for missing (require ...) or syntax errors."
 ;;; Smoke test: tests/e2e/org/ living fixtures are well-formed org
 
 (ert-deftest test-agent-workflow-e2e-org-fixtures-loadable ()
-  "Every committed fixture in tests/e2e/org/ must parse cleanly as org.
+  "Every fixture under tests/e2e/org/ has balanced `#+begin_src'/`#+end_src'.
 
-These are the *living* fixtures the human + agent harness drive by
-hand (workspace-test.org, acp-test.org, tmux-test.org, etc.). There
-is no ert suite that *executes* the AI blocks inside them — that's
-intentional, they require Phoenix + cmux + Claude Code CLI running.
-But broken org-syntax in a fixture silently breaks the harness, so
-this smoke test enforces the cheapest invariant we can: the file is
-loadable in `org-mode' with no parse errors, and every
-`#+begin_src' has a matching `#+end_src'.
+These living fixtures (workspace-test.org, acp-test.org, tmux-test.org,
+etc.) are driven by hand against real Phoenix + cmux + Claude Code, so
+no ert suite executes their AI blocks. Broken org syntax silently
+breaks the harness; this is the cheapest structural invariant we can
+check at smoke time.
 
-FIX: open the failing fixture, run `M-x org-lint' or look for an
-unbalanced `#+begin_src' / `#+end_src' pair.
+FIX: open the failing fixture and look for an unbalanced
+`#+begin_src' / `#+end_src' pair (or run `M-x org-lint').
 
 If you DELETE a fixture, also drop the runbook section that drives
 it in tests/e2e/living-workspace-test.org."
@@ -109,23 +106,20 @@ it in tests/e2e/living-workspace-test.org."
       (when (file-directory-p e2e-org-dir)
         (dolist (file (directory-files e2e-org-dir nil "\\.org\\'"))
           (let ((path (expand-file-name file e2e-org-dir)))
-            (condition-case err
-                (with-temp-buffer
+            (with-temp-buffer
+              (condition-case err
                   (insert-file-contents path)
-                  (delay-mode-hooks (org-mode))
-                  ;; Cheapest structural invariant: every #+begin_src
-                  ;; must have a matching #+end_src.
-                  (let ((begins (count-matches "^[[:blank:]]*#\\+begin_src\\b"
-                                               (point-min) (point-max)))
-                        (ends (count-matches "^[[:blank:]]*#\\+end_src\\b"
-                                             (point-min) (point-max))))
-                    (unless (= begins ends)
-                      (push (format "%s: %d begin_src vs %d end_src"
-                                    file begins ends)
-                            failures))))
-              (error
-               (push (format "%s: %s" file (error-message-string err))
-                     failures)))))
+                (error
+                 (push (format "%s: %s" file (error-message-string err))
+                       failures)))
+              (let ((begins (count-matches "^[[:blank:]]*#\\+begin_src\\b"
+                                           (point-min) (point-max)))
+                    (ends (count-matches "^[[:blank:]]*#\\+end_src\\b"
+                                         (point-min) (point-max))))
+                (unless (= begins ends)
+                  (push (format "%s: %d begin_src vs %d end_src"
+                                file begins ends)
+                        failures))))))
         (should (or (null failures)
                     (error "E2E fixtures with structural errors:\n%s"
                            (mapconcat #'identity failures "\n"))))))))

@@ -150,36 +150,29 @@
       (should (eq (alist-get 'parentId test-span) :null)))))
 
 (ert-deftest test-e2e-local-with-span-no-context-untraced ()
-  "claude-agent-with-span runs body untraced when no trace context exists.
+  "`claude-agent-with-span' returns its body value but exports no span
+when no trace context is active.
 
-This asserts the *current* design (commit 775cecd, 2026-03-20): if
-neither an explicit TRACE-CTX nor a dynamically bound
-`claude-agent-trace--current-context' is present, the macro must run
-its body without emitting a span — auto-promoting to root in that case
-produced noisy stray root spans from timers, MCP callbacks, and other
-async paths (cmux-call, cmux-permission-resolved, auto-title-complete).
-
-The body MUST still return its value; only the span export is skipped."
+This locks in the current design (commit 775cecd, 2026-03-20): without
+an explicit TRACE-CTX or a dynamically bound
+`claude-agent-trace--current-context', the macro skips span export.
+Auto-promoting to root in that case produced noisy stray roots from
+timers and MCP callbacks (cmux-call, cmux-permission-resolved,
+auto-title-complete)."
   :tags '(:local-e2e)
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--bridge-url))
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--phoenix-url))
-  (let ((claude-agent-trace-enabled t)
-        (claude-agent-trace--current-context nil)
-        ;; Use a unique span name so a stale span from an earlier run
-        ;; can't accidentally satisfy the assertion.
-        (probe-name (format "e2e-no-context-probe-%d" (truncate (* (float-time) 1000)))))
-    (let ((result (claude-agent-with-span probe-name
-                      (list :input "no-context verification") nil
-                    "done")))
-      ;; Body must still evaluate and return its value.
-      (should (equal result "done")))
+  (let* ((claude-agent-trace-enabled t)
+         (claude-agent-trace--current-context nil)
+         ;; Unique name so stale spans from earlier runs can't satisfy the assertion.
+         (probe-name (make-temp-name "e2e-no-context-probe-"))
+         (result (claude-agent-with-span probe-name
+                     (list :input "no-context verification") nil
+                   "done")))
+    (should (equal result "done"))
     (sleep-for 3)
-    ;; And no span with that unique name should have been exported.
-    (let* ((spans (test-e2e-local--recent-spans 20))
-           (probe-span (seq-find (lambda (s)
-                                   (equal (alist-get 'name s) probe-name))
-                                 spans)))
-      (should (null probe-span)))))
+    (should (null (seq-find (lambda (s) (equal (alist-get 'name s) probe-name))
+                            (test-e2e-local--recent-spans 20))))))
 
 (ert-deftest test-e2e-local-child-span-has-parent ()
   "Child spans created within a trace have correct parentId."
