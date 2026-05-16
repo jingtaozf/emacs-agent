@@ -82,5 +82,53 @@ FIX: Check the failing test file for missing (require ...) or syntax errors."
                            (length failures)
                            (mapconcat #'identity failures "\n"))))))))
 
+;;; Smoke test: tests/e2e/org/ living fixtures are well-formed org
+
+(ert-deftest test-agent-workflow-e2e-org-fixtures-loadable ()
+  "Every committed fixture in tests/e2e/org/ must parse cleanly as org.
+
+These are the *living* fixtures the human + agent harness drive by
+hand (workspace-test.org, acp-test.org, tmux-test.org, etc.). There
+is no ert suite that *executes* the AI blocks inside them — that's
+intentional, they require Phoenix + cmux + Claude Code CLI running.
+But broken org-syntax in a fixture silently breaks the harness, so
+this smoke test enforces the cheapest invariant we can: the file is
+loadable in `org-mode' with no parse errors, and every
+`#+begin_src' has a matching `#+end_src'.
+
+FIX: open the failing fixture, run `M-x org-lint' or look for an
+unbalanced `#+begin_src' / `#+end_src' pair.
+
+If you DELETE a fixture, also drop the runbook section that drives
+it in tests/e2e/living-workspace-test.org."
+  :tags '(:unit :fast :stable :smoke)
+  (when test-agent-workflow--project-root
+    (let* ((e2e-org-dir (expand-file-name "tests/e2e/org"
+                                          test-agent-workflow--project-root))
+           (failures nil))
+      (when (file-directory-p e2e-org-dir)
+        (dolist (file (directory-files e2e-org-dir nil "\\.org\\'"))
+          (let ((path (expand-file-name file e2e-org-dir)))
+            (condition-case err
+                (with-temp-buffer
+                  (insert-file-contents path)
+                  (delay-mode-hooks (org-mode))
+                  ;; Cheapest structural invariant: every #+begin_src
+                  ;; must have a matching #+end_src.
+                  (let ((begins (count-matches "^[[:blank:]]*#\\+begin_src\\b"
+                                               (point-min) (point-max)))
+                        (ends (count-matches "^[[:blank:]]*#\\+end_src\\b"
+                                             (point-min) (point-max))))
+                    (unless (= begins ends)
+                      (push (format "%s: %d begin_src vs %d end_src"
+                                    file begins ends)
+                            failures))))
+              (error
+               (push (format "%s: %s" file (error-message-string err))
+                     failures)))))
+        (should (or (null failures)
+                    (error "E2E fixtures with structural errors:\n%s"
+                           (mapconcat #'identity failures "\n"))))))))
+
 (provide 'test-agent-workflow)
 ;;; test-agent-workflow.el ends here

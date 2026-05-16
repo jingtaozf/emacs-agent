@@ -149,24 +149,37 @@
       (should (not (null test-span)))
       (should (eq (alist-get 'parentId test-span) :null)))))
 
-(ert-deftest test-e2e-local-with-span-auto-promote ()
-  "claude-agent-with-span auto-promotes to root when no context exists."
+(ert-deftest test-e2e-local-with-span-no-context-untraced ()
+  "claude-agent-with-span runs body untraced when no trace context exists.
+
+This asserts the *current* design (commit 775cecd, 2026-03-20): if
+neither an explicit TRACE-CTX nor a dynamically bound
+`claude-agent-trace--current-context' is present, the macro must run
+its body without emitting a span — auto-promoting to root in that case
+produced noisy stray root spans from timers, MCP callbacks, and other
+async paths (cmux-call, cmux-permission-resolved, auto-title-complete).
+
+The body MUST still return its value; only the span export is skipped."
   :tags '(:local-e2e)
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--bridge-url))
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--phoenix-url))
   (let ((claude-agent-trace-enabled t)
-        (claude-agent-trace--current-context nil))
-    ;; with-span with no context should auto-promote to root
-    (claude-agent-with-span "e2e-auto-promote-test"
-        (list :input "auto-promote verification") nil
-      "done")
+        (claude-agent-trace--current-context nil)
+        ;; Use a unique span name so a stale span from an earlier run
+        ;; can't accidentally satisfy the assertion.
+        (probe-name (format "e2e-no-context-probe-%d" (truncate (* (float-time) 1000)))))
+    (let ((result (claude-agent-with-span probe-name
+                      (list :input "no-context verification") nil
+                    "done")))
+      ;; Body must still evaluate and return its value.
+      (should (equal result "done")))
     (sleep-for 3)
+    ;; And no span with that unique name should have been exported.
     (let* ((spans (test-e2e-local--recent-spans 20))
-           (test-span (seq-find (lambda (s)
-                                  (equal (alist-get 'name s) "e2e-auto-promote-test"))
-                                spans)))
-      (should (not (null test-span)))
-      (should (eq (alist-get 'parentId test-span) :null)))))
+           (probe-span (seq-find (lambda (s)
+                                   (equal (alist-get 'name s) probe-name))
+                                 spans)))
+      (should (null probe-span)))))
 
 (ert-deftest test-e2e-local-child-span-has-parent ()
   "Child spans created within a trace have correct parentId."
