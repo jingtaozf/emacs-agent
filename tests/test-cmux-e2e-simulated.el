@@ -2324,10 +2324,10 @@ of the code (restart paths, recovery) depends on."
 
 (ert-deftest test-cmux-verbose-filter-caps-buffer-size ()
   "Filter bounds the verbose buffer at
-`code-agent-org-cmux-verbose-buffer-max-size'.  Regression test: the
+`claude-agent-multiplexer-verbose-buffer-max-size'.  Regression test: the
 --follow stream filter (introduced in 1f016b8) appended forever."
   :tags '(:unit :stable :e2e)
-  (let* ((code-agent-org-cmux-verbose-buffer-max-size 1024)
+  (let* ((claude-agent-multiplexer-verbose-buffer-max-size 1024)
          (buf (get-buffer-create " *test-cmux-verbose-cap*"))
          (proc-buf (generate-new-buffer " *test-proc*"))
          (proc (start-process "test-cmux-cap" proc-buf "sleep" "60")))
@@ -2338,7 +2338,7 @@ of the code (restart paths, recovery) depends on."
           (dotimes (i 10)
             (let ((chunk (concat (make-string 499 (+ ?a i)) "\n")))
               (code-agent-org-cmux--verbose-follow-filter proc chunk)))
-          (should (<= (buffer-size buf) code-agent-org-cmux-verbose-buffer-max-size))
+          (should (<= (buffer-size buf) claude-agent-multiplexer-verbose-buffer-max-size))
           ;; Most recent content is retained.
           (should (with-current-buffer buf
                     (goto-char (point-max))
@@ -2351,7 +2351,7 @@ of the code (restart paths, recovery) depends on."
   "Filter trims whole lines from the start — no half-truncated
 line at `point-min' after the cap triggers."
   :tags '(:unit :stable :e2e)
-  (let* ((code-agent-org-cmux-verbose-buffer-max-size 100)
+  (let* ((claude-agent-multiplexer-verbose-buffer-max-size 100)
          (buf (get-buffer-create " *test-cmux-whole-lines*"))
          (proc-buf (generate-new-buffer " *test-proc2*"))
          (proc (start-process "test-cmux-whole" proc-buf "sleep" "60")))
@@ -2362,7 +2362,7 @@ line at `point-min' after the cap triggers."
             (code-agent-org-cmux--verbose-follow-filter
              proc (format "line-%02d-content\n" i)))
           (with-current-buffer buf
-            (should (<= (buffer-size) code-agent-org-cmux-verbose-buffer-max-size))
+            (should (<= (buffer-size) claude-agent-multiplexer-verbose-buffer-max-size))
             (goto-char (point-min))
             (should (looking-at "^line-"))))
       (when (process-live-p proc) (delete-process proc))

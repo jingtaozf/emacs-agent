@@ -1781,19 +1781,6 @@ tick; a subsequent `ensure-session' will repopulate the cache."
                       (match-string 1 session-key)))))
     (when ws-sid
       (gethash ws-sid code-agent-org-cmux--workspace-to-cmux-id))))
-
-(defun code-agent-org-cmux--verbose-strip-ansi (chunk)
-  "Best-effort strip of ANSI escapes + control chars from CHUNK.
-
-Stripping is deliberately lossy: we discard colour, cursor
-positioning, and clear-screen sequences.  Preserving them would
-require a tty emulator inside the verbose buffer — disproportionate
-for a read-only debug view.  A handful of safe whitespace chars
-(newline, tab, carriage return) survive so the stream remains
-line-structured."
-  (replace-regexp-in-string
-   "\x1b\\[[0-9;?]*[a-zA-Z]\\|\x1b\\][^\a\x1b]*\\(?:\a\\|\x1b\\\\\\)\\|[\x00-\x08\x0b\x0c\x0e-\x1f]"
-   "" chunk))
 #+END_SRC
 
 ** Verbose Buffer Memory Cap
@@ -1811,32 +1798,24 @@ display readable (no half-truncated line at =point-min=).  The
 default 256 KB ≈ hundreds of scrolled screens — plenty for
 debugging, cheap to hold.
 
+The ANSI strip + ceiling defcustom both live in
+=claude-agent-multiplexer.org= (shared with tmux); this filter
+reads from there directly — no cmux-private copies.
+
 #+BEGIN_SRC elisp
-(defcustom code-agent-org-cmux-verbose-buffer-max-size (* 256 1024)
-  "Ceiling in bytes for each `*cmux: <id>*' verbose buffer.
-
-The `--follow' stream filter appends forever, so without a cap the
-buffer accumulates unbounded terminal scrollback.  When the buffer
-exceeds this size, whole lines are trimmed from the start.
-
-nil disables trimming — long sessions will grow without bound."
-  :type '(choice (const :tag "No cap (unbounded growth)" nil)
-                 (integer :tag "Max bytes"))
-  :group 'code-agent-org)
-
 (defun code-agent-org-cmux--verbose-follow-filter (proc chunk)
   "Append CHUNK (scrubbed) from `cmux capture-pane --follow' to the verbose buffer.
 
 Trims whole lines from the start when the buffer exceeds
-`code-agent-org-cmux-verbose-buffer-max-size' so long-running sessions
-don't accumulate unbounded memory.
+`claude-agent-multiplexer-verbose-buffer-max-size' so long-running
+sessions don't accumulate unbounded memory.
 
 Auto-scrolls only windows that were already at `point-max' — a user
 reading an earlier page keeps their scroll position as new content
 lands after the visible window."
   (let ((vbuf (process-get proc 'verbose-buffer)))
     (when (buffer-live-p vbuf)
-      (let ((scrubbed (code-agent-org-cmux--verbose-strip-ansi chunk)))
+      (let ((scrubbed (claude-agent-multiplexer--strip-ansi chunk)))
         (when (> (length scrubbed) 0)
           (with-current-buffer vbuf
             (let ((win-states nil))
@@ -1847,12 +1826,12 @@ lands after the visible window."
                   (goto-char (point-max))
                   (insert scrubbed))
                 ;; Trim whole lines from the start when over cap.
-                (when (and code-agent-org-cmux-verbose-buffer-max-size
+                (when (and claude-agent-multiplexer-verbose-buffer-max-size
                            (> (buffer-size)
-                              code-agent-org-cmux-verbose-buffer-max-size))
+                              claude-agent-multiplexer-verbose-buffer-max-size))
                   (save-excursion
                     (goto-char (- (point-max)
-                                  code-agent-org-cmux-verbose-buffer-max-size))
+                                  claude-agent-multiplexer-verbose-buffer-max-size))
                     (forward-line 1)
                     (delete-region (point-min) (point)))))
               (dolist (state win-states)
