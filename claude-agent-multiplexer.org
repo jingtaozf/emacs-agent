@@ -101,20 +101,6 @@ for this backend's identity, otherwise launch fresh.
 Returns the session id.  Concrete multiplexers must override.")
 #+END_SRC
 
-*** Resolve session by heading
-
-Recover session identity from org heading (stable identity across
-Emacs restarts). Walks the multiplexer's current sessions looking
-for a name match.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric claude-agent-mux-resolve-session-by-heading (backend heading)
-  "Return existing multiplexer session id matching HEADING, or nil.
-Used for session recovery.  Concrete multiplexers override."
-  (ignore backend heading)
-  nil)
-#+END_SRC
-
 *** Send text
 
 Type text into the current pane, respecting vi-mode / non-vi-mode
@@ -194,28 +180,6 @@ agent profile's ready/busy patterns.
   :missing)
 #+END_SRC
 
-*** Wait for ready
-
-Block (event-driven or polling) until the agent's TUI reports ready.
-Default polls =session-status= every 0.2 s up to =timeout= seconds.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric claude-agent-mux-wait-for-ready (backend &optional timeout)
-  "Block until BACKEND's agent TUI is :ready, up to TIMEOUT seconds.
-
-Default polls `claude-agent-mux-session-status' on the *main thread*
-via `sit-for' — this stalls redisplay for up to TIMEOUT seconds if
-the agent never becomes ready.  Concrete multiplexers SHOULD override
-with an async wait (e.g. cmux's `wait-for claude-ready-<id>' event
-sub-command + sentinel) to avoid blocking the editor.  This default
-is a functional fallback for development only."
-  (let ((deadline (+ (float-time) (or timeout 15.0))))
-    (while (and (< (float-time) deadline)
-                (not (eq :ready (claude-agent-mux-session-status backend))))
-      (sit-for 0.2))
-    (eq :ready (claude-agent-mux-session-status backend))))
-#+END_SRC
-
 *** Rename
 
 Set the workspace / tab title. cmux overrides to call its sidebar API;
@@ -229,17 +193,6 @@ Default: no-op."
   nil)
 #+END_SRC
 
-*** Apply style
-
-Set workspace color / icon. cmux-only feature; tmux default is no-op.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric claude-agent-mux-apply-style (backend color icon)
-  "Apply workspace COLOR and ICON to BACKEND (cmux-only).  Default: no-op."
-  (ignore backend color icon)
-  nil)
-#+END_SRC
-
 *** Focus
 
 Raise BACKEND's workspace to the foreground (for permission alerts, etc.).
@@ -247,18 +200,6 @@ Raise BACKEND's workspace to the foreground (for permission alerts, etc.).
 #+BEGIN_SRC elisp
 (cl-defgeneric claude-agent-mux-focus (backend)
   "Raise BACKEND's workspace to foreground.  Default: no-op."
-  (ignore backend)
-  nil)
-#+END_SRC
-
-*** Restart agent
-
-Send exit to the current TUI, wait for shell prompt, re-spawn the agent.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric claude-agent-mux-restart-agent (backend)
-  "Send exit to BACKEND's agent, wait, re-spawn in same pane.
-Concrete multiplexers override."
   (ignore backend)
   nil)
 #+END_SRC
