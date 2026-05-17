@@ -89,6 +89,7 @@
 (claude-code--load-module "code-agent-org-queue")
 (claude-code--load-module "code-agent-org-response")
 (claude-code--load-module "code-agent-org")
+(claude-code--load-module "code-agent-org-header-line")
 (claude-code--load-module "code-agent-org-scheduled")
 (claude-code--load-module "code-agent-org-workspace-bridge")
 (claude-code--load-module "code-agent-org-terminal-base")

@@ -41,7 +41,8 @@ LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-jsonrpc.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-gemini.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-codex.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
-LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/code-agent-org.org\")"
+LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/code-agent-org.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/code-agent-org-header-line.org\")"
 # Presets for common combinations
 LOAD_AGENT_ONLY = $(LOAD_LITERATE) $(LOAD_AGENT)
 LOAD_ALL = $(LOAD_LITERATE) $(LOAD_AGENT) $(LOAD_MCP) $(LOAD_ORG)
