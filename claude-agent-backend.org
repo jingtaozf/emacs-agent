@@ -13,8 +13,11 @@ lifecycle generics + Protocol 3 org-integration generics, dispatched on
 the abstract =claude-agent-backend= struct) and the *concrete shipped
 agent backend* (=claude-agent-claude-code-backend=, the JSON-stream-
 over-stdio family). The two-family split — agent-family vs multiplexer-
-family — sits in =claude-agent-agent.org= and =claude-agent-multiplexer.org=
-respectively and inherits from the protocols defined here.
+family — comes from two inheritance roots: agent backends subclass
+this file's =claude-agent-backend= directly; multiplexer backends
+subclass =claude-agent-multiplexer-backend= in
+=claude-agent-multiplexer.org=, which in turn inherits the protocols
+defined here.
 
 Read order if you're new to this file:
 
@@ -3459,36 +3462,35 @@ master–slave; the frontend should dispatch identically through both.
                              │               │
         ┌────────────────────┘               └────────────────────┐
         │                                                         │
-┌───────▼─────────────────────────┐         ┌───────────────────▼─────────────┐
-│ claude-agent-agent-backend      │         │ claude-agent-multiplexer-backend │
-│ (abstract — AI-agent family)    │         │ (abstract — terminal multiplexer)│
-│                                 │         │                                  │
-│ ★ Protocol 2a: agent wire       │         │ ★ Protocol 2b: multiplexer wire  │
-│    handshake / send-prompt /    │         │    launch-session / send-text /  │
-│    load-session / interrupt /   │         │    send-key / capture-screen /   │
-│    handle-permission /          │         │    start-follower / stop-…  /    │
-│    stream-event / spawn-cmd     │         │    session-status / wait-for-… / │
-│                                 │         │    rename / apply-style / focus  │
-└────────────┬────────────────────┘         └─────────────────┬────────────────┘
-             │                                                │
-   ┌─────────┼─────────┐                          ┌───────────┴────────┐
-   │                   │                          │                    │
-claude-code-      acp-agent-backend          cmux-backend         tmux-backend
-backend           (abstract)
-                       │
-                ┌──────┼──────┐
-                │      │      │
-            opencode gemini codex
+   (agent family inherits                              ┌──────────▼──────────────────┐
+   `claude-agent-backend` directly)                    │ claude-agent-multiplexer-     │
+        │                                              │ backend  (abstract base for   │
+   ┌────┼─────────┐                                    │ terminal-multiplexer family)  │
+   │              │                                    │                               │
+claude-code-  acp-backend                              │ ★ Protocol 2b: launch-session │
+backend       (abstract)                               │    send-text / send-key /     │
+                  │                                    │    capture-screen /           │
+           ┌──────┼──────┐                             │    start-follower / stop-… /  │
+           │      │      │                             │    session-status / rename /  │
+       opencode gemini codex                           │    focus                      │
+                                                       └────────────────┬──────────────┘
+                                                                        │
+                                                              ┌─────────┴────────┐
+                                                              │                  │
+                                                          cmux-backend     tmux-backend
 #+end_example
 
-The four protocols form a clean separation:
+The three protocols form a clean separation:
 
 | Protocol | Receiver | Purpose |
 |----------+----------+---------|
 | 1 — lifecycle | =claude-agent-backend= | query / cancel / cleanup / introspect — what every backend does |
-| 2a — agent wire | =claude-agent-agent-backend= | handshake / send-prompt / stream-event — how to talk to an AI agent |
 | 2b — multiplexer wire | =claude-agent-multiplexer-backend= | launch-session / send-text / capture-screen — how to talk to a terminal multiplexer |
 | 3 — org-integration | =claude-agent-backend= | execute-block / append-response / cancel-from-org — how to plug a backend into a code-agent-org buffer |
+
+(Protocol 2a — agent wire — was retired in 2026-05.  The aspirational
+=claude-agent-agent-backend= base class had zero subclasses; concrete
+agent backends inherit from =claude-agent-backend= directly.)
 
 ** Why Three Layers on the Agent Side
 
@@ -3599,11 +3601,10 @@ These are not historical — they constrain every change to this layer:
   resource-leak fix that should not be re-derived per multiplexer.
   Per =.claude/rules/bounded-resource-usage.md=.
 
-The concrete subprotocols and their generics are documented in their
-own modules: Protocol 2a in =claude-agent-agent.org=, Protocol 2b in
-=claude-agent-multiplexer.org=. The Backend Protocol section below
-defines Protocol 1 and the Org-Integration generics (Protocol 3) that
-both families consume.
+The remaining family-specific protocol — Protocol 2b for multiplexers
+— lives in =claude-agent-multiplexer.org=. The Backend Protocol
+section below defines Protocol 1 and the Org-Integration generics
+(Protocol 3) that every backend consumes.
 
 * Backend Protocol
 :PROPERTIES:

@@ -9,16 +9,14 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'claude-agent-backend)
-(require 'claude-agent-agent)
 (require 'claude-agent-multiplexer)
 (require 'claude-agent-cmux-backend)
 (require 'claude-agent-tmux-backend)
 
 ;;; Test fixture — a minimal concrete agent backend for dispatch testing.
-;;;
-;;; We cannot instantiate `claude-agent-agent-backend' directly (abstract
-;;; base, `:constructor nil') so we use `claude-agent-claude-code-backend'
-;;; which is a concrete subclass.
+;;; `claude-agent-backend' is the Protocol 1 base (`:constructor nil',
+;;; abstract).  Concrete agents inherit from it directly; we instantiate
+;;; `claude-agent-claude-code-backend' for dispatch tests.
 
 (defun test-p3--fresh-claude-code-backend ()
   "Return a fresh `claude-agent-claude-code-backend' for Protocol 3 dispatch tests."

@@ -1523,7 +1523,7 @@ FIX: Use (cond ((equal X \"str\") body)) instead."
     (and entry (memq lnum (cdr entry)))))
 
 (defvar test-structural--pcase-string-allowlist
-  '(("claude-agent-backend.org" . (2245 2277))
+  '(("claude-agent-backend.org" . (2248 2280))
     ("claude-ide.org" . (418 652 899))
     ("code-agent-org-scheduled.org" . (214))
     ("emacs-mcp-server.org" . (738)))

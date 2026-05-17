@@ -19,8 +19,7 @@
 ;;
 ;; This is the package entry point that loads all modules via literate-elisp:
 ;; - claude-agent.org: Core SDK for process management, query API, permissions
-;; - claude-agent-agent.org: Abstract base for AI-agent backends (Protocol 2a)
-;; - claude-agent-multiplexer.org: Abstract base for multiplexer backends (Protocol 2b)
+;; - claude-agent-multiplexer.org: Abstract base for multiplexer backends
 ;; - code-agent-org.org: Org-mode integration with AI blocks and streaming
 ;; - emacs-mcp-server.org: MCP HTTP server exposing Emacs tools to Claude
 ;;
@@ -61,11 +60,11 @@
 (claude-code--load-module "claude-agent-backend")
 (claude-code--load-module "claude-agent-permission")
 (claude-code--load-module "claude-agent-ide")
-;; Abstract bases for the two backend families (Phase 0 of the
-;; tri-protocol refactor — see
-;; docs/design-docs/2026-tri-protocol-backend-refactor.org).
-;; Skeleton-only: no concrete backend inherits from these yet.
-(claude-code--load-module "claude-agent-agent")
+;; Abstract base for multiplexer backends (tri-protocol Protocol 2b —
+;; see docs/design-docs/2026-tri-protocol-backend-refactor.org).
+;; The agent-wire base (Protocol 2a) was removed in 2026-05: zero
+;; subclasses, zero callers — every agent backend inherits directly
+;; from `claude-agent-backend' (Protocol 1).
 (claude-code--load-module "claude-agent-multiplexer")
 ;; Concrete multiplexer backends register here as subclasses of the
 ;; abstract multiplexer-backend and are added to
