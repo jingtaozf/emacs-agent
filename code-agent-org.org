@@ -3389,32 +3389,55 @@ The primary insertion command. Key behaviors:
 - Tags the heading with =code-agent-org-heading-tag=
 *** Core Block Insertion
 
-**** Finding Previous Chat Level
+**** Finding Previous Chat / Workspace Level
 
-To insert a new AI block at the correct level, we need to find the most recent
-chat section - any heading with =:claude_chat:= tag.
+To insert a new AI block at the correct level, we have to find an enclosing
+*chat* heading (any with =:claude_chat:= tag) or *workspace* heading (any
+with a =CLAUDE_SESSION_ID= property starting with =sdd-=). The two scans
+share a shape: =save-excursion + widen=, scan backward through headings,
+test a predicate at each candidate, return its level. The workspace case
+also falls back to a forward scan from =point-min= so the very first
+workspace in a buffer is reachable when point precedes it.
 
-#+NAME: block-find-chat-level
+=code-agent-org--find-heading-level-matching= captures that shared shape;
+each named finder becomes a thin wrapper that supplies its predicate.
+Removed a third sibling (=--find-previous-story-level=) that had no
+callers anywhere in the repo — pure scaffolding.
+
+#+NAME: block-find-heading-level
 #+BEGIN_SRC elisp
-(defun code-agent-org--find-previous-chat-level ()
-  "Find the level of the most recent :claude_chat: section before point.
-Searches backwards for any heading with :claude_chat: tag.
-Returns the level (integer) or nil if not found."
+(defun code-agent-org--find-heading-level-matching (predicate &optional bidirectional)
+  "Return the org level of the nearest backward heading where PREDICATE holds.
+PREDICATE is called at each heading line and must return non-nil to match.
+If BIDIRECTIONAL is non-nil and the backward scan finds nothing, also scan
+forward from `point-min' up to the original point. Returns an integer
+level or nil."
   (save-excursion
     (save-restriction
       (widen)
-      (let ((found-level nil)
-            (chat-tag-pattern (format ":%s:" code-agent-org-heading-tag)))
-        ;; Search backwards through all headings
+      (let ((start-pos (point))
+            (found-level nil))
         (while (and (not found-level)
-                    (re-search-backward "^\\(\\*+\\) " nil t))
-          (let* ((level (length (match-string 1)))
-                 (line (buffer-substring-no-properties
-                        (point) (line-end-position))))
-            ;; Check for :claude_chat: tag only
-            (when (string-match-p chat-tag-pattern line)
-              (setq found-level level))))
+                    (re-search-backward "^\\*+ " nil t))
+          (when (funcall predicate)
+            (setq found-level (org-current-level))))
+        (when (and bidirectional (not found-level))
+          (goto-char (point-min))
+          (while (and (not found-level)
+                      (re-search-forward "^\\*+ " start-pos t))
+            (when (funcall predicate)
+              (setq found-level (org-current-level)))))
         found-level))))
+
+(defun code-agent-org--find-previous-chat-level ()
+  "Find the level of the nearest :claude_chat:-tagged heading before point.
+Returns the level (integer) or nil if not found."
+  (let ((tag-pattern (format ":%s:" code-agent-org-heading-tag)))
+    (code-agent-org--find-heading-level-matching
+     (lambda ()
+       (string-match-p tag-pattern
+                       (buffer-substring-no-properties
+                        (point) (line-end-position)))))))
 #+END_SRC
 
 **** Inserting the Block
@@ -3505,29 +3528,6 @@ The :claude_session: tag creates a new conversation context for this subtree."
     (insert "#+begin_src ai\n\n#+end_src")
     (forward-line -1)))
 
-(defun code-agent-org--find-previous-story-level ()
-  "Find the level of the most recent story section before point.
-Searches backwards from current position for a heading with CLAUDE_SESSION_ID
-property starting with 'story-'. Returns the level (integer) or nil if not found."
-  (save-excursion
-    (save-restriction
-      (widen)
-      (let ((start-pos (point))
-            (found-level nil))
-        ;; Search backwards through all headings
-        (while (and (not found-level)
-                    (re-search-backward "^\\*+ " nil t))
-          (when (string-prefix-p "story-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
-            (setq found-level (org-current-level))))
-        ;; If not found before point, search from beginning (for stories after point)
-        (unless found-level
-          (goto-char (point-min))
-          (while (and (not found-level)
-                      (re-search-forward "^\\*+ " start-pos t))
-            (when (string-prefix-p "story-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
-              (setq found-level (org-current-level)))))
-        found-level))))
-
 (defun code-agent-org-insert-story ()
   "Insert a new story under the current workspace.
 Prompts for story title and creates a sub-heading with Workflow and
@@ -3576,27 +3576,14 @@ Sets ACTIVE_STORY on the workspace heading."
       (message "Created story '%s' under workspace '%s'" title (car ws)))))
 
 (defun code-agent-org--find-previous-workspace-level ()
-  "Find the level of the most recent workspace section before point.
-Searches backwards from current position for a heading with CLAUDE_SESSION_ID
-property starting with 'sdd-'. Returns the level (integer) or nil if not found."
-  (save-excursion
-    (save-restriction
-      (widen)
-      (let ((start-pos (point))
-            (found-level nil))
-        ;; Search backwards through all headings
-        (while (and (not found-level)
-                    (re-search-backward "^\\*+ " nil t))
-          (when (string-prefix-p "sdd-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
-            (setq found-level (org-current-level))))
-        ;; If not found before point, search from beginning (for workspaces after point)
-        (unless found-level
-          (goto-char (point-min))
-          (while (and (not found-level)
-                      (re-search-forward "^\\*+ " start-pos t))
-            (when (string-prefix-p "sdd-" (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
-              (setq found-level (org-current-level)))))
-        found-level))))
+  "Find the level of the nearest workspace heading (CLAUDE_SESSION_ID starts
+with \"sdd-\"). Falls back to a forward scan from buffer start so a
+workspace placed after point is still reachable. Returns the level
+(integer) or nil if not found."
+  (code-agent-org--find-heading-level-matching
+   (lambda ()
+     (string-prefix-p "sdd-" (or (org-entry-get nil "CLAUDE_SESSION_ID") "")))
+   t))
 
 (defcustom code-agent-org-workspace-docs-format "org"
   "File format for workspace docs/ artifacts (research, design-docs).
@@ -4380,10 +4367,10 @@ since activeForm is the present continuous form of the same task."
   (let* ((content (plist-get todo :content))
          (status (plist-get todo :status))
          (active-form (plist-get todo :activeForm))
-         (checkbox (pcase status
-                     ("completed" "[X]")
-                     ("in_progress" "[-]")
-                     (_ "[ ]")))
+         (checkbox (cond
+                    ((equal status "completed") "[X]")
+                    ((equal status "in_progress") "[-]")
+                    (t "[ ]")))
          ;; Use activeForm for in_progress, content otherwise
          (display-text (if (and (string= status "in_progress") active-form)
                            active-form
@@ -4498,14 +4485,14 @@ between #+end_src and Response section, and updates the heading cookie."
   "Handle special TOOL-NAME with TOOL-INPUT for SESSION-KEY.
 For TodoWrite: updates in-place under instruction heading, returns nil.
 For other tools: returns formatted string to insert, or nil if not special."
-  (pcase tool-name
-    ("TodoWrite"
-     (let ((todos (plist-get tool-input :todos)))
-       ;; Update todos in-place under instruction heading (not at marker)
-       (code-agent-org--update-todos-in-place session-key todos)
-       ;; Return nil so nothing is inserted at streaming marker
-       nil))
-    (_ nil)))
+  (cond
+   ((equal tool-name "TodoWrite")
+    (let ((todos (plist-get tool-input :todos)))
+      ;; Update todos in-place under instruction heading (not at marker)
+      (code-agent-org--update-todos-in-place session-key todos)
+      ;; Return nil so nothing is inserted at streaming marker
+      nil))
+   (t nil)))
 
 (defun code-agent-org--handle-message (session-key msg)
   "Handle incoming MSG for SESSION-KEY.
@@ -6220,18 +6207,6 @@ The protection must be global because it runs in process filter context."
     (setq claude-agent-permission-functions
           (delq #'code-agent-org-permission-protect-org
                 claude-agent-permission-functions))))
-#+END_SRC
-
-** Session Cleanup
-
-#+BEGIN_SRC elisp
-(defun code-agent-org--find-previous-section-level ()
-  "Return the org heading level at the current heading.
-Unified helper — callers should be at or near the heading of interest."
-  (save-excursion
-    (condition-case nil
-        (progn (org-back-to-heading t) (org-current-level))
-      (error 1))))
 #+END_SRC
 
 * Package Footer
