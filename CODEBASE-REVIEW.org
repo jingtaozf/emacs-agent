@@ -1,14 +1,7 @@
 #+TITLE: Design: Codebase Review — Architecture, Quality, and Harness Improvements
 #+DATE: [2026-03-12]
-#+STATUS: superseded (recommendations folded into Tri-Protocol + E2E + Phoenix tracing)
+#+STATUS: active (open-items log; DONE entries cleared 2026-05)
 
-* Reality check (2026-04-27)
-Architecture concerns absorbed by *Tri-Protocol Backend Refactor* (shipped).
-Test-harness concerns absorbed by *E2E Test Strategy* + *Comprehensive E2E
-Coverage* (shipped via `tests/e2e/E2E_TASKS.org`).  Tracing/observability
-concerns absorbed by *Unified Tracing* (shipped).  This doc is preserved
-for the original review findings; consult the named design docs for current
-implementation status of each.
 
 * Overview
 
@@ -17,25 +10,6 @@ architecture, code quality, and test harness engineering. Findings are
 ranked by severity and grouped into actionable proposals.
 
 * Architecture Findings
-
-** A1. Parallel State Tracking Structures (HIGH) — active-states DONE
-
-*Status (active-states)*: Implemented [2026-03-29]
-
-The standalone =claude-agent--active-states= defvar and all =setq= sync points have
-been removed from =claude-agent-backend.org=.  All reads go through
-=claude-agent-registry-active-states= (defsubst accessor) or the struct accessor
-=claude-agent--registry-active-states=.  All writes use =setf= on the struct field.
-Test code in =test-claude-agent-state-management.el= updated to use registry accessors.
-Structural test =test-structural-no-active-states-alias= (F38) prevents reintroduction.
-
-*Remaining*: =claude-agent--pending-background-tasks= and
-=claude-agent--pending-control-requests= still exist as hash-table aliases.
-These are safe (same object as registry fields — mutations are visible through
-both names) but should be consolidated in a future iteration for consistency.
-
-*Proposal*: Consolidate all state into the unified =claude-agent--registry=. Remove the standalone
-variables. All reads/writes go through registry accessors.
 
 ** A2. Backend References MCP Server Variable (MEDIUM)
 
@@ -80,18 +54,6 @@ method implementations.
 validates new backends declare capabilities.
 
 * Code Quality Findings
-
-** DONE Q1. Process Filter Has No =condition-case= (HIGH) :done:
-
-*Status*: Implemented [2026-03-29]
-
-Both =claude-agent--process-filter= and =claude-agent--process-sentinel= now have
-=condition-case= guards. Structural test =test-structural-process-filters-guarded=
-(F36 in =test-structural.el=) enforces that all functions named =*process-filter*=
-or =*process-sentinel*= in source .org files contain =condition-case=.
-
-*Proposal*: Wrap process filter, sentinel, and cleanup timer in =condition-case= with error
-logging. Add a structural test that verifies all process filters are guarded.
 
 ** Q2. =McpClient.eval_elisp= Returns =None= for All Failures (MEDIUM)
 
@@ -143,29 +105,6 @@ afterwards. Property is lost on unexpected Emacs exit.
 
 *Proposal*: Add =save-buffer= call (with =inhibit-message= t) inside the function.
 
-** DONE Q11. Duplicate =claude-agent--extract-error-message= (MEDIUM) :done:
-
-*Status*: Verified [2026-03-29]
-
-The =claude-org.org= duplicate has been removed. The single canonical definition
-in =claude-agent-backend.org:2478= covers all error shapes: plist with =:message=,
-string, symbol, =(error "msg")= list, and fallback with truncation.
-
-*Proposal*: Remove the =claude-org.org= duplicate. Extend the canonical backend version.
-
-** DONE Q12. =emacs-mcp-server-path-mappings= Not Cleared on Abnormal Exit (MEDIUM) :done:
-
-*Status*: Implemented [2026-03-29]
-
-Both =sentinel-cleanup= (normal exit) and =sentinel-handle-abnormal-exit= now
-clear =emacs-mcp-server-path-mappings= when the exiting process has =docker-mode=.
-Tests in =test-claude-agent-sentinel.el=:
-- =test-sentinel-abnormal-exit-clears-docker-path-mappings=: verifies cleanup on SIGKILL
-- =test-sentinel-abnormal-exit-preserves-mappings-for-non-docker=: verifies non-Docker
-  processes do not destroy concurrent Docker mappings
-
-*Proposal*: Clear path mappings in both exit paths, or extract a shared cleanup helper.
-
 ** Q13. Loop Timer Fires After Buffer Kill (MEDIUM)
 
 =code-agent-org--maybe-continue-loop= schedules a =run-at-time= timer.
@@ -198,51 +137,6 @@ refactor to async invocation would break under dynamic binding.
 
 *Proposal*: Wrap =mk= in =lexical-let= for defensive correctness.
 
-** Q17. Three Near-Identical "Find Previous Section Level" Functions (LOW)
-
-=code-agent-org--find-previous-chat-level=,
-=--find-previous-story-level=, =--find-previous-workspace-level= each
-implement the same backwards-scan with different predicates.
-
-*Proposal*: Unify into =code-agent-org--find-previous-section-level (predicate)=
-(a generic version already exists at L6233; finish the consolidation).
-
-** DONE Q19. Stale iTerm2 References in Source Files (MEDIUM) :done:
-
-*Status*: Implemented [2026-03-29]
-
-Removed all iTerm2 mentions from source =.org= file prose and docstrings:
-- =claude-org-terminal-base.org=: 5 references replaced with generic terms
-- =claude-org.org=: 2 references replaced
-- =claude-org-cmux.org=: 3 references replaced
-Design docs under =docs/= are historical and were left unchanged.
-
-Structural test =test-structural-no-iterm2-references= (F37 in =test-structural.el=)
-prevents reintroduction by scanning all source =.org= files for "iTerm2".
-
-*Proposal*: Remove all iTerm2 mentions from source .org file docstrings and prose.
-Add structural test to prevent reintroduction.
-
-** DONE Q20. =claude-org-cmux--ensure-session= Too Long (154 lines) (MEDIUM) :done:
-
-*Status*: Implemented [2026-03-29]
-
-Extracted 4 focused helper functions from the 154-line monolith:
-- =claude-org-cmux--workspace-alive-p= (13 lines): checks if saved workspace still responds
-- =claude-org-cmux--restore-workspace= (25 lines): restores existing workspace mappings/color/verbose
-- =claude-org-cmux--resolve-workspace-uuid= (13 lines): resolves workspace ref to stable UUID
-- =claude-org-cmux--launch-workspace= (63 lines): launches new workspace with full lifecycle
-The orchestrator =ensure-session= is now 30 lines: MCP auto-start, gather context,
-dispatch to restore or launch.
-
-** DONE Q21. Stale Verbose Output Docstring (LOW) :done:
-
-*Status*: Implemented [2026-03-29]
-
-=claude-org-show-verbose= docstring referenced "backend-verbose-buffer" and
-"session's verbose buffer" without explaining what they are. Updated to
-"cmux capture buffer", "backend-specific verbose buffer", "shared session
-verbose buffer" — matching the actual three-level fallback.
 
 * Test Harness Findings
 
@@ -269,30 +163,6 @@ error handling, timeout) are discovered only in production.
 2. Sends structured MCP requests via HTTP
 3. Verifies Emacs state changes (buffer content, properties)
 4. Covers error cases (invalid session ID, read-only buffer, missing heading)
-
-** DONE T3. Protocol Conformance Fuzzer for JSON Stream Parser (HIGH) :done:
-
-*Status*: Implemented [2026-03-29]
-
-=tests/test-json-parser-property.el= now contains 14 property-based fuzzer tests
-covering all protocol conformance dimensions:
-- Random split positions (20 iterations per run): =test-json-random-splits-preserve-messages=
-- Empty/whitespace lines: =test-json-empty-lines-ignored=
-- Unicode content (CJK, emoji, combining marks): =test-json-unicode-survives=
-- Unknown message types (forward compat): =test-json-unknown-types-pass-through=
-- Interleaved message ordering (result before assistant, etc.): =test-json-interleaved-message-ordering=
-- Malformed JSON recovery (bad lines don't kill subsequent parsing): =test-json-malformed-recovery=
-- Truncated JSON completed in next chunk: =test-json-truncated-then-completed=
-- Large messages (100KB payloads): =test-json-large-message=
-- Large message split into 5-byte chunks: =test-json-large-message-many-chunks=
-- Rapid empty buffer processing (50 calls): =test-json-empty-buffer-repeated-calls=
-- Deeply nested JSON (10 levels): =test-json-deeply-nested=
-- Buffer overflow protection: =test-json-buffer-overflow-kills-process=
-- control_request dispatch: =test-json-control-request-dispatch=
-- Mixed valid/invalid lines with random splits (15 iterations): =test-json-mixed-valid-invalid-random-splits=
-
-*Proposal*: Create a protocol fuzzer that generates random valid and semi-valid JSON streams, feeds
-them to the parser, and verifies no errors are signalled.
 
 ** T4. Fixture Capture Mode for Systematic Test Data (MEDIUM)
 
@@ -325,65 +195,6 @@ stack today; tests/e2e/E2E_TASKS.org is human-driven via /loop.
 4. Run headless Emacs with =make test-integration=
 5. Record session transcripts for debugging failures
 
-** DONE T7. Process Sentinel Has Zero Explicit Tests (HIGH) :done:
-
-*Status*: Implemented [2026-03-29]
-
-=tests/test-claude-agent-sentinel.el= now has 21 tests covering all sentinel paths:
-- Normal exit (exit 0): state cleanup, complete callback fires with nil
-- Crash exit (mock crash-mid-stream): state closed, process dead
-- OOM kill (SIGKILL): state fully cleaned up after signal death
-- Filter error recovery: malformed JSON handled gracefully
-- Error exit code: rate-limited scenario with exit code 1
-- Output buffer killed: sentinel-cleanup kills process output buffer
-- Error plist structure: verifies =:message= and =:exit-code= in error plist
-- Cancelled query: sentinel skips complete callback for cancelled queries
-- Docker path-mappings: cleared on Docker exit, preserved on non-Docker exit
-- Full sentinel dispatch: direct invocation of =claude-agent--process-sentinel=
-  for both normal (exit 0) and abnormal (exit 1) events
-
-*Proposal*: Create tests that start a mock CLI process, kill it, and verify session state
-transitions (=:busy → nil=), marker freeing, and error callback invocation.
-
-** DONE T8. Permission Round-Trip Tests (MEDIUM) :done:
-
-*Status*: Implemented [2026-03-29]
-
-10 unit tests in =tests/test-permission-round-trip.el= covering the full
-=control_request= (=can_use_tool=) round-trip lifecycle:
-
-- Allow round-trip: request tracked, permission functions called, response sent, request untracked
-- Deny round-trip: deny behavior and message in response
-- Permission error → deny (SECURITY: deny on error, not allow)
-- Tracking lifecycle: tracked BEFORE permission runs, untracked AFTER response sent
-- hook_callback subtype: returns success response
-- Unsupported subtype: returns error response with subtype name
-- Dead process: response dropped but tracking still cleaned up (no leak)
-- Context propagation: session-id, context-label, suggestions passed to permission functions
-- Updated input: permission function can rewrite tool input via :updated-input
-- Concurrent requests: multiple pending control requests tracked independently
-
-Integration-level test in =test-harness-phase2.el= (=test-harness-control-request-round-trip=)
-already covers the end-to-end flow via mock CLI v2 with =permission-prompt.jsonl= fixture.
-
-** DONE T9. Sentinel Edge Cases + Non-Object JSON Bug Fix (MEDIUM) :done:
-
-*Status*: Implemented [2026-03-29]
-
-7 new tests in =test-claude-agent-sentinel.el= covering sentinel edge cases:
-
-- Buffer killed during stream: output buffer killed before sentinel fires — cleanup completes
-- Signal exit (hangup): unknown signal event handled via fallback branch
-- Signal exit (killed: 9) with recovery disabled: signal events produce structured error
-- Double sentinel fire: second invocation is safe (idempotent state transitions)
-- Non-object JSON in remaining buffer: bare =42= or ="string"= doesn't crash sentinel
-- Non-object JSON in filter path: bare JSON values treated as CLI errors, not crashes
-
-Bug fix in =claude-agent-backend.org=: both =process-json-buffer= and the sentinel's
-remaining-JSON handler now guard against non-plist parsed values (bare numbers, strings,
-booleans). Previously, =plist-get= on a non-list returned nil, then =(intern nil)= crashed.
-The fix adds =(listp parsed)= check and =(stringp msg-type)= guard before dispatch.
-
 ** T10. =claude-agent-chat= Has Zero Tests (MEDIUM)
 
 The comint-based chat mode (=claude-agent-chat=, =chat-send=, =chat-interrupt=, =chat-quit=,
@@ -404,29 +215,17 @@ Ranked by impact on reliability and developer productivity:
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
-| P0 | Q1: Guard process filter/sentinel/timer (DONE 2026-03-29) | S | Prevents silent process death |
-| P0 | A1: Consolidate parallel state tracking (active-states DONE 2026-03-29) | M | Eliminates split-brain state |
-| P0 | T7: Test process sentinel explicitly (DONE 2026-03-29) | S | Tests most dangerous untested path |
 | P1 | T1: Error injection in mock CLI | M | Catches failure-mode bugs |
 | P1 | Q2: Structured MCP error returns | S | Prevents silent Python failures |
 | P1 | Q4: Reset status on MCP failure | S | Prevents permanent "busy" |
-| P1 | Q11: Remove duplicate extract-error-message (DONE 2026-03-29) | S | Eliminates shadow defun |
-| P1 | Q12: Clear path-mappings on abnormal exit (DONE 2026-03-29) | S | Prevents stale Docker paths |
-| P1 | Q19: Remove stale iTerm2 refs from source (DONE 2026-03-29) | S | Clean up after backend removal |
 | P2 | T2: MCP round-trip test harness | L | Catches bridge bugs |
-| P2 | T3: JSON stream protocol fuzzer (DONE 2026-03-29) | M | Catches parser edge cases |
-| P2 | T8: Permission round-trip tests (DONE 2026-03-29) | M | Tests permission round-trip |
-| P2 | T9: Sentinel edge cases + non-object JSON fix (DONE 2026-03-29) | S | Tests common user action + bug fix |
 | P2 | A3: Single load path | S | Prevents double-init bugs |
 | P2 | A6: claude-ide test suite | M | Tests 2K-line module |
 | P3 | T4: Fixture capture mode | M | Systematic test data |
 | P3 | T5: Regression tag | S | Fast regression runs |
 | P3 | T10: Chat mode test suite | M | Tests zero-coverage module |
 | P3 | A2: MCP server boundary fix | S | Clean layering |
-| P3 | Hardcoded /tmp paths in tests (DONE 2026-03-29) | S | Use constant, structural test F40 |
-| P3 | Q6, Q8, Q10, Q13-Q17: Minor fixes | S each | Correctness polish |
-| P3 | Q20: Extract ensure-session (154→30 lines) (DONE 2026-03-29) | S | Readability, 4 focused helpers |
-| P3 | Q21: Stale verbose output docstring (DONE 2026-03-29) | S | Docstring accuracy |
+| P3 | Q6, Q8, Q10, Q13-Q16: Minor fixes | S each | Correctness polish |
 
 Effort: S = hours, M = 1-2 days, L = 3-5 days.
 
