@@ -28,6 +28,7 @@ LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COM
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
 LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
 LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/claude-agent-translate.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/claude-agent-title.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/claude-agent-refine.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/claude-agent-multiplexer.org\")" \

@@ -81,6 +81,7 @@
 ;; Utility helpers extracted from `claude-agent.org' for clarity — load
 ;; right after the core SDK so any caller (code-agent-org-mode or a
 ;; user-written hook) can `require' or call them without further setup.
+(claude-code--load-module "claude-agent-translate")
 (claude-code--load-module "claude-agent-title")
 (claude-code--load-module "claude-agent-refine")
 (claude-code--load-module "code-agent-org-session")
