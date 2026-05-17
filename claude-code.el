@@ -78,6 +78,10 @@
 ;; factories by name, so invoking them without loading will raise
 ;; `void-function'.  This matches ARCHITECTURE.org's OPTIONAL tag.
 (claude-code--load-module "claude-agent")
+;; Utility helpers extracted from `claude-agent.org' for clarity — load
+;; right after the core SDK so any caller (code-agent-org-mode or a
+;; user-written hook) can `require' or call them without further setup.
+(claude-code--load-module "claude-agent-refine")
 (claude-code--load-module "code-agent-org-session")
 (claude-code--load-module "code-agent-org-queue")
 (claude-code--load-module "code-agent-org-response")
