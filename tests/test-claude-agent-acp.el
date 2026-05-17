@@ -106,16 +106,18 @@ The fake process captures sent data but doesn't actually communicate."
              (claude-agent-acp-backend-auth-request-maker backend)))))
 
 (ert-deftest test-acp-gemini-auth-request-uses-configured-method ()
-  "Gemini auth-request-maker returns the configured methodId."
-  (let ((claude-agent-acp-gemini-auth-method 'vertex-ai))
-    (should (equal (map-elt (claude-agent-acp-gemini--auth-request) 'methodId)
-                   "vertex-ai")))
-  (let ((claude-agent-acp-gemini-auth-method 'oauth-personal))
-    (should (equal (map-elt (claude-agent-acp-gemini--auth-request) 'methodId)
-                   "oauth-personal")))
-  (let ((claude-agent-acp-gemini-auth-method 'gemini-api-key))
-    (should (equal (map-elt (claude-agent-acp-gemini--auth-request) 'methodId)
-                   "gemini-api-key"))))
+  "Gemini auth-request-maker returns the configured methodId.
+The per-profile `--auth-request' defuns were replaced in 2026-05 by a
+shared `claude-agent-acp--make-profile-backend' helper that installs
+a closure as the backend's `auth-request-maker'; we drive the
+closure off a created backend instance."
+  (dolist (method '(vertex-ai oauth-personal gemini-api-key))
+    (let* ((claude-agent-acp-gemini-auth-method method)
+           (backend (claude-agent-acp-gemini-create
+                     :session-key "gm" :cwd "/tmp"))
+           (maker (claude-agent-acp-backend-auth-request-maker backend)))
+      (should (equal (map-elt (funcall maker) 'methodId)
+                     (symbol-name method))))))
 
 (ert-deftest test-acp-codex-constructor-sets-defaults ()
   "Codex constructor presets command, auth-method, and needs-auth."
@@ -129,16 +131,18 @@ The fake process captures sent data but doesn't actually communicate."
              (claude-agent-acp-backend-auth-request-maker backend)))))
 
 (ert-deftest test-acp-codex-auth-request-uses-configured-method ()
-  "Codex auth-request-maker returns the configured methodId."
-  (let ((claude-agent-acp-codex-auth-method 'openai-api-key))
-    (should (equal (map-elt (claude-agent-acp-codex--auth-request) 'methodId)
-                   "openai-api-key")))
-  (let ((claude-agent-acp-codex-auth-method 'codex-api-key))
-    (should (equal (map-elt (claude-agent-acp-codex--auth-request) 'methodId)
-                   "codex-api-key")))
-  (let ((claude-agent-acp-codex-auth-method 'chatgpt))
-    (should (equal (map-elt (claude-agent-acp-codex--auth-request) 'methodId)
-                   "chatgpt"))))
+  "Codex auth-request-maker returns the configured methodId.
+The per-profile `--auth-request' defuns were replaced in 2026-05 by a
+shared `claude-agent-acp--make-profile-backend' helper that installs
+a closure as the backend's `auth-request-maker'; we drive the
+closure off a created backend instance."
+  (dolist (method '(openai-api-key codex-api-key chatgpt))
+    (let* ((claude-agent-acp-codex-auth-method method)
+           (backend (claude-agent-acp-codex-create
+                     :session-key "cx" :cwd "/tmp"))
+           (maker (claude-agent-acp-backend-auth-request-maker backend)))
+      (should (equal (map-elt (funcall maker) 'methodId)
+                     (symbol-name method))))))
 
 ;;; Tests: Capabilities
 

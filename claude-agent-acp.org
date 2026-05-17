@@ -1036,6 +1036,48 @@ first prompt's `:on-complete' and `:on-error'."
      (t 'unknown))))
 #+END_SRC
 
+** Profile Factory Helper
+
+Every per-vendor ACP profile (=claude-agent-acp-opencode-create=,
+=claude-agent-acp-gemini-create=, =claude-agent-acp-codex-create=)
+calls the same =cl-defstruct= constructor with the same five
+defaults followed by user =&rest= args.  Extracting the shared
+=apply= shape into one helper saves ~10 lines per profile and
+makes adding a fourth profile a one-line task.
+
+The =auth-method-symbol= is dereferenced *at request time* so a
+user who toggles =claude-agent-acp-codex-auth-method= between two
+calls sees the change immediately.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-acp--make-profile-backend
+    (constructor agent-name command environment auth-method-symbol &rest args)
+  "Create an ACP profile backend instance with the shared default plumbing.
+CONSTRUCTOR is the subclass's `--create' function.
+AGENT-NAME is the agent identifier string (e.g. \"codex\", \"gemini\").
+COMMAND is the spawn command list (read from a `defcustom').
+ENVIRONMENT is the extra env vars list (read from a `defcustom').
+AUTH-METHOD-SYMBOL is the symbol holding the current auth method;
+its `symbol-value' is reread at each authenticate request.
+ARGS are extra :key VAL pairs forwarded to CONSTRUCTOR (typically
+:cwd, :session-key).
+
+`lexical-let' is required because literate-elisp evaluates this
+file with dynamic binding — without it, the auth-request lambda
+would not capture `auth-method-symbol' and would error
+`void-variable' when invoked from the ACP handshake."
+  (lexical-let ((auth-method-symbol auth-method-symbol))
+    (apply constructor
+           :agent-name agent-name
+           :spawn-args command
+           :environment environment
+           :needs-authenticate t
+           :auth-request-maker (lambda ()
+                                 `((methodId . ,(symbol-name
+                                                 (symbol-value auth-method-symbol)))))
+           args)))
+#+END_SRC
+
 ** Provide Feature
 
 #+BEGIN_SRC elisp
