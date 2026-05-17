@@ -2452,6 +2452,43 @@ Docker example:
 
 #+END_SRC
 
+*** Accumulating Wrapper
+
+Fire-and-forget convenience around `claude-agent-query` for callers
+that just want the full text response, not the streamed events.
+Used by `claude-agent-title.org` (title generation) and
+`claude-agent-refine.org` (prompt refinement); could grow more
+callers as more "ask Claude for one short string" features appear.
+
+#+BEGIN_SRC elisp
+(cl-defun claude-agent-query-accumulate (prompt &key options on-result on-error
+                                              session-key)
+  "Run a query that accumulates all response text, then calls ON-RESULT.
+This is a convenience wrapper around `claude-agent-query' for fire-and-forget
+queries that just need the full text response (e.g., title generation,
+prompt refinement).
+
+PROMPT is the query prompt.
+OPTIONS is an options plist (from `claude-agent-options').
+ON-RESULT is called with the accumulated text string (trimmed).
+ON-ERROR is called on error.
+SESSION-KEY is an optional session key."
+  (lexical-let ((collected-text "")
+                (on-result-cb on-result))
+    (claude-agent-query
+     prompt
+     :options options
+     :session-key session-key
+     :on-message (lambda (msg)
+                   (when (claude-agent-assistant-message-p msg)
+                     (when-let* ((text (claude-agent-extract-text msg)))
+                       (setq collected-text (concat collected-text text)))))
+     :on-error on-error
+     :on-complete (lambda (_result)
+                    (when on-result-cb
+                      (funcall on-result-cb (string-trim collected-text)))))))
+#+END_SRC
+
 *** Helper Functions
 
 #+BEGIN_SRC elisp

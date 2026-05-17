@@ -1,0 +1,155 @@
+#+TITLE: Claude Agent — Conversation Titling
+#+PROPERTY: literate-load yes
+
+* Overview
+
+Generate short titles for a transcript of conversation messages.
+Used by =code-agent-org='s "auto-title an instruction" command and
+the activity-feed naming logic.
+
+Costs are kept low and latency tight by defaulting to the Haiku
+model and tools=("*") (forbid all tool use) — the titler should
+produce text and nothing else. The output is post-processed with a
+short list of safety nets: strip surrounding quotes, strip common
+"I'll help…" lead-ins, hard-truncate to =claude-agent-title-max-chars=.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'claude-agent-backend)
+#+END_SRC
+
+* Customization
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-title-model "claude-haiku-4-5-20251001"
+  "Model to use for generating conversation titles.
+Haiku is recommended for low cost and fast response."
+  :type 'string
+  :group 'claude-agent)
+
+(defcustom claude-agent-title-max-chars 50
+  "Maximum characters for generated titles."
+  :type 'integer
+  :group 'claude-agent)
+
+(defcustom claude-agent-title-max-messages 10
+  "Maximum number of recent messages to include in title generation prompt."
+  :type 'integer
+  :group 'claude-agent)
+#+END_SRC
+
+* Title Generation
+
+The titler's system prompt is *aggressively* shaped: explicit rules
+against responding to the conversation, against lead-ins, against
+explanation. The post-processing pass is a belt-and-braces:
+on the small but real chance the model leaks a "Here's the title…"
+phrase, we strip it; on the small but real chance the model thinks
+it's a chat assistant and writes "I'll…", we drop the response and
+do nothing rather than show garbage.
+
+#+BEGIN_SRC elisp
+(defun claude-agent--format-messages-for-title (messages)
+  "Format MESSAGES for title generation prompt.
+MESSAGES is a list of (role . content) pairs."
+  (let ((formatted nil)
+        (count 0))
+    (dolist (msg (reverse messages))
+      (when (< count claude-agent-title-max-messages)
+        (let ((role (car msg))
+              (content (cdr msg)))
+          ;; Truncate long content
+          (when (> (length content) 200)
+            (setq content (concat (substring content 0 197) "...")))
+          (push (format "%s: %s" (capitalize (symbol-name role)) content) formatted)
+          (cl-incf count))))
+    (mapconcat #'identity formatted "\n\n")))
+
+(cl-defun claude-agent-generate-title (messages &key on-title on-error)
+  "Generate a short title for conversation MESSAGES.
+
+MESSAGES is a list of (role . content) pairs, e.g.:
+  \\='((user . \"How do I sort a list?\")
+    (assistant . \"You can use the sort function...\"))
+
+ON-TITLE is called with the generated title string.
+  Function signature: (lambda (title) ...)
+
+ON-ERROR is called if an error occurs.
+  Function signature: (lambda (error) ...)
+
+Uses Haiku model for low cost and fast response.
+Each call uses a fresh session (no conversation continuity).
+
+Example:
+  (claude-agent-generate-title
+   \\='((user . \"Help me write a Python script\")
+     (assistant . \"Sure, what would you like the script to do?\")
+     (user . \"Parse JSON files\"))
+   :on-title (lambda (title) (message \"Title: %s\" title)))"
+  (let* ((formatted-messages (claude-agent--format-messages-for-title messages))
+         (prompt (format "Generate a short title (%d chars max) for this conversation:
+
+%s
+
+IMPORTANT: Output ONLY the title text. No quotes, no explanation, no response to the conversation.
+Example good outputs: \"Python JSON Parsing\" or \"Fix Login Bug\" or \"Database Schema Design\"
+Example bad outputs: \"I'll help you with...\" or \"Here's a title:\" or \"The title is:\""
+                         claude-agent-title-max-chars
+                         formatted-messages))
+         (system-prompt (format "You are a title generator. Your ONLY job is to output a short descriptive title.
+NEVER respond to or engage with the conversation content.
+NEVER start with \"I'll\", \"I can\", \"Here's\", \"The title\", or similar phrases.
+Output ONLY the title text, nothing else. Maximum %d characters."
+                                claude-agent-title-max-chars))
+         (options (claude-agent-options
+                   :model claude-agent-title-model
+                   :system-prompt system-prompt
+                   :disallowed-tools '("*")  ; No tools needed for titling
+                   :max-turns 1)))
+    (lexical-let ((on-title-cb on-title)
+                  (max-chars claude-agent-title-max-chars))
+      (claude-agent-query-accumulate
+       prompt
+       :options options
+       :on-error on-error
+       :on-result
+       (lambda (text)
+         (when on-title-cb
+           (let ((title text))
+             ;; Remove surrounding quotes if present
+             (when (and (>= (length title) 2)
+                        (string-match-p "^[\"'].*[\"']$" title))
+               (setq title (substring title 1 -1)))
+             ;; Remove common bad prefixes
+             (when (string-match "^\\(?:Title:\\s-*\\|Here's\\s-*\\(?:a\\|the\\)\\s-*title:\\s-*\\)" title)
+               (setq title (substring title (match-end 0))))
+             ;; If title looks like a response, skip it
+             (unless (string-match-p "^I'\\(?:ll\\|m\\|ve\\)\\s-\\|^I\\s-+\\(?:can\\|will\\|would\\)" title)
+               ;; Truncate if too long
+               (when (> (length title) max-chars)
+                 (setq title (concat (substring title 0 (- max-chars 3)) "...")))
+               (funcall on-title-cb title)))))))))
+
+(defun claude-agent-generate-title-from-text (text &optional callback)
+  "Generate a title for TEXT content.
+TEXT is a string containing the conversation or content to title.
+CALLBACK is called with the generated title, defaults to `message'.
+
+This is a convenience wrapper for simple use cases."
+  (let ((cb (or callback #'message)))
+    (claude-agent-generate-title
+     `((user . ,text))
+     :on-title cb
+     :on-error (lambda (err)
+                 (message "Title generation error: %s" err)))))
+#+END_SRC
+
+* Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-title)
+;;; claude-agent-title.el ends here
+#+END_SRC
