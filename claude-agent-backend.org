@@ -2881,6 +2881,32 @@ Also untracks the request from pending control requests."
                                               request-id)))
       (message "Claude: control_response dropped - CLI process died (request-id: %s)" request-id))))
 
+(defun claude-agent--handle-control-can-use-tool (process request-id request-data)
+  "Handle the ``can_use_tool'' subtype by running the permission hook.
+Builds the context plist from process-attached metadata
+(session-id, context-label, suggestions), dispatches through
+`--run-permission-functions', and emits a success
+`control_response' with the resolved behavior + updated input."
+  (let* ((tool-name (plist-get request-data :tool_name))
+         (tool-input (plist-get request-data :input))
+         (session-id (process-get process :session-id))
+         (context-label (process-get process :context-label))
+         (context (list :session-id session-id
+                        :context-label context-label
+                        :suggestions
+                        (plist-get request-data :permission_suggestions))))
+    (claude-agent--debug-log "Running permission functions for %s (id=%s)"
+                             tool-name request-id)
+    (let ((result (claude-agent--run-permission-functions
+                   tool-name tool-input context)))
+      (claude-agent--debug-log "Permission result for %s: %S (id=%s)"
+                               tool-name result request-id)
+      (claude-agent--send-control-response
+       process request-id "success"
+       (list :behavior (or (plist-get result :behavior) "allow")
+             :updatedInput (or (plist-get result :updated-input) tool-input)
+             :message (plist-get result :message))))))
+
 (defun claude-agent--handle-control-request (process request)
   "Handle control_request from Claude CLI.
 
@@ -2888,60 +2914,41 @@ PROCESS: The Claude CLI process
 REQUEST: Parsed control_request plist
 
 Invokes appropriate Emacs hooks and sends control_response.
-Tracks pending requests to prevent premature stdin close."
+Tracks pending requests to prevent premature stdin close.
+
+Subtypes:
+- ``can_use_tool''    → `--handle-control-can-use-tool'
+- ``hook_callback''   → reserved, empty success response
+- (anything else)     → signals `error', caught by outer
+                       `condition-case' which emits an error
+                       control_response so the CLI side gets a
+                       deterministic answer."
   (let* ((trace-ctx (process-get process 'claude-agent-trace-ctx))
          (request-id (plist-get request :request_id))
          (request-data (plist-get request :request))
          (subtype (plist-get request-data :subtype)))
     (claude-agent-with-span "handle-control-request"
         (list :subtype subtype) trace-ctx
-
-    (claude-agent--debug-log "Control request: %s (id=%s)" subtype request-id)
-
-    ;; Track this request as pending (will be untracked when response is sent)
-    (let ((owner (when-let* ((state (process-get process 'claude-agent-state)))
-                   (claude-agent--process-state-request-id state))))
-      (claude-agent--track-control-request request-id owner))
-
-    (condition-case err
-        (cond
-         ;; Hook callback (reserved for future use)
-         ((equal subtype "hook_callback")
-          ;; Currently not used - return empty success response
-          (claude-agent--send-control-response
-           process request-id "success"
-           (list)))
-
-         ;; Tool permission - run permission functions hook
-         ((equal subtype "can_use_tool")
-          (let* ((tool-name (plist-get request-data :tool_name))
-                 (tool-input (plist-get request-data :input))
-                 (session-id (process-get process :session-id))
-                 (context-label (process-get process :context-label))
-                 (context (list :session-id session-id
-                               :context-label context-label
-                               :suggestions (plist-get request-data :permission_suggestions))))
-            (claude-agent--debug-log "Running permission functions for %s (id=%s)"
-                                     tool-name request-id)
-            (let ((result (claude-agent--run-permission-functions
-                          tool-name tool-input context)))
-              (claude-agent--debug-log "Permission result for %s: %S (id=%s)"
-                                       tool-name result request-id)
-              (claude-agent--send-control-response
-               process request-id "success"
-               (list :behavior (or (plist-get result :behavior) "allow")
-                     :updatedInput (or (plist-get result :updated-input) tool-input)
-                     :message (plist-get result :message))))))
-
-         (t
-          ;; Unsupported subtype
-          (error "Unsupported control request subtype: %s" subtype)))
-
-      (error
-       ;; Send error response
-       (claude-agent--send-control-response
-        process request-id "error"
-        (list :error (error-message-string err))))))))
+      (claude-agent--debug-log "Control request: %s (id=%s)" subtype request-id)
+      ;; Track this request as pending until the response is sent — prevents
+      ;; premature stdin close while we're still computing the answer.
+      (let ((owner (when-let* ((state (process-get process 'claude-agent-state)))
+                     (claude-agent--process-state-request-id state))))
+        (claude-agent--track-control-request request-id owner))
+      (condition-case err
+          (cond
+           ((equal subtype "hook_callback")
+            (claude-agent--send-control-response
+             process request-id "success" (list)))
+           ((equal subtype "can_use_tool")
+            (claude-agent--handle-control-can-use-tool
+             process request-id request-data))
+           (t
+            (error "Unsupported control request subtype: %s" subtype)))
+        (error
+         (claude-agent--send-control-response
+          process request-id "error"
+          (list :error (error-message-string err))))))))
 #+END_SRC
 
 ** Query Cancellation
@@ -2994,62 +3001,73 @@ Uses `claude-agent-query-timeout' to determine staleness."
        (> (- (float-time) (claude-agent--process-state-start-time state))
           claude-agent-query-timeout)))
 
+(defun claude-agent--state-is-dead-p (state)
+  "Return non-nil iff STATE is invalid, closed, or backs a dead process."
+  (or (not (claude-agent--process-state-p state))
+      (claude-agent--process-state-closed state)
+      (let ((proc (claude-agent--process-state-process state)))
+        (and proc (not (process-live-p proc))))))
+
+(defun claude-agent--scan-stale-queries ()
+  "One-pass scan of `--active-queries' for cleanup.
+Returns ``(STALE-KEYS TIMED-OUT-KEYS PROCS-TO-KILL)''.  The list of
+timed-out processes is collected here but killed by the caller —
+mutating the hash table inside `maphash' is undefined behaviour."
+  (let (stale timed-out procs)
+    (maphash
+     (lambda (key state)
+       (cond
+        ((claude-agent--state-is-dead-p state)
+         (push key stale))
+        ((claude-agent--query-timed-out-p state)
+         (when-let* ((proc (claude-agent--process-state-process state)))
+           (when (process-live-p proc)
+             (claude-agent--debug-log
+              "Killing timed-out query: %s (age: %.0fs)"
+              key
+              (- (float-time)
+                 (claude-agent--process-state-start-time state)))
+             (push proc procs)))
+         (push key timed-out))))
+     claude-agent--active-queries)
+    (list stale timed-out procs)))
+
+(defun claude-agent--purge-active-states ()
+  "Drop dead entries from `--registry-active-states' and log the count."
+  (let* ((current (claude-agent-registry-active-states))
+         (initial (length current))
+         (cleaned (cl-remove-if #'claude-agent--state-is-dead-p current))
+         (removed (- initial (length cleaned))))
+    (setf (claude-agent--registry-active-states claude-agent--registry) cleaned)
+    (when (> removed 0)
+      (claude-agent--debug-log "Cleaned up %d stale states" removed))))
+
 (defun claude-agent--cleanup-stale-queries ()
   "Remove stale entries from active-queries hash table and active-states list.
 Called after code reload to clean up entries with dead processes,
-outdated structure, or queries that have exceeded timeout."
+outdated structure, or queries that have exceeded timeout.
+
+Three phases — scan, kill, purge — avoid mutating the hash inside
+`maphash':
+1. `--scan-stale-queries' collects keys + procs-to-kill.
+2. Kill collected processes outside the hash walk.
+3. Remove keys from the hash and `--purge-active-states' from the
+   registry's list (which can accumulate independently when the
+   hash is correct but the list missed a removal)."
   (condition-case err
-      (let ((stale-keys '())
-            (timed-out-keys '())
-            (procs-to-kill '()))
-        ;; Phase 1: Collect keys and processes (no mutation inside maphash)
-        (maphash
-         (lambda (key state)
-           (cond
-            ;; Invalid state, dead process, or closed
-            ((or (not (claude-agent--process-state-p state))
-                 (and (claude-agent--process-state-process state)
-                      (not (process-live-p
-                            (claude-agent--process-state-process state))))
-                 (claude-agent--process-state-closed state))
-             (push key stale-keys))
-            ;; Timed out - collect process for killing after maphash
-            ((claude-agent--query-timed-out-p state)
-             (let ((proc (claude-agent--process-state-process state)))
-               (when (and proc (process-live-p proc))
-                 (claude-agent--debug-log "Killing timed-out query: %s (age: %.0fs)"
-                                          key
-                                          (- (float-time)
-                                             (claude-agent--process-state-start-time state)))
-                 (push proc procs-to-kill)))
-             (push key timed-out-keys))))
-         claude-agent--active-queries)
-        ;; Phase 2: Kill processes outside maphash
+      (cl-destructuring-bind (stale-keys timed-out-keys procs-to-kill)
+          (claude-agent--scan-stale-queries)
         (dolist (proc procs-to-kill)
-          (condition-case nil
-              (delete-process proc)
-            (error nil)))
-        ;; Phase 3: Remove stale and timed-out entries
+          (ignore-errors (delete-process proc)))
         (dolist (key (append stale-keys timed-out-keys))
           (remhash key claude-agent--active-queries))
         (when stale-keys
-          (claude-agent--debug-log "Cleaned up %d stale queries" (length stale-keys)))
+          (claude-agent--debug-log
+           "Cleaned up %d stale queries" (length stale-keys)))
         (when timed-out-keys
-          (claude-agent--debug-log "Cleaned up %d timed-out queries" (length timed-out-keys)))
-        ;; Also clean up active-states list (may accumulate dead entries)
-        (let* ((current (claude-agent-registry-active-states))
-               (initial-count (length current))
-               (cleaned (cl-remove-if
-                         (lambda (state)
-                           (or (not (claude-agent--process-state-p state))
-                               (claude-agent--process-state-closed state)
-                               (let ((proc (claude-agent--process-state-process state)))
-                                 (and proc (not (process-live-p proc))))))
-                         current)))
-          (setf (claude-agent--registry-active-states claude-agent--registry) cleaned)
-          (let ((removed (- initial-count (length cleaned))))
-            (when (> removed 0)
-              (claude-agent--debug-log "Cleaned up %d stale states" removed)))))
+          (claude-agent--debug-log
+           "Cleaned up %d timed-out queries" (length timed-out-keys)))
+        (claude-agent--purge-active-states))
     (error (message "claude-agent: error in stale query cleanup: %S" err))))
 
 ;; Run cleanup on load
@@ -3198,70 +3216,81 @@ if buffer exceeds the limit after insertion."
         (puthash session-key buf claude-agent--session-verbose-buffers)
         buf)))
 
-(defun claude-agent--verbose-insert-query-header (session-key prompt &optional cli-path args cwd env-vars)
+(defun claude-agent--group-args-as-pairs (args)
+  "Group ARGS into (OPT . VAL) pairs for readable verbose-buffer rendering.
+Bare flags (e.g. \"-v\") get a nil VAL; positional args also get
+nil VAL.  Returns a list of cons cells in original order."
+  (let (pairs (i 0))
+    (while (< i (length args))
+      (let ((arg (nth i args)))
+        (cond
+         ((and (string-prefix-p "-" arg)
+               (< (1+ i) (length args))
+               (not (string-prefix-p "-" (nth (1+ i) args))))
+          (push (cons arg (nth (1+ i) args)) pairs)
+          (setq i (+ i 2)))
+         (t
+          (push (cons arg nil) pairs)
+          (setq i (1+ i))))))
+    (nreverse pairs)))
+
+(defun claude-agent--insert-command-section (cli-path args)
+  "Render a ``Command:'' block (cli-path + grouped option/value pairs)."
+  (insert "\n"
+          (propertize "Command:\n" 'face 'font-lock-keyword-face)
+          (format "  %s \\\n" cli-path))
+  (dolist (pair (claude-agent--group-args-as-pairs args))
+    (let ((opt (propertize (car pair) 'face 'font-lock-constant-face))
+          (val (cdr pair)))
+      (insert (if val
+                  (format "    %s %s \\\n" opt val)
+                (format "    %s \\\n" opt))))))
+
+(defun claude-agent--insert-env-section (env-vars)
+  "Render an ``Environment:'' block, masking TOKEN/KEY/SECRET/PASSWORD values."
+  (insert (format "\n%s\n"
+                  (propertize "Environment:" 'face 'font-lock-keyword-face)))
+  (dolist (pair env-vars)
+    (let* ((name (car pair))
+           (value (cdr pair))
+           (display-value
+            (if (string-match-p "TOKEN\\|KEY\\|SECRET\\|PASSWORD" name)
+                (concat (substring value 0 (min 8 (length value))) "...")
+              value)))
+      (insert (format "  %s=%s\n"
+                      (propertize name 'face 'font-lock-variable-name-face)
+                      display-value)))))
+
+(defun claude-agent--verbose-insert-query-header
+    (session-key prompt &optional cli-path args cwd env-vars)
   "Insert query header in verbose buffer for SESSION-KEY with PROMPT.
 CLI-PATH is the path to claude CLI, ARGS are command line arguments,
-CWD is working directory, ENV-VARS is alist of environment variables."
+CWD is working directory, ENV-VARS is alist of environment variables.
+
+Renders four optional sections inside the buffer, in order:
+banner → Command (`--insert-command-section') → Working directory
+→ Environment (`--insert-env-section') → Prompt."
   (when-let* ((buf (gethash session-key claude-agent--session-verbose-buffers)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (let ((inhibit-read-only t))
           (goto-char (point-max))
-          (insert "\n")
-          (insert "════════════════════════════════════════════════════════════════\n")
-          (insert (format "▸ Query [%s]\n" (format-time-string "%H:%M:%S")))
-          ;; Show CLI command if provided
+          (insert "\n"
+                  "════════════════════════════════════════════════════════════════\n"
+                  (format "▸ Query [%s]\n" (format-time-string "%H:%M:%S")))
           (when (and cli-path args)
-            (insert "\n")
-            (insert (propertize "Command:\n" 'face 'font-lock-keyword-face))
-            (insert (format "  %s \\\n" cli-path))
-            (let ((arg-pairs nil)
-                  (i 0))
-              ;; Group args into option-value pairs for better display
-              (while (< i (length args))
-                (let ((arg (nth i args)))
-                  (if (string-prefix-p "-" arg)
-                      (if (and (< (1+ i) (length args))
-                               (not (string-prefix-p "-" (nth (1+ i) args))))
-                          (progn
-                            (push (cons arg (nth (1+ i) args)) arg-pairs)
-                            (setq i (+ i 2)))
-                        (push (cons arg nil) arg-pairs)
-                        (setq i (1+ i)))
-                    (push (cons arg nil) arg-pairs)
-                    (setq i (1+ i)))))
-              (dolist (pair (nreverse arg-pairs))
-                (let ((opt (car pair))
-                      (val (cdr pair)))
-                  (if val
-                      ;; Show full values (including system prompts) for debugging
-                      (insert (format "    %s %s \\\n"
-                                      (propertize opt 'face 'font-lock-constant-face)
-                                      val))
-                    (insert (format "    %s \\\n"
-                                    (propertize opt 'face 'font-lock-constant-face))))))))
-          ;; Show working directory
+            (claude-agent--insert-command-section cli-path args))
           (when cwd
             (insert (format "\n%s %s\n"
-                            (propertize "Working directory:" 'face 'font-lock-keyword-face)
+                            (propertize "Working directory:"
+                                        'face 'font-lock-keyword-face)
                             cwd)))
-          ;; Show environment variables if any
           (when env-vars
-            (insert (format "\n%s\n" (propertize "Environment:" 'face 'font-lock-keyword-face)))
-            (dolist (pair env-vars)
-              (let* ((name (car pair))
-                     (value (cdr pair))
-                     ;; Mask sensitive values (tokens/keys)
-                     (display-value (if (string-match-p "TOKEN\\|KEY\\|SECRET\\|PASSWORD" name)
-                                        (concat (substring value 0 (min 8 (length value))) "...")
-                                      value)))
-                (insert (format "  %s=%s\n"
-                                (propertize name 'face 'font-lock-variable-name-face)
-                                display-value)))))
-          (insert "\n")
-          (insert (propertize "Prompt:\n" 'face 'font-lock-keyword-face))
-          (insert prompt)
-          (insert "\n\n"))))))
+            (claude-agent--insert-env-section env-vars))
+          (insert "\n"
+                  (propertize "Prompt:\n" 'face 'font-lock-keyword-face)
+                  prompt
+                  "\n\n"))))))
 #+END_SRC
 
 *** Message Formatter
