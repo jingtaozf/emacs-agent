@@ -37,73 +37,106 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
 # --------------------------------------------------------------------
-# Module constants
-# --------------------------------------------------------------------
-
-PHOENIX_ENDPOINT = os.environ.get(
-    "CLAUDE_OTEL_ENDPOINT", "http://localhost:6006/v1/traces"
-)
-
-PHOENIX_HEALTH_URL = PHOENIX_ENDPOINT.rsplit("/v1/traces", 1)[0] + "/health"
-
-STATUS_DIR = "/tmp/claude-agent-status"
-
-# ======================================================================
-# Phoenix auto-start
+# Phoenix backend lifecycle
 #
-# Best-effort: if Phoenix is not listening, try to launch it via uv.
+# Endpoint discovery, health check, and best-effort auto-start.
 # Failures are swallowed — a missing local Phoenix is not an error
 # condition, it just means traces go to the console exporter instead.
-# ======================================================================
+#
+# Wrapped in a class so tests can substitute a fake (e.g. a no-op
+# health check + a recording ensure()) without monkey-patching the
+# module.  A module-level singleton plus thin module-function shims
+# preserve the legacy import surface used by other modules.
+# --------------------------------------------------------------------
+
+
+class PhoenixLifecycle:
+    """Owns the Phoenix endpoint URLs and the auto-start subprocess.
+
+    Construct with an explicit ``endpoint`` for testing or non-default
+    deployments; the default reads ``CLAUDE_OTEL_ENDPOINT`` with a
+    localhost fallback.
+    """
+
+    DEFAULT_ENDPOINT = "http://localhost:6006/v1/traces"
+    HEALTH_TIMEOUT_SECS = 2
+    BOOT_POLL_INTERVAL_SECS = 0.5
+    BOOT_POLL_ATTEMPTS = 10
+
+    def __init__(self, endpoint: str | None = None):
+        self.endpoint = endpoint or os.environ.get(
+            "CLAUDE_OTEL_ENDPOINT", self.DEFAULT_ENDPOINT
+        )
+        # Health URL is the endpoint with /v1/traces stripped + /health appended.
+        self.health_url = self.endpoint.rsplit("/v1/traces", 1)[0] + "/health"
+
+    def is_running(self) -> bool:
+        """Return True if Phoenix's ``/health`` endpoint answers within timeout."""
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(self.health_url, method="GET")
+            with urllib.request.urlopen(req, timeout=self.HEALTH_TIMEOUT_SECS):
+                return True
+        except Exception:
+            return False
+
+    def ensure(self) -> None:
+        """Launch Phoenix via uv if it is not already running.
+
+        Intentionally tolerant — missing ``uv``, missing ``python`` dir,
+        or any other startup failure leaves Phoenix down and traces
+        degrade to the console exporter without raising.
+        """
+        if self.is_running():
+            return
+        try:
+            python_dir = os.path.join(
+                os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "python"
+            )
+            if not os.path.isdir(python_dir):
+                return
+            subprocess.Popen(
+                [
+                    "uv",
+                    "run",
+                    "--extra",
+                    "phoenix",
+                    "python",
+                    "-m",
+                    "phoenix.server.main",
+                    "serve",
+                ],
+                cwd=python_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            for _ in range(self.BOOT_POLL_ATTEMPTS):
+                time.sleep(self.BOOT_POLL_INTERVAL_SECS)
+                if self.is_running():
+                    return
+        except Exception:
+            pass  # best-effort
+
+
+# Module-level singleton + thin shims preserve the existing
+# `from otel_setup import PHOENIX_ENDPOINT/_phoenix_is_running/...`
+# surface used by other modules.  Tests construct a fresh
+# PhoenixLifecycle directly when isolation matters.
+_default_phoenix = PhoenixLifecycle()
+PHOENIX_ENDPOINT = _default_phoenix.endpoint
+PHOENIX_HEALTH_URL = _default_phoenix.health_url
 
 
 def _phoenix_is_running() -> bool:
-    """Return True if Phoenix's ``/health`` endpoint answers within 2s."""
-    try:
-        import urllib.request
-
-        req = urllib.request.Request(PHOENIX_HEALTH_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=2):
-            return True
-    except Exception:
-        return False
+    return _default_phoenix.is_running()
 
 
 def _ensure_phoenix() -> None:
-    """Launch Phoenix via uv if it is not already running.
+    _default_phoenix.ensure()
 
-    Intentionally tolerant — missing ``uv``, missing ``python`` dir, or
-    any other startup failure leaves Phoenix down and traces degrade to
-    the console exporter without raising.
-    """
-    if _phoenix_is_running():
-        return
-    try:
-        python_dir = os.path.join(os.environ.get("CLAUDE_PLUGIN_ROOT", ""), "python")
-        if not os.path.isdir(python_dir):
-            return
-        subprocess.Popen(
-            [
-                "uv",
-                "run",
-                "--extra",
-                "phoenix",
-                "python",
-                "-m",
-                "phoenix.server.main",
-                "serve",
-            ],
-            cwd=python_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        for _ in range(10):
-            time.sleep(0.5)
-            if _phoenix_is_running():
-                return
-    except Exception:
-        pass  # best-effort
 
+STATUS_DIR = "/tmp/claude-agent-status"
 
 # ======================================================================
 # Exporter + tracer factories
