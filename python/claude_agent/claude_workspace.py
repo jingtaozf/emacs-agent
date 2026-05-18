@@ -45,72 +45,75 @@ def _normalize_story_slug(name: str) -> str:
     return slug.strip("-")
 
 
-def _find_workspace_bridge_path() -> str:
-    """Return the absolute path to the ``workspace-bridge`` console script.
+# ======================================================================
+# ClaudeHooksFile — owns the workspace-hooks.json contract
+# ======================================================================
+#
+# Claude Code reads a ``--settings`` file at startup that wires three
+# hook events back into the workspace-bridge subprocess:
+#
+#   - Stop              → workspace-bridge response   (30s timeout)
+#   - UserPromptSubmit  → workspace-bridge prompt     (10s timeout)
+#   - SessionStart      → workspace-bridge session-start (10s timeout)
+#
+# Co-locate the bridge-path discovery + JSON template + write step in
+# one class so the contract is auditable in one read. Class constants
+# expose the timeouts so a deployment with slow MCP can override
+# without forking the hook generation.
 
-    Prefers the script installed in the same venv as this launcher so
-    the hook and the launcher stay in lockstep; falls back to PATH.
-    """
-    venv_bin = Path(sys.executable).parent
-    bridge = venv_bin / "workspace-bridge"
-    if bridge.exists():
-        return str(bridge)
-    return "workspace-bridge"
 
+class ClaudeHooksFile:
+    """Writer for the per-plugin ``workspace-hooks.json`` settings file."""
 
-def _write_hooks_settings(plugin_dir: str) -> str:
-    """Write a ``workspace-hooks.json`` that wires the three hook events.
+    HOOKS_FILENAME = "workspace-hooks.json"
+    STOP_TIMEOUT_SECS = 30
+    PROMPT_TIMEOUT_SECS = 10
+    SESSION_START_TIMEOUT_SECS = 10
 
-    Claude Code reads a ``--settings`` file at startup — the file
-    persists across the session, so we keep it in the plugin dir.
-    Three hooks are configured: Stop (response), UserPromptSubmit
-    (prompt), SessionStart (ready signal).
-    """
-    bridge = _find_workspace_bridge_path()
-    hooks = {
-        "hooks": {
-            "Stop": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": f"{bridge} response",
-                            "timeout": 30,
-                        }
-                    ],
-                }
-            ],
-            "UserPromptSubmit": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": f"{bridge} prompt",
-                            "timeout": 10,
-                        }
-                    ],
-                }
-            ],
-            "SessionStart": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": f"{bridge} session-start",
-                            "timeout": 10,
-                        }
-                    ],
-                }
-            ],
+    def __init__(self, plugin_dir: str):
+        self.plugin_dir = plugin_dir
+
+    @staticmethod
+    def find_bridge_path() -> str:
+        """Return the absolute path to the ``workspace-bridge`` console script.
+
+        Prefers the script installed in the same venv as this launcher so
+        the hook and the launcher stay in lockstep; falls back to PATH.
+        """
+        venv_bin = Path(sys.executable).parent
+        bridge = venv_bin / "workspace-bridge"
+        if bridge.exists():
+            return str(bridge)
+        return "workspace-bridge"
+
+    def _hook_block(self, command: str, timeout: int) -> dict:
+        return {
+            "matcher": "",
+            "hooks": [{"type": "command", "command": command, "timeout": timeout}],
         }
-    }
-    settings_file = os.path.join(plugin_dir, "workspace-hooks.json")
-    with open(settings_file, "w") as f:
-        json.dump(hooks, f)
-    return settings_file
+
+    def write(self) -> str:
+        """Render and write the hooks JSON. Returns the settings file path."""
+        bridge = self.find_bridge_path()
+        hooks = {
+            "hooks": {
+                "Stop": [
+                    self._hook_block(f"{bridge} response", self.STOP_TIMEOUT_SECS),
+                ],
+                "UserPromptSubmit": [
+                    self._hook_block(f"{bridge} prompt", self.PROMPT_TIMEOUT_SECS),
+                ],
+                "SessionStart": [
+                    self._hook_block(
+                        f"{bridge} session-start", self.SESSION_START_TIMEOUT_SECS
+                    ),
+                ],
+            }
+        }
+        settings_file = os.path.join(self.plugin_dir, self.HOOKS_FILENAME)
+        with open(settings_file, "w") as f:
+            json.dump(hooks, f)
+        return settings_file
 
 
 def _list_sessions(mcp: McpClient, org_file: str) -> str | None:
@@ -227,7 +230,7 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
         )
         args.extend(["--mcp-config", mcp_config])
 
-        hooks_file = _write_hooks_settings(self.plugin_dir)
+        hooks_file = ClaudeHooksFile(self.plugin_dir).write()
         args.extend(["--settings", hooks_file])
 
         if self.story_name:
