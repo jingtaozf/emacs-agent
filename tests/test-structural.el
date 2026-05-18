@@ -1478,10 +1478,46 @@ FIX: Rename to describe the concept (e.g. Permission Handler, not Functions)."
 
 ;;; F47: No pcase with string literal patterns (dynamic-binding trap)
 
+;; Allowlist design: a known violation is identified by a SHA-1 fingerprint
+;; of the `(pcase X)' line plus the next 3 lines.  This is robust against
+;; unrelated prose edits that shift line numbers, and *fails closed* when
+;; the pcase body itself changes — forcing the next contributor to either
+;; convert to `cond + equal' or re-audit and update the fingerprint.
+
+(defun test-structural--pcase-fingerprint ()
+  "Hash 4 source lines starting at point (the `pcase' line + 3 below).
+Trims trailing whitespace on each line so reformatting doesn't break
+the fingerprint.  Returns a 12-char hex string (first 12 of SHA-1)."
+  (let ((lines nil))
+    (save-excursion
+      (dotimes (_ 4)
+        (let ((line (buffer-substring-no-properties
+                     (line-beginning-position) (line-end-position))))
+          (push (replace-regexp-in-string "[ \t]+$" "" line) lines))
+        (forward-line 1)))
+    (substring (secure-hash 'sha1 (mapconcat #'identity (nreverse lines) "\n"))
+               0 12)))
+
+(defun test-structural--pcase-allowlisted-p (file _lnum)
+  "Return non-nil if the pcase at point is in the content-fingerprint allowlist.
+FILE is the .org file path; the obsolete LNUM argument is accepted but
+ignored — the lookup is now by FILE's basename + the 4-line fingerprint
+computed from the current `pcase' line."
+  (let ((entry (assoc (file-name-nondirectory file)
+                      test-structural--pcase-string-allowlist))
+        (fp (test-structural--pcase-fingerprint)))
+    (and entry (member fp (cdr entry)))))
+
 (ert-deftest test-structural-pcase-string-detect ()
   "Source .org files must not use pcase with string literal patterns.
 Under dynamic binding pcase string patterns compile differently.
-FIX: Use (cond ((equal X \"str\") body)) instead."
+FIX: Use (cond ((equal X \"str\") body)) instead.
+
+Known-but-deferred violations are recorded in
+`test-structural--pcase-string-allowlist' by content fingerprint
+(SHA-1 of the `pcase' line + 3 lines below).  Fingerprint design is
+robust against unrelated prose edits but fails closed when the pcase
+body itself changes — forces re-audit before unrelated commits land."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
     (let ((violations nil)
@@ -1507,28 +1543,36 @@ FIX: Use (cond ((equal X \"str\") body)) instead."
                          (not (string-match-p "^\\s-*;" line)))
                     (when (and (test-structural--pcase-has-string-arm-p)
                                (not (test-structural--pcase-allowlisted-p file lnum)))
-                      (push (format "%s:%d: pcase with string pattern"
-                                    (file-name-nondirectory file) lnum)
+                      (push (format "%s:%d: pcase with string pattern (fingerprint %s)"
+                                    (file-name-nondirectory file) lnum
+                                    (test-structural--pcase-fingerprint))
                             violations)))))
                 (forward-line 1))))))
       (should-with-fix (null violations)
-        (format "pcase with string patterns:\n%s\nFIX: Use cond + equal for string dispatch."
+        (format "pcase with string patterns:\n%s\nFIX: Use cond + equal for string dispatch.\nTo allowlist a deliberate violation: add the printed fingerprint to test-structural--pcase-string-allowlist."
                 (mapconcat #'identity (nreverse violations) "\n"))))))
 
-(defun test-structural--pcase-allowlisted-p (file lnum)
-  "Return non-nil if FILE:LNUM is in the pcase string-pattern allowlist."
-  (let ((entry (assoc (file-name-nondirectory file)
-                      test-structural--pcase-string-allowlist)))
-    (and entry (memq lnum (cdr entry)))))
-
 (defvar test-structural--pcase-string-allowlist
-  '(("claude-agent-backend.org" . (2279 2311))
-    ("claude-ide.org" . (415 641 888))
-    ("code-agent-org-scheduled.org" . (214))
-    ("emacs-mcp-server.org" . (703)))
-  "Known pcase string-pattern violations in existing code.
-Entries are (FILENAME . (LINE-NUM ...)). These are pre-existing and need
-a separate migration effort to convert to cond + equal.")
+  ;; Each entry: (FILENAME . (FINGERPRINT ...))
+  ;; FINGERPRINT is the first 12 hex chars of SHA-1(pcase-line + 3 lines below).
+  ;; Run `M-x ert RUN test-structural-pcase-string-detect' to see the
+  ;; fingerprint printed in the failure message.
+  '(("claude-agent-backend.org"
+     . ("6235e571eaad"        ; pcase type @ ~L2279
+        "a32472b973e4"))      ; pcase type @ ~L2311
+    ("claude-ide.org"
+     . ("321b189430ab"        ; pcase @ ~L415
+        "9bd00db90951"        ; pcase @ ~L641
+        "7ad5df9f7bf9"))      ; pcase @ ~L888
+    ("code-agent-org-scheduled.org"
+     . ("3c02623232db"))      ; pcase @ ~L214
+    ("emacs-mcp-server.org"
+     . ("4581a3ac1541")))     ; pcase @ ~L703
+  "Known pcase string-pattern violations indexed by content fingerprint.
+Entries are (FILENAME . (FINGERPRINT ...)).  Each fingerprint is the
+first 12 hex chars of SHA-1 over the `pcase' line + the 3 lines below.
+Editing a pcase body invalidates its fingerprint by design — the next
+test run fails with the new fingerprint printed, forcing a re-audit.")
 
 (defvar test-structural--source-org-excluded-dirs-re
   "\\(/docs/\\|/tests/\\|/reference/\\|/prompts/\\|/scripts/\\|/tasks/\\|/\\.claude/\\)"
