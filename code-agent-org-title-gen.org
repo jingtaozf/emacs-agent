@@ -1,0 +1,151 @@
+#+TITLE: Code Agent Org — Title Generator
+#+PROPERTY: literate-load yes
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: overview
+:END:
+
+Auto-generates short titles for AI-block headings of the form
+"Instruction N" (5–8 word summaries of the query content).
+
+The module owns one singleton =copilot-title-generator= struct
+holding a reusable =copilot-chat= instance — spinning up a fresh
+chat per title request is wasteful, and a stable backing instance
+makes the lifecycle obvious. The =maybe-auto-generate-title=
+dispatcher routes between the copilot and claude backends via the
+=code-agent-org-title-backend= defcustom; both produce a string
+the caller writes onto the heading marker.
+
+Lives in its own module because:
+- it owns a singleton + a class — surface visible from many
+  callers, but the implementation is self-contained;
+- the copilot dependency (=copilot-chat=) is hoisted here so the
+  main module's dependency list doesn't carry it;
+- a future second non-LLM title backend (e.g. regex extraction)
+  would slot in next to the existing dispatcher branch.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+#+END_SRC
+
+* Copilot Title Generator Class
+
+The copilot backend reuses one ~copilot-chat~ instance across every
+title request — spinning up a fresh instance per call would be
+wasteful and would scatter state across call frames.  Previously the
+instance was held in a bare ~defvar~ with three free
+setq/memq/copilot-chat--create lines inline in the request
+function.  Promoting to an explicit singleton class makes the lifecycle
+obvious and mirrors the rest of the codebase.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (code-agent-org-copilot-title-generator
+               (:constructor code-agent-org-copilot-title-generator--create)
+               (:copier nil))
+  "Reusable copilot-chat instance used to generate headings for new queries."
+  (instance nil
+            :documentation "copilot-chat instance, created on first use."))
+
+(defvar code-agent-org--title-generator
+  (code-agent-org-copilot-title-generator--create)
+  "Module-wide singleton copilot title generator.
+One per Emacs — creating a fresh copilot-chat instance per query
+has no benefit and wastes the underlying HTTP session.")
+
+(defun code-agent-org-copilot-title-generator-ensure-instance (generator)
+  "Return GENERATOR's copilot-chat instance, creating one if needed.
+Also re-creates when the stored instance has been evicted from
+`copilot-chat--instances' (e.g. by the user clearing chat state)."
+  (let ((current (code-agent-org-copilot-title-generator-instance generator)))
+    (unless (and current (memq current copilot-chat--instances))
+      (setf (code-agent-org-copilot-title-generator-instance generator)
+            (copilot-chat--create default-directory))))
+  (code-agent-org-copilot-title-generator-instance generator))
+
+(defun code-agent-org-copilot-title-generator-generate
+    (generator query on-title on-error)
+  "Ask GENERATOR's copilot instance to summarise QUERY as a short title.
+ON-TITLE is invoked with the cleaned title string when generation
+completes; ON-ERROR is invoked with an explanation string on any
+failure (missing copilot-chat, streaming error, empty response)."
+  (condition-case err
+      (progn
+        (require 'copilot-chat)
+        (require 'copilot-chat-copilot)
+        (require 'copilot-chat-common)
+        (let ((instance (code-agent-org-copilot-title-generator-ensure-instance
+                         generator)))
+          (lexical-let ((accumulated "")
+                        (on-title-cb on-title)
+                        (on-error-cb on-error)
+                        (max-chars claude-agent-title-max-chars)
+                        (fired nil))
+            (copilot-chat--ask
+             instance
+             (format "Generate a short title (5-8 words, max %d chars) for this text. Output ONLY the title, no quotes, no explanation:\n\n%s"
+                     max-chars
+                     (truncate-string-to-width query 500))
+             (lambda (_inst content)
+               (condition-case err
+                   (if (string= content copilot-chat--magic)
+                       (unless fired
+                         (setq fired t)
+                         (let ((title (code-agent-org--clean-title
+                                       accumulated max-chars)))
+                           (if title
+                               (funcall on-title-cb title)
+                             (funcall on-error-cb
+                                      "Copilot returned empty title"))))
+                     (setq accumulated (concat accumulated content)))
+                 (error (funcall on-error-cb (error-message-string err)))))
+             t))))  ; out-of-context = t
+    (error
+     (funcall on-error (error-message-string err)))))
+#+END_SRC
+
+* Backend Dispatch
+
+~maybe-auto-generate-title~ is the public entry point: it's called
+when ~code-agent-org-auto-generate-title~ is enabled and routes to the
+selected backend via ~code-agent-org-title-backend~.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org--maybe-auto-generate-title (query heading-marker)
+  "Generate title for QUERY and update heading at HEADING-MARKER.
+Only runs if `code-agent-org-auto-generate-title' is non-nil.
+Uses `code-agent-org-title-backend' to select the generation backend."
+  (when code-agent-org-auto-generate-title
+    (let ((trace-ctx (claude-agent-trace-context)))
+      (lexical-let ((marker heading-marker)
+                    (ctx trace-ctx))
+        (let ((on-title (lambda (title)
+                          (claude-agent-with-span "auto-title-complete"
+    (list :output title) ctx
+                            (code-agent-org--replace-heading-at-marker marker title))))
+              (on-error (lambda (err)
+                          (message "Auto-title generation failed: %s" err)
+                          (when (markerp marker)
+                            (set-marker marker nil)))))
+          (pcase code-agent-org-title-backend
+            ('copilot
+             (code-agent-org-copilot-title-generator-generate
+              code-agent-org--title-generator query on-title on-error))
+            ('claude
+             (claude-agent-generate-title
+              `((user . ,query))
+              :on-title on-title
+              :on-error on-error))
+            (_
+             (message "Unknown title backend: %s" code-agent-org-title-backend)
+             (when (markerp marker)
+               (set-marker marker nil)))))))))
+#+END_SRC
+
+* Provide
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-org-title-gen)
+#+END_SRC
