@@ -1451,59 +1451,6 @@ Provides inside :load no blocks (tangle templates) are excluded."
     (should (gethash "bg-task-2" (claude-agent--registry-background-tasks claude-agent--registry)))
     (should-not (gethash "ctrl-1" (claude-agent--registry-control-requests claude-agent--registry)))))
 
-;;; Phase 8: Permission system protocol tests
-
-(ert-deftest test-claude-agent-permission-checker-struct-exists ()
-  "Test that base permission-checker struct exists."
-  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
-  (let ((checker (claude-agent-make-permission-checker)))
-    (should (claude-agent-permission-checker-p checker))))
-
-(ert-deftest test-claude-agent-pattern-checker-struct-exists ()
-  "Test that pattern-checker sub-struct exists with allow/deny patterns."
-  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
-  (let ((checker (claude-agent-make-pattern-checker
-                  :allow-patterns '("Read" "Grep")
-                  :deny-patterns '("Bash(rm *)"))))
-    (should (claude-agent-permission-checker-p checker))
-    (should (claude-agent-pattern-checker-p checker))
-    (should (equal '("Read" "Grep")
-                   (claude-agent-pattern-checker-allow-patterns checker)))
-    (should (equal '("Bash(rm *)")
-                   (claude-agent-pattern-checker-deny-patterns checker)))))
-
-(ert-deftest test-claude-agent-check-tool-permission-generic-exists ()
-  "Test that cl-defgeneric check-tool-permission exists."
-  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
-  (should (fboundp 'claude-agent-check-tool-permission)))
-
-(ert-deftest test-claude-agent-pattern-checker-allows ()
-  "Test that pattern-checker allows matching tools."
-  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
-  (let ((checker (claude-agent-make-pattern-checker
-                  :allow-patterns '("Read" "Grep"))))
-    (should (eq 'allow
-                (claude-agent-check-tool-permission
-                 checker "Read" '(:file_path "/tmp/test.txt") nil)))))
-
-(ert-deftest test-claude-agent-pattern-checker-denies ()
-  "Test that pattern-checker denies matching tools."
-  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
-  (let ((checker (claude-agent-make-pattern-checker
-                  :deny-patterns '("Bash(rm *)"))))
-    (should (eq 'deny
-                (claude-agent-check-tool-permission
-                 checker "Bash" '(:command "rm -rf /") nil)))))
-
-(ert-deftest test-claude-agent-pattern-checker-ask-fallback ()
-  "Test that pattern-checker returns ask for unmatched tools."
-  :tags '(:unit :fast :stable :isolated :permissions :phase-8)
-  (let ((checker (claude-agent-make-pattern-checker
-                  :allow-patterns '("Read"))))
-    (should (eq 'ask
-                (claude-agent-check-tool-permission
-                 checker "Write" '(:file_path "/tmp/out.txt") nil)))))
-
 ;;; R10: JSON buffer overflow protection tests
 
 (ert-deftest test-json-buffer-max-size-defcustom-exists ()

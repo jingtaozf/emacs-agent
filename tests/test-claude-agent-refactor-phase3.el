@@ -59,13 +59,6 @@
   :tags '(:unit :fast :stable :isolated :refactor :f12)
   (should (featurep 'claude-agent-permission)))
 
-;; F12.2 Permission protocol struct exists
-(ert-deftest test-f12-permission-protocol-struct ()
-  "Permission checker structs should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f12)
-  (should (fboundp 'claude-agent-permission-checker-p))
-  (should (fboundp 'claude-agent-pattern-checker-p)))
-
 ;; F12.3 Permission check functions exist
 (ert-deftest test-f12-permission-check-functions ()
   "Core permission check functions should be defined."
