@@ -1973,189 +1973,236 @@ def write_status(session_id: str, status: str) -> None:
 
 
 def _extract_full_response(transcript_path: str) -> str:
-    """Collect assistant text since the last user entry in a Claude Code
-    JSONL transcript.
+    """Back-compat wrapper around ``ClaudeTranscriptReader``.
 
-    Skips entries that contain ``tool_use`` blocks — those are
-    intermediate turns ("Let me check…", result summaries) that would
-    create duplicate response sections if inserted.
+    Kept because tests import it by name; production code calls
+    ``TranscriptReader.for_path(p).extract_response()`` instead.
     """
-    # # Step 1: parse the JSONL transcript line-by-line, tolerating malformed
-    # # lines. Claude Code rotates JSONL files mid-session and may flush partial
-    # # lines that get completed on the next write.
-    entries: list[dict] = []
-    with open(transcript_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                logger.warning("Skipping malformed JSONL line in transcript")
-                continue
-
-    if not entries:
-        return ""
-
-    # # Step 2: locate the last user-message boundary. Everything after this
-    # # index is the assistant's response to the most recent prompt; earlier
-    # # turns are prior conversation and would create duplicate response
-    # # sections in org if we re-inserted them.
-    last_user_idx = -1
-    for i, entry in enumerate(entries):
-        if entry.get("type") == "user":
-            last_user_idx = i
-
-    # # Step 3: collect assistant text after the boundary, skipping any entry
-    # # whose content includes a ``tool_use`` block. Tool-use turns are
-    # # intermediate narration ("Let me check…", tool-result summaries) — they
-    # # would clutter the org response section with detail the user already saw
-    # # streamed live.
-    texts: list[str] = []
-    start = last_user_idx + 1 if last_user_idx >= 0 else 0
-    for entry in entries[start:]:
-        if entry.get("type") != "assistant":
-            continue
-        message = entry.get("message")
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content") or []
-        has_tool_use = any(p.get("type") == "tool_use" for p in content)
-        if has_tool_use:
-            continue
-        for part in content:
-            if part.get("type") == "text":
-                text = part.get("text", "").strip()
-                if text:
-                    texts.append(text)
-
-    # # Step 4: rejoin with double-newline so the org response section reads as
-    # # paragraphs, not a wall of text. Empty list yields "".
-    return "\n\n".join(texts)
+    return ClaudeTranscriptReader(transcript_path).extract_response()
 
 #+end_src
 *** Function _extract_turns
 #+begin_src python
 def _extract_turns(transcript_path: str) -> list[tuple[str, str]]:
-    """Return one (user_text, assistant_text) pair per user turn in ORDER.
+    """Back-compat wrapper — see ``ClaudeTranscriptReader.extract_turns``.
 
-    Iterates the Claude Code JSONL transcript once and groups every
-    ``type: "user"`` entry with the *non-tool-use* assistant text that
-    immediately follows it (before the next user turn).  ``assistant_text``
-    is empty when the user's turn was superseded or cancelled before
-    an assistant reply materialised.
-
-    Why this matters: when the user types a second prompt before Claude
-    Code finishes replying to the first, the transcript grows to
-    ``[user-A, (optional) assistant-A, user-B, assistant-B]`` but the
-    bridge only fires one ``Stop`` hook — the orchestration layer
-    needs per-turn pairs to route each response under the matching
-    instruction heading and to mark superseded prompts as cancelled.
+    The shared algorithm groups every user turn with the non-tool-use
+    assistant text that immediately follows it (before the next user
+    turn).  Empty assistant text marks a superseded or cancelled turn
+    so the orchestration layer can route accordingly.
     """
-    entries: list[dict] = []
-    with open(transcript_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                logger.warning("Skipping malformed JSONL line in transcript")
-                continue
-
-    turns: list[tuple[str, str]] = []
-    current_user: str | None = None
-    current_assistant_parts: list[str] = []
-
-    def _flush():
-        if current_user is not None:
-            turns.append((current_user, "\n\n".join(current_assistant_parts)))
-
-    for entry in entries:
-        etype = entry.get("type")
-        if etype == "user":
-            _flush()
-            current_user = _extract_user_text(entry)
-            current_assistant_parts = []
-        elif etype == "assistant" and current_user is not None:
-            message = entry.get("message")
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content") or []
-            if any(p.get("type") == "tool_use" for p in content):
-                continue  # tool-use turn — skip same as legacy extractor
-            for part in content:
-                if part.get("type") == "text":
-                    text = part.get("text", "").strip()
-                    if text:
-                        current_assistant_parts.append(text)
-    _flush()
-    return turns
+    return ClaudeTranscriptReader(transcript_path).extract_turns()
 
 #+end_src
 *** Function _extract_user_text
 #+begin_src python
 def _extract_user_text(entry: dict) -> str:
-    """Best-effort text extraction from a ``type: "user"`` transcript entry."""
-    message = entry.get("message")
-    if not isinstance(message, dict):
-        return ""
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                return part.get("text", "")
-    return ""
+    """Back-compat wrapper — delegates to ``ClaudeTranscriptReader._user_text``."""
+    return ClaudeTranscriptReader("")._user_text(entry)
 
 #+end_src
 *** Function _extract_copilot_response
 #+begin_src python
 def _extract_copilot_response(transcript_path: str) -> str:
-    """Collect assistant text since the last ``user.message`` in a Copilot
-    events.jsonl transcript.
+    """Back-compat wrapper around ``CopilotTranscriptReader.extract_response``."""
+    return CopilotTranscriptReader(transcript_path).extract_response()
 
-    Copilot stores content as a plain string (not a block list) on
-    ``assistant.message`` events. Messages with a non-empty
-    ``toolRequests`` list are tool-use turns and are skipped for the
-    same reason as in the Claude Code path.
+#+end_src
+*** Class TranscriptReader (polymorphic dispatch)
+#+begin_src python
+# ======================================================================
+# TranscriptReader — polymorphic abstraction over the two formats
+# ======================================================================
+#
+# The four ``_extract_*`` free functions above grew from two parallel
+# implementations: Claude Code JSONL (``type: "user"`` /
+# ``type: "assistant"`` with content-block lists) and Copilot
+# events.jsonl (``type: "user.message"`` / ``type: "assistant.message"``
+# with plain-string content).  Three independent call sites then
+# string-sniffed ``first_entry.get("type", "").startswith("session.")``
+# to pick which one to call — a recurring discriminator that ought to
+# be a class hierarchy.
+#
+# Below: a tiny ABC + two concrete readers + a ``for_path`` factory.
+# Callers say ``TranscriptReader.for_path(p).extract_response()`` and
+# the right implementation runs.  The free functions kept above stay
+# as thin shims because external tests import them.
+
+
+class TranscriptReader:
+    """Polymorphic reader for one transcript file.
+
+    Subclasses implement ``USER_TYPE`` (the ``type`` value that marks
+    a user turn) and ``_assistant_text(entry)`` (how to pull text
+    from one assistant entry, returning ``None`` for tool-use turns
+    that should be skipped).  The shared ``extract_response`` and
+    ``extract_turns`` algorithms are identical across formats.
     """
-    entries: list[dict] = []
-    with open(transcript_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                logger.warning("Skipping malformed JSONL line in Copilot transcript")
-                continue
 
-    if not entries:
+    USER_TYPE: str = ""  # overridden by subclasses
+    ASSISTANT_TYPE: str = ""
+
+    @classmethod
+    def for_path(cls, transcript_path: str) -> "TranscriptReader":
+        """Sniff the first non-blank line, return the matching subclass."""
+        first_entry: dict = {}
+        try:
+            with open(transcript_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        first_entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        first_entry = {}
+                    break
+        except OSError:
+            pass
+        if str(first_entry.get("type", "")).startswith("session."):
+            return CopilotTranscriptReader(transcript_path)
+        return ClaudeTranscriptReader(transcript_path)
+
+    def __init__(self, transcript_path: str):
+        self.path = transcript_path
+
+    # --- JSONL parsing: shared, tolerates malformed lines ---
+    def _entries(self) -> list[dict]:
+        entries: list[dict] = []
+        try:
+            with open(self.path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        logger.warning("Skipping malformed JSONL line in transcript")
+                        continue
+        except OSError:
+            pass
+        return entries
+
+    # --- Subclass hooks ---
+    def _assistant_text(self, entry: dict) -> str | None:
+        """Return the assistant text for ENTRY, or None to skip (e.g. tool use).
+
+        Subclass override — the two formats store the text differently."""
+        raise NotImplementedError
+
+    def _user_text(self, entry: dict) -> str:
+        """Return the user-message text for ENTRY (default: empty)."""
         return ""
 
-    last_user_idx = -1
-    for i, entry in enumerate(entries):
-        if entry.get("type") == "user.message":
-            last_user_idx = i
+    # --- Shared algorithms ---
+    def extract_response(self) -> str:
+        """Concatenate assistant text since the last user-turn boundary."""
+        entries = self._entries()
+        if not entries:
+            return ""
+        last_user_idx = -1
+        for i, entry in enumerate(entries):
+            if entry.get("type") == self.USER_TYPE:
+                last_user_idx = i
+        texts: list[str] = []
+        start = last_user_idx + 1 if last_user_idx >= 0 else 0
+        for entry in entries[start:]:
+            if entry.get("type") != self.ASSISTANT_TYPE:
+                continue
+            text = self._assistant_text(entry)
+            if text:
+                texts.append(text)
+        return "\n\n".join(texts)
 
-    texts: list[str] = []
-    start = last_user_idx + 1 if last_user_idx >= 0 else 0
-    for entry in entries[start:]:
-        if entry.get("type") != "assistant.message":
-            continue
-        data = entry.get("data", {})
+    def extract_turns(self) -> list[tuple[str, str]]:
+        """Return per-user-turn ``(user_text, assistant_text)`` pairs.
+
+        Each user turn is grouped with the non-tool-use assistant text
+        that immediately follows it (before the next user turn).
+        """
+        entries = self._entries()
+        turns: list[tuple[str, str]] = []
+        current_user: str | None = None
+        current_assistant_parts: list[str] = []
+
+        def flush():
+            if current_user is not None:
+                turns.append((current_user, "\n\n".join(current_assistant_parts)))
+
+        for entry in entries:
+            etype = entry.get("type")
+            if etype == self.USER_TYPE:
+                flush()
+                current_user = self._user_text(entry)
+                current_assistant_parts = []
+            elif etype == self.ASSISTANT_TYPE and current_user is not None:
+                text = self._assistant_text(entry)
+                if text:
+                    current_assistant_parts.append(text)
+        flush()
+        return turns
+
+
+class ClaudeTranscriptReader(TranscriptReader):
+    """Reader for Claude Code's JSONL transcripts.
+
+    User turns are ``type: "user"``; assistant turns are
+    ``type: "assistant"`` with a ``message.content`` block list.
+    Turns containing any ``tool_use`` block are skipped — those are
+    intermediate narration that would clutter the response.
+    """
+
+    USER_TYPE = "user"
+    ASSISTANT_TYPE = "assistant"
+
+    def _user_text(self, entry: dict) -> str:
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    return part.get("text", "")
+        return ""
+
+    def _assistant_text(self, entry: dict) -> str | None:
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            return None
+        content = message.get("content") or []
+        if any(p.get("type") == "tool_use" for p in content):
+            return None
+        parts: list[str] = []
+        for part in content:
+            if part.get("type") == "text":
+                text = part.get("text", "").strip()
+                if text:
+                    parts.append(text)
+        return "\n\n".join(parts) if parts else None
+
+
+class CopilotTranscriptReader(TranscriptReader):
+    """Reader for Copilot's events.jsonl streams.
+
+    User turns are ``type: "user.message"``; assistant turns are
+    ``type: "assistant.message"`` with a plain string at
+    ``data.content``.  Messages with a non-empty ``toolRequests`` list
+    are tool-use turns and are skipped, same rationale as Claude Code.
+    """
+
+    USER_TYPE = "user.message"
+    ASSISTANT_TYPE = "assistant.message"
+
+    def _assistant_text(self, entry: dict) -> str | None:
+        data = entry.get("data") or {}
         if data.get("toolRequests"):
-            continue
+            return None
         content = (data.get("content") or "").strip()
-        if content:
-            texts.append(content)
-
-    return "\n\n".join(texts)
+        return content or None
 
 #+end_src
 *** Class WorkspaceBridge
@@ -2618,20 +2665,9 @@ class WorkspaceBridge:
         """
         if not (transcript_path and os.path.isfile(transcript_path)):
             return False
-        try:
-            with open(transcript_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        return False
-                    return not str(entry.get("type", "")).startswith("session.")
-        except OSError:
-            return False
-        return False
+        return isinstance(
+            TranscriptReader.for_path(transcript_path), ClaudeTranscriptReader
+        )
 
     def _render_queue_against_transcript(
         self,
@@ -2731,36 +2767,21 @@ class WorkspaceBridge:
     def _collect_response_text(self, transcript_path: str, span) -> str:
         """Read the transcript file and return the response text or ``""``.
 
-        Dispatches on the first non-empty entry's ``type`` — a prefix of
-        ``session.`` identifies a Copilot ``events.jsonl`` stream; anything
-        else is assumed to be Claude Code's format.
+        Polymorphic — ``TranscriptReader.for_path`` sniffs the first
+        entry and returns the matching ``ClaudeTranscriptReader`` or
+        ``CopilotTranscriptReader``; the rest of this method is the
+        same regardless of format.
         """
         if not (transcript_path and os.path.isfile(transcript_path)):
             return ""
-
-        with open(transcript_path) as f:
-            first_line = ""
-            for line in f:
-                line = line.strip()
-                if line:
-                    first_line = line
-                    break
-        try:
-            first_entry = json.loads(first_line) if first_line else {}
-        except json.JSONDecodeError:
-            first_entry = {}
-
-        if first_entry.get("type", "").startswith("session."):
-            with self._span(
-                "extract-copilot-response",
-                **{"transcript.path": transcript_path},
-            ):
-                return _extract_copilot_response(transcript_path)
-        with self._span(
-            "extract-full-response",
-            **{"transcript.path": transcript_path},
-        ):
-            return _extract_full_response(transcript_path)
+        reader = TranscriptReader.for_path(transcript_path)
+        span_name = (
+            "extract-copilot-response"
+            if isinstance(reader, CopilotTranscriptReader)
+            else "extract-full-response"
+        )
+        with self._span(span_name, **{"transcript.path": transcript_path}):
+            return reader.extract_response()
 
     def _mint_missing_custom_id(self, input_data: dict, span) -> str | None:
         """Insert a terminal-typed prompt to obtain a fresh custom_id.
