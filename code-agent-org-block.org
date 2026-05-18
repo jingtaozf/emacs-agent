@@ -1,0 +1,301 @@
+#+TITLE: Code Agent Org — Block + Heading Detection
+#+PROPERTY: literate-load yes
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: overview
+:END:
+
+Boundary primitives that answer "where am I in the document?" for
+the rest of code-agent-org. Every higher-level execution path
+(=execute=, =cancel=, =insert-response=, =auto-title=) starts by
+calling one or more of these to decide what to do — they form the
+narrow waist of the org integration.
+
+** Concerns
+
+| Concern | Primitive(s) |
+|---------+--------------|
+| Section level (how deep am I?) | =--get-section-level= |
+| AI block boundary | =--in-ai-block-p= / =--get-block-content= / =--find-block-end= |
+| Block content mutation | =--replace-block-content= |
+| Output section detection | =--in-output-section-p= / =--skip-to-after-output-section= |
+| Instruction-by-tag lookup | =--find-instruction-heading= / =--find-instruction-number= |
+| Heading text manipulation | =--heading-matches-auto-title-pattern-p= / =--replace-heading-at-marker= / =--clean-title= |
+
+The "instruction-by-tag" group is load-bearing: instruction
+sections are identified by the =:claude_chat:= tag, NOT by heading
+text patterns like "Instruction N". Users may rename headings to
+descriptive titles ("Fix Authentication Bug", "Implement User
+Dashboard") and the system must keep working. Every caller goes
+through =--find-instruction-heading= rather than regex-matching the
+heading text.
+
+** Why one module
+
+The cohesion is "things that read or write org headings around the
+cursor." Splitting boundary primitives off from heading-editing
+helpers would scatter calls that always come in pairs (find
+instruction → replace heading) across modules without a real
+architectural gain.
+
+The two copilot-chat =declare-function= / =defvar= forward
+declarations live here too — =--clean-title= is the cleanup helper
+the copilot title generator calls back into, and a copilot-chat
+symbol may be touched indirectly through the title-clean path on
+some older Emacs builds. Keeping them adjacent to =--clean-title=
+documents the dependency.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'org)
+#+END_SRC
+
+* Section Level Detection
+
+#+NAME: block-detect-section-level
+#+BEGIN_SRC elisp
+(defun code-agent-org--get-section-level ()
+  "Get the current org section level (number of stars).
+Returns 0 if not inside any heading, otherwise returns the heading level."
+  (save-excursion
+    (if (org-before-first-heading-p)
+        0
+      (org-back-to-heading t)
+      (org-current-level))))
+#+END_SRC
+
+* AI Block Boundary Detection
+
+These functions detect whether point is inside an AI block and extract its boundaries.
+The key insight: an incomplete block (no =#+end_src= yet) is valid for execution,
+enabling users to run queries while still composing them.
+
+#+NAME: block-detect-boundaries
+#+BEGIN_SRC elisp
+(defun code-agent-org--in-ai-block-p ()
+  "Return t if point is inside a #+begin_src ai block."
+  (save-excursion
+    (let ((case-fold-search t)
+          (pos (point)))
+      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
+        (let ((block-start (point)))
+          ;; If we find end_src, check we're between begin and end
+          ;; If no end_src found, assume we're still inside the block (incomplete block)
+          (if (re-search-forward "^[ \t]*#\\+end_src" nil t)
+              (and (>= pos block-start)
+                   (<= pos (point)))
+            ;; No end found, we're in an incomplete block - that's OK
+            (>= pos block-start)))))))
+
+(defun code-agent-org--get-block-content ()
+  "Get content of the ai block at point."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
+        (forward-line 1)
+        (let ((start (point)))
+          (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
+            (forward-line 0)
+            (string-trim (buffer-substring-no-properties start (point)))))))))
+
+(defun code-agent-org--find-block-end ()
+  "Find position at end of #+end_src line."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
+        (line-end-position)))))
+#+END_SRC
+
+* Block Content Replacement
+
+Replace the content inside an AI block, preserving the begin/end markers.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org--replace-block-content (new-content)
+  "Replace the content of the ai block at point with NEW-CONTENT.
+Returns t if successful, nil otherwise."
+  (save-excursion
+    (let ((case-fold-search t))
+      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
+        (forward-line 1)
+        (let ((start (point)))
+          (when (re-search-forward "^[ \t]*#\\+end_src" nil t)
+            (forward-line 0)
+            (delete-region start (point))
+            (goto-char start)
+            (insert new-content "\n")
+            t))))))
+#+END_SRC
+
+* Output Section and Instruction Detection
+
+Output sections (tagged =:ai_output:=) contain Claude's responses.
+Instruction detection finds which numbered instruction contains the cursor,
+used for maintaining conversation context and navigation.
+
+** Design Note: Instruction Identification
+
+*IMPORTANT*: Instruction sections are identified by the =:claude_chat:= tag,
+NOT by heading text patterns like "Instruction N".
+
+Users may rename instruction headings to descriptive titles like
+"Fix Authentication Bug" or "Implement User Dashboard". The system must
+work correctly regardless of heading text.
+
+| Identifier | Used For | Example |
+|--------------+-------------------------------+-----------------------------------|
+| =:claude_chat:= | Finding instruction heading | =** My Task :claude_chat:= |
+| =:ai_output:= | Finding response sections | =** Response 1 :ai_output:= |
+
+All functions that need to find instruction sections MUST use
+=code-agent-org--find-instruction-heading= which searches by tag.
+
+#+NAME: block-detect-output-instruction
+#+BEGIN_SRC elisp
+(defun code-agent-org--in-output-section-p ()
+  "Check if cursor is inside an :ai_output: tagged section.
+Returns non-nil if current heading or any parent heading has the output tag."
+  (save-excursion
+    (let ((tags (org-get-tags nil t)))
+      (member code-agent-org-output-tag tags))))
+
+(defun code-agent-org--find-instruction-heading ()
+  "Find the instruction heading for point.
+Instruction headings are identified by the :claude_chat: tag.
+
+Search order:
+1. Current heading (if it has :claude_chat: tag)
+2. Parent headings (walk up the hierarchy, checking each for tag)
+3. At each level, also check previous siblings for the tag
+
+Returns the position of the instruction heading, or nil if not found.
+
+NOTE: This function identifies instructions by TAG, not by heading text.
+Headings like \"Fix Bug :claude_chat:\" and \"Instruction 1 :claude_chat:\"
+are both valid instruction headings."
+  (save-excursion
+    (when (ignore-errors (org-back-to-heading t))
+      (let ((found nil)
+            (done nil))
+        ;; Search current heading and all ancestors
+        (while (and (not found) (not done))
+          ;; Check current heading
+          (when (member code-agent-org-heading-tag (org-get-tags nil t))
+            (setq found (point)))
+          ;; If not found, check previous siblings at this level
+          (unless found
+            (let ((current-level (org-current-level))
+                  (search-pos (point)))
+              (save-excursion
+                (while (and (not found)
+                            (org-get-previous-sibling))
+                  (when (and (= (org-current-level) current-level)
+                             (member code-agent-org-heading-tag (org-get-tags nil t)))
+                    (setq found (point)))))
+              ;; If still not found, go up one level
+              (unless found
+                (goto-char search-pos)
+                (unless (org-up-heading-safe)
+                  ;; Can't go up further, exit loop
+                  (setq done t))))))
+        found))))
+
+(defun code-agent-org--find-instruction-number ()
+  "Find the next response number for the current instruction section.
+Uses `code-agent-org--find-instruction-heading' to locate the instruction
+by its :claude_chat: tag, then counts existing Response N siblings.
+
+Returns the next available response number (max existing + 1).
+Returns nil if no instruction heading is found (caller must handle this)."
+  (save-excursion
+    (let ((instr-pos (code-agent-org--find-instruction-heading)))
+      (when instr-pos
+        (goto-char instr-pos)
+        (let ((instruction-level (org-current-level))
+              (max-response-num 0))
+          ;; Search forward for Response N siblings at same level
+          (save-excursion
+            (while (org-get-next-sibling)
+              (when (and (= (org-current-level) instruction-level)
+                         (looking-at "^\\*+ Response \\([0-9]+\\)"))
+                (let ((num (string-to-number (match-string 1))))
+                  (when (> num max-response-num)
+                    (setq max-response-num num))))))
+          ;; Return next number (max + 1), or 1 if no responses found
+          (1+ max-response-num))))))
+
+(defun code-agent-org--skip-to-after-output-section ()
+  "Skip to after the current :ai_output: section.
+Moves point to after the output section's subtree, ready to insert sibling."
+  (when (code-agent-org--in-output-section-p)
+    (org-back-to-heading t)
+    ;; Move to the end of this subtree
+    (org-end-of-subtree t t)))
+
+(defun code-agent-org--heading-matches-auto-title-pattern-p ()
+  "Check if current heading matches the auto-title pattern.
+Returns the heading text (without stars and tags) if it matches, nil otherwise."
+  (save-excursion
+    (when (ignore-errors (org-back-to-heading t))
+      (let ((heading (org-get-heading t t t t)))  ; no tags, no todo, no priority, no comment
+        (when (and heading
+                   (string-match-p code-agent-org-auto-title-heading-pattern heading))
+          heading)))))
+
+(defun code-agent-org--replace-heading-at-marker (marker new-title)
+  "Replace heading text at MARKER with NEW-TITLE.
+Preserves heading level (stars), tags, and properties.
+Frees MARKER after use to prevent leak (F23)."
+  (when (and marker (markerp marker) (marker-buffer marker) (buffer-live-p (marker-buffer marker)))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (goto-char marker)
+        (when (ignore-errors (org-back-to-heading t))
+          (let* ((tags (org-get-tags nil t))
+                 (level (org-current-level))
+                 (stars (make-string level ?*))
+                 ;; Build tag string manually
+                 (tag-str (if tags
+                              (concat " :" (mapconcat #'identity tags ":") ":")
+                            "")))
+            ;; Delete the current heading line (including newline)
+            (beginning-of-line)
+            (let ((line-start (point)))
+              (forward-line 1)
+              (delete-region line-start (point)))
+            ;; Insert new heading with title and tags on same line
+            (insert stars " " new-title tag-str "\n"))))))
+    ;; Free marker after use to prevent leak (F23)
+    (when (markerp marker)
+      (set-marker marker nil)))
+
+;; Forward declarations for copilot-chat (optional dependency)
+(defvar copilot-chat--instances)
+(defvar copilot-chat--magic)
+(declare-function copilot-chat--create "copilot-chat-copilot" (directory &optional model type))
+(declare-function copilot-chat--ask "copilot-chat-copilot" (instance prompt callback &optional out-of-context))
+
+(defun code-agent-org--clean-title (title max-chars)
+  "Clean up a generated TITLE string, truncating to MAX-CHARS.
+Strips surrounding quotes and truncates with ellipsis if needed.
+Returns cleaned title or nil if empty."
+  (let ((cleaned (string-trim title)))
+    (when (and (>= (length cleaned) 2)
+               (string-match-p "^[\"'].*[\"']$" cleaned))
+      (setq cleaned (substring cleaned 1 -1)))
+    (when (string-match "^\\(?:Title:\\s-*\\|Here's\\s-*\\(?:a\\|the\\)\\s-*title:\\s-*\\)" cleaned)
+      (setq cleaned (substring cleaned (match-end 0))))
+    (when (> (length cleaned) max-chars)
+      (setq cleaned (concat (substring cleaned 0 (- max-chars 3)) "...")))
+    (unless (string-empty-p cleaned)
+      cleaned)))
+#+END_SRC
+
+* Provide
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-org-block)
+#+END_SRC
