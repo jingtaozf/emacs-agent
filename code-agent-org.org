@@ -3507,23 +3507,6 @@ workspace placed after point is still reachable. Returns the level
      (string-prefix-p "sdd-" (or (org-entry-get nil "CLAUDE_SESSION_ID") "")))
    t))
 
-(defcustom code-agent-org-workspace-docs-format "org"
-  "File format for workspace docs/ artifacts (research, design-docs).
-When \"org\", creates .org files with org-mode markup.
-When \"md\", creates .md files with Markdown markup.
-Can be overridden per-story via the WORKSPACE_DOCS_FORMAT org property."
-  :type '(choice (const :tag "Org-mode (.org)" "org")
-                 (const :tag "Markdown (.md)" "md"))
-  :group 'code-agent-org)
-
-(defun code-agent-org--workspace-docs-format ()
-  "Return the docs format for the current context.
-Checks WORKSPACE_DOCS_FORMAT org property (inherited) first,
-then falls back to `code-agent-org-workspace-docs-format' defcustom."
-  (or (and (derived-mode-p 'org-mode)
-           (org-entry-get nil "WORKSPACE_DOCS_FORMAT" t))
-      code-agent-org-workspace-docs-format))
-
 (defun code-agent-org--workspace-name-to-slug (name)
   "Convert workspace feature NAME to a file-system slug.
 Lowercases, replaces spaces/special chars with hyphens, collapses runs."
@@ -3531,95 +3514,6 @@ Lowercases, replaces spaces/special chars with hyphens, collapses runs."
     (setq slug (replace-regexp-in-string "[^a-z0-9]+" "-" slug))
     (setq slug (replace-regexp-in-string "^-\\|-$" "" slug))
     slug))
-
-(defun code-agent-org--workspace-create-docs-files (name session-id)
-  "Create docs/ research and design-doc files for workspace story NAME.
-SESSION-ID is the workspace session identifier.
-Uses `code-agent-org--workspace-docs-format' to determine file extension and template.
-Returns a plist (:research PATH :design PATH) of created file paths,
-or nil if docs/ directories don't exist."
-  (let* ((buf-dir (if buffer-file-name
-                     (file-name-directory buffer-file-name)
-                   default-directory))
-         (project-root (or (locate-dominating-file buf-dir "docs")
-                           buf-dir))
-         (research-dir (expand-file-name "docs/research" project-root))
-         (design-dir (expand-file-name "docs/design-docs" project-root))
-         (fmt (code-agent-org--workspace-docs-format))
-         (ext (concat "." fmt))
-         (year (substring session-id 4 8))
-         (slug (code-agent-org--workspace-name-to-slug name))
-         (research-file (expand-file-name (format "%s-%s%s" year slug ext) research-dir))
-         (design-file (expand-file-name (format "%s-%s%s" year slug ext) design-dir))
-         (is-md (equal fmt "md")))
-    ;; Create the directories on-demand (the docs/ migration emptied them
-    ;; but the SDD workspace pattern still wants per-story research +
-    ;; design files; users can opt out by deleting them after creation).
-    (make-directory research-dir t)
-    (make-directory design-dir t)
-    (when (and (file-directory-p research-dir)
-               (file-directory-p design-dir))
-      ;; Create research file from template
-      (unless (file-exists-p research-file)
-        (with-temp-file research-file
-          (if is-md
-              (progn
-                (insert (format "# Research: %s\n\n" name))
-                (insert (format "**Date**: %s\n" (format-time-string "%Y-%m-%d")))
-                (insert (format "**Workspace Session**: %s\n" session-id))
-                (insert "**Status**: draft\n\n")
-                (insert "## Codebase Patterns\n\n")
-                (insert "## Relevant Files\n\n")
-                (insert "## External References\n\n")
-                (insert "## Findings\n"))
-            (insert (format "#+TITLE: Research: %s\n" name))
-            (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
-            (insert (format "#+WORKSPACE_SESSION: %s\n" session-id))
-            (insert "#+STATUS: draft\n\n")
-            (insert "* Codebase Patterns\n\n")
-            (insert "* Relevant Files\n\n")
-            (insert "* External References\n\n")
-            (insert "* Findings\n"))))
-      ;; Create design doc from template
-      (unless (file-exists-p design-file)
-        (with-temp-file design-file
-          (if is-md
-              (progn
-                (insert (format "# Design: %s\n\n" name))
-                (insert (format "**Date**: %s\n" (format-time-string "%Y-%m-%d")))
-                (insert (format "**Workspace Session**: %s\n" session-id))
-                (insert "**Status**: draft\n\n")
-                (insert "## Goals\n\n")
-                (insert "## Non-Goals\n\n")
-                (insert "## Proposed Solution\n\n")
-                (insert "## Technical Design\n\n")
-                (insert "## Features\n"))
-            (insert (format "#+TITLE: Design: %s\n" name))
-            (insert (format "#+DATE: %s\n" (format-time-string "[%Y-%m-%d]")))
-            (insert (format "#+WORKSPACE_SESSION: %s\n" session-id))
-            (insert "#+STATUS: draft\n\n")
-            (insert "* Goals\n\n")
-            (insert "* Non-Goals\n\n")
-            (insert "* Proposed Solution\n\n")
-            (insert "* Technical Design\n\n")
-            (insert "* Features\n"))))
-      ;; Update INDEX.md files
-      (code-agent-org--workspace-update-index research-dir name session-id)
-      (code-agent-org--workspace-update-index design-dir name session-id)
-      (list :research research-file :design design-file))))
-
-(defun code-agent-org--workspace-update-index (dir name session-id)
-  "Append entry to INDEX.md in DIR for workspace story NAME.
-SESSION-ID is accepted for API compatibility but not stored in the index."
-  (let ((index-file (expand-file-name "INDEX.md" dir)))
-    (when (file-exists-p index-file)
-      (with-temp-buffer
-        (insert-file-contents index-file)
-        (goto-char (point-max))
-        (insert (format "| %s | %s | draft |\n"
-                        (format-time-string "%Y-%m-%d")
-                        name))
-        (write-region (point-min) (point-max) index-file nil 'silent)))))
 
 (defcustom code-agent-org-workspace-default-backend "cmux"
   "Default CLAUDE_BACKEND value for new workspace sections.

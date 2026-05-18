@@ -424,52 +424,5 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (goto-char (point-min))
     (should-not (re-search-forward "^\\*\\*\\* Features" nil t))))
 
-;;; Unit Tests - Configurable Docs Format
-
-(ert-deftest test-workspace-docs-format-default ()
-  "Test that default docs format is 'org'."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (should (equal "org" code-agent-org-workspace-docs-format)))
-
-(ert-deftest test-workspace-docs-format-resolver-default ()
-  "Test that resolver returns defcustom value when no property set."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Test\n")
-    (goto-char (point-min))
-    (let ((code-agent-org-workspace-docs-format "org"))
-      (should (equal "org" (code-agent-org--workspace-docs-format))))))
-
-(ert-deftest test-workspace-docs-format-resolver-property-override ()
-  "Test that WORKSPACE_DOCS_FORMAT property overrides defcustom."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Test\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":WORKSPACE_DOCS_FORMAT: md\n")
-    (insert ":END:\n")
-    (goto-char (point-min))
-    (re-search-forward "Test")
-    (let ((code-agent-org-workspace-docs-format "org"))
-      (should (equal "md" (code-agent-org--workspace-docs-format))))))
-
-(ert-deftest test-workspace-docs-format-resolver-inherited-property ()
-  "Test that WORKSPACE_DOCS_FORMAT property is inherited from parent headings."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Project\n")
-    (insert ":PROPERTIES:\n")
-    (insert ":WORKSPACE_DOCS_FORMAT: md\n")
-    (insert ":END:\n")
-    (insert "** Child\n")
-    (goto-char (point-min))
-    (re-search-forward "Child")
-    (let ((code-agent-org-workspace-docs-format "org"))
-      (should (equal "md" (code-agent-org--workspace-docs-format))))))
-
-
 (provide 'test-code-agent-org-workspace)
 ;;; test-code-agent-org-sdd.el ends here
