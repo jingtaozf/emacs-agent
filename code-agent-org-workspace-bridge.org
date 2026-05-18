@@ -615,6 +615,58 @@ Returns the session ID string, or nil if none saved."
 ** Real-time Tool Output
 
 #+BEGIN_SRC elisp
+(defun code-agent-org-workspace-bridge--find-src-end-and-todo-region (instr-end)
+  "Return ``(SRC-END TODO-START TODO-END)'' for the instruction at point.
+
+SRC-END is the buffer position one line after ``#+end_src'' (nil
+if no src block exists inside the instruction).  TODO-START /
+TODO-END bracket any pre-existing checkbox region — consecutive
+lines starting with ``- [`` — and are nil when no such region
+exists yet.  Caller positions point at the instruction heading
+before calling.
+
+Walks at most to INSTR-END."
+  (let (src-end todo-start todo-end)
+    (save-excursion
+      (when (re-search-forward "^#\\+end_src" instr-end t)
+        (forward-line 1)
+        (setq src-end (point))))
+    (when src-end
+      (save-excursion
+        (goto-char src-end)
+        (while (and (< (point) instr-end) (looking-at "^[ \t]*$"))
+          (forward-line 1))
+        (when (looking-at "^- \\[")
+          (setq todo-start (point))
+          (while (and (< (point) instr-end) (looking-at "^- \\["))
+            (forward-line 1))
+          (setq todo-end (point)))))
+    (list src-end todo-start todo-end)))
+
+(defun code-agent-org-workspace-bridge--render-todos (todos)
+  "Render TODOS (plist list) into the markdown checkbox text."
+  (mapconcat
+   (lambda (todo)
+     (format "- [%s] %s"
+             (if (string= (plist-get todo :status) "completed") "X" " ")
+             (plist-get todo :content)))
+   todos "\n"))
+
+(defun code-agent-org-workspace-bridge--write-todo-cookie (instr-pos todos)
+  "Set/update the ``[N/M]'' progress cookie on the heading at INSTR-POS."
+  (goto-char instr-pos)
+  (let* ((done (cl-count-if
+                (lambda (todo) (string= (plist-get todo :status) "completed"))
+                todos))
+         (total (length todos))
+         (cookie (format " [%d/%d]" done total)))
+    (when (re-search-forward " \\[[0-9]+/[0-9]+\\]" (line-end-position) t)
+      (replace-match ""))
+    (goto-char instr-pos)
+    (when (re-search-forward "\\( +:\\)" (line-end-position) t)
+      (goto-char (match-beginning 1))
+      (insert cookie))))
+
 (defun code-agent-org-workspace-bridge-update-todos (org-file session-id todos instr-custom-id)
   "Update checkbox list under the Instruction with INSTR-CUSTOM-ID.
 TODOS is a list of plists with :content, :status, and :priority keys.
@@ -625,73 +677,39 @@ Replaces or creates the checkbox list between the src block and child headings."
         (widen)
         (code-agent-org-workspace-bridge--find-workflow session-id)
         (let* ((workflow-level (org-current-level))
-               (instr-level (1+ workflow-level))
-               (workflow-end (code-agent-org-workspace-bridge--find-next-sibling-heading
-                              workflow-level (point-max)))
-               (last-instr-pos (code-agent-org-workspace-bridge--find-heading-by-custom-id
-                                instr-custom-id workflow-end)))
-          (unless last-instr-pos
+               (instr-level    (1+ workflow-level))
+               (workflow-end
+                (code-agent-org-workspace-bridge--find-next-sibling-heading
+                 workflow-level (point-max)))
+               (instr-pos
+                (code-agent-org-workspace-bridge--find-heading-by-custom-id
+                 instr-custom-id workflow-end)))
+          (unless instr-pos
             (error "Instruction %s not found under Workflow for session %s"
                    instr-custom-id session-id))
-          (goto-char last-instr-pos)
-          ;; Find the end of the src block (#+end_src)
-          (let* ((instr-end (code-agent-org-workspace-bridge--find-next-sibling-heading
-                             instr-level workflow-end))
-                 (src-end nil)
-                 (todo-start nil)
-                 (todo-end nil))
-            ;; Find #+end_src within this instruction
-            (save-excursion
-              (when (re-search-forward "^#\\+end_src" instr-end t)
-                (forward-line 1)
-                (setq src-end (point))))
+          (goto-char instr-pos)
+          (let* ((instr-end
+                  (code-agent-org-workspace-bridge--find-next-sibling-heading
+                   instr-level workflow-end))
+                 (region
+                  (code-agent-org-workspace-bridge--find-src-end-and-todo-region
+                   instr-end))
+                 (src-end    (nth 0 region))
+                 (todo-start (nth 1 region))
+                 (todo-end   (nth 2 region))
+                 (checkbox-text
+                  (code-agent-org-workspace-bridge--render-todos todos)))
             (when src-end
-              ;; Find existing todo region: consecutive lines starting with "- ["
-              (goto-char src-end)
-              ;; Skip blank lines after src block
-              (while (and (< (point) instr-end) (looking-at "^[ \t]*$"))
-                (forward-line 1))
-              (when (looking-at "^- \\[")
-                (setq todo-start (point))
-                (while (and (< (point) instr-end) (looking-at "^- \\["))
-                  (forward-line 1))
-                (setq todo-end (point)))
-              ;; Build new checkbox text
-              (let ((checkbox-text
-                     (mapconcat
-                      (lambda (todo)
-                        (let ((content (plist-get todo :content))
-                              (status (plist-get todo :status)))
-                          (format "- [%s] %s"
-                                  (if (string= status "completed") "X" " ")
-                                  content)))
-                      todos "\n")))
-                (if todo-start
-                    ;; Replace existing todo region
-                    (progn
-                      (delete-region todo-start todo-end)
-                      (goto-char todo-start)
-                      (insert checkbox-text "\n"))
-                  ;; Insert after src block
-                  (goto-char src-end)
-                  (unless (looking-at "^[ \t]*$")
-                    (insert "\n"))
-                  (insert checkbox-text "\n"))
-                ;; Update heading cookie
-                (goto-char last-instr-pos)
-                (let* ((done (cl-count-if
-                              (lambda (todo) (string= (plist-get todo :status) "completed"))
-                              todos))
-                       (total (length todos))
-                       (cookie (format " [%d/%d]" done total)))
-                  ;; Remove existing cookie if any
-                  (when (re-search-forward " \\[[0-9]+/[0-9]+\\]" (line-end-position) t)
-                    (replace-match ""))
-                  ;; Insert cookie before tags
-                  (goto-char last-instr-pos)
-                  (when (re-search-forward "\\( +:\\)" (line-end-position) t)
-                    (goto-char (match-beginning 1))
-                    (insert cookie)))))))
+              (if todo-start
+                  (progn
+                    (delete-region todo-start todo-end)
+                    (goto-char todo-start)
+                    (insert checkbox-text "\n"))
+                (goto-char src-end)
+                (unless (looking-at "^[ \t]*$")
+                  (insert "\n"))
+                (insert checkbox-text "\n"))
+              (code-agent-org-workspace-bridge--write-todo-cookie instr-pos todos))))
         (save-buffer)
         (format "Updated %d todos" (length todos))))))
 #+END_SRC

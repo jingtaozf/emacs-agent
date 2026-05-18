@@ -1470,10 +1470,8 @@ Eleven OTel spans cover this flow: =cmux-call=, =cmux-ensure-session=,
 spans roll up into the per-AI-block root span.
 
 #+BEGIN_SRC elisp
-(defun code-agent-org-cmux--execute-ai-block ()
-  "Execute current AI block via cmux backend.
-Ensures session exists, checks readiness, sends prompt.
-Registers in `claude-agent--active-queries' for mode-line."
+(defun code-agent-org-cmux--prompt-at-point ()
+  "Return the trimmed prompt string of the AI block at point, or signal user-error."
   (let* ((element (org-element-at-point))
          (prompt (when (and (eq (org-element-type element) 'src-block)
                             (string= (org-element-property :language element) "ai"))
@@ -1481,75 +1479,83 @@ Registers in `claude-agent--active-queries' for mode-line."
                     (string-trim (org-element-property :value element))))))
     (unless prompt
       (user-error "Point is not inside a #+begin_src ai block"))
-    (let* ((surface-id (code-agent-org-cmux--ensure-session))
-           (workspace-session-id
-            (code-agent-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
-           (status (code-agent-org-cmux--get-status workspace-session-id surface-id)))
-      (when (string= status "busy")
-        (user-error "Claude Code busy (status: %s). Cancel first?" status))
-      ;; Detect story and update ACTIVE_STORY on workspace heading
-      (let ((story (code-agent-org--find-story-heading)))
-        (when story
-          (code-agent-org--set-active-story (car story))))
-      ;; Store ROOT trace context BEFORE entering child span,
-      ;; so async callbacks (cmux-query-completed) join at the root level
-      (let ((session-key (code-agent-org--current-session-key)))
-        (when session-key
-          (code-agent-org--session-put session-key :trace-ctx (claude-agent-trace-context))))
-      (claude-agent-with-span "cmux-execute"
-          (list :session-id workspace-session-id
-                :input prompt
-                :surface-id surface-id) nil
-      ;; Store workspace→session-key mapping
+    prompt))
+
+(defun code-agent-org-cmux--session-state-seed (sk surface-id)
+  "Populate per-query session state for SK / SURFACE-ID before dispatch.
+
+Mirrors the field-write block in `code-agent-org-execute' that the
+agent-family backends rely on.  The multiplexer path bypasses
+`code-agent-org-execute', so without this seeding cancel-from-org
+returns \"No active query\", queueing skips, and `:loop 2+' never
+advances past iteration 1."
+  (ignore surface-id)
+  (code-agent-org--session-put sk :loop-org-buffer (current-buffer))
+  (code-agent-org--session-put sk :loop-block-marker (copy-marker (point)))
+  (code-agent-org--session-put sk :backend
+                               (claude-agent-cmux-backend-create :session-key sk))
+  (let ((instr-num     (code-agent-org--find-instruction-number))
+        (custom-id     (code-agent-org--find-instruction-custom-id))
+        (section-level (code-agent-org--get-section-level))
+        (query-id      (code-agent-org--generate-query-id))
+        (block-marker  (copy-marker (point))))
+    (code-agent-org--session-put sk :busy t)
+    (code-agent-org--session-put sk :query-id query-id)
+    (code-agent-org--session-put sk :marker block-marker)
+    (code-agent-org--session-put sk :start-time (float-time))
+    (code-agent-org--session-put sk :instruction-num instr-num)
+    (code-agent-org--session-put sk :custom-id custom-id)
+    (code-agent-org--session-put sk :section-level section-level)
+    (code-agent-org--session-put sk :recovery-count 0)))
+
+(defun code-agent-org-cmux--dispatch-prompt (sk workspace-session-id surface-id prompt)
+  "Register the query, flip the from-emacs flag, type PROMPT, start verbose mirror."
+  (ignore sk)
+  (save-excursion
+    (org-back-to-heading t)
+    (when workspace-session-id
+      (code-agent-org-terminal--register-query workspace-session-id surface-id)))
+  (when workspace-session-id
+    (code-agent-org-terminal--write-from-emacs-flag workspace-session-id))
+  (code-agent-org-cmux--send-text surface-id prompt)
+  (code-agent-org-cmux--start-verbose surface-id sk)
+  (message "Sent to cmux (%d chars)" (length prompt)))
+
+(defun code-agent-org-cmux--execute-ai-block ()
+  "Execute the AI block at point via the cmux backend.
+
+Five phases:
+1. Read the prompt and resolve session/surface/status.
+2. Refuse to send when the surface is busy.
+3. Auto-update ACTIVE_STORY (so Channel B routing stays in sync).
+4. Seed session state for cancel/queue/loop/telemetry paths.
+5. Type the prompt, register active query, start verbose mirror —
+   all under one `cmux-execute' span that async cmux-query-completed
+   callbacks attach to via the cached trace context."
+  (let* ((prompt (code-agent-org-cmux--prompt-at-point))
+         (surface-id (code-agent-org-cmux--ensure-session))
+         (workspace-session-id
+          (code-agent-org-terminal--find-session-property "CLAUDE_SESSION_ID"))
+         (status (code-agent-org-cmux--get-status workspace-session-id surface-id))
+         (sk (code-agent-org--current-session-key)))
+    (when (string= status "busy")
+      (user-error "Claude Code busy (status: %s). Cancel first?" status))
+    (when-let* ((story (code-agent-org--find-story-heading)))
+      (code-agent-org--set-active-story (car story)))
+    ;; Root trace context: cache BEFORE entering the child span so async
+    ;; callbacks join at the root, not under the cmux-execute span itself.
+    (when sk
+      (code-agent-org--session-put sk :trace-ctx (claude-agent-trace-context)))
+    (claude-agent-with-span "cmux-execute"
+        (list :session-id workspace-session-id
+              :input prompt
+              :surface-id surface-id) nil
       (when workspace-session-id
-        (puthash workspace-session-id (code-agent-org--current-session-key)
+        (puthash workspace-session-id sk
                  code-agent-org-terminal--workspace-to-session-key))
-      ;; Store a cmux-backend struct instance so generic
-      ;; `code-agent-org-cancel' dispatches through Protocol 3
-      ;; (receiver-typed `cl-defmethod'), not via a string discriminator.
-      (code-agent-org--session-put
-       (code-agent-org--current-session-key) :backend
-       (claude-agent-cmux-backend-create
-        :session-key (code-agent-org--current-session-key)))
-      ;; Save org buffer + marker for loop-send
-      (code-agent-org--session-put (code-agent-org--current-session-key)
-                               :loop-org-buffer (current-buffer))
-      (code-agent-org--session-put (code-agent-org--current-session-key)
-                               :loop-block-marker (copy-marker (point)))
-      ;; Populate session state needed by cancel / queue / loop-continuation /
-      ;; telemetry paths.  Without these, `code-agent-org-cancel' returns
-      ;; "No active query to cancel", queueing skips, and loops do not
-      ;; continue past iteration 1.  (Agent-family backends populate these
-      ;; same fields in `code-agent-org-execute' itself; the multiplexer
-      ;; path bypasses that block, so we duplicate them here.)
-      (let* ((sk (code-agent-org--current-session-key))
-             (instr-num (code-agent-org--find-instruction-number))
-             (custom-id (code-agent-org--find-instruction-custom-id))
-             (section-level (code-agent-org--get-section-level))
-             (query-id (code-agent-org--generate-query-id))
-             (block-marker (copy-marker (point))))
-        (code-agent-org--session-put sk :busy t)
-        (code-agent-org--session-put sk :query-id query-id)
-        (code-agent-org--session-put sk :marker block-marker)
-        (code-agent-org--session-put sk :start-time (float-time))
-        (code-agent-org--session-put sk :instruction-num instr-num)
-        (code-agent-org--session-put sk :custom-id custom-id)
-        (code-agent-org--session-put sk :section-level section-level)
-        (code-agent-org--session-put sk :recovery-count 0))
-      ;; Register in active-queries BEFORE writing from-emacs flag
-      ;; (avoids TOCTOU race: hook could fire before request-id is written)
-      (save-excursion
-        (org-back-to-heading t)
-        (when workspace-session-id
-          (code-agent-org-terminal--register-query workspace-session-id surface-id)))
-      ;; Write from-emacs flag BEFORE sending
-      (when workspace-session-id
-        (code-agent-org-terminal--write-from-emacs-flag workspace-session-id))
-      ;; Send prompt via cmux
-      (code-agent-org-cmux--send-text surface-id prompt)
-      ;; Start verbose output mirror (async capture-pane polling into its own buffer)
-      (code-agent-org-cmux--start-verbose surface-id (code-agent-org--current-session-key))
-      (message "Sent to cmux (%d chars)" (length prompt))))))
+      (code-agent-org-cmux--session-state-seed sk surface-id)
+      (code-agent-org-cmux--dispatch-prompt
+       sk workspace-session-id surface-id prompt))))
 #+END_SRC
 
 * Response Delivery

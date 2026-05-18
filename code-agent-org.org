@@ -548,6 +548,67 @@ Aligns level with previous workspace if any exists."
     (forward-line 1)
     (message "Created workspace '%s' with session ID: %s" name session-id)))
 
+(defun code-agent-org--find-workspace-anchor ()
+  "Locate the enclosing workspace heading + its CLAUDE_SESSION_ID.
+
+Walks up from point (or the current heading) looking for the
+nearest ancestor with a CLAUDE_SESSION_ID property, then the
+current heading itself.  Signals `user-error' when no workspace
+context is reachable.  Returns a cons (POSITION . SESSION-ID)."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((workspace-pos nil)
+          (session-id nil))
+      (save-excursion
+        (while (and (not session-id) (org-up-heading-safe))
+          (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
+          (when session-id (setq workspace-pos (point)))))
+      (unless session-id
+        (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
+        (when session-id (setq workspace-pos (point))))
+      (unless session-id
+        (user-error "Not inside a workspace section (no CLAUDE_SESSION_ID found)"))
+      (cons workspace-pos session-id))))
+
+(defun code-agent-org--find-active-workflow-pos (workspace-pos)
+  "Return the line-beginning of the first non-archived Workflow under WORKSPACE-POS.
+
+A workflow heading carries the `:sdd:' tag.  Skips any heading that
+already has the `ARCHIVE' tag.  Signals `user-error' if none found."
+  (save-excursion
+    (goto-char workspace-pos)
+    (let ((workspace-end (save-excursion (org-end-of-subtree t t) (point)))
+          (workflow-pos nil))
+      (while (and (not workflow-pos)
+                  (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" workspace-end t))
+        (unless (member "ARCHIVE" (org-get-tags nil t))
+          (setq workflow-pos (line-beginning-position))))
+      (unless workflow-pos
+        (user-error "No active Workflow section found under this workspace"))
+      workflow-pos)))
+
+(defun code-agent-org--insert-fresh-workflow (session-id wf-level)
+  "Insert a fresh Workflow + Instruction 1 + empty AI block at point.
+
+WF-LEVEL is the heading depth of the workflow (stars count).  Uses
+SESSION-ID as the workspace identifier for CUSTOM_ID generation.
+Point must already be at the position where the workflow should
+appear (typically immediately after `org-archive-subtree')."
+  (let* ((stars (make-string wf-level ?*))
+         (stars-instr (make-string (1+ wf-level) ?*))
+         (file-base (when buffer-file-name (file-name-base buffer-file-name))))
+    (insert stars " Workflow :sdd:\n"
+            ":PROPERTIES:\n"
+            ":CUSTOM_ID: "
+            (code-agent-org--generate-custom-id session-id "Workflow" file-base)
+            "\n:END:\n\n"
+            stars-instr " Instruction 1 :" code-agent-org-heading-tag ":\n"
+            ":PROPERTIES:\n")
+    (when-let* ((instr-id (code-agent-org--generate-instruction-custom-id
+                           file-base 1 session-id)))
+      (insert ":CUSTOM_ID: " instr-id "\n"))
+    (insert ":END:\n\n#+begin_src ai\n\n#+end_src\n")))
+
 (defun code-agent-org-workspace-archive-workflow ()
   "Archive the current Workflow via `org-archive-subtree' and create a fresh one.
 Uses the buffer's #+ARCHIVE: property to determine the archive location.
@@ -560,57 +621,21 @@ conversation. To start a brand-new chat instead, clear the property
 manually with `org-delete-property' before launching the terminal."
   (interactive)
   (save-excursion
-    (org-back-to-heading t)
-    ;; Walk up to find the workspace top-level heading with CLAUDE_SESSION_ID
-    (let ((workspace-pos nil)
-          (session-id nil))
-      (save-excursion
-        (while (and (not session-id) (org-up-heading-safe))
-          (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
-          (when session-id (setq workspace-pos (point)))))
-      (unless session-id
-        (setq session-id (org-entry-get nil "CLAUDE_SESSION_ID"))
-        (when session-id (setq workspace-pos (point))))
-      (unless session-id
-        (user-error "Not inside a workspace section (no CLAUDE_SESSION_ID found)"))
-      ;; Find the active Workflow heading under this workspace
-      (goto-char workspace-pos)
-      (let* ((workspace-end (save-excursion (org-end-of-subtree t t) (point)))
-             (workflow-pos nil))
-        (save-excursion
-          (while (and (not workflow-pos)
-                      (re-search-forward "^\\*+ +Workflow\\b.*:sdd:" workspace-end t))
-            (unless (member "ARCHIVE" (org-get-tags nil t))
-              (setq workflow-pos (line-beginning-position)))))
-        (unless workflow-pos
-          (user-error "No active Workflow section found under this workspace"))
-        (goto-char workflow-pos)
-        (let* ((wf-level (org-current-level))
-               (stars (make-string wf-level ?*))
-               (stars-instr (make-string (1+ wf-level) ?*))
-               (file-base (when buffer-file-name (file-name-base buffer-file-name))))
-          ;; Archive the workflow subtree using org's native archive
-          (org-archive-subtree)
-          ;; Point is now where the workflow was — insert new one
-          (insert stars " Workflow :sdd:\n")
-          (insert ":PROPERTIES:\n")
-          (insert ":CUSTOM_ID: " (code-agent-org--generate-custom-id session-id "Workflow" file-base) "\n")
-          (insert ":END:\n\n")
-          (insert stars-instr " Instruction 1 :" code-agent-org-heading-tag ":\n")
-          (insert ":PROPERTIES:\n")
-          (let ((instr-id (code-agent-org--generate-instruction-custom-id file-base 1 session-id)))
-            (when instr-id
-              (insert ":CUSTOM_ID: " instr-id "\n")))
-          (insert ":END:\n\n")
-          (insert "#+begin_src ai\n\n#+end_src\n")
-          ;; CLAUDE_CLI_SESSION (and Copilot's) are intentionally NOT
-          ;; cleared — archiving the transcript should not break
-          ;; resume on the next "Open terminal".
-          (save-buffer)
-          ;; Position cursor inside the new AI block
-          (re-search-backward "^#\\+begin_src ai")
-          (forward-line 1)
-          (message "Archived workflow to archive file, created fresh Workflow section"))))))
+    (let* ((anchor       (code-agent-org--find-workspace-anchor))
+           (session-id   (cdr anchor))
+           (workspace-pos (car anchor))
+           (workflow-pos (code-agent-org--find-active-workflow-pos workspace-pos)))
+      (goto-char workflow-pos)
+      (let ((wf-level (org-current-level)))
+        ;; org-archive-subtree relocates the subtree; point ends up at the
+        ;; original workflow start, ready for the fresh insertion.
+        (org-archive-subtree)
+        (code-agent-org--insert-fresh-workflow session-id wf-level)
+        (save-buffer)
+        (re-search-backward "^#\\+begin_src ai")
+        (forward-line 1)
+        (message
+         "Archived workflow to archive file, created fresh Workflow section")))))
 #+END_SRC
 
 ** Prompt Refinement
