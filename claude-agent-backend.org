@@ -1638,75 +1638,105 @@ query, clears Docker mappings, and kills output buffer."
     (when (buffer-live-p buf)
       (kill-buffer buf))))
 
+(defun claude-agent--sentinel-log-exit (state event)
+  "Log PROCESS EVENT to STATE's verbose buffer with pending-counter summary."
+  (when-let* ((session-key (claude-agent--process-state-session-key state)))
+    (claude-agent--verbose-insert
+     session-key
+     (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
+             (string-trim event)
+             (hash-table-count claude-agent--pending-background-tasks)
+             (hash-table-count claude-agent--pending-control-requests)))))
+
+(defun claude-agent--sentinel-flush-final-line (state trimmed)
+  "Best-effort handling of the last line that arrived without trailing newline.
+
+Three shapes matter:
+- A `control_request` we cannot answer — log a clear WARNING since
+  the CLI has died before we could write the response.
+- Any other valid JSON message — log it as INFO; nothing else to do
+  because the regular dispatcher only fires on newline-terminated
+  lines.
+- Anything that does not parse — forward to ERROR-CALLBACK as a
+  raw CLI error so the caller's failure path runs."
+  (let ((session-key (claude-agent--process-state-session-key state))
+        (error-callback (claude-agent--process-state-error-callback state))
+        (parsed (claude-agent--try-parse-json trimmed)))
+    (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
+    (if (and parsed (listp parsed))
+        (let ((msg-type (plist-get parsed :type)))
+          (cond
+           ((not (stringp msg-type))
+            (when session-key
+              (claude-agent--verbose-insert
+               session-key
+               (format ">>> INFO: Final JSON without :type: %s" trimmed))))
+           ((equal msg-type "control_request")
+            (when session-key
+              (claude-agent--verbose-insert
+               session-key
+               ">>> WARNING: control_request received without newline (CLI died?) - cannot respond"))
+            (message "Claude: control_request received but CLI died before we could respond"))
+           (t
+            (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
+            (when session-key
+              (claude-agent--verbose-insert
+               session-key
+               (format ">>> INFO: Final message without newline: %s" msg-type))))))
+      (when error-callback
+        (funcall error-callback
+                 (list 'claude-agent-cli-error
+                       :message trimmed
+                       :original-error nil))))))
+
+(defun claude-agent--sentinel-emergency-cleanup (process)
+  "Minimal cleanup to prevent state leaks if the sentinel itself errored.
+Wraps `claude-agent-registry-cleanup-process' in its own condition-case
+because the original sentinel-level handler has already fired."
+  (condition-case nil
+      (let ((state (process-get process 'claude-agent-state)))
+        (when state
+          (claude-agent-registry-cleanup-process state)))
+    (error nil)))
+
 (defun claude-agent--process-sentinel (process event)
   "Process sentinel function for PROCESS.
 EVENT is the process event string.
-Delegates to sub-handlers for normal exit, abnormal exit (recovery),
-and cleanup."
+
+Five phases under one `process-sentinel' span:
+1. Log the exit to the per-session verbose buffer.
+2. Mark STATE closed/not-ready so in-flight callbacks no-op.
+3. Drain any newline-terminated JSON still in the buffer.
+4. Handle the trailing partial line (no newline) via
+   `--sentinel-flush-final-line'.
+5. Dispatch to the normal vs abnormal exit handler.
+
+Outer `condition-case' falls back to
+`--sentinel-emergency-cleanup' so a bug here can't leak STATE
+out of the registry."
   (condition-case err
       (let* ((state (process-get process 'claude-agent-state))
              (trace-ctx (process-get process 'claude-agent-trace-ctx)))
         (claude-agent-with-span "process-sentinel"
             (list :event (string-trim event)) trace-ctx
-        (claude-agent--debug-log "Process event: %s" (string-trim event))
-        (when state
-          ;; Always log process exit to verbose buffer for diagnostics
-          (when-let* ((session-key (claude-agent--process-state-session-key state)))
-            (claude-agent--verbose-insert session-key
-                                          (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
-                                                  (string-trim event)
-                                                  (hash-table-count claude-agent--pending-background-tasks)
-                                                  (hash-table-count claude-agent--pending-control-requests))))
-          (setf (claude-agent--process-state-closed state) t)
-          (setf (claude-agent--process-state-ready state) nil)
-          ;; Process any remaining JSON in buffer
-          (claude-agent--process-json-buffer process)
-          ;; Handle any remaining content without trailing newline
-          (let ((remaining (claude-agent--process-state-json-buffer state)))
-            (when (and remaining (not (string-empty-p (string-trim remaining))))
-              (let ((trimmed (string-trim remaining))
-                    (error-callback (claude-agent--process-state-error-callback state))
-                    (session-key (claude-agent--process-state-session-key state)))
-                (claude-agent--debug-log "Remaining output without newline: %s" trimmed)
-                (let ((parsed (claude-agent--try-parse-json trimmed)))
-                  (if (and parsed (listp parsed))
-                      (let ((msg-type (plist-get parsed :type)))
-                        (if (not (stringp msg-type))
-                            ;; JSON object without :type — log as info
-                            (when session-key
-                              (claude-agent--verbose-insert
-                               session-key
-                               (format ">>> INFO: Final JSON without :type: %s" trimmed)))
-                          (claude-agent--debug-log "Parsed remaining JSON: %S" msg-type)
-                          (if (equal msg-type "control_request")
-                              (progn
-                                (when session-key
-                                  (claude-agent--verbose-insert
-                                   session-key
-                                   (format ">>> WARNING: control_request received without newline (CLI died?) - cannot respond")))
-                                (message "Claude: control_request received but CLI died before we could respond"))
-                            (when session-key
-                              (claude-agent--verbose-insert
-                               session-key
-                               (format ">>> INFO: Final message without newline: %s" msg-type))))))
-                    (when error-callback
-                      (funcall error-callback
-                               (list 'claude-agent-cli-error
-                                     :message trimmed
-                                     :original-error nil))))))))
-          ;; Dispatch to normal or abnormal exit handler
-          (if (claude-agent--is-abnormal-exit-p event state)
-              (claude-agent--sentinel-handle-abnormal-exit process state event)
-            (claude-agent--sentinel-handle-normal-exit state event)
-            (claude-agent--sentinel-cleanup process state)))))
+          (claude-agent--debug-log "Process event: %s" (string-trim event))
+          (when state
+            (claude-agent--sentinel-log-exit state event)
+            (setf (claude-agent--process-state-closed state) t)
+            (setf (claude-agent--process-state-ready state) nil)
+            (claude-agent--process-json-buffer process)
+            (let ((remaining (claude-agent--process-state-json-buffer state)))
+              (when (and remaining
+                         (not (string-empty-p (string-trim remaining))))
+                (claude-agent--sentinel-flush-final-line
+                 state (string-trim remaining))))
+            (if (claude-agent--is-abnormal-exit-p event state)
+                (claude-agent--sentinel-handle-abnormal-exit process state event)
+              (claude-agent--sentinel-handle-normal-exit state event)
+              (claude-agent--sentinel-cleanup process state)))))
     (error
      (message "claude-agent: error in process sentinel: %S" err)
-     ;; Attempt minimal cleanup to prevent permanent state leaks
-     (condition-case nil
-         (let ((state (process-get process 'claude-agent-state)))
-           (when state
-             (claude-agent-registry-cleanup-process state)))
-       (error nil)))))
+     (claude-agent--sentinel-emergency-cleanup process))))
 #+END_SRC
 
 *** Session Recovery
