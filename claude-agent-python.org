@@ -67,7 +67,6 @@
     - [[#function-_extract_turns][Function _extract_turns]]
     - [[#function-_extract_user_text][Function _extract_user_text]]
     - [[#function-_extract_copilot_response][Function _extract_copilot_response]]
-    - [[#class-workspacebridgeprotocol][Class WorkspaceBridgeProtocol]]
     - [[#class-workspacebridge][Class WorkspaceBridge]]
     - [[#function-main][Function main]]
     - [[#if_statement-1][if_statement]]
@@ -152,7 +151,6 @@
     - [[#class-testhandlepermissionclear][Class TestHandlePermissionClear]]
     - [[#class-testmcpeval][Class TestMcpEval]]
     - [[#class-testhandleresponsepromptinsertion][Class TestHandleResponsePromptInsertion]]
-    - [[#class-testworkspacebridgeprotocol][Class TestWorkspaceBridgeProtocol]]
   - [[#test_claude_workspace][test_claude_workspace]]
     - [[#docstring-13][Docstring]]
     - [[#import-statements-4][Import statements]]
@@ -1748,7 +1746,12 @@ from typing import Protocol
 from opentelemetry import trace as otel_trace
 from opentelemetry.trace import SpanKind
 
-from claude_agent.mcp_client import McpClient, McpConnectionError, McpElispError
+from claude_agent.mcp_client import (
+    McpClient,
+    McpClientProtocol,
+    McpConnectionError,
+    McpElispError,
+)
 
 #+end_src
 *** Assignment logger = logging.getLogger(__name__)
@@ -2087,26 +2090,6 @@ def _extract_copilot_response(transcript_path: str) -> str:
     return "\n\n".join(texts)
 
 #+end_src
-*** Class WorkspaceBridgeProtocol
-#+begin_src python
-# ======================================================================
-# Protocol
-# ======================================================================
-
-
-class WorkspaceBridgeProtocol(Protocol):
-    """Contract every bridge implementation publishes.
-
-    A bridge receives a Claude CLI hook event plus its JSON payload and
-    is responsible for whatever side-effects (MCP calls, tracing, status
-    files) that event requires. The concrete class is
-    ``WorkspaceBridge``; tests may substitute a fake that only
-    implements ``handle``.
-    """
-
-    def handle(self, event: str, input_data: dict) -> None: ...
-
-#+end_src
 *** Class WorkspaceBridge
 #+begin_src python
 # ======================================================================
@@ -2130,7 +2113,7 @@ class WorkspaceBridge:
 
     def __init__(
         self,
-        mcp: McpClient,
+        mcp: McpClientProtocol,
         org_file: str,
         session_id: str,
         tracer: object | None = None,
@@ -5853,23 +5836,6 @@ class TestHandleResponsePromptInsertion:
         )
         assert not flag.exists()
         assert result == "recent-cid"
-#+end_src
-*** Class TestWorkspaceBridgeProtocol
-#+begin_src python
-class TestWorkspaceBridgeProtocol:
-    """The published protocol is satisfied by the concrete class (structural)."""
-
-    def test_concrete_has_handle_method(self):
-        from claude_agent.workspace_bridge import WorkspaceBridgeProtocol
-
-        bridge = make_bridge()
-        # Structural: any object with a callable `handle(event, data)` fits.
-        assert callable(getattr(bridge, "handle", None))
-        # typing.Protocol isinstance check (requires runtime_checkable — we
-        # didn't decorate it because the contract is compile-time; just verify
-        # the method signature exists).
-        assert "handle" in dir(WorkspaceBridgeProtocol)
-
 #+end_src
 
 ** test_claude_workspace

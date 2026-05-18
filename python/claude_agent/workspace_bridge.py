@@ -43,7 +43,12 @@ from typing import Protocol
 from opentelemetry import trace as otel_trace
 from opentelemetry.trace import SpanKind
 
-from claude_agent.mcp_client import McpClient, McpConnectionError, McpElispError
+from claude_agent.mcp_client import (
+    McpClient,
+    McpClientProtocol,
+    McpConnectionError,
+    McpElispError,
+)
 
 try:
     from claude_agent.otel_setup import (
@@ -355,24 +360,6 @@ def _extract_copilot_response(transcript_path: str) -> str:
 
 
 # ======================================================================
-# Protocol
-# ======================================================================
-
-
-class WorkspaceBridgeProtocol(Protocol):
-    """Contract every bridge implementation publishes.
-
-    A bridge receives a Claude CLI hook event plus its JSON payload and
-    is responsible for whatever side-effects (MCP calls, tracing, status
-    files) that event requires. The concrete class is
-    ``WorkspaceBridge``; tests may substitute a fake that only
-    implements ``handle``.
-    """
-
-    def handle(self, event: str, input_data: dict) -> None: ...
-
-
-# ======================================================================
 # WorkspaceBridge
 # ======================================================================
 
@@ -393,7 +380,7 @@ class WorkspaceBridge:
 
     def __init__(
         self,
-        mcp: McpClient,
+        mcp: McpClientProtocol,
         org_file: str,
         session_id: str,
         tracer: object | None = None,

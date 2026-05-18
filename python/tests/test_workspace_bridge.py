@@ -1272,18 +1272,3 @@ class TestHandleResponsePromptInsertion:
         result = bridge._mint_missing_custom_id({"last_user_message": "prompt"}, None)
         assert not flag.exists()
         assert result == "recent-cid"
-
-
-class TestWorkspaceBridgeProtocol:
-    """The published protocol is satisfied by the concrete class (structural)."""
-
-    def test_concrete_has_handle_method(self):
-        from claude_agent.workspace_bridge import WorkspaceBridgeProtocol
-
-        bridge = make_bridge()
-        # Structural: any object with a callable `handle(event, data)` fits.
-        assert callable(getattr(bridge, "handle", None))
-        # typing.Protocol isinstance check (requires runtime_checkable — we
-        # didn't decorate it because the contract is compile-time; just verify
-        # the method signature exists).
-        assert "handle" in dir(WorkspaceBridgeProtocol)
