@@ -40,18 +40,6 @@ from opentelemetry.trace.status import Status, StatusCode
 
 from claude_agent.otel_setup import create_exporter
 
-# --------------------------------------------------------------------
-# Kind translation
-# --------------------------------------------------------------------
-
-_SPAN_KIND_MAP = {
-    "INTERNAL": SpanKind.INTERNAL,
-    "SERVER": SpanKind.SERVER,
-    "CLIENT": SpanKind.CLIENT,
-    "PRODUCER": SpanKind.PRODUCER,
-    "CONSUMER": SpanKind.CONSUMER,
-}
-
 # OpenInference is Phoenix-specific metadata — see
 # https://github.com/Arize-ai/openinference for the full enum. These
 # defaults drive the Phoenix UI's colour coding and are overridable by
@@ -60,18 +48,6 @@ _SPAN_KIND_MAP = {
 # Public module constant (no leading underscore) because workspace_bridge
 # imports it for span tagging.  Single source of truth across modules.
 OI_KIND_ATTR = "openinference.span.kind"
-
-_OI_KIND_DEFAULTS = {
-    "SERVER": "CHAIN",
-    "CONSUMER": "CHAIN",
-    "INTERNAL": "CHAIN",
-    "CLIENT": "TOOL",
-    "PRODUCER": "TOOL",
-}
-
-# Keys the bridge consumes for its own routing — never forwarded as
-# span attributes because they're not part of the semantic schema.
-_META_ATTR_KEYS = {"span-kind", "oi-kind", "input", "output"}
 
 # ======================================================================
 # Preset-id generator
@@ -137,6 +113,36 @@ class OtelBridgeServer:
     than rely on module globals, so state is fully isolated between
     tests.
     """
+
+    # ------------------------------------------------------------------
+    # Class-level translation tables (override in subclasses for testing
+    # alternate OTel/OpenInference kind mappings without touching globals)
+    # ------------------------------------------------------------------
+
+    SPAN_KIND_MAP: dict[str, SpanKind] = {
+        "INTERNAL": SpanKind.INTERNAL,
+        "SERVER": SpanKind.SERVER,
+        "CLIENT": SpanKind.CLIENT,
+        "PRODUCER": SpanKind.PRODUCER,
+        "CONSUMER": SpanKind.CONSUMER,
+    }
+    """OTel SpanKind translation — string from start-span payload → SpanKind enum."""
+
+    OI_KIND_DEFAULTS: dict[str, str] = {
+        "SERVER": "CHAIN",
+        "CONSUMER": "CHAIN",
+        "INTERNAL": "CHAIN",
+        "CLIENT": "TOOL",
+        "PRODUCER": "TOOL",
+    }
+    """OpenInference (Phoenix) span-kind defaults keyed by the OTel kind name.
+    Caller can override per-span via ``openinference_kind`` in the start payload."""
+
+    META_ATTR_KEYS: frozenset[str] = frozenset(
+        {"span-kind", "oi-kind", "input", "output"}
+    )
+    """Keys the bridge consumes for routing — never forwarded as span
+    attributes because they're not part of the semantic schema."""
 
     def __init__(self, service_name: str = "emacs-agent"):
         self.id_gen = _PresetIdGenerator()
@@ -263,7 +269,7 @@ class OtelBridgeServer:
             {
                 k.replace("-", "."): v
                 for k, v in attrs.items()
-                if v is not None and k not in _META_ATTR_KEYS
+                if v is not None and k not in self.META_ATTR_KEYS
             }
             if attrs
             else None
@@ -271,12 +277,12 @@ class OtelBridgeServer:
         span = self.tracer.start_span(
             name=name,
             context=ctx,
-            kind=_SPAN_KIND_MAP.get(kind_str, SpanKind.INTERNAL),
+            kind=self.SPAN_KIND_MAP.get(kind_str, SpanKind.INTERNAL),
             start_time=start_ns,
             attributes=filtered_attrs,
         )
 
-        oi_kind = data.get("openinference_kind") or _OI_KIND_DEFAULTS.get(kind_str)
+        oi_kind = data.get("openinference_kind") or self.OI_KIND_DEFAULTS.get(kind_str)
         if oi_kind:
             span.set_attribute(OI_KIND_ATTR, oi_kind)
 
