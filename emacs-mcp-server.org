@@ -28,9 +28,6 @@ Prerequisites:
 
 * MCP Server Foundation
 
-The MCP server provides an HTTP interface for external tools (like Claude Code)
-to interact with Emacs.
-
 ** Customization
 
 #+BEGIN_SRC elisp
@@ -163,8 +160,6 @@ Translates quoted string paths like \"/workspace/foo.txt\"."
 
 ** Constants and State
 
-Protocol version and server information:
-
 #+BEGIN_SRC elisp
 (defconst emacs-mcp-server-protocol-version "2024-11-05"
   "MCP protocol version. Must match version expected by Claude Code CLI.")
@@ -174,8 +169,6 @@ Protocol version and server information:
     (version . "0.1.0"))
   "Server information for initialize response.")
 #+END_SRC
-
-Server state variables:
 
 #+BEGIN_SRC elisp
 (defvar emacs-mcp-server--server nil
@@ -220,9 +213,6 @@ Updated directly when eval starts/ends, like claude-agent-activity-string.")
 
 ** evalElisp Tool
 
-The core tool that enables all Emacs operations. It evaluates arbitrary elisp
-and returns the result as JSON.
-
 *** Security Considerations
 
 =evalElisp= runs *arbitrary* Elisp on the host Emacs — effectively a shell
@@ -235,9 +225,6 @@ is reminded what it's actually exposing.
 | Indirect prompt injection via README/issue → agent calls =evalElisp= to exfiltrate =~/.ssh/id_rsa= or run =(shell-command "rm -rf ...")= | (a) Server is bound to =127.0.0.1= only (see HTTP Request Handler). (b) =CLAUDE.md= rule: untrusted content (README/PR descriptions) is marked as such; agent must not invoke =evalElisp= based on instructions found there. (c) Each call should complete in <2 s — host Emacs is single-threaded, so a long call is an anomaly, not the norm. |
 | Network-exposed (e.g. agent in a container talks to host) | From a container use =host.docker.internal:9999/mcp=. Never widen the bind beyond =127.0.0.1=. |
 | =evalElisp= reads files outside the project | No path scope today — Elisp can =(find-file "/Users/...")=. *Open issue*: add an Emacs-side advice to restrict =evalElisp= from reading paths outside =(or (vc-root-dir) default-directory)= during agent sessions. |
-
-The sibling =report_invocation= tool records skill/rule invocations for
-observability and has no filesystem effect — it is not in scope here.
 
 *** Mode-Line Indicator
 
@@ -523,9 +510,6 @@ an error payload (per JSON-RPC spec), except parse errors which use HTTP 400.
 
 *** Raw HTTP Response Construction
 
-The foundation for all responses. Constructs proper HTTP/1.1 response format
-with status line, headers (CRLF-separated), blank line, then body.
-
 #+NAME: http-response-raw
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--send-raw-response (process status-code headers body)
@@ -590,9 +574,6 @@ If NEW-SESSION-ID is provided, include it in headers."
 
 *** Error Response Helper
 
-Sends a JSON-RPC 2.0 error response. Note: JSON-RPC errors still use HTTP 200
-status - the error is in the response body, not the HTTP status.
-
 Standard JSON-RPC error codes:
 - =-32700=: Parse error (invalid JSON)
 - =-32600=: Invalid Request
@@ -618,9 +599,6 @@ Standard JSON-RPC error codes:
 
 ** MCP Method Handlers
 
-The MCP protocol defines a set of JSON-RPC methods that clients (like Claude Code)
-call to interact with the server. Each method has a specific role:
-
 | Method | Purpose |
 |--------+---------|
 | =initialize= | Handshake - exchange protocol versions and capabilities |
@@ -630,11 +608,6 @@ call to interact with the server. Each method has a specific role:
 | =resources/list= | (Unused) List available resources |
 
 *** Initialize Handler
-
-The =initialize= method is called once when the client connects. It:
-1. Creates a unique session ID for tracking this connection
-2. Reports our protocol version (must match client's expected version)
-3. Declares server capabilities (we support tools, no dynamic list changes)
 
 #+NAME: mcp-handler-initialize
 #+BEGIN_SRC elisp
@@ -654,9 +627,8 @@ The =initialize= method is called once when the client connects. It:
 
 *** Schema Conversion Helpers
 
-MCP requires JSON Schema format for tool definitions. Elisp alists have a quirk:
-empty lists =()= encode as =null= in JSON, but MCP expects ={}= for empty objects.
-This helper recursively converts empty alists to hash tables.
+Elisp empty lists =()= encode as JSON =null=, but MCP expects ={}= for
+empty objects — the helper rewrites empty alists to hash tables.
 
 #+NAME: mcp-handler-schema-helpers
 #+BEGIN_SRC elisp
@@ -690,9 +662,6 @@ This converts empty () to an empty hash-table which encodes as {}."
 
 *** Tools List Handler
 
-Returns all available tools (built-in + user-registered) in MCP format.
-The client calls this after =initialize= to discover what operations are available.
-
 #+NAME: mcp-handler-tools-list
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--handle-tools-list ()
@@ -704,9 +673,6 @@ The client calls this after =initialize= to discover what operations are availab
 #+END_SRC
 
 *** Tools Call Handler
-
-Executes a tool by name with provided arguments. This is the main workhorse -
-every actual operation (evalElisp, org operations, etc.) flows through here.
 
 #+NAME: mcp-handler-tools-call
 #+BEGIN_SRC elisp
@@ -727,9 +693,8 @@ every actual operation (evalElisp, org operations, etc.) flows through here.
 
 *** Method Dispatcher
 
-Routes incoming JSON-RPC method calls to the appropriate handler.
-Returns empty arrays for =prompts/list= and =resources/list= since we don't
-implement those MCP features.
+=prompts/list= and =resources/list= return empty arrays — these MCP
+features are not implemented, but absent handlers would trip the client.
 
 #+NAME: mcp-handler-dispatch
 #+BEGIN_SRC elisp
@@ -751,8 +716,6 @@ implement those MCP features.
 #+END_SRC
 
 ** HTTP Request Handler
-
-Main entry point for HTTP requests.
 
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--handle-post (request)
@@ -788,8 +751,6 @@ Main entry point for HTTP requests.
 #+END_SRC
 
 ** Public API
-
-These are the main entry points for users.
 
 *** Server Control
 
@@ -953,8 +914,6 @@ message or an ADR, block the PR.
 - OWASP LLM Top 10 (2025/2026)
 
 * Tests
-
-Seven test files cover this module under =tests/=:
 
 | File | Covers |
 |------+--------|

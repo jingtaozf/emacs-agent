@@ -54,12 +54,11 @@ side waits for the response before continuing. That single capability
 is what eliminates the entire screen-scraping / TUI-watching layer that
 multiplexer-based backends need.
 
-The Notification Handler section below maps each ACP =session/update=
-into our existing callback shape — same callback signatures as the
-Claude Code JSON-stream backend, so any frontend that subscribes to
-=:on-token= / =:on-message= / =:on-thought= / =:on-complete= /
-=:on-permission= / =:on-error= works against either family without
-changes:
+ACP =session/update= events are mapped into the same callback shape
+as the Claude Code JSON-stream backend, so any frontend that
+subscribes to =:on-token= / =:on-message= / =:on-thought= /
+=:on-complete= / =:on-permission= / =:on-error= works against either
+family without changes:
 
 | ACP =session/update= | Our callback | Notes |
 |----------------------+--------------+-------|
@@ -71,9 +70,8 @@ changes:
 | =session/request_permission= | =:on-permission= | Permission dialog request |
 | =error= | =:on-error= | API or agent errors |
 
-The contrast with the other shipped backend family — Claude Code's
-NDJSON stream — explains when each family is the right choice. They
-are not interchangeable on every axis:
+The contrast with Claude Code's NDJSON stream backend — they are not
+interchangeable on every axis:
 
 | Dimension | Claude Code NDJSON stream | ACP (this module) |
 |-----------+---------------------------+-------------------|
@@ -85,11 +83,6 @@ are not interchangeable on every axis:
 | Permissions | CLI prompt / shell hooks | =session/request_permission= RPC to client |
 | Cancellation | kill process / SIGINT | =session/cancel= notification |
 | Multi-turn | new process per turn | same process, new =session/prompt= |
-
-Both families share the same callback interface in this codebase, so
-the frontend (=code-agent-org.org=) dispatches on the backend
-*instance* via Protocol 3 generics rather than caring which wire each
-agent speaks.
 
 ** Dependencies
 
@@ -159,10 +152,9 @@ terminal-escape or homoglyph spoofing."
 
 ** Backend Struct
 
-Per-agent knobs live on the struct, not in global defvars.  Each agent
-(opencode, gemini, codex, claude) is created by a thin constructor in
-its own module that passes the appropriate =:spawn-args=, =:environment=,
-=:needs-authenticate=, and =:auth-request-maker=.
+Per-agent knobs live on the struct, not in global defvars — each
+profile module constructs an instance with its own =:spawn-args=,
+=:environment=, =:needs-authenticate=, and =:auth-request-maker=.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent-acp-backend
@@ -230,8 +222,8 @@ cleanup or by `kill-emacs-hook'.")
 
 ** Verbose Buffer Helper
 
-Shared verbose buffer system (same one used by =claude-agent.org= for
-other backends).  ACP notifications stream text straight in.
+Shares =claude-agent.org='s verbose buffer system; ACP notifications
+stream text straight in.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--verbose-log (backend text)
@@ -246,8 +238,8 @@ explicit `--get-session-verbose-buffer' call is needed here."
 ** Usage Accumulator
 
 Both =usage_update= notifications and the =session/prompt= response
-may carry a =usage= alist (and the notification additionally carries
-cost/context).  The helper below stores whichever slots are present.
+may carry partial =usage= / =cost= alists; the helpers below store
+whichever slots are present.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--store-usage (backend usage)
@@ -274,10 +266,6 @@ forward a customized symbol as the ACP =methodId= string."
 #+END_SRC
 
 ** Process Startup
-
-Spawn the agent subprocess per backend config.  The JSON-RPC client is
-created from the process and stored in the backend.  Registered for
-kill-emacs cleanup.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--start-process (backend)
@@ -514,8 +502,6 @@ fall back to `session/new'."
 
 ** Notification Handler
 
-Maps ACP =session/update= events to client callbacks + verbose buffer.
-
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--handle-notification (backend notification)
   "Dispatch ACP NOTIFICATION to BACKEND callbacks."
@@ -630,11 +616,10 @@ Maps ACP =session/update= events to client callbacks + verbose buffer.
 
 ** Permission Request Handler
 
-Handles =session/request_permission= from the agent.  The default
-(=claude-agent-acp-auto-approve= nil) prompts the user via
-=completing-read=; C-g translates into a =cancelled= outcome.  Setting
-the customization to t restores the previous auto-approve-first-option
-behaviour for trusted environments.
+Default (=claude-agent-acp-auto-approve= nil) prompts the user via
+=completing-read=; C-g translates into a =cancelled= outcome.
+Setting the customization to t restores auto-approve-first-option
+for trusted environments.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--handle-request (backend request)
@@ -1038,16 +1023,10 @@ first prompt's `:on-complete' and `:on-error'."
 
 ** Profile Factory Helper
 
-Every per-vendor ACP profile (=claude-agent-acp-opencode-create=,
-=claude-agent-acp-gemini-create=, =claude-agent-acp-codex-create=)
-calls the same =cl-defstruct= constructor with the same five
-defaults followed by user =&rest= args.  Extracting the shared
-=apply= shape into one helper saves ~10 lines per profile and
-makes adding a fourth profile a one-line task.
-
-The =auth-method-symbol= is dereferenced *at request time* so a
-user who toggles =claude-agent-acp-codex-auth-method= between two
-calls sees the change immediately.
+Shared by every per-vendor ACP profile (=opencode=, =gemini=,
+=codex=).  The =auth-method-symbol= is dereferenced *at request
+time* so a user who toggles e.g. =claude-agent-acp-codex-auth-method=
+between two calls sees the change immediately.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-acp--make-profile-backend

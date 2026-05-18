@@ -1524,9 +1524,9 @@ FIX: Use (cond ((equal X \"str\") body)) instead."
 
 (defvar test-structural--pcase-string-allowlist
   '(("claude-agent-backend.org" . (2248 2280))
-    ("claude-ide.org" . (418 644 891))
+    ("claude-ide.org" . (415 641 888))
     ("code-agent-org-scheduled.org" . (214))
-    ("emacs-mcp-server.org" . (738)))
+    ("emacs-mcp-server.org" . (703)))
   "Known pcase string-pattern violations in existing code.
 Entries are (FILENAME . (LINE-NUM ...)). These are pre-existing and need
 a separate migration effort to convert to cond + equal.")

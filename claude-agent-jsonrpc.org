@@ -13,27 +13,11 @@ backend and any future protocol that shares the wire format.
 
 ** Design shape
 
-The module publishes one class (=claude-agent-jsonrpc-client=,
-implemented as a =cl-defstruct= so accessors are auto-generated and
-methods can dispatch on type) plus a small set of generic functions
-— =send-request=, =send-response=, =send-notification=, add-handler
-variants, =shutdown=.  Internal routing and the process filter /
-sentinel attach to the client at construction time and stay out of
-the public surface.
-
-Why a class rather than a plist: the project's
-=.claude/rules/oop-smalltalk-protocols.md= calls this out — "wrap the
-hash in a class; expose =defgeneric= verbs."  The old plist was
-fine-ish when there were two call sites; once ACP grew multiple
-callers and the tests started reaching into =:process= and
-=:stderr-buffer= directly, the free-function-over-plist shape stopped
-carrying its weight.
-
-Struct accessors replace the =(plist-get client :process)= idiom
-(readers) and =(plist-put client :partial-line partial)= (mutators,
-now via =setf=).  The transport module exports the accessors so
-clients outside this file read state through them rather than the
-raw fields.
+Class rather than plist: once ACP grew multiple callers reaching
+into =:process= and =:stderr-buffer= directly, the
+free-function-over-plist shape stopped carrying its weight.  Struct
+accessors are exported so callers read state through them rather
+than the raw fields.
 
 ** Dependencies
 
@@ -44,11 +28,6 @@ raw fields.
 #+END_SRC
 
 ** The Client Class
-
-State held by one JSON-RPC connection: its subprocess, the pending
-request table, the handler lists, the stderr buffer, and the partial
-line accumulator.  A =cl-defstruct= is the right shape — all fields
-are data, all behaviour lives in the methods below.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent-jsonrpc-client
@@ -76,8 +55,6 @@ A global counter is sufficient because each client has its own
 
 ** Factory
 
-Construction wires the filter and sentinel onto the subprocess so
-the rest of the module can forget about where bytes come from.
 =lexical-let= is required because literate-elisp does not honour the
 file-level =lexical-binding= directive — without it the lambda
 closures would see =client= as a dynamic variable and fail at
@@ -110,10 +87,8 @@ struct)."
 
 ** Sending
 
-Three verbs are published as generics — =send-request=,
-=send-response=, =send-notification= — each dispatched on the client
-class.  Subclassing the client in tests is the expected substitution
-point (e.g. a recording client that captures sent messages).
+Generics rather than plain =defun=s so tests can subclass the client
+with a recording variant that captures sent messages.
 
 #+BEGIN_SRC elisp
 (cl-defgeneric claude-agent-jsonrpc-send-request
@@ -273,9 +248,6 @@ dies mid-stream."
 #+END_SRC
 
 ** Handler Registration
-
-Generics so tests can override how handlers are stored (e.g. a
-recording subclass that keeps every handler call for assertions).
 
 #+BEGIN_SRC elisp
 (cl-defgeneric claude-agent-jsonrpc-add-notification-handler

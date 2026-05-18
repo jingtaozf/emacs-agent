@@ -11,97 +11,35 @@ OpenCode speaks ACP natively via =opencode acp= on stdio.  It uses
 its own credentials from =opencode auth login=, so no ACP-level
 =authenticate= RPC is needed.
 
-** Why OpenCode Gets a Dedicated Profile
-
-OpenCode (https://opencode.ai) is MIT-licensed, provider-agnostic
-(any OpenAI-compatible endpoint — Claude / OpenAI / Gemini / local),
-and ships a real client/server split (=opencode serve= = HTTP + SSE
-API; the TUI is just one client). That combination — non-Anthropic
-providers, structured non-TUI output, native MCP, JS/TS plugin
-system — earns a first-class profile rather than a generic shell
-command.
-
 ** Two Integration Paths to the Same Agent
 
-This codebase supports OpenCode through two coexisting integrations.
-They share zero code and they target different use cases; both are
-shipped.
+OpenCode is reachable through two coexisting integrations that share
+zero code:
 
 | Path | Mechanism | Best for |
 |------+-----------+----------|
-| *cmux profile* (=code-agent-org-cmux.org= → Agent Profiles) | OpenCode TUI inside a cmux pane, driven by =cmux send= / =cmux capture-pane= — same shape as the Claude / Copilot profiles | watching the agent think in a terminal, mixed Emacs+terminal workflows, themes/visuals |
-| *Direct ACP* (*this module*) | =opencode acp= subprocess speaking ACP/JSON-RPC over stdio — no terminal, no screen-scraping | structured token streaming, multi-turn programmatic use, scripts/tests that don't want a cmux app at all |
+| *cmux profile* (=code-agent-org-cmux.org= → Agent Profiles) | OpenCode TUI inside a cmux pane, driven by =cmux send= / =cmux capture-pane= | watching the agent think in a terminal, mixed Emacs+terminal workflows |
+| *Direct ACP* (*this module*) | =opencode acp= subprocess speaking ACP/JSON-RPC over stdio | structured token streaming, multi-turn programmatic use |
 
-The cmux profile shipped first (2026-04-17, see git history) and uses
-the agent-profile system documented in =code-agent-org-cmux.org=. This
-ACP profile is the structurally preferred path for new work: same agent,
-no screen-scraping, no =opencode.jsonc=/=AGENTS.md= injection dance, and
-the multi-turn session lives in OpenCode's own session store via the
-=session/load= ACP method.
-
-** Differences vs the cmux Profile
-
-The two paths handle the same five OpenCode quirks differently — useful
-to know which path absorbs which cost:
-
-| OpenCode quirk | cmux profile | Direct ACP (this module) |
-|----------------+--------------+--------------------------|
-| MCP config via =opencode.jsonc= (file, not flag) | =opencode_workspace.py= merges Emacs MCP entry into the project's =opencode.jsonc=, =atexit= restores original | OpenCode's own MCP config — we don't inject; the agent picks up its own =opencode.jsonc= as usual |
-| System prompt via =AGENTS.md= | launcher prepends session prompt to =AGENTS.md=, restores on exit | system prompt is passed as ACP =session/new= attributes, no file mutation |
-| Hook events via JS/TS plugin (=.opencode/plugins/emacs-bridge.ts=) | injected at launch, removed on exit; events POST to =workspace_bridge= | not used — ACP RPCs replace plugin events |
-| Session resume | =OPENCODE_SESSION_ID= org property → =--session <id>= flag | ACP =session/load= with the OpenCode session id |
-| Auth | =opencode auth login= one-time, no per-launch handling | same — no ACP-level =authenticate= needed; =needs-authenticate= is =nil= in the constructor below |
-
-The injection-and-restore dance is the main argument for using ACP for
-anything more than light interactive use: the cmux profile mutates files
-in the user's repo during a session, and a crash before =atexit= runs
-leaves the project in a partially-modified state. ACP avoids the whole
-class of problem because OpenCode reads its own config and we never
-touch it.
-
-** What Direct ACP Removed From the Stack
-
-Concretely, picking the ACP path for OpenCode removed the following
-moving parts from the codebase's hot path:
-
-| Component | Status under cmux profile | Status under ACP |
-|-----------+---------------------------+------------------|
-| =cmux= terminal surface | one cmux workspace per session | not used — OpenCode runs as a child subprocess |
-| =capture-pane= polling + ready-pattern regexes | every launch | gone — =initialize= → =session/new= replaces the wait-for-ready handshake |
-| =cmux send= / =send-key= / =paste-buffer= for prompts | every turn | gone — =session/prompt= takes the text as structured RPC params |
-| =workspace_bridge.py= Python process | active for every hook event | not needed — events arrive as ACP notifications |
-| =opencode_workspace.py= Python launcher | invoked per session | not needed — the elisp side spawns =opencode acp= directly |
-| =emacs-bridge.ts= JS plugin | injected into =.opencode/plugins/=, removed at exit | not needed — plugin events become ACP notifications |
-| =opencode.jsonc= / =AGENTS.md= injection-and-restore | every session | not needed — OpenCode reads its own config; we never write into the repo |
-| =.from-emacs= / =.custom-id= / =.status= status files | every interaction | not needed — RPC state lives in process memory |
-| JSONL transcript post-hoc parsing | =Stop= hook fallback | not needed — token chunks arrive live via =agent_message_chunk= |
-| MCP =evalElisp= round-trips from Python | every Emacs-side mutation | not needed — Emacs is already the orchestrator |
-| Multi-line paste workarounds (shift-enter / 100 KB =paste-buffer=) | every long prompt | not needed — JSON strings have no terminal-pasting limits |
-
-What stays shared across both paths: the frontend dispatch
-(=code-agent-org-execute= → backend by Protocol-3 generics), system-prompt
-assembly, the =:on-token= / =:on-message= / =:on-permission= callback
-shape, org-property session bookkeeping, and the mode-line indicators.
-Neither profile is a silo.
+The cmux profile mutates =opencode.jsonc= / =AGENTS.md= / =.opencode/plugins/=
+during a session and restores them via =atexit=; a crash before =atexit=
+runs leaves the project in a partially-modified state.  Direct ACP avoids
+the whole class of problem because OpenCode reads its own config and we
+never touch it — that's the structural argument for picking this path
+for anything beyond light interactive use.
 
 ** Open Questions Carried Forward
 
-Most of the original ACP-design open questions resolved into the
-shipped form, but two remain worth revisiting when the relevant pain
-shows up:
-
 - *Session persistence across Emacs restart.* ACP exposes =session/load=
-  with a sessionId, and OpenCode keeps server-side sessions. We could
-  persist the sessionId into the org =OPENCODE_SESSION_ID= property and
-  call =session/load= on resume instead of =session/new=. Not wired today
-  because every session reach we have is intra-Emacs-process so far.
+  with a sessionId, and OpenCode keeps server-side sessions. Could persist
+  the sessionId into =OPENCODE_SESSION_ID= and call =session/load= on
+  resume instead of =session/new=. Not wired today because every session
+  reach we have is intra-Emacs-process so far.
 - *Filesystem RPCs from agent to client.* ACP defines =fs/read_text_file=
-  and =fs/write_text_file= so the agent can ask the client (us) to do
-  the I/O. Implementing them would let OpenCode read/write files
-  through Emacs rather than the OS filesystem directly — useful for
-  honouring buffer edits that aren't saved yet, sandboxing, or
-  rejecting writes outside the project root. Not implemented; the
-  default behaviour (OpenCode reads from disk) is fine for now.
+  and =fs/write_text_file= so the agent can ask the client (us) to do the
+  I/O — useful for honouring unsaved buffer edits or rejecting writes
+  outside the project root. Not implemented; the default (OpenCode reads
+  from disk) is fine for now.
 
 References:
 - https://opencode.ai
@@ -137,14 +75,10 @@ List of \"NAME=VALUE\" strings.  Typical entries:
 
 ** Class
 
-Concrete subclass of =claude-agent-acp-backend= for OpenCode.
-Adding this as a formal =cl-defstruct= — rather than using the base
-class directly with agent-specific slot values — follows the
-Smalltalk-flavoured protocol style: dispatch on the receiver's class
-rather than on an =agent-name= string.  Currently OpenCode shares
-all methods with the abstract base; adding =cl-defmethod=
-specialisations later (e.g. an OpenCode-only capability check)
-requires no call-site changes.
+A dedicated subclass exists so future OpenCode-only =cl-defmethod=
+specialisations can dispatch on the receiver's class rather than on
+an =agent-name= string.  Currently OpenCode shares all methods with
+the abstract base.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (claude-agent-opencode-backend
