@@ -501,18 +501,13 @@ class WorkspaceBridge:
         except FileNotFoundError:
             pass
 
-    # Back-compat single-entry aliases — callers that only care about the
-    # most recent pending id (e.g. trace-span attributes, legacy tests)
-    # go through these thin shims.
+    # The "latest pending id" shim — most callers want the newest id
+    # (trace-span attributes, legacy tests) rather than the full FIFO.
+    # The list→latest-or-None transformation lives here so call sites
+    # stay declarative.
     def _read_custom_id(self) -> str | None:
         ids = self._read_custom_ids()
         return ids[-1] if ids else None
-
-    def _write_custom_id(self, custom_id: str) -> None:
-        self._append_custom_id(custom_id)
-
-    def _clear_custom_id(self) -> None:
-        self._clear_custom_ids()
 
     # ------------------------------------------------------------------
     # Small helpers
@@ -654,7 +649,7 @@ class WorkspaceBridge:
                 if result is None:
                     return
                 if result:
-                    self._write_custom_id(result)
+                    self._append_custom_id(result)
                     if span:
                         span.set_attribute("org.custom_id", result)
                 if save_sexp:
@@ -1045,7 +1040,7 @@ class WorkspaceBridge:
         if not result:
             self._notify_query_completed(None)
             return None
-        self._write_custom_id(result)
+        self._append_custom_id(result)
         if span:
             span.set_attribute("org.custom_id", result)
         return result

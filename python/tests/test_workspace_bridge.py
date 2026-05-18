@@ -56,7 +56,7 @@ class TestCustomIdPersistence:
     def test_write_and_read(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
-        bridge._write_custom_id("sdd-123-instr-3")
+        bridge._append_custom_id("sdd-123-instr-3")
         assert bridge._read_custom_id() == "sdd-123-instr-3"
 
     def test_read_missing(self, tmp_path, monkeypatch):
@@ -67,21 +67,21 @@ class TestCustomIdPersistence:
     def test_overwrite(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
-        bridge._write_custom_id("sdd-123-instr-1")
-        bridge._write_custom_id("sdd-123-instr-2")
+        bridge._append_custom_id("sdd-123-instr-1")
+        bridge._append_custom_id("sdd-123-instr-2")
         assert bridge._read_custom_id() == "sdd-123-instr-2"
 
     def test_clear_removes_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
-        bridge._write_custom_id("cid")
-        bridge._clear_custom_id()
+        bridge._append_custom_id("cid")
+        bridge._clear_custom_ids()
         assert bridge._read_custom_id() is None
 
     def test_clear_missing_is_noop(self, tmp_path, monkeypatch):
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="never-written")
-        bridge._clear_custom_id()  # should not raise
+        bridge._clear_custom_ids()  # should not raise
 
 
 class TestCustomIdQueue:
@@ -114,8 +114,8 @@ class TestCustomIdQueue:
         """Back-compat alias should append, not overwrite (bug fix)."""
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
-        bridge._write_custom_id("first")
-        bridge._write_custom_id("second")
+        bridge._append_custom_id("first")
+        bridge._append_custom_id("second")
         assert bridge._read_custom_ids() == ["first", "second"]
 
 
@@ -257,7 +257,7 @@ class TestHandleResponseQueryCompleted:
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
-        bridge._write_custom_id("instr-custom-id")
+        bridge._append_custom_id("instr-custom-id")
         bridge._handle_response({"last_assistant_message": "hello"})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("code-agent-org--terminal-query-completed" in c for c in calls)
@@ -529,7 +529,7 @@ class TestHandleResponseCopilotFormat:
         )
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
-        bridge._write_custom_id("cid")
+        bridge._append_custom_id("cid")
         bridge._handle_response({"transcriptPath": str(transcript), "sessionId": "abc"})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("answer" in c for c in calls)
@@ -538,7 +538,7 @@ class TestHandleResponseCopilotFormat:
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
-        bridge._write_custom_id("cid")
+        bridge._append_custom_id("cid")
         bridge._handle_response(
             {"last_assistant_message": "hi", "sessionId": "copilot-session-123"}
         )
@@ -570,7 +570,7 @@ class TestHandleResponseCopilotFormat:
         )
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
-        bridge._write_custom_id("cid")
+        bridge._append_custom_id("cid")
         bridge._handle_response({"sessionId": copilot_session_id})
         calls = [str(c) for c in mcp.eval_elisp.call_args_list]
         assert any("discovered answer" in c for c in calls)
@@ -1132,7 +1132,7 @@ class TestHandleResponsePromptInsertion:
         monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         (tmp_path / "sid.from-emacs").write_text("1")
         bridge = make_bridge(MagicMock(), session_id="sid")
-        bridge._write_custom_id("emacs-custom-id")
+        bridge._append_custom_id("emacs-custom-id")
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
         bridge._handle_response(
@@ -1184,15 +1184,15 @@ class TestHandleResponsePromptInsertion:
         mcp.eval_elisp.side_effect = ["new-custom-id", None, None]
         bridge = make_bridge(mcp, session_id="sid")
 
-        # We wrap _write_custom_id to verify it was called, since _handle_response
-        # clears it at the very end.
+        # We wrap _append_custom_id to verify it was called, since _handle_response
+        # clears the queue at the very end.
         with patch.object(
-            bridge, "_write_custom_id", wraps=bridge._write_custom_id
-        ) as mock_write:
+            bridge, "_append_custom_id", wraps=bridge._append_custom_id
+        ) as mock_append:
             bridge._handle_response(
                 {"last_assistant_message": "resp", "last_user_message": "prompt"}
             )
-            mock_write.assert_called_once_with("new-custom-id")
+            mock_append.assert_called_once_with("new-custom-id")
 
     def test_stale_from_emacs_flag_does_not_route_to_stale_cid(
         self, tmp_path, monkeypatch
