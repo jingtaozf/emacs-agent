@@ -42,12 +42,9 @@ end-user command that happens to use the SDK.
   :group 'claude-agent)
 
 (defcustom claude-agent-translate-buffer-name "*claude-agent-translate*"
-  "Base template for translation output buffer names.
-Each call to `claude-agent-translate' allocates a fresh buffer derived
-from this template plus the target language (e.g.
-\"*claude-agent-translate: Chinese*\"), using `generate-new-buffer-name'
-so repeated runs into the same language get \"<2>\", \"<3>\", etc.
-This avoids overwriting a previous translation's output."
+  "Template for translation output buffer names.
+The target language is injected (e.g. \"*claude-agent-translate: Chinese*\")
+and `generate-new-buffer-name' appends \"<2>\" etc. for collisions."
   :type 'string
   :group 'claude-agent)
 
@@ -70,15 +67,10 @@ freely while the translation is in flight.
 
 (defvar claude-agent-translate--last-buffer nil
   "Most recently created translation output buffer, or nil.
-Each call to `claude-agent-translate' updates this to point at the
-fresh per-run buffer. Tests and jump-to-latest commands can rely on
-this without having to scan buffer lists.")
+Tests and jump-to-latest commands read this instead of scanning buffers.")
 
 (defun claude-agent-translate--make-buffer-name (language)
-  "Build a unique buffer name for a translation into LANGUAGE.
-Uses `claude-agent-translate-buffer-name' as a template, injecting
-LANGUAGE before the trailing `*'. `generate-new-buffer-name' then
-handles collisions by appending `<2>', `<3>', etc."
+  "Build a unique buffer name for a translation into LANGUAGE."
   (let* ((template claude-agent-translate-buffer-name)
          (trimmed (if (and (string-prefix-p "*" template)
                            (string-suffix-p "*" template)
@@ -90,10 +82,8 @@ handles collisions by appending `<2>', `<3>', etc."
 
 (defun claude-agent-translate--setup-buffer (language text-preview)
   "Create and return a fresh translation buffer for LANGUAGE.
-TEXT-PREVIEW is shown as a source snippet in the header. A unique
-buffer name is allocated per call so previous translations remain
-intact; the new buffer is also stashed in
-`claude-agent-translate--last-buffer'."
+TEXT-PREVIEW is shown as a source snippet in the header.
+Also stashes the new buffer in `claude-agent-translate--last-buffer'."
   (let ((buf (get-buffer-create
               (claude-agent-translate--make-buffer-name language))))
     (with-current-buffer buf
@@ -134,16 +124,11 @@ RESULT is nil on success, or an error description on failure."
 
 * Core Translation Function
 
-The system prompt is intentionally short: "preserve formatting,
-preserve markup, output only the translation".  Anything richer
-would invite the model to argue with the source or add commentary,
-which is the exact behaviour the `disallowed-tools '("*")` + Haiku
-default of =claude-agent-translate-model= are designed to avoid.
-
-=lexical-let= is required around =out-buf= because literate-elisp
-evaluates this file with dynamic binding (the cookie at the top
-of =claude-agent-backend.org= notwithstanding) — a plain =let= would
-not survive until the async filter / sentinel callbacks fire.
+The prompt is intentionally short — "preserve formatting, output only
+the translation".  Anything richer invites the model to comment on the
+source, the exact behaviour the Haiku default + ban on tools avoid.
+=lexical-let= is required because literate-elisp evaluates this file
+with dynamic binding (see =ELISP-IDIOMS.org=).
 
 #+BEGIN_SRC elisp
 (defun claude-agent-translate (text language &optional extra-options)

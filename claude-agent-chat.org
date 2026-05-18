@@ -137,12 +137,10 @@ When non-nil, a <system-reminder> tag with context is prepended to each message.
 
 * Chat Mode Functions
 
-The streaming update path is two-step on purpose: =--handle-token=
-appends the token to a buffer-local accumulator, then
-=--update-response= rewrites the response region from the
-accumulator (delete + re-insert). The cost is one extra =delete-
-region= per token; the benefit is that token order is preserved
-even if the backend reorders / re-sends.
+Streaming is accumulator-driven: =--handle-token= appends to a
+buffer-local string and =--update-response= rewrites the response
+region from it.  The extra =delete-region= per token buys idempotency
+against backend reorder / re-send.
 
 #+BEGIN_SRC elisp
 (defun claude-agent-chat--make-backend ()
@@ -209,7 +207,6 @@ Appends the token text to the current response display."
          (when text
            (setq claude-agent-chat--current-response text)
            (claude-agent-chat--update-response text)))
-       ;; Check for tool use
        (let ((content (claude-agent-assistant-message-content msg)))
          (dolist (block content)
            (when (claude-agent-tool-use-block-p block)
@@ -271,10 +268,9 @@ Appends the token text to the current response display."
       (setq claude-agent-chat--current-response "")
       (claude-agent-chat--insert-response-start)
       (claude-agent-chat--insert "[Waiting...]" 'claude-agent-chat-thinking-face)
-      ;; Ensure backend exists
       (unless claude-agent-chat--backend
         (setq claude-agent-chat--backend (claude-agent-chat--make-backend)))
-      ;; Build options with session continuation if we have a session
+      ;; Build options, layering session continuation / system prompt / mcp
       (let* ((base-opts (or claude-agent-chat--options (claude-agent-options)))
              (opts (if claude-agent-chat--session-id
                        (plist-put (plist-put (copy-sequence base-opts)
@@ -295,7 +291,6 @@ Appends the token text to the current response display."
                                      (not (string-empty-p system-reminder)))
                                 (concat system-reminder "\n" input)
                               input)))
-        ;; Build callbacks plist for backend-query
         (lexical-let ((chat-buf (current-buffer)))
           (let ((callbacks
                  (list
@@ -337,7 +332,6 @@ Appends the token text to the current response display."
   "Clear the chat buffer and reset the session."
   (interactive)
   (when (yes-or-no-p "Clear chat history and start new session? ")
-    ;; Clean up backend
     (when claude-agent-chat--backend
       (claude-agent-backend-cleanup claude-agent-chat--backend)
       (setq claude-agent-chat--backend nil)
@@ -391,10 +385,7 @@ Based on comint-mode for proper input handling.
   (setq-local comint-input-sender #'claude-agent-chat--input-sender)
   (setq-local comint-process-echoes nil)
   ;; Backend cleanup on buffer kill
-  (add-hook 'kill-buffer-hook #'claude-agent-chat--kill-buffer-cleanup nil t)
-  ;; We don't have a real process, so we need a dummy
-  ;; The input sender handles everything
-  )
+  (add-hook 'kill-buffer-hook #'claude-agent-chat--kill-buffer-cleanup nil t))
 
 (defun claude-agent-chat--initialize-buffer ()
   "Initialize the chat buffer with header and prompt."
@@ -419,15 +410,13 @@ Based on comint-mode for proper input handling.
 (defun claude-agent-chat ()
   "Start or switch to the Claude chat buffer."
   (interactive)
-  ;; Check for CLI first
   (unless (claude-agent--find-cli)
     (user-error "Claude CLI not found. Set `claude-agent-cli-path' or install Claude Code CLI"))
   (let ((buf (get-buffer-create claude-agent-chat-buffer-name)))
     (with-current-buffer buf
       (unless (eq major-mode 'claude-agent-chat-mode)
         (claude-agent-chat-mode)
-        ;; Start a fake process for comint to work with
-        ;; We use 'cat' as a simple no-op process
+        ;; Dummy `cat' process so comint has a process-mark to track
         (let ((proc (start-process "claude-chat" buf "cat")))
           (set-process-query-on-exit-flag proc nil)
           (set-process-filter proc #'claude-agent-chat--comint-filter))
@@ -436,9 +425,7 @@ Based on comint-mode for proper input handling.
     (goto-char (point-max))))
 
 (defun claude-agent-chat--comint-filter (_proc _output)
-  "Filter for the dummy comint process.
-Ignores all output from the dummy process."
-  ;; Do nothing - we handle output ourselves
+  "Filter for the dummy comint process; ignored — we drive output ourselves."
   nil)
 #+END_SRC
 
