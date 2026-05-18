@@ -455,14 +455,11 @@ falls back to looking up by =surfaceId= or =workspaceId= when a
 =sessionId= is unknown.
 
 #+BEGIN_SRC elisp
-(defun code-agent-org-cmux--call (subcommand &rest args)
-  "Call cmux CLI with SUBCOMMAND and ARGS. Return stdout string.
-If ARGS contains :stdin KEY, that value is piped as stdin."
-  (claude-agent-with-span "cmux-call"
-      (list :span-kind "CLIENT" :subcommand subcommand) nil
-  (let* ((stdin-text nil)
-         (cli-args nil))
-    ;; Separate :stdin from positional args
+(defun code-agent-org-cmux--split-stdin-arg (args)
+  "Split ARGS into (STDIN-TEXT . POSITIONAL).
+If ARGS contains a ``:stdin VALUE'' pair, VALUE is the stdin text
+and the rest are positional CLI args.  Otherwise stdin is nil."
+  (let ((stdin-text nil) (cli-args nil))
     (while args
       (if (eq (car args) :stdin)
           (progn
@@ -470,52 +467,80 @@ If ARGS contains :stdin KEY, that value is piped as stdin."
             (setq args (cddr args)))
         (push (car args) cli-args)
         (setq args (cdr args))))
-    (setq cli-args (nreverse cli-args))
-    (let* ((effective-socket
-            (or code-agent-org-cmux-socket-path
-                ;; Per-story override: CMUX_SOCKET_PATH org property
-                (condition-case nil
-                    (code-agent-org-terminal--find-session-property "CMUX_SOCKET_PATH")
-                  (error nil))))
-           (effective-cli
-            (or (condition-case nil
-                    (code-agent-org-terminal--find-session-property "CMUX_CLI_PATH")
-                  (error nil))
-                code-agent-org-cmux-cli-path))
-           (socket-args (when effective-socket
-                          (list "--socket" effective-socket)))
-           (flat-args (append socket-args (cons subcommand (flatten-tree cli-args))))
-           ;; When using a custom socket (dev app), clear production env vars
-           ;; so the CLI doesn't resolve workspaces from the wrong instance
+    (cons stdin-text (nreverse cli-args))))
+
+(defun code-agent-org-cmux--resolve-socket-and-cli ()
+  "Return ``(SOCKET-PATH . CLI-PATH)'' using session-property overrides.
+
+CMUX_SOCKET_PATH and CMUX_CLI_PATH org properties win over the
+defcustoms; both may be nil if no override and the defcustom is
+also nil."
+  (cons (or code-agent-org-cmux-socket-path
+            (ignore-errors
+              (code-agent-org-terminal--find-session-property "CMUX_SOCKET_PATH")))
+        (or (ignore-errors
+              (code-agent-org-terminal--find-session-property "CMUX_CLI_PATH"))
+            code-agent-org-cmux-cli-path)))
+
+(defun code-agent-org-cmux--exec (cli flat-args stdin-text)
+  "Invoke CLI with FLAT-ARGS, optionally piping STDIN-TEXT.
+Return the trimmed stdout string on exit-code 0; signal `error'
+with the trimmed stderr on non-zero exit.  Cleans up temp files."
+  (let* ((stderr-file (make-temp-file "cmux-stderr-"))
+         (buf (generate-new-buffer " *cmux-cli*"))
+         (stdin-file (when stdin-text
+                       (let ((f (make-temp-file "cmux-stdin-")))
+                         (with-temp-file f (insert stdin-text))
+                         f)))
+         (exit-code (apply #'call-process
+                           cli stdin-file
+                           (list buf stderr-file) nil
+                           flat-args)))
+    (unwind-protect
+        (with-current-buffer buf
+          (if (= exit-code 0)
+              (string-trim (buffer-string))
+            (let ((stderr (string-trim
+                           (with-temp-buffer
+                             (insert-file-contents stderr-file)
+                             (buffer-string)))))
+              (error "cmux failed (exit %d): %s" exit-code stderr))))
+      (kill-buffer buf)
+      (when stdin-file (delete-file stdin-file t))
+      (delete-file stderr-file t))))
+
+(defun code-agent-org-cmux--call (subcommand &rest args)
+  "Call cmux CLI with SUBCOMMAND and ARGS. Return stdout string.
+If ARGS contains :stdin KEY, that value is piped as stdin.
+
+Three phases under one ``cmux-call'' span:
+1. Split ``:stdin VAL'' out of ARGS.
+2. Resolve socket + CLI path (per-story properties override
+   defcustoms).
+3. Assemble flat argv and exec — when a custom socket is in use
+   we clear ``CMUX_WORKSPACE_ID'' from the environment so the CLI
+   doesn't resolve workspaces from the production instance."
+  (claude-agent-with-span "cmux-call"
+      (list :span-kind "CLIENT" :subcommand subcommand) nil
+    (let* ((split (code-agent-org-cmux--split-stdin-arg args))
+           (stdin-text (car split))
+           (cli-args   (cdr split))
+           (paths      (code-agent-org-cmux--resolve-socket-and-cli))
+           (socket     (car paths))
+           (cli        (cdr paths))
+           (socket-args (when socket (list "--socket" socket)))
+           (flat-args
+            (append socket-args (cons subcommand (flatten-tree cli-args))))
            (process-environment
-            (if effective-socket
+            (if socket
                 (cl-remove-if
                  (lambda (e) (string-match-p "^CMUX_WORKSPACE_ID=" e))
                  process-environment)
-              process-environment))
-           (stderr-file (make-temp-file "cmux-stderr-"))
-           (buf (generate-new-buffer " *cmux-cli*"))
-           (stdin-file (when stdin-text
-                         (let ((f (make-temp-file "cmux-stdin-")))
-                           (with-temp-file f (insert stdin-text))
-                           f)))
-           (exit-code (apply #'call-process
-                             effective-cli stdin-file
-                             (list buf stderr-file) nil
-                             flat-args)))
-      (unwind-protect
-          (with-current-buffer buf
-            (if (= exit-code 0)
-                (string-trim (buffer-string))
-              (let ((stderr (string-trim
-                             (with-temp-buffer
-                               (insert-file-contents stderr-file)
-                               (buffer-string)))))
-                (error "cmux %s failed (exit %d): %s"
-                       subcommand exit-code stderr))))
-        (kill-buffer buf)
-        (when stdin-file (delete-file stdin-file t))
-        (delete-file stderr-file t))))))
+              process-environment)))
+      (condition-case err
+          (code-agent-org-cmux--exec cli flat-args stdin-text)
+        (error (error "cmux %s failed: %s" subcommand
+                      (error-message-string err)))))))
 #+END_SRC
 
 * Wait for Ready
