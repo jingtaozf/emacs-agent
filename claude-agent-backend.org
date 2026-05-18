@@ -2104,6 +2104,88 @@ Retries up to 50 times (5 seconds) then force-closes to prevent hang."
 *** Process Creation
 
 #+BEGIN_SRC elisp
+(defun claude-agent--resolve-cli-parts (options)
+  "Return ``(CLI-PARTS DOCKER-P RAW-CLI-PATH)'' for OPTIONS.
+
+CLI-PARTS is the argv prefix: a list of strings.  For Docker
+commands (``docker compose exec claude claude'') the path is
+split into multiple tokens; for regular paths it's the single
+expanded executable.  DOCKER-P is the boolean predicate.
+RAW-CLI-PATH is the unprocessed string (used downstream to derive
+the CLI's directory for the exec-path prepend)."
+  (let* ((raw-cli-path (or (plist-get options :cli-path)
+                           (claude-agent--find-cli)))
+         (docker-p (claude-agent--docker-command-p raw-cli-path))
+         (cli-parts (if docker-p
+                        (claude-agent--split-command raw-cli-path)
+                      (list (expand-file-name raw-cli-path)))))
+    (list cli-parts docker-p raw-cli-path)))
+
+(defun claude-agent--make-start-state
+    (options req-id docker-p callback token-callback error-callback
+             complete-callback session-key source-buffer query-context
+             source-location-fn source-location-args)
+  "Build the process-state struct for a fresh `--start-process' call.
+
+Pulled into its own constructor wrapper so the top-level reads as
+a 6-line plan instead of a 16-key keyword soup."
+  (claude-agent--make-process-state
+   :options options
+   :json-buffer ""
+   :callback callback
+   :token-callback token-callback
+   :error-callback error-callback
+   :complete-callback complete-callback
+   :request-id req-id
+   :start-time (float-time)
+   :session-key session-key
+   :source-buffer source-buffer
+   :query-context query-context
+   :source-location-fn source-location-fn
+   :source-location-args source-location-args
+   :docker-mode docker-p
+   :ready nil
+   :closed nil))
+
+(defun claude-agent--launch-and-wire-process (command state session-key prompt
+                                                       cli-parts args
+                                                       default-directory env-vars)
+  "Spawn the CLI subprocess from COMMAND and wire STATE onto it.
+
+Bidirectional wiring: STATE keeps a reference to the process and
+its buffer; the process carries STATE + trace context via
+`process-put' so the filter and sentinel (which receive only the
+process) can recover the state without closure capture.  Side
+effects: configures I/O, registers the query for cancellation,
+seeds the per-session verbose buffer when session-key is set,
+sends the streaming-mode init payload, and registers STATE in the
+registry's active-states list.  Returns nothing (caller already
+holds STATE)."
+  (let ((process (make-process
+                  :name "claude-agent"
+                  :command command
+                  :buffer (generate-new-buffer " *claude-agent*")
+                  :connection-type 'pipe ; use pipe, not PTY
+                  :filter #'claude-agent--process-filter
+                  :sentinel #'claude-agent--process-sentinel
+                  :coding 'utf-8-unix
+                  :noquery t)))
+    (process-put process 'claude-agent-state state)
+    (process-put process 'claude-agent-trace-ctx (claude-agent-trace-context))
+    (setf (claude-agent--process-state-process state) process)
+    (setf (claude-agent--process-state-buffer state) (process-buffer process))
+    (claude-agent--configure-process-io process)
+    (claude-agent--register-query
+     (claude-agent--process-state-request-id state) state)
+    (when session-key
+      (claude-agent--get-session-verbose-buffer session-key)
+      (claude-agent--verbose-insert-query-header
+       session-key prompt (string-join cli-parts " ")
+       args default-directory env-vars))
+    (claude-agent--streaming-init process state prompt)
+    (setf (claude-agent--registry-active-states claude-agent--registry)
+          (cons state (claude-agent--registry-active-states claude-agent--registry)))))
+
 (cl-defun claude-agent--start-process (prompt options &key callback error-callback
                                             complete-callback token-callback
                                             request-id session-key source-buffer
@@ -2128,82 +2210,32 @@ for features like canUseTool permission callback.
 
 Returns a process state object."
   (claude-agent-with-span "start-process" (list :span-kind "CLIENT") nil
-  (let* ((raw-cli-path (or (plist-get options :cli-path)
-                           (claude-agent--find-cli)))
-         ;; For Docker commands, split into args; for regular paths, expand
-         (cli-parts (if (claude-agent--docker-command-p raw-cli-path)
-                        (claude-agent--split-command raw-cli-path)
-                      (list (expand-file-name raw-cli-path))))
-         ;; Always use streaming mode for bidirectional control protocol
-         (args (claude-agent--build-args options t))
-         (cwd (plist-get options :cwd))
-         (env-vars (plist-get options :env))
-         (req-id (or request-id (claude-agent--generate-request-id)))
-         (docker-mode-p (claude-agent--docker-command-p raw-cli-path))
-         (state (claude-agent--make-process-state
-                 :options options
-                 :json-buffer ""
-                 :callback callback
-                 :token-callback token-callback
-                 :error-callback error-callback
-                 :complete-callback complete-callback
-                 :request-id req-id
-                 :start-time (float-time)
-                 :session-key session-key
-                 :source-buffer source-buffer
-                 :query-context query-context
-                 :source-location-fn source-location-fn
-                 :source-location-args source-location-args
-                 :docker-mode docker-mode-p
-                 :ready nil
-                 :closed nil))
-         (default-directory (or cwd default-directory))
-         ;; When cli-path is explicit, prepend its directory to exec-path
-         ;; This ensures #!/usr/bin/env node finds the correct node version
-         ;; (e.g., when using nvm with claude installed under a specific node)
-         (cli-dir (when (and raw-cli-path
-                             (not (claude-agent--docker-command-p raw-cli-path)))
-                    (file-name-directory (expand-file-name raw-cli-path))))
-         (exec-path (if cli-dir
-                        (cons cli-dir exec-path)
-                      exec-path))
-         ;; Build process-environment: custom vars, CLI PATH, stripped nesting vars
-         (process-environment (claude-agent--build-process-environment
-                               env-vars cli-dir)))
-    ;; Build command; for Docker commands, cli-parts is already a list
-    (let* ((command (append cli-parts args))
-           (process (make-process
-                    :name "claude-agent"
-                    :command command
-                    :buffer (generate-new-buffer " *claude-agent*")
-                    :connection-type 'pipe  ;; Use pipe, not PTY
-                    :filter #'claude-agent--process-filter
-                    :sentinel #'claude-agent--process-sentinel
-                    :coding 'utf-8-unix
-                    :noquery t)))
-      ;; Store state on process for filter/sentinel to access
-      ;; (avoids closure issues with dynamic binding)
-      (process-put process 'claude-agent-state state)
-      ;; Store trace context for async filter/sentinel access
-      (process-put process 'claude-agent-trace-ctx (claude-agent-trace-context))
-      (setf (claude-agent--process-state-process state) process)
-      (setf (claude-agent--process-state-buffer state) (process-buffer process))
-      ;; Configure I/O for optimal throughput and deadlock prevention
-      (claude-agent--configure-process-io process)
-      ;; Register query for cancellation tracking
-      (claude-agent--register-query req-id state)
-      ;; Initialize verbose buffer for session if session-key provided
-      (when session-key
-        (claude-agent--get-session-verbose-buffer session-key)
-        (claude-agent--verbose-insert-query-header session-key prompt
-                                                   (string-join cli-parts " ")
-                                                   args default-directory env-vars))
-      ;; Streaming mode: Send initialization and prompt via stdin
-      (claude-agent--streaming-init process state prompt)
-      ;; Register in registry (sole owner of active-states)
-      (setf (claude-agent--registry-active-states claude-agent--registry)
-            (cons state (claude-agent--registry-active-states claude-agent--registry)))
-      state))))
+    (let* ((resolved      (claude-agent--resolve-cli-parts options))
+           (cli-parts     (nth 0 resolved))
+           (docker-p      (nth 1 resolved))
+           (raw-cli-path  (nth 2 resolved))
+           (args          (claude-agent--build-args options t))
+           (cwd           (plist-get options :cwd))
+           (env-vars      (plist-get options :env))
+           (req-id        (or request-id (claude-agent--generate-request-id)))
+           (state (claude-agent--make-start-state
+                   options req-id docker-p
+                   callback token-callback error-callback complete-callback
+                   session-key source-buffer query-context
+                   source-location-fn source-location-args))
+           (default-directory (or cwd default-directory))
+           ;; When cli-path is explicit, prepend its directory to exec-path so
+           ;; #!/usr/bin/env node finds the matching node (e.g. under nvm).
+           (cli-dir (when (and raw-cli-path (not docker-p))
+                      (file-name-directory (expand-file-name raw-cli-path))))
+           (exec-path (if cli-dir (cons cli-dir exec-path) exec-path))
+           (process-environment
+            (claude-agent--build-process-environment env-vars cli-dir))
+           (command (append cli-parts args)))
+      (claude-agent--launch-and-wire-process
+       command state session-key prompt cli-parts args
+       default-directory env-vars)
+      state)))
 #+END_SRC
 
 ** JSON Protocol
