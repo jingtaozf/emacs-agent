@@ -213,66 +213,92 @@ Navigates to the workspace section and reuses existing prompt-building logic."
 ** Prompt Insertion
 
 #+BEGIN_SRC elisp
+(defun code-agent-org-workspace-bridge--count-instructions (instr-level workflow-end)
+  "Count headings of depth INSTR-LEVEL tagged with `code-agent-org-heading-tag'.
+Counts by tag, not text — auto-title may rename ``Instruction N''
+to ``Fix parser bug'', so a regex over the visible heading text
+would miss renamed entries.  Scans up to WORKFLOW-END."
+  (let ((count 0))
+    (save-excursion
+      (while (re-search-forward
+              (format "^\\*\\{%d\\} +.+:%s:"
+                      instr-level code-agent-org-heading-tag)
+              workflow-end t)
+        (setq count (1+ count))))
+    count))
+
+(defun code-agent-org-workspace-bridge--write-instruction-block
+    (workflow-end instr-level instr-num custom-id prompt)
+  "Insert ``Instruction N :tag:'' heading + properties + ai block at WORKFLOW-END.
+Returns a marker on the heading line so the caller can re-position
+for register-query / auto-title hooks."
+  (goto-char workflow-end)
+  (unless (bolp) (insert "\n"))
+  (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
+    (insert "\n"))
+  (let ((stars (make-string instr-level ?*)))
+    (insert (format "%s Instruction %d :%s:\n"
+                    stars instr-num code-agent-org-heading-tag)))
+  (let ((heading-marker (copy-marker (line-beginning-position 0))))
+    (insert ":PROPERTIES:\n"
+            (format ":CUSTOM_ID: %s\n" custom-id)
+            ":END:\n\n"
+            "#+begin_src ai\n"
+            prompt "\n"
+            "#+end_src\n")
+    heading-marker))
+
+(defun code-agent-org-workspace-bridge--wire-new-instruction
+    (session-id prompt heading-marker)
+  "Hook a freshly-inserted terminal-bridge prompt into the rest of the system.
+
+Point starts at HEADING-MARKER inside the org buffer; the function
+registers an active query, fires the standard execute-hook,
+flips :busy, maps workspace-id → session-key, marks the heading's
+AI_EXEC_STATUS, and kicks off auto-title (if enabled)."
+  (goto-char heading-marker)
+  (code-agent-org-terminal--register-query session-id nil)
+  (when-let* ((session-key (code-agent-org--current-session-key)))
+    (run-hook-with-args 'code-agent-org-execute-hook session-key prompt nil)
+    (code-agent-org--session-put session-key :busy t)
+    (puthash session-id session-key
+             code-agent-org-terminal--workspace-to-session-key))
+  (code-agent-org--set-exec-status "executing")
+  (when code-agent-org-auto-generate-title
+    (code-agent-org--maybe-auto-generate-title prompt heading-marker)))
+
 (defun code-agent-org-workspace-bridge-insert-prompt (org-file session-id prompt)
   "Insert PROMPT as a new AI block in the workspace Workflow for SESSION-ID in ORG-FILE.
 Creates a new Instruction N subsection under the Workflow heading.
 Returns the CUSTOM_ID string for correlating with the Stop hook."
   (claude-agent-with-span "workspace-insert-prompt"
       (list :session-id session-id) nil
-  (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer org-file)
-    (let ((custom-id nil))
-      (save-excursion
-        (save-restriction
-          (widen)
-          (code-agent-org-workspace-bridge--find-workflow session-id)
-          (let* ((workflow-level (org-current-level))
-                 (instr-level (1+ workflow-level))
-                 (stars (make-string instr-level ?*))
-                 ;; Use regex to find workflow boundary (safe against embedded headings)
-                 (workflow-end (code-agent-org-workspace-bridge--find-next-sibling-heading
-                                workflow-level (point-max)))
-                 (instr-count 0))
-            ;; Count existing instructions by tag (headings may be renamed by auto-title)
-            (save-excursion
-              (while (re-search-forward
-                      (format "^\\*\\{%d\\} +.+:%s:" instr-level code-agent-org-heading-tag)
-                      workflow-end t)
-                (setq instr-count (1+ instr-count))))
-            (let* ((instr-num (1+ instr-count))
-                   (file-base (file-name-sans-extension (file-name-nondirectory org-file))))
-              (setq custom-id (code-agent-org--generate-instruction-custom-id file-base instr-num session-id))
-              ;; Go to end of workflow subtree to insert new instruction
-              (goto-char workflow-end)
-              ;; Ensure blank line before heading
-              (unless (bolp) (insert "\n"))
-              (unless (save-excursion (forward-line -1) (looking-at "^[ \t]*$"))
-                (insert "\n"))
-              (insert (format "%s Instruction %d :%s:\n" stars instr-num code-agent-org-heading-tag))
-              (let ((heading-marker (copy-marker (line-beginning-position 0))))
-                (insert ":PROPERTIES:\n")
-                (insert (format ":CUSTOM_ID: %s\n" custom-id))
-                (insert ":END:\n\n")
-                (insert "#+begin_src ai\n")
-                (insert prompt "\n")
-                (insert "#+end_src\n")
-                ;; Register as active query for mode-line and query manager
-                (goto-char heading-marker)
-                (code-agent-org-terminal--register-query session-id nil)
-                ;; Record in block history (enables "Jump to AI block" for terminal prompts)
-                (let ((session-key (code-agent-org--current-session-key)))
-                  (when session-key
-                    (run-hook-with-args 'code-agent-org-execute-hook session-key prompt nil)
-                    (code-agent-org--session-put session-key :busy t)
-                    ;; Map workspace-session-id → session-key (shared across backends)
-                    (puthash session-id session-key
-                             code-agent-org-terminal--workspace-to-session-key)))
-                ;; Set exec-status on the instruction heading
-                (code-agent-org--set-exec-status "executing")
-                ;; Auto-generate a meaningful title for the heading
-                (when code-agent-org-auto-generate-title
-                  (code-agent-org--maybe-auto-generate-title prompt heading-marker)))))))
-      (save-buffer)
-      custom-id))))
+    (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer org-file)
+      (let (custom-id)
+        (save-excursion
+          (save-restriction
+            (widen)
+            (code-agent-org-workspace-bridge--find-workflow session-id)
+            (let* ((workflow-level (org-current-level))
+                   (instr-level    (1+ workflow-level))
+                   (workflow-end
+                    (code-agent-org-workspace-bridge--find-next-sibling-heading
+                     workflow-level (point-max)))
+                   (instr-num
+                    (1+ (code-agent-org-workspace-bridge--count-instructions
+                         instr-level workflow-end)))
+                   (file-base
+                    (file-name-sans-extension (file-name-nondirectory org-file)))
+                   (heading-marker nil))
+              (setq custom-id (code-agent-org--generate-instruction-custom-id
+                               file-base instr-num session-id))
+              (setq heading-marker
+                    (code-agent-org-workspace-bridge--write-instruction-block
+                     workflow-end instr-level instr-num custom-id prompt))
+              (code-agent-org-workspace-bridge--wire-new-instruction
+               session-id prompt heading-marker))))
+        (save-buffer)
+        custom-id))))
 #+END_SRC
 
 ** Response Insertion
