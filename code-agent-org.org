@@ -1505,76 +1505,89 @@ Operations are performed in a fixed, canonical order."
   ;; 7. Refresh header line
   (code-agent-org--refresh-header-line))
 
-(defun code-agent-org--handle-complete (session-key result)
-  "Handle query completion for SESSION-KEY with RESULT.
-Uses query-id based architecture with marker for queue duplicate detection.
+(defun code-agent-org--complete-span-attrs (session-key result)
+  "Build the OTel span attribute list for a `handle-complete' span."
+  (list :custom-id (code-agent-org--session-get session-key :custom-id)
+        :result (if result "error" "ok")
+        :error-message (when (and result (plist-get (cdr result) :message))
+                         (plist-get (cdr result) :message))
+        :tool-call-count (code-agent-org--session-get session-key :tool-call-count)
+        :duration-sec (when (code-agent-org--session-get session-key :start-time)
+                        (format "%.1f" (- (float-time)
+                                          (code-agent-org--session-get
+                                           session-key :start-time))))
+        :loop-current (code-agent-org--session-get session-key :loop-current)
+        :loop-max (code-agent-org--session-get session-key :loop-max)))
 
-IMPORTANT: Loop continuation check must happen BEFORE freeing the marker,
-because execute-loop-iteration needs the marker to find the buffer.
-When the loop continues, :busy and :marker are kept alive for the next
-iteration (including across run-at-time delays for :interval)."
-  (let ((trace-ctx (code-agent-org--session-get session-key :trace-ctx)))
-  (claude-agent-with-span "handle-complete"
-      (list :custom-id (code-agent-org--session-get session-key :custom-id)
-            :result (if result "error" "ok")
-            :error-message (when (and result (plist-get (cdr result) :message))
-                             (plist-get (cdr result) :message))
-            :tool-call-count (code-agent-org--session-get session-key :tool-call-count)
-            :duration-sec (when (code-agent-org--session-get session-key :start-time)
-                            (format "%.1f" (- (float-time)
-                                              (code-agent-org--session-get session-key :start-time))))
-            :loop-current (code-agent-org--session-get session-key :loop-current)
-            :loop-max (code-agent-org--session-get session-key :loop-max))
-      trace-ctx
-  (code-agent-org--stop-spinner session-key)
-  ;; Add newline after response using query-id lookup (marker-free)
+(defun code-agent-org--complete-fire-hooks (session-key result)
+  "Insert trailing newline, refresh header, and fire the completion hooks."
   (let ((query-id (code-agent-org--session-get session-key :query-id)))
     (when query-id
       (code-agent-org--insert-at-response session-key "\n")))
-  ;; Update header line
   (code-agent-org--refresh-header-line)
-  ;; Run completion hook (no marker to pass - we're marker-free)
   (run-hook-with-args 'code-agent-org-complete-hook session-key result 'completed)
-  ;; Run user query-complete hook (F4: empty by default, user opts in)
   (let ((query-id (code-agent-org--session-get session-key :query-id)))
     (when query-id
-      (run-hook-with-args 'code-agent-org-query-complete-hook session-key query-id)))
-  ;; Persist telemetry (F5: duration, tool count)
+      (run-hook-with-args 'code-agent-org-query-complete-hook
+                          session-key query-id)))
   (condition-case nil
       (progn
         (code-agent-org--persist-duration session-key)
         (code-agent-org--persist-tool-count session-key))
-    (error nil))
-  ;; Check loop state BEFORE any cleanup - execute-loop-iteration needs :marker
+    (error nil)))
+
+(defun code-agent-org--complete-finish-or-loop (session-key)
+  "Decide between continuing the loop and full cleanup.
+
+When the session is mid-loop (:loop-current < :loop-max) the marker
+and `:busy' flag stay alive, transient flags are cleared, and the
+next iteration is scheduled.  Otherwise: mark exec-status completed
+(unless previously cancelled), reset session state, free the marker,
+and pump the pending-block queue."
   (let* ((loop-current (or (code-agent-org--session-get session-key :loop-current) 1))
-         (loop-max (or (code-agent-org--session-get session-key :loop-max) 1))
-         (should-continue (< loop-current loop-max)))
-    (if should-continue
-        ;; Loop has more iterations: keep :busy and :marker alive,
-        ;; clear only transient flags, then trigger next iteration
+         (loop-max     (or (code-agent-org--session-get session-key :loop-max) 1)))
+    (if (< loop-current loop-max)
         (progn
           (code-agent-org--session-put session-key :recovering nil)
           (code-agent-org--session-put session-key :last-assistant-query-id nil)
           (code-agent-org--maybe-continue-loop session-key))
-      ;; Loop complete (or single-shot) - full cleanup
-      (unless (equal (code-agent-org--get-exec-status-for-session session-key) "cancelled")
+      (unless (equal (code-agent-org--get-exec-status-for-session session-key)
+                     "cancelled")
         (code-agent-org--set-exec-status-for-session session-key "completed"))
       (code-agent-org--reset-session-state session-key)
       (code-agent-org--free-marker session-key)
-      ;; Process pending queue
       (let ((next-block (code-agent-org--dequeue-block session-key)))
-        (if next-block
-            (code-agent-org--execute-queued-block session-key next-block)
-          ;; Truly done — no follow-up call to --unregister-active-query.
-          ;; Mode-line + *Claude Queries* buffer already reflect terminal
-          ;; state via --reset-session-state (step 3) + --refresh-header-line
-          ;; (step 7) above.  --unregister-active-query only adds a backend
-          ;; cancel-from-org dispatch, which on multiplexer-family backends
-          ;; sends ESC to the persistent surface and cancels follow-up
-          ;; sub-agent work; on agent-family backends it's a no-op since the
-          ;; SDK subprocess already exited.  See the gating in --cleanup-session
-          ;; for the same rationale on the cancel/error paths.
-          )))))))
+        (when next-block
+          (code-agent-org--execute-queued-block session-key next-block)))
+      ;; No follow-up --unregister-active-query call: mode-line and
+      ;; *Claude Queries* buffer already reflect terminal state via
+      ;; --reset-session-state + --refresh-header-line above.
+      ;; --unregister-active-query only adds a backend cancel-from-org
+      ;; dispatch, which on multiplexer-family backends sends ESC to the
+      ;; persistent surface and cancels follow-up sub-agent work; on
+      ;; agent-family backends it's a no-op since the SDK subprocess
+      ;; already exited.  See --cleanup-session for the same rationale.
+      )))
+
+(defun code-agent-org--handle-complete (session-key result)
+  "Handle query completion for SESSION-KEY with RESULT.
+
+Three phases:
+1. Fire hooks + persist telemetry (`--complete-fire-hooks').
+2. Continue loop or run full cleanup (`--complete-finish-or-loop').
+
+IMPORTANT: phase 2's loop-continuation check must happen BEFORE the
+marker is freed because execute-loop-iteration needs the marker to
+find the buffer.  When the loop continues, :busy and :marker stay
+alive for the next iteration (including across run-at-time delays
+for :interval)."
+  (let ((trace-ctx (code-agent-org--session-get session-key :trace-ctx)))
+    (claude-agent-with-span "handle-complete"
+        (code-agent-org--complete-span-attrs session-key result)
+        trace-ctx
+      (code-agent-org--stop-spinner session-key)
+      (code-agent-org--complete-fire-hooks session-key result)
+      (code-agent-org--complete-finish-or-loop session-key))))
 #+END_SRC
 
 ** Error Handling
