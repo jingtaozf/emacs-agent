@@ -803,34 +803,123 @@ This ensures loop iterations use the original session, not current cursor positi
 
 ;;; Recovery Session Key Tests
 
+;; These three tests previously inspected the printed body of
+;; --recover-session via `string-match' against
+;; `(symbol-function ...)' — that locks the implementation against any
+;; helper extraction even when behaviour is unchanged.  Rewrite as
+;; behavioural assertions: build a temp org buffer, stub the boundary
+;; helpers --send-request / --create-response-section /
+;; --find-response-by-query-id, drive --recover-session, then assert
+;; on what the stubs observed.
+
+(defun test-code-agent-org--recovery-setup (session-key)
+  "Common fixture: seed session state + register a fake response heading.
+Returns alist of (calls . arg-records) recording every stubbed boundary call.
+Caller must wrap in `cl-letf' to actually install the stubs."
+  (code-agent-org--session-put session-key :query-id "old-query-id")
+  (code-agent-org--session-put session-key :section-level 1)
+  (code-agent-org--session-put session-key :original-prompt "original prompt")
+  (code-agent-org--session-put session-key :recovery-count 0)
+  (code-agent-org--session-put session-key :custom-id "test-cid"))
+
 (ert-deftest test-code-agent-org-recover-session-passes-session-key ()
-  "Test that recover-session passes session-key to send-request.
-This ensures recovery uses the original session, not current cursor position."
+  "Recovery must pass session-key — not the buffer's current point — to
+`code-agent-org--send-request' so the new query is bound to the
+original session even when point has moved."
   :tags '(:unit :fast :stable :isolated :org :recovery)
-  (let* ((fn-str (format "%s" (symbol-function 'code-agent-org--recover-session)))
-         ;; Check that the function calls send-request with session-key as 3rd arg
-         (has-session-key-arg (string-match "send-request recovery-prompt nil session-key" fn-str)))
-    (should has-session-key-arg)))
+  (let ((key "test-rs-passes-key::file")
+        (send-args nil))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* dummy\n")
+      (test-code-agent-org--recovery-setup key)
+      (cl-letf (((symbol-function 'code-agent-org--find-response-by-query-id)
+                 (lambda (_qid) 1))
+                ((symbol-function 'code-agent-org--create-response-section)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'code-agent-org--collect-session-context)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org--clear-sdk-uuid)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org--generate-query-id)
+                 (lambda () "new-query-id"))
+                ((symbol-function 'code-agent-org--send-request)
+                 (lambda (&rest args) (setq send-args args))))
+        (code-agent-org--recover-session key)))
+    (should send-args)
+    ;; Third arg to send-request must be the session-key we passed in.
+    (should (equal (nth 2 send-args) key))))
 
 (ert-deftest test-code-agent-org-recover-session-uses-query-id ()
-  "Test that recover-session uses query-id based marker-free architecture.
-This ensures recovery works without relying on markers that can become invalid."
+  "Recovery must look the response section up by the old query-id and
+mint a fresh query-id for the new response — proving the marker-free
+path is wired without freezing the function body."
   :tags '(:unit :fast :stable :isolated :org :recovery)
-  (let* ((fn-str (format "%s" (symbol-function 'code-agent-org--recover-session)))
-         ;; Check for marker-free approach using query-id
-         (uses-query-id (or (string-match "find-response-by-query-id" fn-str)
-                            (string-match "old-query-id" fn-str))))
-    (should uses-query-id)))
+  (let ((key "test-rs-qid::file")
+        (find-by-qid-calls nil)
+        (generate-qid-called nil)
+        (final-qid nil))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* dummy\n")
+      (test-code-agent-org--recovery-setup key)
+      (cl-letf (((symbol-function 'code-agent-org--find-response-by-query-id)
+                 (lambda (qid) (push qid find-by-qid-calls) 1))
+                ((symbol-function 'code-agent-org--create-response-section)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'code-agent-org--collect-session-context)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org--clear-sdk-uuid)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org--generate-query-id)
+                 (lambda () (setq generate-qid-called t) "new-query-id"))
+                ((symbol-function 'code-agent-org--send-request)
+                 (lambda (&rest _args) nil)))
+        (code-agent-org--recover-session key))
+      (setq final-qid (code-agent-org--session-get key :query-id)))
+    (should (member "old-query-id" find-by-qid-calls))
+    (should generate-qid-called)
+    (should (equal "new-query-id" final-qid))))
 
 (ert-deftest test-code-agent-org-recover-session-positions-cursor ()
-  "Test that recover-session positions cursor at response section before operations.
-This ensures org operations work correctly when called during recovery."
+  "Recovery must position at the response-section position returned by
+`--find-response-by-query-id' before writing the recovery section —
+proving the cursor is bound to the response section, not the current
+buffer point."
   :tags '(:unit :fast :stable :isolated :org :recovery)
-  (let* ((fn-str (format "%s" (symbol-function 'code-agent-org--recover-session)))
-         ;; Check that we position at response-pos before operations
-         (positions-cursor (or (string-match "goto-char response-pos" fn-str)
-                               (string-match "response-pos" fn-str))))
-    (should positions-cursor)))
+  (let ((key "test-rs-pos::file")
+        (response-pos-marker 42)
+        (point-at-create-time nil))
+    (with-temp-buffer
+      (org-mode)
+      ;; Pad the buffer so position 42 is reachable.
+      (insert (make-string 100 ?\n))
+      (insert "* dummy heading\n")
+      ;; Move point far away so we can assert the recovery code re-positioned.
+      (goto-char (point-max))
+      (test-code-agent-org--recovery-setup key)
+      (cl-letf (((symbol-function 'code-agent-org--find-response-by-query-id)
+                 (lambda (_qid) response-pos-marker))
+                ((symbol-function 'code-agent-org--create-response-section)
+                 (lambda (&rest _args)
+                   ;; Capture point at the moment the recovery section is created.
+                   (setq point-at-create-time (point))))
+                ((symbol-function 'code-agent-org--collect-session-context)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org--clear-sdk-uuid)
+                 (lambda () nil))
+                ((symbol-function 'code-agent-org--generate-query-id)
+                 (lambda () "new-query-id"))
+                ((symbol-function 'code-agent-org--send-request)
+                 (lambda (&rest _args) nil)))
+        (code-agent-org--recover-session key)))
+    ;; create-response-section must have been called while point was at
+    ;; (or just after) the response-pos returned by find-response-by-query-id,
+    ;; not (point-max).  The exact position depends on org-end-of-subtree + the
+    ;; "\n\n" insert, but it must be reachable from response-pos-marker, not
+    ;; from end of buffer.
+    (should point-at-create-time)
+    (should (< point-at-create-time 200))))
 
 ;;; CUSTOM_ID Generation Tests
 

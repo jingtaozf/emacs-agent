@@ -365,74 +365,93 @@ Returns list of (question . response) pairs for recovery."
      "Please continue the conversation. The user's current question is:\n\n"
      original-prompt)))
 
+(defun code-agent-org--recovery-budget-spent-p (session-key)
+  "Return non-nil iff SESSION-KEY has used up its recovery budget.
+Inserts a user-facing error via `--insert-error' (which also runs
+`--cleanup-session') and returns t so the caller short-circuits.
+Otherwise increments the counter and returns nil."
+  (let ((count (or (code-agent-org--session-get session-key :recovery-count) 0)))
+    (if (>= count code-agent-org-max-recovery-attempts)
+        (progn
+          (code-agent-org--insert-error
+           session-key
+           (format "Recovery limit reached (%d attempts). Please retry manually."
+                   count))
+          t)
+      (code-agent-org--session-put session-key :recovery-count (1+ count))
+      (code-agent-org--session-put session-key :recovering t)
+      nil)))
+
+(defun code-agent-org--insert-recovery-section (session-key response-pos
+                                                            old-query-id reason)
+  "Append a new :ai_output: response section after RESPONSE-POS for SESSION-KEY.
+Mints a new query-id (so the old query's callbacks no-op via query-id
+mismatch), records it on the session, writes the section header via
+`--create-response-section', and inserts the italic recovery marker
+keyed on REASON.  OLD-QUERY-ID supplies the :PARENT_QUERY_ID property."
+  (let ((reason-str (pcase reason
+                      ('context-limit "context_limit")
+                      (_ "session_expired")))
+        (recovery-msg (pcase reason
+                        ('context-limit "/Context limit reached, recovering with history.../")
+                        (_ "/Session expired, recovering with context.../"))))
+    (save-excursion
+      (goto-char response-pos)
+      (org-end-of-subtree t)
+      (insert "\n\n")
+      (let ((new-query-id (code-agent-org--generate-query-id)))
+        (code-agent-org--session-put session-key :query-id new-query-id)
+        (code-agent-org--create-response-section
+         session-key new-query-id 'recovery old-query-id reason-str)
+        (insert recovery-msg "\n\n")))))
+
+(defun code-agent-org--dispatch-recovery-request (session-key)
+  "Collect the org-buffer history for SESSION-KEY and re-dispatch send-request.
+Reads the original prompt off the session, calls
+`--collect-session-context' to walk the buffer, hands both to
+`--build-recovery-prompt' for envelope assembly, clears the now-stale
+`:recovering' flag (the new query-id already protects us against late
+callbacks from the dead query), and forwards through the normal
+send-request path."
+  (code-agent-org--clear-sdk-uuid)
+  (let* ((context         (code-agent-org--collect-session-context))
+         (original-prompt (code-agent-org--session-get session-key :original-prompt))
+         (recovery-prompt (code-agent-org--build-recovery-prompt context original-prompt)))
+    (code-agent-org--session-put session-key :recovering nil)
+    (code-agent-org--send-request recovery-prompt nil session-key)))
+
 (defun code-agent-org--recover-session (session-key &optional reason)
   "Recover session for SESSION-KEY by creating a new response section.
 REASON can be 'context-limit or 'expired (default).
 
-Uses query-id based recovery:
-1. Find current response section by query-id
-2. Create NEW recovery response section after it
-3. Generate new query-id for recovery query
-4. Old query's callbacks will be ignored (query-id mismatch)
+Three phases, each delegated to a helper so this top-level reads
+top-to-bottom:
 
-Recovery is limited to `code-agent-org-max-recovery-attempts' consecutive
-attempts.  The counter resets on each new query."
+1. `--recovery-budget-spent-p' enforces the
+   `code-agent-org-max-recovery-attempts' budget — short-circuit if
+   exhausted, otherwise bump the counter + set the `:recovering' flag.
+2. `--insert-recovery-section' mints a new query-id and writes the
+   header + italic marker into the buffer (after the prior response
+   section identified by the old query-id).
+3. `--dispatch-recovery-request' collects context + sends a fresh
+   query through the standard send-request path.
+
+The old query's callbacks are ignored by query-id mismatch, so we
+don't cancel the in-flight process here."
   (claude-agent-with-span "recover-session"
       (list :custom-id (code-agent-org--session-get session-key :custom-id)
             :reason (format "%s" reason))
     nil
-  ;; Guard: check recovery count against limit
-  (let ((count (or (code-agent-org--session-get session-key :recovery-count) 0)))
-    (if (>= count code-agent-org-max-recovery-attempts)
-        ;; insert-error calls cleanup-session internally — no need for
-        ;; redundant reset-session-state, stop-spinner, refresh-header-line
-        (code-agent-org--insert-error
-         session-key
-         (format "Recovery limit reached (%d attempts). Please retry manually."
-                 count))
-      ;; Normal recovery path — increment counter before attempting
-      (code-agent-org--session-put session-key :recovery-count (1+ count))
-      (code-agent-org--session-put session-key :recovering t)
+    (unless (code-agent-org--recovery-budget-spent-p session-key)
       (let* ((old-query-id (code-agent-org--session-get session-key :query-id))
-             (reason-str (pcase reason
-                           ('context-limit "context_limit")
-                           (_ "session_expired"))))
-        ;; Try to find response section by query-id (marker-free approach)
-        (let ((response-pos (code-agent-org--find-response-by-query-id old-query-id)))
-          (if (not response-pos)
-              ;; Can't find response section - full cleanup via centralized function
-              (progn
-                (message "Claude: Cannot recover session - response section not found")
-                (code-agent-org--cleanup-session session-key "error" t))
-            ;; Found response section - create recovery section
-            (save-excursion
-              (goto-char response-pos)
-              ;; Move to end of current response section
-              (org-end-of-subtree t)
-              ;; Insert newlines and create NEW recovery response section
-              (insert "\n\n")
-              ;; Generate new query-id for recovery
-              (let ((new-query-id (code-agent-org--generate-query-id)))
-                ;; Update session with new query-id BEFORE creating section
-                (code-agent-org--session-put session-key :query-id new-query-id)
-                ;; Create recovery response section with parent reference
-                (code-agent-org--create-response-section
-                 session-key new-query-id 'recovery old-query-id reason-str)
-                ;; Insert recovery message in the new section
-                (let ((recovery-msg (pcase reason
-                                      ('context-limit "/Context limit reached, recovering with history.../")
-                                      (_ "/Session expired, recovering with context.../"))))
-                  (insert recovery-msg "\n\n"))))
-            ;; Clear old session UUID from org property
-            (code-agent-org--clear-sdk-uuid)
-            ;; Collect context and send recovery request
-            (let* ((context (code-agent-org--collect-session-context))
-                   (original-prompt (code-agent-org--session-get session-key :original-prompt))
-                   (recovery-prompt (code-agent-org--build-recovery-prompt context original-prompt)))
-              ;; Clear recovering flag - the new query-id protects us now
-              (code-agent-org--session-put session-key :recovering nil)
-              ;; Send recovery request with new query-id already in session
-              (code-agent-org--send-request recovery-prompt nil session-key)))))))))
+             (response-pos (code-agent-org--find-response-by-query-id old-query-id)))
+        (if (not response-pos)
+            (progn
+              (message "Claude: Cannot recover session - response section not found")
+              (code-agent-org--cleanup-session session-key "error" t))
+          (code-agent-org--insert-recovery-section
+           session-key response-pos old-query-id reason)
+          (code-agent-org--dispatch-recovery-request session-key))))))
 #+END_SRC
 
 * Provide
