@@ -1,0 +1,181 @@
+#+TITLE: Code Agent Org — Project Configuration + System Prompts
+#+PROPERTY: literate-load yes
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: overview
+:END:
+
+Three closely-related concerns that all answer "what does the agent
+see when it starts running in this org buffer?":
+
+- =PROJECT_ROOT= resolution (file/section inheritance → cwd).
+- Docker-mode detection + host↔container path mapping when
+  =CLAUDE_CODE_PATH= points at a Docker command.
+- System-prompt assembly from =prompts/system/*.org= templates and
+  =:system_prompt:= tagged sections in the buffer.
+
+Combined here because they form one logical "project context"
+surface — every spawn path reads them in sequence (cwd first,
+docker mode + path mappings if applicable, system prompt last)
+before invoking the backend. Splitting them into three
+single-defun modules would only fragment the call sequence; one
+module with three sub-sections matches the reader's mental model.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+#+END_SRC
+
+* PROJECT_ROOT
+
+#+BEGIN_SRC elisp
+(defun code-agent-org--get-project-root ()
+  "Get project root from org properties with inheritance.
+Checks section-level property drawer first, then inherits from parent headings,
+finally falls back to file-level #+PROPERTY.
+Returns nil if not set (will use default-directory).
+Returns nil safely if not in org-mode context.
+
+Usage in org file:
+  File-level: #+PROPERTY: PROJECT_ROOT /path/to/project
+  Section-level (property drawer):
+    * My Section
+    :PROPERTIES:
+    :PROJECT_ROOT: /other/path
+    :END:"
+  (ignore-errors
+    ;; Ensure file-level #+PROPERTY keywords are parsed.
+    ;; org-keyword-properties may be nil if the buffer was modified
+    ;; externally or narrowing prevented a full re-parse.
+    (unless (bound-and-true-p org-keyword-properties)
+      (org-set-regexps-and-options))
+    (org-entry-get nil "PROJECT_ROOT" t)))
+#+END_SRC
+
+* Docker Configuration
+
+These functions support running Claude Code in Docker containers.  When
+=CLAUDE_CODE_PATH= is set to a Docker command, path translation is enabled
+between host and container paths using =PROJECT_ROOT= (host) and =CLAUDE_CONTAINER_PATH=.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org--get-cli-path ()
+  "Get Claude CLI path/command from org properties.
+Returns nil to use default (claude-agent-cli-path).
+Returns nil safely if not in org-mode context.
+
+Usage:
+  #+PROPERTY: CLAUDE_CODE_PATH docker compose exec claude claude"
+  (ignore-errors
+    (org-entry-get nil code-agent-org-code-path-property t)))
+
+(defun code-agent-org--get-path-mappings ()
+  "Build path mappings alist from org properties for Docker mode.
+Returns alist of (HOST-PATH . CONTAINER-PATH) or nil if not configured.
+
+Uses PROJECT_ROOT as the host path and CLAUDE_CONTAINER_PATH as container path.
+Both must be set for mapping to work.
+
+Usage:
+  #+PROPERTY: PROJECT_ROOT /home/user/project
+  #+PROPERTY: CLAUDE_CONTAINER_PATH /workspace"
+  (ignore-errors
+    (let ((host-path (code-agent-org--get-project-root))
+          (container-path (org-entry-get nil code-agent-org-container-path-property t)))
+      (when (and host-path container-path)
+        (list (cons host-path container-path))))))
+
+(defun code-agent-org--docker-mode-p ()
+  "Return non-nil if Docker mode is active.
+Docker mode is detected when CLAUDE_CODE_PATH contains 'docker'.
+Returns nil safely if not in org-mode context."
+  (let ((cli-path (code-agent-org--get-cli-path)))
+    (and cli-path (string-match-p "docker" cli-path))))
+#+END_SRC
+
+* System Prompts
+
+#+BEGIN_SRC elisp
+(defun code-agent-org--collect-system-prompts ()
+  "Collect content from all org sections tagged :system_prompt:.
+Returns concatenated string of heading + body for each section, or nil if none.
+
+Usage in org file:
+  * Project Guidelines :system_prompt:
+  This project uses Python 3.11 with Django.
+  Always use absolute imports."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((prompts '())
+            (heading-re "^\\(\\*+\\) +\\(.*\\):system_prompt:"))
+        ;; Use regex search instead of org-map-entries to avoid cache issues
+        (while (re-search-forward heading-re nil t)
+          (let* ((stars (match-string 1))
+                 (heading-text (match-string 2))
+                 (heading (string-trim (replace-regexp-in-string ":.*$" "" heading-text)))
+                 (beg (save-excursion
+                        (forward-line 1)
+                        ;; Skip property drawers and planning lines
+                        (while (and (not (eobp))
+                                    (looking-at "^[ \t]*\\(:\\|DEADLINE:\\|SCHEDULED:\\|CLOSED:\\)"))
+                          (forward-line 1))
+                        (point)))
+                 (end (save-excursion
+                        (beginning-of-line)
+                        (org-end-of-subtree t t)
+                        (point)))
+                 (body (when (< beg end)
+                         (string-trim (buffer-substring-no-properties beg end)))))
+            (when (and heading (not (string-empty-p heading)))
+              (push (concat "* " heading
+                            (when (and body (not (string-empty-p body)))
+                              (concat "\n" body)))
+                    prompts))))
+        (when prompts
+          (mapconcat #'identity (nreverse prompts) "\n\n"))))))
+
+(defun code-agent-org--build-elisp-reload-hint ()
+  "Build instruction for reloading elisp files after editing.
+Always included in system prompt to ensure Claude reloads code changes."
+  "IMPORTANT - Elisp Reload Rule:
+After editing .el or .org files containing Elisp code, you MUST reload them
+in Emacs using evalElisp MCP tool so changes take effect:
+- For .el files: (load-file \"/path/to/file.el\")
+- For .org files with literate-elisp: (literate-elisp-load \"/path/to/file.org\")
+This applies in both host and Docker sandbox modes.")
+
+(defun code-agent-org--build-system-prompt ()
+  "Build complete system prompt from file-based templates and org sections.
+Combines:
+1. System prompts from prompts/system/*.org (loaded in sorted order)
+2. :system_prompt: tagged org sections in the current file
+3. Line width instruction based on `code-agent-org-line-width'
+4. Elisp reload instruction"
+  (claude-agent-with-span "build-system-prompt" nil nil
+  (let ((file-prompts (code-agent-org--load-system-prompts))
+        (org-prompts (code-agent-org--collect-system-prompts))
+        (line-width-hint (when (and code-agent-org-line-width (> code-agent-org-line-width 0))
+                           (format "Keep output lines under %d characters, break long lines naturally."
+                                   code-agent-org-line-width)))
+        (elisp-hint (code-agent-org--build-elisp-reload-hint)))
+    ;; Order by stability for prompt cache efficiency:
+    ;; 1. File prompts (static across sessions — from prompts/system/*.org)
+    ;; 2. Elisp reload hint (static per project)
+    ;; 3. Org section prompts (semi-stable — :system_prompt: sections)
+    ;; 4. Line width hint (dynamic — changes with window width)
+    ;; Stable prefix = better cache hit rate in Claude Code's prompt cache.
+    (let ((parts (append file-prompts
+                         (delq nil (list elisp-hint org-prompts line-width-hint)))))
+      (when parts
+        (string-join parts "\n\n"))))))
+#+END_SRC
+
+* Provide
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-org-project-prompts)
+#+END_SRC
