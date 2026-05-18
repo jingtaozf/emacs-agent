@@ -83,30 +83,6 @@ def _inject_emacs_mcp(project_root: str, mcp_url: str) -> None:
     print(f"  MCP config: injected Emacs server into {out_path}")
 
 
-def _write_agents_md(project_root: str, system_prompt: str) -> None:
-    """Prepend the session system prompt to ``AGENTS.md`` at project root.
-
-    If the file already contains BEGIN/END inject blocks from a prior
-    session whose cleanup didn't fire, those blocks are stripped before
-    treating the rest as the durable base. This breaks the
-    self-perpetuating bloat reported on 2026-04-30 (see tasks/lessons.md).
-    """
-    agents_md_path = Path(project_root) / "AGENTS.md"
-
-    file_existed_before = agents_md_path.exists()
-    raw = agents_md_path.read_text() if file_existed_before else ""
-    base = strip_emacs_agent_inject_blocks(raw)
-
-    header = (
-        "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
-        f"{system_prompt.strip()}\n"
-        "<!-- END emacs-agent session instructions -->\n\n"
-    )
-    agents_md_path.write_text(header + base)
-    atexit.register(cleanup_emacs_agent_inject, agents_md_path, file_existed_before)
-    print(f"  System prompt: written to {agents_md_path}")
-
-
 def _inject_bridge_plugin(plugin_dir: str, project_root: str) -> None:
     """Copy the emacs-bridge TS plugin into ``.opencode/plugins/``.
 
@@ -204,7 +180,9 @@ class OpencodeWorkspaceLauncher(WorkspaceLauncher):
     def inject_config(self) -> None:
         _inject_emacs_mcp(self.project_root, self.mcp_url)
         if self.mcp_ok and is_valid_session(self.system_prompt):
-            _write_agents_md(self.project_root, self.system_prompt)
+            AgentsMdInjector(Path(self.project_root) / "AGENTS.md").inject(
+                self.system_prompt
+            )
         _inject_bridge_plugin(self.plugin_dir, self.project_root)
 
     # ------------------------------------------------------------------

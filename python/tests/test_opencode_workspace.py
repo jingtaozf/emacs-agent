@@ -9,17 +9,28 @@ import json
 
 import pytest
 
+from pathlib import Path
+
 from claude_agent.opencode_workspace import (
     OpencodeWorkspaceLauncher,
     _inject_emacs_mcp,
     _parse_jsonc,
-    _write_agents_md,
 )
 from claude_agent.workspace_launcher import (
+    AgentsMdInjector,
     filter_claude_args,
     is_valid_session,
     split_positional_args,
 )
+
+
+def _write_agents_md(project_root, system_prompt):
+    """Test-helper wrapper preserving the legacy free-function signature.
+
+    Production code now uses ``AgentsMdInjector(path).inject(prompt)``;
+    these tests still pass a project-root string + prompt, so wrap.
+    """
+    AgentsMdInjector(Path(project_root) / "AGENTS.md").inject(system_prompt)
 
 
 def _make_launcher(
@@ -350,9 +361,7 @@ class TestWriteAgentsMd:
         nofile_dir.mkdir()
         nofile = nofile_dir / "AGENTS.md"
         # Simulate inject created the file (no prior base):
-        from claude_agent.opencode_workspace import _write_agents_md as wam
-
-        wam(str(nofile_dir), "Only inject here.")
+        _write_agents_md(str(nofile_dir), "Only inject here.")
         assert nofile.exists()
         cleanup_emacs_agent_inject(nofile, file_existed_before=False)
         # No durable base, so file is removed entirely.

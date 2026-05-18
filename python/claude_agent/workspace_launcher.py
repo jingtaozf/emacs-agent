@@ -21,6 +21,7 @@ launcher, runs once, and exits.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -152,6 +153,53 @@ def cleanup_emacs_agent_inject(path: Path, file_existed_before: bool) -> None:
             path.write_text(cleaned)
     except Exception:
         pass  # Best-effort — process may be torn down
+
+
+# ======================================================================
+# AgentsMdInjector — shared system-prompt injector for AGENTS.md files
+# ======================================================================
+#
+# Copilot writes to ``.github/AGENTS.md``; OpenCode writes to
+# ``AGENTS.md`` at the project root. The body of the operation is
+# otherwise identical: read existing content → strip prior inject
+# blocks (idempotent) → prepend a BEGIN/END-marked session block →
+# register an atexit cleanup that re-strips the block.
+#
+# Co-locating the path policy + content template + atexit wiring in
+# one class makes the two launchers' inject_config() methods
+# one-liners.
+
+_AGENTS_MD_HEADER_TEMPLATE = (
+    "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
+    "{prompt}\n"
+    "<!-- END emacs-agent session instructions -->\n\n"
+)
+
+
+class AgentsMdInjector:
+    """Inject a session system prompt into an AGENTS.md-style file.
+
+    Construct with the full target path (e.g.
+    ``Path(project_root) / "AGENTS.md"`` for OpenCode or
+    ``Path(project_root) / ".github" / "AGENTS.md"`` for Copilot).
+    Calling ``inject(prompt)`` prepends the BEGIN/END block and
+    registers an atexit cleanup; safe to call again across sessions
+    because the prior block is stripped first.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def inject(self, system_prompt: str) -> None:
+        """Prepend the system-prompt block; register atexit cleanup."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        file_existed_before = self.path.exists()
+        raw = self.path.read_text() if file_existed_before else ""
+        base = strip_emacs_agent_inject_blocks(raw)
+        header = _AGENTS_MD_HEADER_TEMPLATE.format(prompt=system_prompt.strip())
+        self.path.write_text(header + base)
+        atexit.register(cleanup_emacs_agent_inject, self.path, file_existed_before)
+        print(f"  System prompt: written to {self.path}")
 
 
 def split_positional_args(argv: list[str]) -> tuple[str, str, list[str]]:

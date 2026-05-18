@@ -78,7 +78,6 @@
   - [[#copilot-workspace][Copilot Workspace]]
     - [[#docstring-6][Docstring]]
     - [[#function-_inject_emacs_mcp_into_dotgithub][Function _inject_emacs_mcp_into_dotgithub]]
-    - [[#function-_write_agents_md][Function _write_agents_md]]
     - [[#class-copilotworkspacelauncher][Class CopilotWorkspaceLauncher]]
     - [[#function-main-2][Function main]]
     - [[#if_statement-3][if_statement]]
@@ -86,7 +85,6 @@
     - [[#docstring-7][Docstring]]
     - [[#function-_parse_jsonc][Function _parse_jsonc]]
     - [[#function-_inject_emacs_mcp][Function _inject_emacs_mcp]]
-    - [[#function-_write_agents_md-1][Function _write_agents_md]]
     - [[#function-_inject_bridge_plugin][Function _inject_bridge_plugin]]
     - [[#class-opencodeworkspacelauncher][Class OpencodeWorkspaceLauncher]]
     - [[#function-main-3][Function main]]
@@ -1321,6 +1319,7 @@ launcher, runs once, and exits.
 #+begin_src python
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -1467,6 +1466,55 @@ def cleanup_emacs_agent_inject(path: Path, file_existed_before: bool) -> None:
             path.write_text(cleaned)
     except Exception:
         pass  # Best-effort — process may be torn down
+
+#+end_src
+*** Class AgentsMdInjector
+#+begin_src python
+# ======================================================================
+# AgentsMdInjector — shared system-prompt injector for AGENTS.md files
+# ======================================================================
+#
+# Copilot writes to ``.github/AGENTS.md``; OpenCode writes to
+# ``AGENTS.md`` at the project root. The body of the operation is
+# otherwise identical: read existing content → strip prior inject
+# blocks (idempotent) → prepend a BEGIN/END-marked session block →
+# register an atexit cleanup that re-strips the block.
+#
+# Co-locating the path policy + content template + atexit wiring in
+# one class makes the two launchers' inject_config() methods
+# one-liners.
+
+_AGENTS_MD_HEADER_TEMPLATE = (
+    "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
+    "{prompt}\n"
+    "<!-- END emacs-agent session instructions -->\n\n"
+)
+
+
+class AgentsMdInjector:
+    """Inject a session system prompt into an AGENTS.md-style file.
+
+    Construct with the full target path (e.g.
+    ``Path(project_root) / "AGENTS.md"`` for OpenCode or
+    ``Path(project_root) / ".github" / "AGENTS.md"`` for Copilot).
+    Calling ``inject(prompt)`` prepends the BEGIN/END block and
+    registers an atexit cleanup; safe to call again across sessions
+    because the prior block is stripped first.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def inject(self, system_prompt: str) -> None:
+        """Prepend the system-prompt block; register atexit cleanup."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        file_existed_before = self.path.exists()
+        raw = self.path.read_text() if file_existed_before else ""
+        base = strip_emacs_agent_inject_blocks(raw)
+        header = _AGENTS_MD_HEADER_TEMPLATE.format(prompt=system_prompt.strip())
+        self.path.write_text(header + base)
+        atexit.register(cleanup_emacs_agent_inject, self.path, file_existed_before)
+        print(f"  System prompt: written to {self.path}")
 
 #+end_src
 *** Function split_positional_args
@@ -3436,34 +3484,6 @@ def _inject_emacs_mcp_into_dotgithub(project_root: str, mcp_url: str) -> None:
     print(f"  MCP config: injected Emacs server into {mcp_json_path}")
 
 #+end_src
-*** Function _write_agents_md
-#+begin_src python
-def _write_agents_md(project_root: str, system_prompt: str) -> None:
-    """Prepend the session system prompt to ``.github/AGENTS.md``.
-
-    Existing content is preserved with a clear header/footer so session
-    instructions are visually separate from permanent project guidance.
-    On exit the inject block is stripped (idempotent) so multiple failed
-    cleanups don't accumulate — see tasks/lessons.md (2026-04-30) for the
-    self-perpetuating bloat bug this avoids.
-    """
-    agents_md_path = Path(project_root) / ".github" / "AGENTS.md"
-    agents_md_path.parent.mkdir(parents=True, exist_ok=True)
-
-    file_existed_before = agents_md_path.exists()
-    raw = agents_md_path.read_text() if file_existed_before else ""
-    base = strip_emacs_agent_inject_blocks(raw)
-
-    header = (
-        "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
-        f"{system_prompt.strip()}\n"
-        "<!-- END emacs-agent session instructions -->\n\n"
-    )
-    agents_md_path.write_text(header + base)
-    atexit.register(cleanup_emacs_agent_inject, agents_md_path, file_existed_before)
-    print(f"  System prompt: written to {agents_md_path}")
-
-#+end_src
 *** Class CopilotWorkspaceLauncher
 #+begin_src python
 # ======================================================================
@@ -3485,7 +3505,9 @@ class CopilotWorkspaceLauncher(WorkspaceLauncher):
     def inject_config(self) -> None:
         _inject_emacs_mcp_into_dotgithub(self.project_root, self.mcp_url)
         if self.mcp_ok and is_valid_session(self.system_prompt):
-            _write_agents_md(self.project_root, self.system_prompt)
+            AgentsMdInjector(
+                Path(self.project_root) / ".github" / "AGENTS.md"
+            ).inject(self.system_prompt)
 
     # ------------------------------------------------------------------
     # build_args — copilot argv + plugin-dir + model override
@@ -3642,32 +3664,6 @@ def _inject_emacs_mcp(project_root: str, mcp_url: str) -> None:
     print(f"  MCP config: injected Emacs server into {out_path}")
 
 #+end_src
-*** Function _write_agents_md
-#+begin_src python
-def _write_agents_md(project_root: str, system_prompt: str) -> None:
-    """Prepend the session system prompt to ``AGENTS.md`` at project root.
-
-    If the file already contains BEGIN/END inject blocks from a prior
-    session whose cleanup didn't fire, those blocks are stripped before
-    treating the rest as the durable base. This breaks the
-    self-perpetuating bloat reported on 2026-04-30 (see tasks/lessons.md).
-    """
-    agents_md_path = Path(project_root) / "AGENTS.md"
-
-    file_existed_before = agents_md_path.exists()
-    raw = agents_md_path.read_text() if file_existed_before else ""
-    base = strip_emacs_agent_inject_blocks(raw)
-
-    header = (
-        "<!-- BEGIN emacs-agent session instructions (auto-removed on exit) -->\n"
-        f"{system_prompt.strip()}\n"
-        "<!-- END emacs-agent session instructions -->\n\n"
-    )
-    agents_md_path.write_text(header + base)
-    atexit.register(cleanup_emacs_agent_inject, agents_md_path, file_existed_before)
-    print(f"  System prompt: written to {agents_md_path}")
-
-#+end_src
 *** Function _inject_bridge_plugin
 #+begin_src python
 def _inject_bridge_plugin(plugin_dir: str, project_root: str) -> None:
@@ -3769,7 +3765,9 @@ class OpencodeWorkspaceLauncher(WorkspaceLauncher):
     def inject_config(self) -> None:
         _inject_emacs_mcp(self.project_root, self.mcp_url)
         if self.mcp_ok and is_valid_session(self.system_prompt):
-            _write_agents_md(self.project_root, self.system_prompt)
+            AgentsMdInjector(Path(self.project_root) / "AGENTS.md").inject(
+                self.system_prompt
+            )
         _inject_bridge_plugin(self.plugin_dir, self.project_root)
 
     # ------------------------------------------------------------------
@@ -6098,17 +6096,28 @@ import json
 
 import pytest
 
+from pathlib import Path
+
 from claude_agent.opencode_workspace import (
     OpencodeWorkspaceLauncher,
     _inject_emacs_mcp,
     _parse_jsonc,
-    _write_agents_md,
 )
 from claude_agent.workspace_launcher import (
+    AgentsMdInjector,
     filter_claude_args,
     is_valid_session,
     split_positional_args,
 )
+
+
+def _write_agents_md(project_root, system_prompt):
+    """Test-helper wrapper preserving the legacy free-function signature.
+
+    Production code now uses ``AgentsMdInjector(path).inject(prompt)``;
+    these tests still pass a project-root string + prompt, so wrap.
+    """
+    AgentsMdInjector(Path(project_root) / "AGENTS.md").inject(system_prompt)
 
 #+end_src
 *** Function _make_launcher
@@ -6455,9 +6464,7 @@ class TestWriteAgentsMd:
         nofile_dir.mkdir()
         nofile = nofile_dir / "AGENTS.md"
         # Simulate inject created the file (no prior base):
-        from claude_agent.opencode_workspace import _write_agents_md as wam
-
-        wam(str(nofile_dir), "Only inject here.")
+        _write_agents_md(str(nofile_dir), "Only inject here.")
         assert nofile.exists()
         cleanup_emacs_agent_inject(nofile, file_existed_before=False)
         # No durable base, so file is removed entirely.
