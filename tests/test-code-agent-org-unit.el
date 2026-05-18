@@ -2058,22 +2058,11 @@ instruction was not properly marked as completed."
 ;;; F9: code-agent-org Backend Integration
 ;;; ============================================================
 
-(ert-deftest test-f9-backend-type-defcustom-exists ()
-  "code-agent-org-backend-type defcustom should exist."
-  :tags '(:unit :fast :stable :isolated :org :f9)
-  (should (boundp 'code-agent-org-backend-type)))
-
-(ert-deftest test-f9-backend-type-default-claude-code ()
-  "Default backend type should be claude-code for backward compat."
-  :tags '(:unit :fast :stable :isolated :org :f9)
-  (should (eq 'claude-code (default-value 'code-agent-org-backend-type))))
-
 (ert-deftest test-f9-make-backend-claude-code ()
-  "make-default-backend with claude-code returns claude-code-backend."
+  "make-default-backend returns claude-code-backend by default."
   :tags '(:unit :fast :stable :isolated :org :f9)
-  (let ((code-agent-org-backend-type 'claude-code))
-    (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-      (should (claude-agent-claude-code-backend-p backend)))))
+  (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
+    (should (claude-agent-claude-code-backend-p backend))))
 
 (ert-deftest test-f9-show-verbose-uses-backend-verbose-buffer ()
   "show-verbose should check backend-verbose-buffer first."
@@ -2103,7 +2092,6 @@ instruction was not properly marked as completed."
   "dispatch-query should store backend in session."
   :tags '(:unit :fast :stable :isolated :org :f9)
   (let* ((key "test-f9-dispatch::stores-backend")
-         (code-agent-org-backend-type 'claude-code)
          (mock-handle 'mock-handle))
     (code-agent-org--session-put key :section-level 1)
     ;; Mock backend-query to avoid actual CLI call
@@ -2126,40 +2114,37 @@ instruction was not properly marked as completed."
 (ert-deftest test-f9b-backend-property-file-level-claude-code ()
   "File-level CLAUDE_BACKEND property claude-code creates claude-code-backend."
   :tags '(:unit :fast :stable :isolated :org :f9b)
-  (let ((code-agent-org-backend-type 'claude-code))
-    (with-temp-buffer
-      (org-mode)
-      (insert "#+PROPERTY: CLAUDE_BACKEND claude-code\n\n")
-      (insert "* Section\n")
-      (goto-char (point-min))
-      (re-search-forward "^\\* Section")
-      (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-        (should (claude-agent-claude-code-backend-p backend))))))
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+PROPERTY: CLAUDE_BACKEND claude-code\n\n")
+    (insert "* Section\n")
+    (goto-char (point-min))
+    (re-search-forward "^\\* Section")
+    (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
+      (should (claude-agent-claude-code-backend-p backend)))))
 
-(ert-deftest test-f9b-backend-property-absent-uses-defcustom ()
-  "Without CLAUDE_BACKEND property, defcustom is used."
+(ert-deftest test-f9b-backend-property-absent-uses-fallback ()
+  "Without CLAUDE_BACKEND property, claude-code fallback is used."
   :tags '(:unit :fast :stable :isolated :org :f9b)
-  (let ((code-agent-org-backend-type 'claude-code))
-    (with-temp-buffer
-      (org-mode)
-      (insert "* Section\n")
-      (goto-char (point-min))
-      (re-search-forward "^\\* Section")
-      (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-        (should (claude-agent-claude-code-backend-p backend))))))
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Section\n")
+    (goto-char (point-min))
+    (re-search-forward "^\\* Section")
+    (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
+      (should (claude-agent-claude-code-backend-p backend)))))
 
-(ert-deftest test-f9b-backend-property-invalid-value-uses-defcustom ()
-  "Invalid CLAUDE_BACKEND property value falls back to defcustom."
+(ert-deftest test-f9b-backend-property-invalid-value-uses-fallback ()
+  "Invalid CLAUDE_BACKEND property value falls back to claude-code."
   :tags '(:unit :fast :stable :isolated :org :f9b)
-  (let ((code-agent-org-backend-type 'claude-code))
-    (with-temp-buffer
-      (org-mode)
-      (insert "#+PROPERTY: CLAUDE_BACKEND nonsense-value\n\n")
-      (insert "* Section\n")
-      (goto-char (point-min))
-      (re-search-forward "^\\* Section")
-      (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-        (should (claude-agent-claude-code-backend-p backend))))))
+  (with-temp-buffer
+    (org-mode)
+    (insert "#+PROPERTY: CLAUDE_BACKEND nonsense-value\n\n")
+    (insert "* Section\n")
+    (goto-char (point-min))
+    (re-search-forward "^\\* Section")
+    (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
+      (should (claude-agent-claude-code-backend-p backend)))))
 
 (provide 'test-code-agent-org-unit)
 ;;; test-code-agent-org-unit.el ends here

@@ -1897,8 +1897,7 @@ instance because a persistent client is a per-Emacs resource.")
 
 *** Customization
 
-=code-agent-org-persistent-sessions= opts into the persistent pool;
-=code-agent-org-backend-type= selects which backend implementation is used.
+=code-agent-org-persistent-sessions= opts into the persistent pool.
 
 #+BEGIN_SRC elisp
 (defcustom code-agent-org-persistent-sessions nil
@@ -1908,15 +1907,6 @@ When nil, spawn a new process for each query (legacy behavior).
 Persistent sessions reduce latency and allow Claude to maintain
 conversation context internally."
   :type 'boolean
-  :group 'code-agent-org)
-
-(defcustom code-agent-org-backend-type 'claude-code
-  "Backend type for Claude CLI communication.
-Selects which backend implementation to use for new sessions.
-
-  - `claude-code': JSON streaming via subprocess (default).
-    Uses --output-format stream-json with structured messages."
-  :type '(radio (const :tag "JSON stream (default)" claude-code))
   :group 'code-agent-org)
 #+END_SRC
 
@@ -2134,24 +2124,17 @@ exists for symmetry with ACP entries and for future Phase 3b cut-over.")
 
 (defun code-agent-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
-Dispatches on the CLAUDE_BACKEND org property via `code-agent-org-backend-registry'.
-An unknown property value falls back to `code-agent-org-backend-type' (and then to
-\"claude-code\") so a typo never breaks the workspace.  When the fallback
-fires because the property is non-nil but unrecognised (e.g. the
-pre-rename value \"json-stream\"), a one-line `message' surfaces the
-silent migration so the user knows to update the property."
+Dispatches on the CLAUDE_BACKEND org property via
+`code-agent-org-backend-registry'.  Unknown values fall back to
+\"claude-code\" with a one-line `message' so the user knows to update
+the property (e.g. \"json-stream\" → \"claude-code\")."
   (let* ((prop-value (code-agent-org--get-org-property "CLAUDE_BACKEND" t))
-         (fallback-name (or (and code-agent-org-backend-type
-                                 (symbol-name code-agent-org-backend-type))
-                            "claude-code"))
          (direct-hit (cdr (assoc prop-value code-agent-org-backend-registry)))
          (constructor (or direct-hit
-                          (cdr (assoc fallback-name code-agent-org-backend-registry))
                           (cdr (assoc "claude-code" code-agent-org-backend-registry)))))
     (when (and prop-value (not direct-hit))
-      (message "CLAUDE_BACKEND=%S not in registry; falling back to %s.  \
-Consider updating the property (e.g. \"json-stream\" \342\206\222 \"claude-code\")."
-               prop-value fallback-name))
+      (message "CLAUDE_BACKEND=%S not in registry; falling back to claude-code."
+               prop-value))
     (funcall constructor session-key options)))
 
 #+END_SRC
