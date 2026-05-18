@@ -419,8 +419,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-client-send"
     "claude-agent-client-send-message"
     "claude-agent-client-interrupt"
-    "claude-agent-continue-session"
-    "claude-agent-resume-session"
     "claude-agent-get-session-id"
     ;; claude-agent: chat mode (comint-based)
     "claude-agent-chat"
