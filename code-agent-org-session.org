@@ -6,8 +6,12 @@
 :header-args:elisp: :tangle yes
 :END:
 
-Session state management for code-agent-org.
-Decomposed into 4 focused sub-structs composed within the main session-state.
+Per-buffer session state for a Claude query in an org-mode AI block.
+A session-state is a =cl-defstruct= composed of four sub-structs —
+=lifecycle=, =render=, =loop=, =identity= — plus an =extras= plist
+for properties that have not (yet) earned a typed slot. Callers reach
+slots through the keyword API =--session-get= / =--session-put= so
+the receiver-only typed shape stays decoupled from the 600+ call sites.
 
 ** Dependencies
 
@@ -92,14 +96,11 @@ Composed of sub-structs: lifecycle, render, loop, identity."
 
 (defun code-agent-org--make-session-state (&rest args)
   "Create a new session-state, applying keyword ARGS to sub-struct fields.
-Supports all legacy keyword arguments (e.g. :spinner 0, :section-level nil)
-by routing them to the appropriate sub-struct."
+ARGS is a flat property list (e.g. :spinner 0 :section-level nil);
+each key is routed to its sub-struct via `code-agent-org--session-state-set'."
   (let ((state (code-agent-org--make-session-state--internal)))
-    ;; Apply keyword arguments to sub-struct fields
-    (while args
-      (let ((key (pop args))
-            (val (pop args)))
-        (code-agent-org--session-state-set state key val)))
+    (cl-loop for (key val) on args by #'cddr
+             do (code-agent-org--session-state-set state key val))
     state))
 #+END_SRC
 
@@ -142,32 +143,48 @@ Used to generate routing tables and backward-compat accessors.")
 
 ** Generated Routing Tables
 
+Two alists, generated from =code-agent-org--session-field-specs= by a
+shared helper. Each entry is =(KEYWORD . FUNCTION)= so callers
+(including structural tests that introspect the tables) can use
+=(funcall (cdr entry) ...)= without knowing which sub-struct the slot
+lives in. The previous revision inlined =mapcar= twice with two
+near-identical =eval `(lambda ...)=  closures; folding the shared
+spec→symbols step into =--make-field-entry= cuts the boilerplate in
+half.
+
 #+BEGIN_SRC elisp
+(defun code-agent-org--session--make-field-entry (spec build-fn)
+  "Build a (KEYWORD . CLOSURE) entry for one field SPEC.
+SPEC is (FIELD-NAME . SUB-STRUCT-NAME); BUILD-FN receives the two
+resolved accessor symbols and returns the lambda to store."
+  (let* ((field (car spec))
+         (sub (cdr spec))
+         (sub-acc (intern (format "code-agent-org--session-state-%s" sub)))
+         (field-acc (intern (format "code-agent-org--session-%s-%s" sub field))))
+    (cons (intern (format ":%s" field))
+          (funcall build-fn sub-acc field-acc))))
+
 (defconst code-agent-org--session-field-accessors
   (mapcar
    (lambda (spec)
-     (let* ((field (car spec))
-            (sub (cdr spec))
-            (kw (intern (format ":%s" field)))
-            (sub-acc (intern (format "code-agent-org--session-state-%s" sub)))
-            (field-acc (intern (format "code-agent-org--session-%s-%s" sub field))))
-       (cons kw (eval `(lambda (s) (,field-acc (,sub-acc s)))))))
+     (code-agent-org--session--make-field-entry
+      spec
+      (lambda (sub-acc field-acc)
+        (eval `(lambda (s) (,field-acc (,sub-acc s))) t))))
    code-agent-org--session-field-specs)
-  "Alist mapping keyword properties to session-state accessor functions.
+  "Alist mapping keyword properties to session-state getter closures.
 Each entry is (KEYWORD . GETTER-FN) where GETTER-FN routes through sub-structs.
 Generated from `code-agent-org--session-field-specs'.")
 
 (defconst code-agent-org--session-field-setters
   (mapcar
    (lambda (spec)
-     (let* ((field (car spec))
-            (sub (cdr spec))
-            (kw (intern (format ":%s" field)))
-            (sub-acc (intern (format "code-agent-org--session-state-%s" sub)))
-            (field-acc (intern (format "code-agent-org--session-%s-%s" sub field))))
-       (cons kw (eval `(lambda (s v) (setf (,field-acc (,sub-acc s)) v))))))
+     (code-agent-org--session--make-field-entry
+      spec
+      (lambda (sub-acc field-acc)
+        (eval `(lambda (s v) (setf (,field-acc (,sub-acc s)) v)) t))))
    code-agent-org--session-field-specs)
-  "Alist mapping keyword properties to session-state setter functions.
+  "Alist mapping keyword properties to session-state setter closures.
 Each entry is (KEYWORD . SETTER-FN) where SETTER-FN routes through sub-structs.
 Generated from `code-agent-org--session-field-specs'.")
 #+END_SRC
@@ -207,8 +224,8 @@ Replaces stale non-struct entries (e.g. plists from pre-refactor code)."
 
 (defun code-agent-org--session-state-set (state prop value)
   "Set PROP to VALUE on session STATE struct.
-Looks up PROP in `code-agent-org--session-field-setters'; unknown props
-fall through to the extras plist."
+PROP is a keyword like :busy, :query-id, etc.; unknown keywords fall
+through to the extras plist."
   (let ((entry (assq prop code-agent-org--session-field-setters)))
     (if entry
         (funcall (cdr entry) state value)
@@ -225,8 +242,8 @@ PROP is a keyword like :busy, :query-id, etc."
 
 (defun code-agent-org--session-state-get (state prop)
   "Get PROP from session STATE struct.
-Looks up PROP in `code-agent-org--session-field-accessors'; unknown props
-fall through to the extras plist."
+PROP is a keyword like :busy, :query-id, etc.; unknown keywords fall
+through to the extras plist."
   (let ((entry (assq prop code-agent-org--session-field-accessors)))
     (if entry
         (funcall (cdr entry) state)
