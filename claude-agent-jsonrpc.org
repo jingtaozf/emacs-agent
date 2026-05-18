@@ -87,20 +87,13 @@ struct)."
 
 ** Sending
 
-Generics rather than plain =defun=s so tests can subclass the client
-with a recording variant that captures sent messages.
-
 #+BEGIN_SRC elisp
-(cl-defgeneric claude-agent-jsonrpc-send-request
+(defun claude-agent-jsonrpc-send-request
     (client method params on-success on-failure)
   "Send a JSON-RPC request to the peer via CLIENT.
 METHOD is a string.  PARAMS is an alist or nil.  ON-SUCCESS receives
 the result; ON-FAILURE receives the error alist.  Returns the
-assigned request id.")
-
-(cl-defmethod claude-agent-jsonrpc-send-request
-    ((client claude-agent-jsonrpc-client) method params on-success on-failure)
-  "JSON-RPC client method: allocate an id, register callbacks, write."
+assigned request id."
   (let* ((id (cl-incf claude-agent-jsonrpc--next-id))
          (msg `((jsonrpc . "2.0")
                 (id . ,id)
@@ -117,14 +110,10 @@ assigned request id.")
     (process-send-string proc (concat json-str "\n"))
     id))
 
-(cl-defgeneric claude-agent-jsonrpc-send-response
+(defun claude-agent-jsonrpc-send-response
     (client id result &optional error-obj)
   "Send a JSON-RPC response for the inbound request ID.
-Provide RESULT on success or ERROR-OBJ on failure.")
-
-(cl-defmethod claude-agent-jsonrpc-send-response
-    ((client claude-agent-jsonrpc-client) id result &optional error-obj)
-  "JSON-RPC client method: emit a response envelope."
+Provide RESULT on success or ERROR-OBJ on failure."
   (let* ((msg (if error-obj
                   `((jsonrpc . "2.0") (id . ,id) (error . ,error-obj))
                 `((jsonrpc . "2.0") (id . ,id) (result . ,result))))
@@ -132,13 +121,8 @@ Provide RESULT on success or ERROR-OBJ on failure.")
          (proc (claude-agent-jsonrpc-client-process client)))
     (process-send-string proc (concat json-str "\n"))))
 
-(cl-defgeneric claude-agent-jsonrpc-send-notification
-    (client method params)
-  "Send a JSON-RPC notification (no id, no response expected).")
-
-(cl-defmethod claude-agent-jsonrpc-send-notification
-    ((client claude-agent-jsonrpc-client) method params)
-  "JSON-RPC client method: emit a notification envelope."
+(defun claude-agent-jsonrpc-send-notification (client method params)
+  "Send a JSON-RPC notification (no id, no response expected)."
   (let* ((msg `((jsonrpc . "2.0")
                 (method . ,method)
                 (params . ,params)))
@@ -250,34 +234,20 @@ dies mid-stream."
 ** Handler Registration
 
 #+BEGIN_SRC elisp
-(cl-defgeneric claude-agent-jsonrpc-add-notification-handler
-    (client handler)
-  "Register HANDLER (function of one MSG) for server-side notifications.")
-
-(cl-defmethod claude-agent-jsonrpc-add-notification-handler
-    ((client claude-agent-jsonrpc-client) handler)
-  "JSON-RPC client method: push HANDLER onto the notification list."
+(defun claude-agent-jsonrpc-add-notification-handler (client handler)
+  "Register HANDLER (function of one MSG) for server-side notifications."
   (push handler (claude-agent-jsonrpc-client-notification-handlers client)))
 
-(cl-defgeneric claude-agent-jsonrpc-add-request-handler
-    (client handler)
-  "Register HANDLER (function of one MSG) for server-to-client requests.")
-
-(cl-defmethod claude-agent-jsonrpc-add-request-handler
-    ((client claude-agent-jsonrpc-client) handler)
-  "JSON-RPC client method: push HANDLER onto the request list."
+(defun claude-agent-jsonrpc-add-request-handler (client handler)
+  "Register HANDLER (function of one MSG) for server-to-client requests."
   (push handler (claude-agent-jsonrpc-client-request-handlers client)))
 #+END_SRC
 
 ** Shutdown
 
 #+BEGIN_SRC elisp
-(cl-defgeneric claude-agent-jsonrpc-shutdown (client)
-  "Release CLIENT: kill its subprocess and stderr buffer, clear pending.")
-
-(cl-defmethod claude-agent-jsonrpc-shutdown
-    ((client claude-agent-jsonrpc-client))
-  "JSON-RPC client method: tear down the subprocess end-to-end."
+(defun claude-agent-jsonrpc-shutdown (client)
+  "Release CLIENT: kill its subprocess and stderr buffer, clear pending."
   (when client
     (let ((proc (claude-agent-jsonrpc-client-process client))
           (stderr (claude-agent-jsonrpc-client-stderr-buffer client)))

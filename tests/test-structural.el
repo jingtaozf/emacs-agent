@@ -637,6 +637,8 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-trace-stop-bridge"
     "claude-agent-trace-stop-phoenix"
     "claude-agent-trace-open-phoenix"
+    "claude-agent-trace-service-ensure"
+    "claude-agent-trace-service-stop"
     "claude-agent-with-trace"
     "claude-agent-with-span"
     ;; emacs-mcp-server public API
