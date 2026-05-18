@@ -30,7 +30,7 @@
   - [[#otel-relay-server][OTel Relay Server]]
     - [[#docstring-2][Docstring]]
     - [[#assignment-_span_kind_map][Assignment _SPAN_KIND_MAP]]
-    - [[#assignment-_oi_kind_attr--openinferencespankind][Assignment _OI_KIND_ATTR = "openinference.span.kind"]]
+    - [[#assignment-_oi_kind_attr--openinferencespankind][Assignment OI_KIND_ATTR = "openinference.span.kind"]]
     - [[#assignment-_oi_kind_defaults][Assignment _OI_KIND_DEFAULTS]]
     - [[#assignment-_meta_attr_keys--span-kind-oi-kind-input-output][Assignment _META_ATTR_KEYS = {"span-kind", "oi-kind", "input", "output"}]]
     - [[#class-_presetidgenerator][Class _PresetIdGenerator]]
@@ -56,7 +56,6 @@
     - [[#docstring-4][Docstring]]
     - [[#import-statements][Import statements]]
     - [[#assignment-logger--logginggetlogger__name__][Assignment logger = logging.getLogger(__name__)]]
-    - [[#assignment-_oi_kind_attr--openinferencespankind-1][Assignment _OI_KIND_ATTR = "openinference.span.kind"]]
     - [[#assignment-_process_start_time--timetime][Assignment _process_start_time = time.time()]]
     - [[#function-_escape_elisp_string][Function _escape_elisp_string]]
     - [[#function-_format_todos_as_elisp][Function _format_todos_as_elisp]]
@@ -915,13 +914,16 @@ _SPAN_KIND_MAP = {
 }
 
 #+end_src
-*** Assignment _OI_KIND_ATTR = "openinference.span.kind"
+*** Assignment OI_KIND_ATTR = "openinference.span.kind"
 #+begin_src python
 # OpenInference is Phoenix-specific metadata — see
 # https://github.com/Arize-ai/openinference for the full enum. These
 # defaults drive the Phoenix UI's colour coding and are overridable by
 # the caller via ``openinference_kind`` in the start payload.
-_OI_KIND_ATTR = "openinference.span.kind"
+#
+# Public module constant (no leading underscore) because workspace_bridge
+# imports it for span tagging.  Single source of truth across modules.
+OI_KIND_ATTR = "openinference.span.kind"
 
 #+end_src
 *** Assignment _OI_KIND_DEFAULTS
@@ -1153,7 +1155,7 @@ class OtelBridgeServer:
 
         oi_kind = data.get("openinference_kind") or _OI_KIND_DEFAULTS.get(kind_str)
         if oi_kind:
-            span.set_attribute(_OI_KIND_ATTR, oi_kind)
+            span.set_attribute(OI_KIND_ATTR, oi_kind)
 
         input_value = data.get("input")
         if input_value is not None:
@@ -1758,21 +1760,18 @@ from claude_agent.mcp_client import (
 #+begin_src python
 try:
     from claude_agent.otel_setup import (
+        OI_KIND_ATTR,
         STATUS_DIR,
         TraceContextStore,
         setup_tracer,
     )
 except ImportError:
     STATUS_DIR = "/tmp/claude-agent-status"
+    OI_KIND_ATTR = "openinference.span.kind"
     setup_tracer = None
     TraceContextStore = None
 
 logger = logging.getLogger(__name__)
-
-#+end_src
-*** Assignment _OI_KIND_ATTR = "openinference.span.kind"
-#+begin_src python
-_OI_KIND_ATTR = "openinference.span.kind"
 
 #+end_src
 *** Assignment _process_start_time = time.time()
@@ -2153,7 +2152,7 @@ class WorkspaceBridge:
     ):
         """Open a span if the tracer is available; otherwise a no-op CM."""
         if self.tracer:
-            attrs[_OI_KIND_ATTR] = oi_kind
+            attrs[OI_KIND_ATTR] = oi_kind
             return self.tracer.start_as_current_span(name, kind=kind, attributes=attrs)
         return nullcontext()
 
@@ -2975,7 +2974,7 @@ def main() -> None:
         root_kind, root_oi_kind = SpanKind.SERVER, "CHAIN"
     else:
         root_kind, root_oi_kind = SpanKind.CONSUMER, "TOOL"
-    root_attrs[_OI_KIND_ATTR] = root_oi_kind
+    root_attrs[OI_KIND_ATTR] = root_oi_kind
 
     if tracer:
         root_span_ctx = tracer.start_as_current_span(

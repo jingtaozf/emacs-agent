@@ -56,7 +56,10 @@ _SPAN_KIND_MAP = {
 # https://github.com/Arize-ai/openinference for the full enum. These
 # defaults drive the Phoenix UI's colour coding and are overridable by
 # the caller via ``openinference_kind`` in the start payload.
-_OI_KIND_ATTR = "openinference.span.kind"
+#
+# Public module constant (no leading underscore) because workspace_bridge
+# imports it for span tagging.  Single source of truth across modules.
+OI_KIND_ATTR = "openinference.span.kind"
 
 _OI_KIND_DEFAULTS = {
     "SERVER": "CHAIN",
@@ -275,7 +278,7 @@ class OtelBridgeServer:
 
         oi_kind = data.get("openinference_kind") or _OI_KIND_DEFAULTS.get(kind_str)
         if oi_kind:
-            span.set_attribute(_OI_KIND_ATTR, oi_kind)
+            span.set_attribute(OI_KIND_ATTR, oi_kind)
 
         input_value = data.get("input")
         if input_value is not None:

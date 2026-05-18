@@ -52,18 +52,18 @@ from claude_agent.mcp_client import (
 
 try:
     from claude_agent.otel_setup import (
+        OI_KIND_ATTR,
         STATUS_DIR,
         TraceContextStore,
         setup_tracer,
     )
 except ImportError:
     STATUS_DIR = "/tmp/claude-agent-status"
+    OI_KIND_ATTR = "openinference.span.kind"
     setup_tracer = None
     TraceContextStore = None
 
 logger = logging.getLogger(__name__)
-
-_OI_KIND_ATTR = "openinference.span.kind"
 
 # Process start time — used by the "any recent .from-emacs flag" check
 # to distinguish flags written during *this* invocation from stale ones
@@ -420,7 +420,7 @@ class WorkspaceBridge:
     ):
         """Open a span if the tracer is available; otherwise a no-op CM."""
         if self.tracer:
-            attrs[_OI_KIND_ATTR] = oi_kind
+            attrs[OI_KIND_ATTR] = oi_kind
             return self.tracer.start_as_current_span(name, kind=kind, attributes=attrs)
         return nullcontext()
 
@@ -1240,7 +1240,7 @@ def main() -> None:
         root_kind, root_oi_kind = SpanKind.SERVER, "CHAIN"
     else:
         root_kind, root_oi_kind = SpanKind.CONSUMER, "TOOL"
-    root_attrs[_OI_KIND_ATTR] = root_oi_kind
+    root_attrs[OI_KIND_ATTR] = root_oi_kind
 
     if tracer:
         root_span_ctx = tracer.start_as_current_span(
