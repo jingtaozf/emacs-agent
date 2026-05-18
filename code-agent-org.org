@@ -131,13 +131,6 @@
     - [[#transient-prefix][Transient Prefix]]
     - [[#keymap][Keymap]]
   - [[#minor-mode][Minor Mode]]
-- [[#org-file-protection-hook][Org File Protection Hook]]
-  - [[#how-permission-functions-work][How Permission Functions Work]]
-  - [[#org-file-protection-permission-function][Org File Protection (Permission Function)]]
-    - [[#bash-command-detection][Bash Command Detection]]
-    - [[#deny-message-helper][Deny Message Helper]]
-    - [[#main-protection-function][Main Protection Function]]
-  - [[#protection-installation][Protection Installation]]
 - [[#package-footer][Package Footer]]
 
 * Introduction
@@ -5764,8 +5757,6 @@ Key bindings:
         (code-agent-org--register-exclusion)
         ;; Auto-start MCP server
         (code-agent-org--ensure-mcp-server)
-        ;; Install org file protection hook (prevents Edit/Write on .org files)
-        (code-agent-org--install-protection)
         ;; Add company backend for slash commands (buffer-local, high priority)
         (when (boundp 'company-backends)
           (set (make-local-variable 'company-backends)
@@ -5787,8 +5778,6 @@ Key bindings:
     ;; Disconnect persistent clients for this buffer
     (code-agent-org-persistent-registry-disconnect-buffer
      code-agent-org--persistent-registry (current-buffer))
-    ;; Remove org file protection hook
-    (code-agent-org--remove-protection)
     ;; Stop header timer if no more code-agent-org buffers
     (code-agent-org--stop-header-timer)
     ;; Cancel cursor-position debounce timer
@@ -5814,140 +5803,6 @@ Key bindings:
   (interactive)
   (code-agent-org-cancel-all)
   (clrhash code-agent-org--sessions))
-#+END_SRC
-
-* Org File Protection Hook
-
-*NOTE: This hook does NOT work as intended.* It is kept for documentation purposes
-and potential future use if Claude Code CLI changes its architecture.
-
-** How Permission Functions Work
-
-When Claude Code CLI is in =acceptEdits= mode, it sends =can_use_tool= control
-requests to Emacs before executing Edit/Write tools. The
-=claude-agent-permission-functions= hook processes these requests:
-
-| Permission Mode | Edit/Write Flow | Protection? |
-|-----------------+-----------------+-------------|
-| bypassPermissions | CLI auto-approves | ❌ No prompts |
-| acceptEdits | CLI → can_use_tool → Emacs | ✅ Permission functions run |
-| default | CLI prompts user | ⚠️ CLI UI (not Emacs) |
-
-To protect org files, add =code-agent-org-permission-protect-org= to
-=claude-agent-permission-functions=. This only works in =acceptEdits= mode.
-
-** Org File Protection (Permission Function)
-
-This permission function protects .org files from modifications via:
-1. Edit/Write tools directly targeting .org files
-2. Bash commands that would modify .org files (sed -i, redirects, cp, mv, etc.)
-
-Add it to =claude-agent-permission-functions= to enable protection.
-
-*** Bash Command Detection
-
-Detect if a bash command would modify an .org file.
-
-#+NAME: org-protect-bash-detect
-#+BEGIN_SRC elisp
-(defun code-agent-org--bash-modifies-org-p (command)
-  "Return non-nil if COMMAND would modify an .org file.
-Checks for:
-- In-place edit commands (sed -i, perl -i) referencing .org
-- Output redirection (>, >>) to .org files
-- File operations (cp, mv, install, tee) targeting .org files
-- Temp file swap patterns (cmd > tmp && mv tmp file.org)"
-  (when (and command (stringp command) (string-match-p "\\.org\\b" command))
-    (or
-     ;; In-place edit commands: sed -i, perl -i, ruby -i
-     (and (string-match-p "\\b\\(sed\\|perl\\|ruby\\)\\b" command)
-          (string-match-p " -[^ ]*i" command))
-     ;; Output redirection to .org: > file.org, >> file.org, 2> file.org
-     ;; Match > or >> followed by anything then .org (but not | or ; before .org)
-     (string-match-p ">[>&]?[^|;]*\\.org" command)
-     ;; File operations with .org as target at end of command
-     (string-match-p "\\b\\(cp\\|mv\\|install\\)\\b.*\\.org[ \t]*$" command)
-     ;; File operations with .org in quotes
-     (string-match-p "\\b\\(cp\\|mv\\|install\\)\\b.*\\.org['\"]" command)
-     ;; tee to .org file
-     (string-match-p "\\btee\\b.*\\.org" command)
-     ;; Temp file swap pattern: ... && mv ... .org
-     (string-match-p "&&.*\\bmv\\b.*\\.org" command))))
-#+END_SRC
-
-*** Deny Message Helper
-
-#+NAME: org-protect-deny-helper
-#+BEGIN_SRC elisp
-(defun code-agent-org--deny-org-modification (tool-name)
-  "Return permission denial result for org file modification via TOOL-NAME.
-Provides helpful message guiding to use evalElisp instead."
-  (list :behavior "deny"
-        :message
-        (concat "🚫 Cannot use " tool-name " to modify .org files.\n\n"
-                "Use evalElisp MCP tool for org-mode operations.\n"
-                "Run /emacs-org skill to learn elisp patterns for:\n"
-                "- Reading/navigating org sections\n"
-                "- Updating section content\n"
-                "- Managing properties and tags\n\n"
-                "If evalElisp is not available, report this as an error and stop.")))
-#+END_SRC
-
-*** Main Protection Function
-
-#+NAME: org-protect-permission
-#+BEGIN_SRC elisp
-(defun code-agent-org-permission-protect-org (tool-name tool-input _context)
-  "Permission function to protect .org files from modifications.
-
-TOOL-NAME: string like \"Edit\", \"Write\", \"Bash\"
-TOOL-INPUT: plist with tool-specific parameters
-CONTEXT: plist with :session-id, :context-label
-
-Blocks:
-1. Edit/Write tools on .org files
-2. Bash commands that would modify .org files
-
-Returns nil to pass through, or permission result to deny.
-Should be added to `claude-agent-permission-functions'."
-  (let ((file-path (plist-get tool-input :file_path))
-        (command (plist-get tool-input :command)))
-    (cond
-     ;; Layer 1: Block Edit/Write on .org files
-     ((and (member tool-name '("Edit" "Write"))
-           file-path
-           (string-match-p "\\.org$" file-path))
-      (code-agent-org--deny-org-modification tool-name))
-     ;; Layer 2-4: Block Bash commands modifying .org files
-     ((and (string= tool-name "Bash")
-           command
-           (code-agent-org--bash-modifies-org-p command))
-      (code-agent-org--deny-org-modification "Bash")))))
-#+END_SRC
-
-** Protection Installation
-
-Install/remove org protection in the permission hook.
-
-#+NAME: org-protect-install
-#+BEGIN_SRC elisp
-(defun code-agent-org--install-protection ()
-  "Install org file protection in permission functions.
-The protection must be global because it runs in process filter context."
-  (add-hook 'claude-agent-permission-functions
-            #'code-agent-org-permission-protect-org))
-
-(defun code-agent-org--remove-protection ()
-  "Remove org file protection if no code-agent-org buffers remain."
-  (unless (cl-some (lambda (buf)
-                     (and (not (eq buf (current-buffer)))
-                          (buffer-live-p buf)
-                          (with-current-buffer buf
-                            code-agent-org-mode)))
-                   (buffer-list))
-    (setq claude-agent-permission-functions
-          (delq #'code-agent-org-permission-protect-org
-                claude-agent-permission-functions))))
 #+END_SRC
 
 * Package Footer

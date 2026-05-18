@@ -583,7 +583,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-header-line"
     "code-agent-org-header-line-mode"
     ;; code-agent-org: permissions
-    "code-agent-org-permission-protect-org"
     "code-agent-org-switch-permission-mode"
     ;; code-agent-org: unified terminal tab
     "code-agent-org-open-terminal-tab"
