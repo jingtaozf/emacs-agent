@@ -1916,35 +1916,20 @@ conversation context internally."
 client (the common read path); =alive-p= is a bool shortcut.
 
 #+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-persistent-registry-get-entry
-    (registry session-key)
-  "Return the `code-agent-org-persistent-entry' for SESSION-KEY, or nil.")
-
-(cl-defmethod code-agent-org-persistent-registry-get-entry
-    ((registry code-agent-org-persistent-registry) session-key)
-  "Default implementation: hash lookup."
+(defun code-agent-org-persistent-registry-get-entry (registry session-key)
+  "Return the `code-agent-org-persistent-entry' for SESSION-KEY, or nil."
   (gethash session-key (code-agent-org-persistent-registry-entries registry)))
 
-(cl-defgeneric code-agent-org-persistent-registry-get
-    (registry session-key)
-  "Return the live client handle for SESSION-KEY, or nil if absent.")
-
-(cl-defmethod code-agent-org-persistent-registry-get
-    ((registry code-agent-org-persistent-registry) session-key)
-  "Default implementation: return the `client' slot of the entry, if any."
+(defun code-agent-org-persistent-registry-get (registry session-key)
+  "Return the live client handle for SESSION-KEY, or nil if absent."
   (when-let* ((entry (code-agent-org-persistent-registry-get-entry
                       registry session-key)))
     (code-agent-org-persistent-entry-client entry)))
 
-(cl-defgeneric code-agent-org-persistent-registry-alive-p
-    (registry session-key)
-  "Return non-nil iff SESSION-KEY has a live client in REGISTRY.")
-
-(cl-defmethod code-agent-org-persistent-registry-alive-p
-    ((registry code-agent-org-persistent-registry) session-key)
-  "Default implementation: look up + `claude-agent-client-alive-p'."
+(defun code-agent-org-persistent-registry-alive-p (registry session-key)
+  "Return non-nil iff SESSION-KEY has a live client in REGISTRY."
   (when-let* ((client (code-agent-org-persistent-registry-get registry
-                                                          session-key)))
+                                                              session-key)))
     (claude-agent-client-alive-p client)))
 #+END_SRC
 
@@ -1955,14 +1940,9 @@ timestamp and increments the query counter after each successful
 dispatch.
 
 #+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-persistent-registry-register
+(defun code-agent-org-persistent-registry-register
     (registry session-key client buffer heading-pos)
-  "Record CLIENT + BUFFER + HEADING-POS under SESSION-KEY in REGISTRY.")
-
-(cl-defmethod code-agent-org-persistent-registry-register
-    ((registry code-agent-org-persistent-registry)
-     session-key client buffer heading-pos)
-  "Default implementation: build the entry and puthash it."
+  "Record CLIENT + BUFFER + HEADING-POS under SESSION-KEY in REGISTRY."
   (puthash session-key
            (code-agent-org-persistent-entry--create
             :client client
@@ -1972,13 +1952,9 @@ dispatch.
             :query-count 0)
            (code-agent-org-persistent-registry-entries registry)))
 
-(cl-defgeneric code-agent-org-persistent-registry-update-activity
+(defun code-agent-org-persistent-registry-update-activity
     (registry session-key)
-  "Bump `last-activity' and increment `query-count' for SESSION-KEY.")
-
-(cl-defmethod code-agent-org-persistent-registry-update-activity
-    ((registry code-agent-org-persistent-registry) session-key)
-  "Default implementation: mutate the entry's slots in place."
+  "Bump `last-activity' and increment `query-count' for SESSION-KEY."
   (when-let* ((entry (code-agent-org-persistent-registry-get-entry
                       registry session-key)))
     (setf (code-agent-org-persistent-entry-last-activity entry) (float-time))
@@ -1993,14 +1969,10 @@ emits a user-facing message; the buffer-sweep path delegates to the
 single-session path so the message format stays consistent.
 
 #+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-persistent-registry-disconnect
+(defun code-agent-org-persistent-registry-disconnect
     (registry session-key &optional reason)
   "Disconnect and remove the entry for SESSION-KEY from REGISTRY.
-REASON (optional string) is shown in the user-facing message.")
-
-(cl-defmethod code-agent-org-persistent-registry-disconnect
-    ((registry code-agent-org-persistent-registry) session-key &optional reason)
-  "Default implementation: tear down the client then remove the entry."
+REASON (optional string) is shown in the user-facing message."
   (when-let* ((entry (code-agent-org-persistent-registry-get-entry
                       registry session-key)))
     (when-let* ((client (code-agent-org-persistent-entry-client entry)))
@@ -2012,13 +1984,8 @@ REASON (optional string) is shown in the user-facing message.")
              (code-agent-org--session-display-name session-key)
              (if reason (format " (%s)" reason) ""))))
 
-(cl-defgeneric code-agent-org-persistent-registry-disconnect-buffer
-    (registry buffer)
-  "Disconnect every entry whose `buffer' slot matches BUFFER.")
-
-(cl-defmethod code-agent-org-persistent-registry-disconnect-buffer
-    ((registry code-agent-org-persistent-registry) buffer)
-  "Default implementation: collect keys first, then dispatch one-by-one."
+(defun code-agent-org-persistent-registry-disconnect-buffer (registry buffer)
+  "Disconnect every entry whose `buffer' slot matches BUFFER."
   (let ((to-remove nil))
     (maphash (lambda (key entry)
                (when (eq (code-agent-org-persistent-entry-buffer entry) buffer)
@@ -2031,23 +1998,15 @@ REASON (optional string) is shown in the user-facing message.")
 *** Enumeration
 
 #+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-persistent-registry-list (registry)
-  "Return a list of (SESSION-KEY . ENTRY) pairs for every entry in REGISTRY.")
-
-(cl-defmethod code-agent-org-persistent-registry-list
-    ((registry code-agent-org-persistent-registry))
-  "Default implementation: maphash into a list."
+(defun code-agent-org-persistent-registry-list (registry)
+  "Return a list of (SESSION-KEY . ENTRY) pairs for every entry in REGISTRY."
   (let ((pairs nil))
     (maphash (lambda (key entry) (push (cons key entry) pairs))
              (code-agent-org-persistent-registry-entries registry))
     (nreverse pairs)))
 
-(cl-defgeneric code-agent-org-persistent-registry-count (registry)
-  "Return the number of entries currently held by REGISTRY.")
-
-(cl-defmethod code-agent-org-persistent-registry-count
-    ((registry code-agent-org-persistent-registry))
-  "Default implementation: `hash-table-count' on the entries."
+(defun code-agent-org-persistent-registry-count (registry)
+  "Return the number of entries currently held by REGISTRY."
   (hash-table-count (code-agent-org-persistent-registry-entries registry)))
 #+END_SRC
 
