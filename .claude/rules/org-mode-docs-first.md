@@ -32,8 +32,8 @@ exists to prevent.
 
 ## Why heading-as-concept, not heading-as-phase
 
-The user-level rule `~/projects/dummy/claude/rules/lp-prose-no-self-narration.md`
-(and the project rule `.claude/rules/literate-programming-document-first.md`)
+The companion rule [`lp-prose-no-self-narration.md`](./lp-prose-no-self-narration.md)
+(and `.claude/rules/literate-programming-document-first.md`)
 both call out generic phase headings ("Functions", "Helpers",
 "Utilities", "Implementation", "Misc") as failures.  Heading
 should name *what role* the section plays in the system, not the
@@ -171,5 +171,5 @@ in this repo (`code-agent-org-*.org`, `claude-agent-*.org`,
 ## See also
 
 - [`literate-programming-document-first.md`](./literate-programming-document-first.md) — the project's general LP rule.
-- `~/projects/dummy/claude/rules/lp-prose-no-self-narration.md` — user-level deletion-test taxonomy.
+- [`lp-prose-no-self-narration.md`](./lp-prose-no-self-narration.md) — deletion-test taxonomy.
 - [Org Babel — Literate Programming Tutorial (Howard Abrams)](https://www.howardism.org/Technical/Emacs/literate-programming-tutorial.html) — original source for the four-part shape and `:comments org` mechanism.

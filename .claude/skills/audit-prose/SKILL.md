@@ -35,7 +35,7 @@ ls -la /Users/jingtao/projects/claude-agent/*"$ARGUMENTS"*.org 2>/dev/null | hea
 ## What to look for
 
 Apply the deletion test paragraph-by-paragraph. The canonical rule
-lives at `~/projects/dummy/claude/rules/lp-prose-no-self-narration.md`
+lives at `.claude/rules/lp-prose-no-self-narration.md`
 — consult it for the full taxonomy. The high-value failure modes:
 
 1. **Self-narration immediately after the artefact.**

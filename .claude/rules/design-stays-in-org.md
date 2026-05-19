@@ -1,9 +1,5 @@
 # Design Stays in the .org File — Not in docs/design-docs/
 
-> *Adopted*: 2026-05-19, copied verbatim of the *intent* from
-> `~/projects/mind-ai/edo-literate/.claude/rules/design-in-lp-draft-not-docs.md`
-> and adapted to claude-agent's single-repo layout.
-
 This repo's `docs/design-docs/` directory was emptied by the
 2026-04 LP migration that absorbed every separate design doc into
 the relevant `.org` module's Overview / Rationale / Why-X
@@ -84,13 +80,3 @@ The test: if a contributor would *write English sentences* to
 explain *why the code is shaped the way it is*, those sentences
 go into the `.org` file. Not into a `.md`. Not into a `docs/`
 subdirectory. The `.org` file IS where design lives.
-
-## Source
-
-Verbatim adoption (with single-repo adaptations) from
-`~/projects/mind-ai/edo-literate/.claude/rules/design-in-lp-draft-not-docs.md`,
-which traces back to that repo's pre-2026 LP-as-meta-repo design
-discussions. The `claude-agent-draft.org` placement mirrors
-edo-literate's `lp/draft.org`; the `RATIONALE.md` decision-log
-placement is claude-agent-specific (the file already existed
-before this rule).

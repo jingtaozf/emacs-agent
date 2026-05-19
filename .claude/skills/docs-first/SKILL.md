@@ -60,7 +60,7 @@ Common failures:
   "the :tangle path is relative to the .org file") → delete unless
   it warns of a real trap.
 
-The rule lives at `~/projects/dummy/claude/rules/lp-prose-no-self-narration.md`
+The rule lives at `.claude/rules/lp-prose-no-self-narration.md`
 — consult it when in doubt.
 
 ## Bypass conditions

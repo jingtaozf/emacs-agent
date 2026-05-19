@@ -7,9 +7,6 @@ that backs up the prose. The same principle applies to Python modules
 (`python/claude_agent/*.py`) — favour docstrings that explain *why*, not
 *what*, and prefer module-level prose over flat function lists.
 
-Adapted from `~/projects/mind-ai/agents/mega/dev-agent/lisp-style.org`
-§"Literate programming — document first", calibrated for this project.
-
 ## What "document first" means
 
 For every `.org` module under the repo root (`claude-agent.org`,

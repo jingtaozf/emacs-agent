@@ -4,9 +4,6 @@ Minimum code that solves the problem. No features beyond what was asked.
 Every abstraction, parameter, and indirection must have ≥1 caller using it
 right now — not "might need later".
 
-Adapted from `~/projects/mind-ai/agents/mega/dev-agent/lisp-style.org`
-§"YAGNI — no speculative generality".
-
 ## `defcustom` without non-default usage = delete
 
 If every caller uses the default value, the option is dead weight. Remove

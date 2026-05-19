@@ -4,10 +4,6 @@ Consistent naming makes the codebase greppable and self-documenting.
 These rules apply to all Elisp code in `.org` source files and any
 `.el` files in the project.
 
-Adapted from `~/projects/mind-ai/agents/mega/dev-agent/lisp-style.org`
-§"Naming conventions", calibrated for the two-module prefix structure
-of this project.
-
 ## Prefix table
 
 | Prefix | Module | Visibility |

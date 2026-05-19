@@ -3,12 +3,9 @@
 Each module models its domain as a small set of **classes** (state +
 identity) and **protocols** (published behaviour, dispatched on the
 receiver). New code must follow this style; older modules are being
-refactored to match.
-
-Adapted from `~/projects/mind-ai/agents/mega/dev-agent/lisp-style.org`
-§"CLOS protocol — Smalltalk-flavoured objects", calibrated for the
-two languages we use here: Elisp (via `cl-defstruct` + `cl-defgeneric`)
-and Python (classes + methods, `typing.Protocol`/ABC).
+refactored to match. Applies to both languages: Elisp
+(`cl-defstruct` + `cl-defgeneric`) and Python (classes + methods +
+`typing.Protocol`/ABC).
 
 ## Core idea
 

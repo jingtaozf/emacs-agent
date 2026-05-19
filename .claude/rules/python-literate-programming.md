@@ -4,8 +4,6 @@
 truth** for all Python code. The `.py` files are generated artefacts
 produced by `org-babel-tangle`.
 
-Adapted from `~/projects/mind-ai/agents/mega/skill-scout-server/.claude/rules/literate-programming-document-first.md`.
-
 ## NEVER-touch list
 
 - **NEVER** edit any `.py` file directly. The PreToolUse hook
