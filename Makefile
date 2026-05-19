@@ -741,3 +741,13 @@ check-python-structure:
 .PHONY: build-python-index
 build-python-index:
 	@python3 scripts/build_index.py $(PYTHON_LP_ORG)
+
+# build-tangle-map populates .cache/tangle-map.tsv used by the
+# block-python-tangled-edit.sh PreToolUse hook to print section-
+# precise navigation hints (instead of just "edit
+# claude-agent-python.org" — the file is 6770 lines).  The hook
+# self-heals by re-running this when the cache is stale, but you
+# can run it manually after large reorgs in claude-agent-python.org.
+.PHONY: build-tangle-map
+build-tangle-map:
+	@scripts/build-tangle-map.sh
