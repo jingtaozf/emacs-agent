@@ -31,6 +31,7 @@ Required env vars: ``WORKSPACE_ORG_FILE``, ``WORKSPACE_SESSION_ID``,
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -116,17 +117,61 @@ def _format_todos_as_elisp(todos: list[dict]) -> str:
     return "(" + " ".join(items) + ")"
 
 
+class AgentKind(enum.Enum):
+    """Which agent CLI is driving this workspace.
+
+    Values are the string written to the ``AGENT_TYPE`` env var by
+    the launcher, so an enum member round-trips through env-var I/O
+    without a separate mapping table.
+
+    Method `cli_session_property` collapses the
+    "Copilot vs everyone-else" CLI-session-property dispatch that
+    previously sat in `_cli_session_property` as a single ``if``
+    branch — Smalltalk-style: each agent kind *carries* the
+    knowledge of what org property it persists its session id to.
+    """
+
+    CLAUDE = "claude"
+    COPILOT = "copilot"
+    OPENCODE = "opencode"
+
+    @property
+    def cli_session_property(self) -> str:
+        """Org property name where this agent persists its CLI session id.
+
+        Copilot and Claude Code use distinct property names so a
+        workspace can run both without stomping on each other's
+        resume token; OpenCode shares CLAUDE_CLI_SESSION historically
+        and has its own separate ACP_SESSION_ID for the direct-ACP
+        integration path.
+        """
+        if self is AgentKind.COPILOT:
+            return "COPILOT_CLI_SESSION"
+        return "CLAUDE_CLI_SESSION"
+
+    @classmethod
+    def from_env(cls) -> "AgentKind":
+        """Read the current kind from ``AGENT_TYPE``; default to CLAUDE."""
+        return cls.from_string(os.environ.get("AGENT_TYPE", ""))
+
+    @classmethod
+    def from_string(cls, value: str | None) -> "AgentKind":
+        """Parse VALUE into a kind, defaulting to CLAUDE when unrecognised."""
+        if value:
+            value = value.lower()
+            for kind in cls:
+                if kind.value == value:
+                    return kind
+        return cls.CLAUDE
+
+
 def _cli_session_property() -> str:
     """Return the org property name where we persist the CLI session id.
 
-    Copilot and Claude Code use distinct property names so a workspace
-    can run both without stomping on each other's resume token. The
-    ``AGENT_TYPE`` env var is set by the launcher.
+    Thin shim over `AgentKind.from_env().cli_session_property` kept
+    for the existing call site in `WorkspaceBridge._save_cli_session_elisp`.
     """
-    agent_type = os.environ.get("AGENT_TYPE", "")
-    if agent_type.lower() == "copilot":
-        return "COPILOT_CLI_SESSION"
-    return "CLAUDE_CLI_SESSION"
+    return AgentKind.from_env().cli_session_property
 
 
 def _check_any_recent_from_emacs_flag() -> tuple[bool, str]:
