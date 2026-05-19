@@ -15,7 +15,8 @@ ACP-compatible agents (Codex, Gemini, OpenCode), and a tri-protocol backend.
 
 ## Where to read more
 
-- **Primary agent rules**: `CLAUDE.md` (this repo's root). Read it first.
+- **Onboarding**: `ONBOARDING.md` — 60-second docs-first pitch for new contributors.
+- **Primary agent rules**: `CLAUDE.md` (this repo's root). Read it after onboarding.
 - **Architecture**: `ARCHITECTURE.org` — module boundaries, invariants, extension points.
 - **Lessons**: `tasks/lessons.md` — past mistakes promoted into rules.
 - **Design rationale**: `RATIONALE.md` — why-we-decided-X log.
