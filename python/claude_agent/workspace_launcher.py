@@ -156,6 +156,70 @@ def cleanup_emacs_agent_inject(path: Path, file_existed_before: bool) -> None:
 
 
 # ======================================================================
+# McpConfigInjector — base for per-project MCP config injection
+#
+# Both Copilot (.github/mcp.json) and OpenCode (opencode.jsonc) need
+# the same shape of operation: resolve target → read original (or
+# None) → parse → mutate to add the Emacs MCP entry → write → register
+# atexit cleanup.  Only the path policy, parser, JSON shape of the
+# mutation, and (for OpenCode's .jsonc/.json alt) the restore
+# registration differ.  Pull the scaffolding into a template-method
+# base class and override only the four hooks that actually vary.
+# ======================================================================
+
+
+class McpConfigInjector:
+    """Template-method base for injecting Emacs MCP into a config file.
+
+    Subclasses override four hooks; the rest of the inject lifecycle
+    (mkdir parent, capture original, parse, write, restore on exit,
+    log to stdout) is shared.
+    """
+
+    def __init__(self, project_root: str, mcp_url: str):
+        self.project_root = Path(project_root)
+        self.mcp_url = mcp_url
+
+    def inject(self) -> None:
+        """Run the inject lifecycle: resolve → read → parse → mutate → write → restore."""
+        input_path, output_path = self._resolve_paths()
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        original: str | None = input_path.read_text() if input_path.exists() else None
+        config = self._parse_or_empty(original)
+        self._merge_emacs_entry(config)
+        output_path.write_text(json.dumps(config, indent=2))
+        self._register_restore(input_path, output_path, original)
+        print(f"  MCP config: injected Emacs server into {output_path}")
+
+    # ------------------------------------------------------------------
+    # Subclass hooks
+    # ------------------------------------------------------------------
+
+    def _resolve_paths(self) -> tuple[Path, Path]:
+        """Return ``(INPUT_PATH, OUTPUT_PATH)``.
+
+        INPUT_PATH is read for the prior content (may not exist).
+        OUTPUT_PATH is where the merged config is written.  They may
+        be the same; OpenCode reads ``.json`` as fallback but always
+        writes back as ``.jsonc``."""
+        raise NotImplementedError
+
+    def _parse_or_empty(self, content: str | None) -> dict:
+        """Parse CONTENT into a dict, returning {} when missing or malformed."""
+        raise NotImplementedError
+
+    def _merge_emacs_entry(self, config: dict) -> None:
+        """Mutate CONFIG in place to add the Emacs MCP entry."""
+        raise NotImplementedError
+
+    def _register_restore(
+        self, input_path: Path, output_path: Path, original: str | None
+    ) -> None:
+        """Register atexit restore — default: restore the output path only."""
+        atexit.register(restore_file, output_path, original)
+
+
+# ======================================================================
 # AgentsMdInjector — shared system-prompt injector for AGENTS.md files
 # ======================================================================
 #

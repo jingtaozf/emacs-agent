@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from claude_agent.workspace_launcher import (
+    McpConfigInjector,
     WorkspaceLauncher,
     cleanup_emacs_agent_inject,
     filter_claude_args,
@@ -30,32 +31,38 @@ from claude_agent.workspace_launcher import (
 )
 
 
-# ======================================================================
-# File-based injection helpers (Copilot's MCP + system-prompt model)
-# ======================================================================
+class DotGithubMcpInjector(McpConfigInjector):
+    """Injects the Emacs MCP entry into ``.github/mcp.json`` (Copilot)."""
+
+    def _resolve_paths(self) -> tuple[Path, Path]:
+        path = self.project_root / ".github" / "mcp.json"
+        return path, path
+
+    def _parse_or_empty(self, content: str | None) -> dict:
+        if not content:
+            return {}
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return {}
+
+    def _merge_emacs_entry(self, config: dict) -> None:
+        config.setdefault("mcpServers", {})["emacs"] = {
+            "type": "http",
+            "url": self.mcp_url,
+        }
+
+
+# --- Back-compat free function -------------------------------------------------
+# `_inject_emacs_mcp_into_dotgithub` was the public surface before the
+# class extraction; tests + CopilotWorkspaceLauncher both called it by
+# name.  Keep it as a 1-line wrapper around DotGithubMcpInjector so test
+# imports continue to resolve.
 
 
 def _inject_emacs_mcp_into_dotgithub(project_root: str, mcp_url: str) -> None:
-    """Merge the Emacs MCP server entry into ``.github/mcp.json``.
-
-    Saves the original (or marks "did not exist") and registers an
-    atexit to restore it so the launcher is non-destructive.
-    """
-    mcp_json_path = Path(project_root) / ".github" / "mcp.json"
-    mcp_json_path.parent.mkdir(parents=True, exist_ok=True)
-
-    original: str | None = None
-    if mcp_json_path.exists():
-        original = mcp_json_path.read_text()
-    try:
-        config = json.loads(original) if original else {}
-    except json.JSONDecodeError:
-        config = {}
-
-    config.setdefault("mcpServers", {})["emacs"] = {"type": "http", "url": mcp_url}
-    mcp_json_path.write_text(json.dumps(config, indent=2))
-    atexit.register(restore_file, mcp_json_path, original)
-    print(f"  MCP config: injected Emacs server into {mcp_json_path}")
+    """Back-compat wrapper — delegates to `DotGithubMcpInjector`."""
+    DotGithubMcpInjector(project_root, mcp_url).inject()
 
 
 # ======================================================================

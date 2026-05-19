@@ -1468,6 +1468,74 @@ def cleanup_emacs_agent_inject(path: Path, file_existed_before: bool) -> None:
         pass  # Best-effort — process may be torn down
 
 #+end_src
+*** Class McpConfigInjector (template-method base shared by copilot + opencode)
+#+begin_src python
+# ======================================================================
+# McpConfigInjector — base for per-project MCP config injection
+#
+# Both Copilot (.github/mcp.json) and OpenCode (opencode.jsonc) need
+# the same shape of operation: resolve target → read original (or
+# None) → parse → mutate to add the Emacs MCP entry → write → register
+# atexit cleanup.  Only the path policy, parser, JSON shape of the
+# mutation, and (for OpenCode's .jsonc/.json alt) the restore
+# registration differ.  Pull the scaffolding into a template-method
+# base class and override only the four hooks that actually vary.
+# ======================================================================
+
+
+class McpConfigInjector:
+    """Template-method base for injecting Emacs MCP into a config file.
+
+    Subclasses override four hooks; the rest of the inject lifecycle
+    (mkdir parent, capture original, parse, write, restore on exit,
+    log to stdout) is shared.
+    """
+
+    def __init__(self, project_root: str, mcp_url: str):
+        self.project_root = Path(project_root)
+        self.mcp_url = mcp_url
+
+    def inject(self) -> None:
+        """Run the inject lifecycle: resolve → read → parse → mutate → write → restore."""
+        input_path, output_path = self._resolve_paths()
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        original: str | None = (
+            input_path.read_text() if input_path.exists() else None
+        )
+        config = self._parse_or_empty(original)
+        self._merge_emacs_entry(config)
+        output_path.write_text(json.dumps(config, indent=2))
+        self._register_restore(input_path, output_path, original)
+        print(f"  MCP config: injected Emacs server into {output_path}")
+
+    # ------------------------------------------------------------------
+    # Subclass hooks
+    # ------------------------------------------------------------------
+
+    def _resolve_paths(self) -> tuple[Path, Path]:
+        """Return ``(INPUT_PATH, OUTPUT_PATH)``.
+
+        INPUT_PATH is read for the prior content (may not exist).
+        OUTPUT_PATH is where the merged config is written.  They may
+        be the same; OpenCode reads ``.json`` as fallback but always
+        writes back as ``.jsonc``."""
+        raise NotImplementedError
+
+    def _parse_or_empty(self, content: str | None) -> dict:
+        """Parse CONTENT into a dict, returning {} when missing or malformed."""
+        raise NotImplementedError
+
+    def _merge_emacs_entry(self, config: dict) -> None:
+        """Mutate CONFIG in place to add the Emacs MCP entry."""
+        raise NotImplementedError
+
+    def _register_restore(
+        self, input_path: Path, output_path: Path, original: str | None
+    ) -> None:
+        """Register atexit restore — default: restore the output path only."""
+        atexit.register(restore_file, output_path, original)
+
+#+end_src
 *** Class AgentsMdInjector
 #+begin_src python
 # ======================================================================
@@ -3456,7 +3524,7 @@ forwarding to Copilot, which does not know about them.
 """
 
 #+end_src
-*** Function _inject_emacs_mcp_into_dotgithub
+*** Class DotGithubMcpInjector
 #+begin_src python
 from __future__ import annotations
 
@@ -3467,6 +3535,7 @@ import sys
 from pathlib import Path
 
 from claude_agent.workspace_launcher import (
+    McpConfigInjector,
     WorkspaceLauncher,
     cleanup_emacs_agent_inject,
     filter_claude_args,
@@ -3477,32 +3546,38 @@ from claude_agent.workspace_launcher import (
 )
 
 
-# ======================================================================
-# File-based injection helpers (Copilot's MCP + system-prompt model)
-# ======================================================================
+class DotGithubMcpInjector(McpConfigInjector):
+    """Injects the Emacs MCP entry into ``.github/mcp.json`` (Copilot)."""
+
+    def _resolve_paths(self) -> tuple[Path, Path]:
+        path = self.project_root / ".github" / "mcp.json"
+        return path, path
+
+    def _parse_or_empty(self, content: str | None) -> dict:
+        if not content:
+            return {}
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return {}
+
+    def _merge_emacs_entry(self, config: dict) -> None:
+        config.setdefault("mcpServers", {})["emacs"] = {
+            "type": "http",
+            "url": self.mcp_url,
+        }
+
+
+# --- Back-compat free function -------------------------------------------------
+# `_inject_emacs_mcp_into_dotgithub` was the public surface before the
+# class extraction; tests + CopilotWorkspaceLauncher both called it by
+# name.  Keep it as a 1-line wrapper around DotGithubMcpInjector so test
+# imports continue to resolve.
 
 
 def _inject_emacs_mcp_into_dotgithub(project_root: str, mcp_url: str) -> None:
-    """Merge the Emacs MCP server entry into ``.github/mcp.json``.
-
-    Saves the original (or marks "did not exist") and registers an
-    atexit to restore it so the launcher is non-destructive.
-    """
-    mcp_json_path = Path(project_root) / ".github" / "mcp.json"
-    mcp_json_path.parent.mkdir(parents=True, exist_ok=True)
-
-    original: str | None = None
-    if mcp_json_path.exists():
-        original = mcp_json_path.read_text()
-    try:
-        config = json.loads(original) if original else {}
-    except json.JSONDecodeError:
-        config = {}
-
-    config.setdefault("mcpServers", {})["emacs"] = {"type": "http", "url": mcp_url}
-    mcp_json_path.write_text(json.dumps(config, indent=2))
-    atexit.register(restore_file, mcp_json_path, original)
-    print(f"  MCP config: injected Emacs server into {mcp_json_path}")
+    """Back-compat wrapper — delegates to `DotGithubMcpInjector`."""
+    DotGithubMcpInjector(project_root, mcp_url).inject()
 
 #+end_src
 *** Class CopilotWorkspaceLauncher
@@ -3622,6 +3697,7 @@ import sys
 from pathlib import Path
 
 from claude_agent.workspace_launcher import (
+    McpConfigInjector,
     WorkspaceLauncher,
     cleanup_emacs_agent_inject,
     filter_claude_args,
@@ -3646,43 +3722,54 @@ def _parse_jsonc(text: str) -> dict:
 #+end_src
 *** Function _inject_emacs_mcp
 #+begin_src python
-def _inject_emacs_mcp(project_root: str, mcp_url: str) -> None:
-    """Merge the Emacs MCP server entry into ``opencode.jsonc``.
+class OpencodeJsoncInjector(McpConfigInjector):
+    """Injects the Emacs MCP entry into ``opencode.jsonc`` (OpenCode).
 
-    Accepts either ``opencode.jsonc`` or ``opencode.json`` as input;
-    always writes back as ``.jsonc``. Register atexit to restore.
+    Reads from ``opencode.jsonc`` (preferred) or ``opencode.json``
+    (fallback when only the .json shape exists); always writes back as
+    ``.jsonc``.  When the alt format is in use, registers TWO atexit
+    restores so both the read-from path and the written-to path end up
+    in their original state.
     """
-    config_path = Path(project_root) / "opencode.jsonc"
-    if not config_path.exists():
-        alt = Path(project_root) / "opencode.json"
-        if alt.exists():
-            config_path = alt
 
-    original: str | None = None
-    if config_path.exists():
-        original = config_path.read_text()
-    try:
-        config = _parse_jsonc(original) if original else {}
-    except (json.JSONDecodeError, ValueError):
-        config = {}
+    def _resolve_paths(self) -> tuple[Path, Path]:
+        jsonc = self.project_root / "opencode.jsonc"
+        json_p = self.project_root / "opencode.json"
+        input_path = jsonc if jsonc.exists() or not json_p.exists() else json_p
+        return input_path, jsonc  # always write .jsonc
 
-    config.setdefault("mcp", {})["emacs"] = {
-        "type": "remote",
-        "url": mcp_url,
-        "enabled": True,
-    }
+    def _parse_or_empty(self, content: str | None) -> dict:
+        if not content:
+            return {}
+        try:
+            return _parse_jsonc(content)
+        except (json.JSONDecodeError, ValueError):
+            return {}
 
-    out_path = Path(project_root) / "opencode.jsonc"
-    out_path.write_text(json.dumps(config, indent=2))
-    atexit.register(
-        restore_file,
-        out_path,
-        original if out_path == config_path else None,
-    )
-    if config_path != out_path and original is not None:
-        # Opened a .json, now writing .jsonc — restore both.
-        atexit.register(restore_file, config_path, original)
-    print(f"  MCP config: injected Emacs server into {out_path}")
+    def _merge_emacs_entry(self, config: dict) -> None:
+        config.setdefault("mcp", {})["emacs"] = {
+            "type": "remote",
+            "url": self.mcp_url,
+            "enabled": True,
+        }
+
+    def _register_restore(
+        self, input_path: Path, output_path: Path, original: str | None
+    ) -> None:
+        atexit.register(
+            restore_file,
+            output_path,
+            original if output_path == input_path else None,
+        )
+        # When alt-format (.json) was the source, also restore that path so
+        # we don't leave a written-back .jsonc + an un-restored .json behind.
+        if input_path != output_path and original is not None:
+            atexit.register(restore_file, input_path, original)
+
+
+def _inject_emacs_mcp(project_root: str, mcp_url: str) -> None:
+    """Back-compat wrapper — delegates to `OpencodeJsoncInjector`."""
+    OpencodeJsoncInjector(project_root, mcp_url).inject()
 
 #+end_src
 *** Function _inject_bridge_plugin

@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from claude_agent.workspace_launcher import (
+    McpConfigInjector,
     WorkspaceLauncher,
     cleanup_emacs_agent_inject,
     filter_claude_args,
@@ -44,43 +45,54 @@ def _parse_jsonc(text: str) -> dict:
     return json.loads(stripped) if stripped.strip() else {}
 
 
-def _inject_emacs_mcp(project_root: str, mcp_url: str) -> None:
-    """Merge the Emacs MCP server entry into ``opencode.jsonc``.
+class OpencodeJsoncInjector(McpConfigInjector):
+    """Injects the Emacs MCP entry into ``opencode.jsonc`` (OpenCode).
 
-    Accepts either ``opencode.jsonc`` or ``opencode.json`` as input;
-    always writes back as ``.jsonc``. Register atexit to restore.
+    Reads from ``opencode.jsonc`` (preferred) or ``opencode.json``
+    (fallback when only the .json shape exists); always writes back as
+    ``.jsonc``.  When the alt format is in use, registers TWO atexit
+    restores so both the read-from path and the written-to path end up
+    in their original state.
     """
-    config_path = Path(project_root) / "opencode.jsonc"
-    if not config_path.exists():
-        alt = Path(project_root) / "opencode.json"
-        if alt.exists():
-            config_path = alt
 
-    original: str | None = None
-    if config_path.exists():
-        original = config_path.read_text()
-    try:
-        config = _parse_jsonc(original) if original else {}
-    except (json.JSONDecodeError, ValueError):
-        config = {}
+    def _resolve_paths(self) -> tuple[Path, Path]:
+        jsonc = self.project_root / "opencode.jsonc"
+        json_p = self.project_root / "opencode.json"
+        input_path = jsonc if jsonc.exists() or not json_p.exists() else json_p
+        return input_path, jsonc  # always write .jsonc
 
-    config.setdefault("mcp", {})["emacs"] = {
-        "type": "remote",
-        "url": mcp_url,
-        "enabled": True,
-    }
+    def _parse_or_empty(self, content: str | None) -> dict:
+        if not content:
+            return {}
+        try:
+            return _parse_jsonc(content)
+        except (json.JSONDecodeError, ValueError):
+            return {}
 
-    out_path = Path(project_root) / "opencode.jsonc"
-    out_path.write_text(json.dumps(config, indent=2))
-    atexit.register(
-        restore_file,
-        out_path,
-        original if out_path == config_path else None,
-    )
-    if config_path != out_path and original is not None:
-        # Opened a .json, now writing .jsonc — restore both.
-        atexit.register(restore_file, config_path, original)
-    print(f"  MCP config: injected Emacs server into {out_path}")
+    def _merge_emacs_entry(self, config: dict) -> None:
+        config.setdefault("mcp", {})["emacs"] = {
+            "type": "remote",
+            "url": self.mcp_url,
+            "enabled": True,
+        }
+
+    def _register_restore(
+        self, input_path: Path, output_path: Path, original: str | None
+    ) -> None:
+        atexit.register(
+            restore_file,
+            output_path,
+            original if output_path == input_path else None,
+        )
+        # When alt-format (.json) was the source, also restore that path so
+        # we don't leave a written-back .jsonc + an un-restored .json behind.
+        if input_path != output_path and original is not None:
+            atexit.register(restore_file, input_path, original)
+
+
+def _inject_emacs_mcp(project_root: str, mcp_url: str) -> None:
+    """Back-compat wrapper — delegates to `OpencodeJsoncInjector`."""
+    OpencodeJsoncInjector(project_root, mcp_url).inject()
 
 
 def _inject_bridge_plugin(plugin_dir: str, project_root: str) -> None:
