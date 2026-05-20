@@ -1,5 +1,16 @@
 # Claude Agent SDK for Emacs
 
+## Shared LP doctrine (imported from literate-agent)
+
+The literate-programming rules, language hints, and tangle conventions
+are shared with other LP projects via the `literate-agent` repo. The
+following `@`-import pulls in 23 rules + Elisp/Python language hints +
+LP build-command conventions, so they don't need to be duplicated here:
+
+@~/projects/literate-agent/CLAUDE.md
+
+Project-specific overrides + claude-agent-only rules continue below.
+
 ## Commands
 
 ```bash
@@ -101,45 +112,32 @@ When investigating any issue:
 
 ## Design Principles (read before editing)
 
-Two style rules are canonical for this project and apply to both
-languages (Elisp `.org` modules and Python under `python/`):
+LP doctrine + OOP protocol style live in `literate-agent` (imported
+at the top of this file). claude-agent-specific application:
 
-| Rule | File | What it enforces |
-|---|---|---|
-| Literate programming — document first | `.claude/rules/literate-programming-document-first.md` | Prose before every code block; section headings name *concepts*, not "Functions"; one block = one meaningful step; org file carries design record + rejected alternatives. |
-| OOP — Smalltalk-flavoured protocols | `.claude/rules/oop-smalltalk-protocols.md` | Classes + generics (Elisp: `cl-defstruct` + `cl-defgeneric`; Python: classes + `typing.Protocol`/ABC). No free functions on plists/dicts for modules with real behaviour. Dispatch on the receiver, not on a keyword. |
+`claude-agent-backend.org` defines the canonical protocol
+(`claude-agent-backend-query`, `-cancel`, `-cleanup`,
+`-classify-error`, …); `claude-agent-acp-backend` and
+`claude-agent-claude-code-backend` each `cl-defmethod` those generics.
+Callers in `code-agent-org.org` dispatch on the backend instance —
+never branch on a string or symbol discriminator. New modules MUST
+follow the same pattern.
 
-Example in this repo: `claude-agent-backend.org` defines the protocol
-(`claude-agent-backend-query`, `-cancel`, `-cleanup`, `-classify-error`,
-etc.); `claude-agent-acp-backend` and `claude-agent-claude-code-backend` each
-`cl-defmethod` those generics. Callers in `code-agent-org.org` dispatch on
-the backend instance — they never branch on a string or symbol
-discriminator. New modules must follow the same pattern.
-
-**Tri-protocol refactor shipped** (2026-04-24, Phases 0–4): the backend
-layer is restructured into three protocols — lifecycle, agent wire,
-multiplexer wire, plus org-integration — with agent-family (Claude Code,
-OpenCode, Gemini, Codex) and multiplexer-family (cmux, tmux) as symmetric
-siblings. See the "Tri-Protocol Architecture" section of
-`claude-agent-backend.org` (full design) and `ARCHITECTURE.org`
-(meta-map). Any new
-backend or cross-module dispatch site MUST follow the tri-protocol shape;
-no `CLAUDE_BACKEND` string-match branches in the frontend.
+**Tri-protocol refactor shipped** (2026-04-24): backend layer is
+three protocols — lifecycle, agent wire, multiplexer wire — plus
+org-integration; agent-family (Claude Code, OpenCode, Gemini, Codex)
+and multiplexer-family (cmux, tmux) are symmetric siblings. See
+`claude-agent-backend.org` § "Tri-Protocol Architecture" +
+`ARCHITECTURE.org`. No `CLAUDE_BACKEND` string-match branches in the
+frontend.
 
 ## Architecture
 
 See `ARCHITECTURE.org` for module boundaries, invariants, and extension points.
 
-### Literate Programming
+### Key modules
 
-All source code lives in `.org` files using `literate-elisp`:
-- `claude-agent.org` — Core SDK: process management, JSON protocol, query API
-- `code-agent-org.org` — Org integration: AI blocks, sessions, streaming
-- `emacs-mcp-server.org` — MCP server for Emacs tools
-
-Load with: `(literate-elisp-load "claude-agent.org")`
-
-### Key Layers
+LP source lives in `.org` files loaded via `literate-elisp`:
 
 | Layer | File | Purpose |
 |-------|------|---------|
@@ -148,13 +146,12 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 | MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude |
 | Entry Point | `claude-code.el` | Package requires, autoloads |
 
-### Data Flow
-
-1. User writes query in `#+begin_src ai` block, presses `C-c C-c`
-2. `code-agent-org-execute` validates block, creates session
-3. `claude-agent-query` spawns CLI subprocess with `--output-format stream-json`
-4. Process filter parses newline-delimited JSON, dispatches to callbacks
-5. Tokens stream into response section below the AI block
+Load with: `(literate-elisp-load "claude-agent.org")`. Data flow:
+user writes a query in `#+begin_src ai`, hits `C-c C-c` →
+`code-agent-org-execute` validates + creates a session →
+`claude-agent-query` spawns the CLI with `--output-format stream-json`
+→ process filter parses newline-delimited JSON → tokens stream into
+the response section below the AI block.
 
 ### Session Management
 
@@ -183,13 +180,15 @@ Load with: `(literate-elisp-load "claude-agent.org")`
 - Public API uses single-dash: `code-agent-org-public-fn`
 
 ### Literate Elisp Caveats
-- `lexical-binding: t` in org headers is **ignored** by literate-elisp
-- Use `lexical-let` (from `cl-lib`) for closures in callbacks/timers
-- Use `cond` + `equal` instead of `pcase` string patterns (dynamic binding)
-- After editing `.org` files, **always reload**: `(literate-elisp-load "file.org")`
-- **Macro re-expansion**: When a macro definition changes (e.g. in `claude-agent-trace.org`),
-  ALL modules that USE that macro must also be reloaded — the old function bodies
-  contain the old macro expansion until reloaded
+
+See `~/projects/literate-agent/hints/elisp.org` — auto-activated by
+the `lp-hint-elisp` skill when editing `.el` files or `.org` files
+with Elisp src blocks. Project-specific addendum:
+
+- **Macro re-expansion** (claude-agent-specific): when a macro
+  defined in `claude-agent-trace.org` changes, ALL modules that USE
+  that macro must also be reloaded — the old function bodies still
+  carry the old macro expansion until each module reloads.
 
 ### Testing
 - All tests in `tests/*.el`, never in `.org` files

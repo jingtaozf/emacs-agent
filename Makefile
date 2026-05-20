@@ -734,20 +734,27 @@ tangle-python:
 	  --eval "(org-babel-tangle-file \"$(PWD)/$(PYTHON_LP_ORG)\")"
 	@ruff format --quiet python/ 2>/dev/null || true
 
+# LP scripts now live in literate-agent (shared with other LP projects).
+# Override LITERATE_AGENT_HOME if the repo lives elsewhere.
+LITERATE_AGENT_HOME ?= $(HOME)/projects/literate-agent
+
 .PHONY: check-python-structure
 check-python-structure:
-	@python3 scripts/check_org_structure.py $(PYTHON_LP_ORG)
+	@python3 $(LITERATE_AGENT_HOME)/scripts/check_org_structure.py $(PYTHON_LP_ORG)
 
 .PHONY: build-python-index
 build-python-index:
-	@python3 scripts/build_index.py $(PYTHON_LP_ORG)
+	@python3 $(LITERATE_AGENT_HOME)/scripts/build_index.py \
+	    --output INDEX-python.org \
+	    --preamble /dev/null \
+	    --filter 'python/claude_agent/.*\.py$$' \
+	    $(PYTHON_LP_ORG)
 
 # build-tangle-map populates .cache/tangle-map.tsv used by the
-# block-python-tangled-edit.sh PreToolUse hook to print section-
-# precise navigation hints (instead of just "edit
-# claude-agent-python.org" — the file is 6770 lines).  The hook
-# self-heals by re-running this when the cache is stale, but you
-# can run it manually after large reorgs in claude-agent-python.org.
+# block-tangled-edit.sh PreToolUse hook to print section-precise
+# navigation hints (the .org file is 6770 lines, so generic "edit
+# claude-agent-python.org" is unhelpful). The hook self-heals on
+# cache miss; run manually after large reorgs.
 .PHONY: build-tangle-map
 build-tangle-map:
-	@scripts/build-tangle-map.sh
+	@LITERATE_AGENT_LP_ROOT="" python3 $(LITERATE_AGENT_HOME)/scripts/build_tangle_map.py
