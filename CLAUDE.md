@@ -1,15 +1,22 @@
 # Claude Agent SDK for Emacs
 
-## Shared LP doctrine (imported from literate-agent)
+## Setup + shared LP doctrine
 
-The literate-programming rules, language hints, and tangle conventions
-are shared with other LP projects via the `literate-agent` repo. The
-following `@`-import pulls in 23 rules + Elisp/Python language hints +
-LP build-command conventions, so they don't need to be duplicated here:
+Clone `literate-agent` (LP doctrine + plugin + shared scripts) then
+launch Claude Code with `--plugin-dir`:
+
+```bash
+git clone https://github.com/jingtaozf/literate-agent.git ~/projects/literate-agent
+claude --plugin-dir ~/projects/literate-agent ...
+```
+
+The `@`-import below pulls in 23 rules + language hints +
+build-command conventions from literate-agent:
 
 @~/projects/literate-agent/CLAUDE.md
 
-Project-specific overrides + claude-agent-only rules continue below.
+Override `LITERATE_AGENT_HOME` if cloned elsewhere. Project-specific
+overrides + claude-agent-only rules continue below.
 
 ## Commands
 
@@ -220,21 +227,14 @@ with Elisp src blocks. Project-specific addendum:
 - Use `condition-case` in all callbacks
 - Sentinel runs after process exits — clean up state there
 
-### ARCHITECTURE.org Maintenance
-After architectural changes, update `ARCHITECTURE.org`:
-- New .org module added → update Module Boundary Diagram
-- Dependency changed → update diagram arrows
-- New invariant discovered → add to Invariants section
-- New extension point created → add to Extension Points
+### ARCHITECTURE.org + Harness Feedback Loop
 
-### Harness Feedback Loop
-When an agent mistake is not caught by existing tests:
-1. Fix the immediate issue
-2. Add a structural test to `test-structural.el` that catches this class of mistake
-3. Include a `FIX:` message explaining the correct action
-4. Update `ARCHITECTURE.org` invariants if it reveals a cross-module rule
-
-The harness grows with each mistake — rules become multipliers.
+After architectural changes, update `ARCHITECTURE.org` (new module →
+Module Boundary Diagram; new invariant → Invariants; new extension
+point → Extension Points). When an agent mistake escapes the existing
+tests: fix it, add a structural test to `tests/test-structural.el`
+with a `FIX:` message, update `ARCHITECTURE.org` invariants if it
+reveals a cross-module rule. The harness grows with each mistake.
 
 ### Secrets & sensitive data — **NEVER hardcode**
 
