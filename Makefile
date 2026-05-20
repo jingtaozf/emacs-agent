@@ -738,13 +738,21 @@ tangle-python:
 # Override LITERATE_AGENT_HOME if the repo lives elsewhere.
 LITERATE_AGENT_HOME ?= $(HOME)/projects/literate-agent
 
+# Each LP-script target sources `.claude/hooks/_env.sh` so claude-agent's
+# project-specific overrides (LITERATE_AGENT_LP_ROOT="" — single-repo
+# layout with .org at root, LITERATE_AGENT_TANGLE_MAKE_TARGET=tangle-python)
+# reach the plugin scripts. Without this, the scripts fall back to
+# literate-agent defaults (lp/ multi-submodule layout, plain `make tangle`)
+# which work by accident here but break the moment _env.sh gains a new var.
+LP_ENV := set -a; . .claude/hooks/_env.sh; set +a;
+
 .PHONY: check-python-structure
 check-python-structure:
-	@python3 $(LITERATE_AGENT_HOME)/scripts/check_org_structure.py $(PYTHON_LP_ORG)
+	@$(LP_ENV) python3 $(LITERATE_AGENT_HOME)/scripts/check_org_structure.py $(PYTHON_LP_ORG)
 
 .PHONY: build-python-index
 build-python-index:
-	@python3 $(LITERATE_AGENT_HOME)/scripts/build_index.py \
+	@$(LP_ENV) python3 $(LITERATE_AGENT_HOME)/scripts/build_index.py \
 	    --output INDEX-python.org \
 	    --preamble /dev/null \
 	    --filter 'python/claude_agent/.*\.py$$' \
@@ -757,4 +765,4 @@ build-python-index:
 # cache miss; run manually after large reorgs.
 .PHONY: build-tangle-map
 build-tangle-map:
-	@LITERATE_AGENT_LP_ROOT="" python3 $(LITERATE_AGENT_HOME)/scripts/build_tangle_map.py
+	@$(LP_ENV) python3 $(LITERATE_AGENT_HOME)/scripts/build_tangle_map.py
