@@ -11,7 +11,7 @@
 | Finding | Severity | Action |
 |---------|----------|--------|
 | **Risk: declaration adoption = 0%** across all three repos | high | Eat own dog food; start declaring on every new commit |
-| **`:CUSTOM_ID:` coverage** real metric (≥2-ref sections): claude-agent 100% ✓ / edo-literate **35.7%** | medium | Backfill the 45 specific multi-ref sections in edo-literate (mostly `Why this subpackage exists`) |
+| **`:CUSTOM_ID:` coverage** real metric (≥2-ref sections): claude-agent 100% ✓ / edo-literate **35.7% → 100%** (backfilled) | resolved | Backfill applied via literate-agent/scripts/backfill_anchors.py; edo-literate commit ca01c8c (45 sections, 41 files) |
 | C3 prose-before-src violations (concept-level): 225 claude-agent / 1298 edo-literate | medium | Sample top-10 worst files, fix opportunistically |
 | K3 false positives — heuristic flagged the LP-rule-migration as "incident strip" | low | Refine heuristic to know migration patterns are benign |
 | Phase-name headings minimal (2 in claude-agent, 6 in edo-literate) | low | Spot-fix the ~8 known cases |
@@ -75,10 +75,14 @@ violations are the `* Why this subpackage exists` pattern repeated across
 sibling README.
 
 *Action*:
-1. ✓ DONE — built `literate-agent/scripts/audit_anchor_coverage.py`.
-2. Backfill the 45 specific edo-literate sections (mechanical — same
-   pattern repeated).
-3. Run the script in CI / quarterly cadence for ongoing tracking.
+1. ✓ DONE — built `literate-agent/scripts/audit_anchor_coverage.py`
+   (literate-agent commit 6bcf345).
+2. ✓ DONE — built `literate-agent/scripts/backfill_anchors.py`
+   companion (literate-agent commit ecaca36).
+3. ✓ DONE — backfilled all 45 edo-literate violations
+   (edo-literate commit ca01c8c on jt branch). Post-backfill audit:
+   100% coverage on multi-ref subset (70/70). 35.7% → 100%.
+4. Run audit script in CI / quarterly cadence for ongoing tracking.
 
 ## C3: Prose-before-src violations (concept level, depth ≤ 2)
 
