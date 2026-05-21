@@ -11,7 +11,7 @@
 | Finding | Severity | Action |
 |---------|----------|--------|
 | **Risk: declaration adoption = 0%** across all three repos | high | Eat own dog food; start declaring on every new commit |
-| **`:CUSTOM_ID:` coverage 2-7%** on concept-level headings | medium | Backfill only on ≥2-referenced sections (not all 13 K headings) |
+| **`:CUSTOM_ID:` coverage** real metric (≥2-ref sections): claude-agent 100% ✓ / edo-literate **35.7%** | medium | Backfill the 45 specific multi-ref sections in edo-literate (mostly `Why this subpackage exists`) |
 | C3 prose-before-src violations (concept-level): 225 claude-agent / 1298 edo-literate | medium | Sample top-10 worst files, fix opportunistically |
 | K3 false positives — heuristic flagged the LP-rule-migration as "incident strip" | low | Refine heuristic to know migration patterns are benign |
 | Phase-name headings minimal (2 in claude-agent, 6 in edo-literate) | low | Spot-fix the ~8 known cases |
@@ -48,28 +48,37 @@ edo-literate are worth spot-checking; the rest are noise.
 
 ## C2 + C6: `:CUSTOM_ID:` anchor coverage
 
+Initial raw metric (misleading):
+
 | Repo | Total headings | With `:CUSTOM_ID:` | % missing |
 |------|----------------|---------------------|-----------|
 | claude-agent root | 1018 | 79 | 93% |
 | edo-literate lp/ | 13435 | 357 | 98% |
 
-*Important nuance*: `rules/lp-stable-anchors-for-multi-referenced-sections.md`
-explicitly says `:CUSTOM_ID:` is required for sections **≥ 2 times referenced**.
-The rule does NOT require every heading to have an anchor. So the 93/98 %
-"missing" is dominated by single-reference sections where the rule says no
-anchor is required.
+The rule `lp-stable-anchors-for-multi-referenced-sections.md` only requires
+anchors on sections referenced **≥ 2 times**, not every heading. So
+93/98% raw "missing" includes single-reference sections where no anchor is
+needed.
 
-*True C2 violation rate* (headings that are cross-referenced but lack
-`:CUSTOM_ID:`) requires per-heading cross-reference scanning, which I did
-not run mechanically. Sample inspection shows the rate is *much lower* than
-the raw 93-98% — probably 5-15% of *concept-level* headings.
+**Corrected metric via `scripts/audit_anchor_coverage.py` (shipped this
+audit cycle)**:
+
+| Repo | Concept-level headings | Multi-ref sections | With anchor | Coverage % |
+|------+-----------------------+--------------------|-------------+------------|
+| claude-agent | 1629 (depth ≤ 2) | 67 | 67 | **100%** ✓ |
+| edo-literate | 3538 (depth ≤ 2) | 70 | 25 | **35.7%** ← backfill |
+
+The corrected numbers: claude-agent is **healthy** above the 95% threshold;
+edo-literate has **45 specific sections** that need anchor backfill. Most
+violations are the `* Why this subpackage exists` pattern repeated across
+~14 `_project.org` files — each linked from CLAUDE.md aggregator + a
+sibling README.
 
 *Action*:
-1. Build a script that finds cross-references and flags missing anchors at
-   the ≥2-reference threshold. Not blocking; add to `literate-agent/scripts/`
-   as a future audit step.
-2. Backfill anchors *opportunistically* — when editing a section that has
-   any cross-reference, add an anchor before merging.
+1. ✓ DONE — built `literate-agent/scripts/audit_anchor_coverage.py`.
+2. Backfill the 45 specific edo-literate sections (mechanical — same
+   pattern repeated).
+3. Run the script in CI / quarterly cadence for ongoing tracking.
 
 ## C3: Prose-before-src violations (concept level, depth ≤ 2)
 
