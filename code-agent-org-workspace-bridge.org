@@ -1,8 +1,12 @@
 #+TITLE: Claude Org Workspace Bridge
 #+PROPERTY: literate-load yes
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA e0b759f81409817c05a816ba9a68498f34c8c6e5
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
+#+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
 * Claude Org Workspace Bridge
 :PROPERTIES:
+:LITERATE_ORG_BLOCK_KIND: atomic
 :header-args:elisp: :tangle yes
 :END:
 
@@ -144,21 +148,51 @@ one per workspace section found. PARENT is the outline path above the workspace 
                   (push (format "%s\t%s\t%s" sid heading parent) results)))))
           (mapconcat #'identity (nreverse results) "\n"))))))
 
-(defun code-agent-org-workspace-bridge--goto-session (session-id)
-  "Move point to the workspace section matching SESSION-ID in current buffer.
-Searches for :CLAUDE_SESSION_ID: property matching SESSION-ID.
-Signals error if not found."
+(defun code-agent-org-workspace-bridge--goto-session (workspace-key)
+  "Move point to the workspace section matching WORKSPACE-KEY in current buffer.
+
+WORKSPACE-KEY is matched against two properties, in this order:
+
+1. =:CUSTOM_ID:= — the stable, globally-unique heading anchor.  This
+   is the preferred routing key set by ``workspace_launcher.py`` as
+   the ``WORKSPACE_CUSTOM_ID`` env var.  Survives heading rename and
+   cmux workspace rename, which closes the cross-workspace routing
+   bug seen on 2026-05-21.
+
+2. =:CLAUDE_SESSION_ID:= — legacy routing key.  Retained so existing
+   tests and any code path still using ``WORKSPACE_SESSION_ID`` keep
+   working unchanged.
+
+Signals error if neither match is found."
   (goto-char (point-min))
-  (let ((found nil))
-    (while (and (not found)
-                (re-search-forward
-                 (format "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+%s[ \t]*$"
-                         (regexp-quote session-id))
-                 nil t))
-      (setq found (point)))
+  (let ((found nil)
+        (pattern-cid
+         (format "^[ \t]*:CUSTOM_ID:[ \t]+%s[ \t]*$"
+                 (regexp-quote workspace-key)))
+        (pattern-sid
+         (format "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+%s[ \t]*$"
+                 (regexp-quote workspace-key))))
+    ;; Try CUSTOM_ID first (preferred).
+    (save-excursion
+      (while (and (not found) (re-search-forward pattern-cid nil t))
+        (save-excursion
+          (org-back-to-heading t)
+          ;; Only accept matches on workspace-level headings — a
+          ;; ``:CUSTOM_ID:`` on an instruction or response inside the
+          ;; workflow would otherwise sometimes win and misroute.  A
+          ;; workspace heading is the ancestor that owns
+          ;; ``:CLAUDE_SESSION_ID:``.
+          (when (org-entry-get nil "CLAUDE_SESSION_ID")
+            (setq found (point))))))
+    ;; Fall back to CLAUDE_SESSION_ID.
     (unless found
-      (error "Workspace session %s not found in buffer" session-id))
-    ;; Move to the heading that owns this property
+      (save-excursion
+        (while (and (not found) (re-search-forward pattern-sid nil t))
+          (setq found (match-beginning 0)))))
+    (unless found
+      (error "Workspace %s not found in buffer (matched neither :CUSTOM_ID: nor :CLAUDE_SESSION_ID:)"
+             workspace-key))
+    (goto-char found)
     (org-back-to-heading t)))
 
 (defun code-agent-org-workspace-bridge--find-workflow (session-id)

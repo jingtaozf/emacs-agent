@@ -1,8 +1,12 @@
 #+TITLE: Claude Org cmux Backend
 #+PROPERTY: literate-load yes
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA e0b759f81409817c05a816ba9a68498f34c8c6e5
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
+#+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
 * Claude Org cmux
 :PROPERTIES:
+:LITERATE_ORG_BLOCK_KIND: atomic
 :header-args:elisp: :tangle yes
 :END:
 
@@ -2074,56 +2078,190 @@ matching workspace exists.  Always re-applies WORKSPACE_COLOR pill
       (message "cmux surface: %s (focused app)" surface-id))
      (t (user-error "No cmux session for this story")))))
 
+(defun code-agent-org-cmux--capture-screen (surface-id lines)
+  "Capture LINES of SURFACE-ID's screen as a string, or empty on failure.
+
+The plain ``capture-pane --surface'' form fails with ``Surface is not
+a terminal'' when the caller is outside cmux (Emacs subprocess) and
+the target surface lives in a non-current workspace.  Including the
+``--workspace'' ref disambiguates the lookup and brings the cross-
+workspace case back to life.  Falls back gracefully — every caller
+already treats empty string as ``unknown screen state''."
+  (let ((ws-ref (code-agent-org-cmux--session-workspace-ref)))
+    (or (condition-case nil
+            (apply #'code-agent-org-cmux--call
+                   "capture-pane"
+                   (append
+                    (when ws-ref (list "--workspace" ws-ref))
+                    (list "--surface" surface-id "--lines" (number-to-string lines))))
+          (error nil))
+        "")))
+
+(defun code-agent-org-cmux--shell-prompt-p (screen)
+  "Return non-nil when SCREEN's last visible character looks like a shell prompt.
+
+Matches the three prompts our developer machines actually produce:
+bash/zsh =$=, starship/p10k =❯=, and zsh-with-newline =%=.  The
+trailing whitespace class is =\\s-*= (elisp syntax-class for
+whitespace), NOT =\\s*= — the latter is a bare backslash-s with no
+syntax-class character and never matches anything.  The earlier
+restart copy used the broken form, which is why this code path was
+silently no-op in production."
+  (and screen
+       (or (string-match-p "\\$\\s-*$" screen)
+           (string-match-p "❯\\s-*$" screen)
+           (string-match-p "%\\s-*$" screen))))
+
+(defun code-agent-org-cmux--claude-tui-p (screen)
+  "Return non-nil when SCREEN shows the Claude Code TUI is in the foreground.
+
+Positive detection looks for any of Claude Code's stable UI strings —
+the input-mode indicator, the permissions status line, or the
+distinctive welcome banner.  Negative cases (shell, vim, less, plain
+output) lack all three and return nil.
+
+Used by ``restart'' to decide between three states:
+  TUI running   → send /exit + wait for shell
+  shell prompt  → skip /exit, launch directly
+  something else→ neither — log warning, assume TUI to stay safe."
+  (and screen
+       (or (string-match-p "-- INSERT --" screen)
+           (string-match-p "bypass permissions on" screen)
+           (string-match-p "shift+tab to cycle" screen)
+           (string-match-p "✻ Welcome to Claude" screen))))
+
+(defun code-agent-org-cmux--surface-state (screen)
+  "Classify SCREEN content as ='claude=, ='shell=, or ='unknown=.
+
+Order matters: a screen that ends in =$= but also contains
+=-- INSERT --= is most likely the *previous* shell line scrolled
+above a freshly-started Claude — checking the TUI markers first
+catches that case correctly."
+  (cond
+   ((code-agent-org-cmux--claude-tui-p screen) 'claude)
+   ((code-agent-org-cmux--shell-prompt-p screen) 'shell)
+   (t 'unknown)))
+
+(defun code-agent-org-cmux--wait-for-shell (surface-id max-seconds)
+  "Poll SURFACE-ID once per second until a shell prompt appears or MAX-SECONDS elapse.
+Returns t when the prompt was seen, nil on timeout."
+  (let ((attempts 0)
+        (seen nil))
+    (while (and (not seen) (< attempts max-seconds))
+      (sleep-for 1)
+      (when (code-agent-org-cmux--shell-prompt-p
+             (code-agent-org-cmux--capture-screen surface-id 3))
+        (setq seen t))
+      (cl-incf attempts))
+    seen))
+
+(defun code-agent-org-cmux--launch-cmd-without-resume (launch-cmd)
+  "Return LAUNCH-CMD with the ``--resume <id>'' pair stripped.
+
+The shell-quoted form produced by ``--build-launch-command'' looks
+like ``... -- --resume 12d9...''; rewriting via a single regex is
+safer than parsing the shell quoting back to argv, because the env
+prefix and quoting style differ across agent profiles."
+  (replace-regexp-in-string
+   " --resume +[^ ]+"
+   ""
+   launch-cmd))
+
+(defun code-agent-org-cmux--resume-failed-p (surface-id)
+  "Return non-nil when SURFACE-ID shows Claude Code's resume-failure banner.
+
+Claude exits within ~1s of seeing an unknown session id, printing
+``No conversation found with session ID: <uuid>'' before returning
+control to the shell.  Both the banner line and the resulting shell
+prompt are usually still on screen by the time we capture, but we
+look for the banner alone — the prompt may have scrolled past the
+captured window if the user's prompt occupies multiple lines."
+  (let ((screen (code-agent-org-cmux--capture-screen surface-id 15)))
+    (and screen (string-match-p "No conversation found" screen))))
+
 (defun code-agent-org-cmux-restart ()
   "Restart Claude Code in the current cmux tab.
-Sends /exit to quit the running Claude Code, waits for shell prompt,
-then launches a fresh Claude Code in the same tab. Does not destroy
-the workspace or affect other tabs.
 
-Calls `code-agent-org-cmux--ensure-session' first so stale surface/workspace
-IDs are refreshed after a cmux restart: the saved UUID may be gone but
-cmux restores the workspace by name, and restart must drive the fresh
-surface rather than the stale one."
+Sends /exit to quit the running Claude Code, waits for the shell
+prompt, then launches a fresh Claude Code in the same tab.  Does not
+destroy the workspace or affect other tabs.
+
+Resume-failure recovery: the launch command uses ``--resume <id>''
+when ``:CLAUDE_CLI_SESSION:'' is saved on the heading.  If that id
+no longer exists in Claude Code's on-disk session store (cross-
+contamination, version skew, manual cleanup), Claude prints
+``No conversation found with session ID'' and exits immediately.
+We detect that within ~2s of launch, drop the stale property, and
+re-launch without ``--resume'' so the user gets a fresh session
+rather than being stranded at a bare shell prompt.
+
+Calls ``code-agent-org-cmux--ensure-session'' first so stale surface
+/ workspace IDs are refreshed after a cmux restart: the saved UUID
+may be gone but cmux restores the workspace by name, and restart
+must drive the fresh surface rather than the stale one."
   (interactive)
   (let* ((surface-id (code-agent-org-cmux--ensure-session))
          (workspace-session-id (code-agent-org-terminal--find-session-property "CLAUDE_SESSION_ID")))
     (unless surface-id
       (user-error "No cmux session for this story"))
-    (let ((launch-cmd (code-agent-org-cmux--build-launch-command
-                       (buffer-file-name)
-                       workspace-session-id
-                       (or (code-agent-org--get-project-root) default-directory)))
-          (screen (condition-case nil
-                      (code-agent-org-cmux--call "capture-pane" "--surface" surface-id "--lines" "5")
-                    (error "")))
-          (at-shell nil))
-      ;; 1. Check if Claude Code is running or already at shell prompt
-      (setq at-shell (or (string-match-p "\\$\\s*$" screen)
-                         (string-match-p "❯\\s*$" screen)
-                         (string-match-p "%\\s*$" screen)))
-      (unless at-shell
-        ;; Claude Code is running — send /exit and wait
+    (let* ((launch-cmd (code-agent-org-cmux--build-launch-command
+                        (buffer-file-name)
+                        workspace-session-id
+                        (or (code-agent-org--get-project-root) default-directory)))
+           (screen (code-agent-org-cmux--capture-screen surface-id 8))
+           (state  (code-agent-org-cmux--surface-state screen)))
+      ;; 1. Classify the surface — claude TUI, shell prompt, or
+      ;; unknown.  Only the shell-prompt case skips the /exit step.
+      ;; Unknown defaults to "treat as claude" so we err toward
+      ;; cleanly closing whatever's there (Claude swallows a stray
+      ;; /exit harmlessly; sending nothing risks stacking processes).
+      (message "Surface %s state before restart: %S" surface-id state)
+      (unless (eq state 'shell)
+        (when (eq state 'unknown)
+          (message
+           "Surface %s shows neither a Claude TUI nor a shell prompt — \
+sending /exit as a conservative default.  If something else is in the \
+foreground (vim, less, …) this may be a no-op."
+           surface-id))
+        ;; Claude Code (or unknown) — send /exit and wait
         (message "Sending /exit to Claude Code...")
         (condition-case nil
             (progn
               (code-agent-org-cmux--call "send" "--surface" surface-id "/exit")
               (code-agent-org-cmux--call "send-key" "--surface" surface-id "Return"))
           (error nil))
-        (let ((attempts 0))
-          (while (< attempts 15)
-            (sleep-for 1)
-            (let ((s (condition-case nil
-                         (code-agent-org-cmux--call "capture-pane" "--surface" surface-id "--lines" "3")
-                       (error ""))))
-              (when (or (string-match-p "\\$\\s*$" s)
-                        (string-match-p "❯\\s*$" s)
-                        (string-match-p "%\\s*$" s))
-                (setq attempts 100)))
-            (cl-incf attempts))))
+        (code-agent-org-cmux--wait-for-shell surface-id 15))
       ;; 2. Launch new Claude Code in the same tab
       (message "Launching fresh Claude Code...")
       (code-agent-org-cmux--call "send" "--surface" surface-id
                              (concat launch-cmd "\n"))
+      ;; 2a. Resume-failure recovery — see docstring.  Claude exits
+      ;; within ~1s on a bad session id, so a 2-3s settle is enough
+      ;; to see the banner.  Only kick the recovery path when we
+      ;; actually used --resume; otherwise skip the round trip.
+      (when (string-match-p " --resume " launch-cmd)
+        (sleep-for 3)
+        (when (code-agent-org-cmux--resume-failed-p surface-id)
+          (message "Resume failed (stale CLAUDE_CLI_SESSION); relaunching fresh...")
+          ;; Drop the stale property so future restarts don't repeat
+          ;; the failure.  A successful prompt will repopulate it via
+          ;; the workspace bridge save-cli-session path.
+          (condition-case nil
+              (save-excursion
+                (code-agent-org-terminal--goto-session-heading)
+                (org-entry-delete nil "CLAUDE_CLI_SESSION")
+                (let ((inhibit-message t)) (save-buffer)))
+            (error nil))
+          ;; Wait for claude to release the shell, then re-send a
+          ;; --resume-free command.  Don't rebuild from scratch via
+          ;; --build-launch-command — the property write above won't
+          ;; be visible to that helper until the next read cycle in
+          ;; some org versions.  Stripping the flag is deterministic.
+          (code-agent-org-cmux--wait-for-shell surface-id 5)
+          (let ((fresh-cmd (code-agent-org-cmux--launch-cmd-without-resume
+                            launch-cmd)))
+            (code-agent-org-cmux--call "send" "--surface" surface-id
+                                       (concat fresh-cmd "\n")))))
       ;; 3. Rename tab to active story (cmux may reset title on relaunch)
       (let ((ws-ref (code-agent-org-cmux--session-workspace-ref))
             (tab-title (code-agent-org-terminal--tab-title)))
