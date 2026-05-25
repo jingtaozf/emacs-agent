@@ -72,9 +72,17 @@
 ;; backend instance instead of string-matching CLAUDE_BACKEND.
 (claude-code--load-module "claude-agent-cmux-backend")
 (claude-code--load-module "claude-agent-tmux-backend")
-;; ACP backends (OpenCode / Gemini / Codex) are OPT-IN — users load
+;; Pi backend (pi.dev RPC) — auto-loaded so `:CLAUDE_BACKEND: pi'
+;; dispatches without the user having to add an extra `literate-elisp-load'
+;; line to their init.  Loading the module does not spawn anything; the
+;; subprocess is created lazily on first query.  Pi itself (the `pi'
+;; binary + provider/auth config in ~/.pi/agent/) is still required at
+;; runtime; absent that, dispatch fails with a clear error from the
+;; factory rather than `void-function'.
+(claude-code--load-module "claude-agent-pi-backend")
+;; ACP backends (OpenCode / Gemini / Codex) remain OPT-IN — users load
 ;; them explicitly in their init file if they use those agents.
-;; The `code-agent-org-backend-registry' entries reference these
+;; The `code-agent-org-backend-registry' entries reference those
 ;; factories by name, so invoking them without loading will raise
 ;; `void-function'.  This matches ARCHITECTURE.org's OPTIONAL tag.
 (claude-code--load-module "claude-agent")

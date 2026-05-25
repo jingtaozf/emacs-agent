@@ -151,7 +151,7 @@ LP source lives in `.org` files loaded via `literate-elisp`:
 | Core SDK | `claude-agent.org` | CLI subprocess, JSON stream parsing |
 | Org Integration | `code-agent-org.org` | `#+begin_src ai` blocks, response sections |
 | MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude / Pi |
-| Pi (opt-in) | `claude-agent-pi-{backend,extension}.org` | pi.dev RPC backend + TS extension tangling to `~/.pi/agent/extensions/emacs-mcp.ts`; `:CLAUDE_BACKEND: pi` |
+| Pi (default-loaded; ext opt-in) | `claude-agent-pi-{backend,extension}.org` | pi.dev RPC backend (auto-load) + TS extension tangling to `~/.pi/agent/extensions/emacs-mcp.ts`; `:CLAUDE_BACKEND: pi` |
 | Entry Point | `claude-code.el` | Package requires, autoloads |
 
 Load with: `(literate-elisp-load "claude-agent.org")`. Data flow:
