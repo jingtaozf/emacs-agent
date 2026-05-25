@@ -1560,20 +1560,40 @@ Resilience: phase 1's hook chain (response-section insert, mode-line
 refresh, user `--complete-hook' bodies, telemetry persistence) can
 raise — historically a hook error short-circuited phase 2 and left
 the session permanently `:busy t', queuing every subsequent
-`C-c C-c'.  Wrap phase 1 in `condition-case' so the failure is
-recorded but `--complete-finish-or-loop' always runs.  2026-05-25
-multi-block regression caught by `test-e2e-pi-multiblock'."
+`C-c C-c'.  Wrap the whole tracing-span + hooks block in
+`unwind-protect' so `--complete-finish-or-loop' ALWAYS runs, even
+if the span macro itself, `stop-spinner', or any hook raises.
+2026-05-26: condition-case alone wasn't enough — span macro and
+spinner cleanup can also raise, so go for unwind-protect."
   (let ((trace-ctx (code-agent-org--session-get session-key :trace-ctx)))
-    (claude-agent-with-span "handle-complete"
-        (code-agent-org--complete-span-attrs session-key result)
-        trace-ctx
-      (code-agent-org--stop-spinner session-key)
-      (condition-case err
-          (code-agent-org--complete-fire-hooks session-key result)
+    ;; Diagnostic breadcrumb in *Messages* so a future stuck :busy can
+    ;; be triaged from `M-x view-echo-area-messages' without rebuilding.
+    (message "code-agent-org: handle-complete sk=%s busy-before=%s"
+             session-key
+             (code-agent-org--session-get session-key :busy))
+    (unwind-protect
+        (claude-agent-with-span "handle-complete"
+            (code-agent-org--complete-span-attrs session-key result)
+            trace-ctx
+          (ignore-errors (code-agent-org--stop-spinner session-key))
+          (condition-case err
+              (code-agent-org--complete-fire-hooks session-key result)
+            (error
+             (message "code-agent-org: complete-fire-hooks raised: %s"
+                      (error-message-string err)))))
+      ;; ALWAYS run — this is what clears :busy and drains the queue.
+      ;; Any failure inside is logged + isolated; the session must not
+      ;; leak.
+      (condition-case finish-err
+          (code-agent-org--complete-finish-or-loop session-key)
         (error
-         (message "code-agent-org: complete-fire-hooks raised: %s"
-                  (error-message-string err))))
-      (code-agent-org--complete-finish-or-loop session-key))))
+         (message "code-agent-org: complete-finish-or-loop raised: %s; force-clearing :busy"
+                  (error-message-string finish-err))
+         ;; Last-resort: clear :busy directly so the session is usable.
+         (code-agent-org--session-put session-key :busy nil)))
+      (message "code-agent-org: handle-complete done sk=%s busy-after=%s"
+               session-key
+               (code-agent-org--session-get session-key :busy)))))
 #+END_SRC
 
 ** Error Handling
