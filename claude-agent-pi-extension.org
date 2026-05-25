@@ -169,11 +169,11 @@ async function callMcpTool(toolName: string, args: Record<string, unknown>): Pro
 	}
 	const result = payload.result;
 	if (!result) return "";
+	const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
 	if (result.isError) {
-		const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
 		throw new Error(`Emacs tool failed: ${text || "no detail"}`);
 	}
-	return (result.content ?? []).map((c) => c.text ?? "").join("\n");
+	return text;
 }
 #+end_src
 
@@ -272,11 +272,14 @@ function registerGetPropTool(pi: ExtensionAPI): void {
     (let ((case-fold-search t)
           (h ${elispString(heading)}))
       (goto-char (point-min))
-      (cond
-       ((string-prefix-p "#" h)
-        (org-link-search (concat "#" (substring h 1))))
-       (t (re-search-forward (concat "^" (regexp-quote h) "$"))))
-      (or (org-entry-get nil ${elispString(property)} t) ""))))`;
+      (condition-case nil
+          (progn
+            (cond
+             ((string-prefix-p "#" h)
+              (org-link-search (concat "#" (substring h 1))))
+             (t (re-search-forward (concat "^" (regexp-quote h) "$"))))
+            (or (org-entry-get nil ${elispString(property)} t) ""))
+        (search-failed (format "ERROR: heading not found: %s" h))))))`;
 			const out = await evalElisp(code);
 			return { content: [{ type: "text", text: out }] };
 		},
@@ -318,16 +321,19 @@ function registerNavigateTool(pi: ExtensionAPI): void {
   (save-excursion
     (let ((h ${elispString(heading)}))
       (goto-char (point-min))
-      (cond
-       ((string-prefix-p "#" h) (org-link-search (concat "#" (substring h 1))))
-       (t (re-search-forward (concat "^" (regexp-quote h) "$"))))
-      (let* ((start (line-beginning-position 2))
-             (end (save-excursion (org-end-of-subtree t t) (point)))
-             (body (buffer-substring-no-properties start end))
-             (cap ${cap}))
-        (if (> (length body) cap)
-            (concat (substring body 0 cap) "\\n... (truncated)")
-          body)))))`;
+      (condition-case nil
+          (progn
+            (cond
+             ((string-prefix-p "#" h) (org-link-search (concat "#" (substring h 1))))
+             (t (re-search-forward (concat "^" (regexp-quote h) "$"))))
+            (let* ((start (line-beginning-position 2))
+                   (end (save-excursion (org-end-of-subtree t t) (point)))
+                   (body (buffer-substring-no-properties start end))
+                   (cap ${cap}))
+              (if (> (length body) cap)
+                  (concat (substring body 0 cap) "\\n... (truncated)")
+                body)))
+        (search-failed (format "ERROR: heading not found: %s" h))))))`;
 			const out = await evalElisp(code);
 			return { content: [{ type: "text", text: out }] };
 		},
@@ -458,23 +464,19 @@ MCP server yet, or may be using Pi standalone for an unrelated task.
 #+begin_src typescript
 function attachHealthCheck(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
+		// tools/list is a cheap probe and confirms both transport + dispatcher.
+		const body = JSON.stringify({ jsonrpc: "2.0", id: "hc", method: "tools/list" });
+		const ac = new AbortController();
+		const timer = setTimeout(() => ac.abort(), 2000);
 		try {
-			// tools/list is a cheap probe and confirms both transport + dispatcher.
-			const body = JSON.stringify({ jsonrpc: "2.0", id: "hc", method: "tools/list" });
-			const ac = new AbortController();
-			const timer = setTimeout(() => ac.abort(), 2000);
-			try {
-				const r = await fetch(MCP_URL, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body,
-					signal: ac.signal,
-				});
-				if (!r.ok) throw new Error(`HTTP ${r.status}`);
-				vlog("MCP health check OK");
-			} finally {
-				clearTimeout(timer);
-			}
+			const r = await fetch(MCP_URL, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body,
+				signal: ac.signal,
+			});
+			if (!r.ok) throw new Error(`HTTP ${r.status}`);
+			vlog("MCP health check OK");
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			vlog(`MCP health check FAILED: ${msg}`);
@@ -484,6 +486,8 @@ function attachHealthCheck(pi: ExtensionAPI): void {
 					"warning",
 				);
 			}
+		} finally {
+			clearTimeout(timer);
 		}
 	});
 }

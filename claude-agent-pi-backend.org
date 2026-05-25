@@ -121,6 +121,14 @@ Pi normally exits within ~0.5 s of stdin EOF; the grace period
 accommodates slow shutdown when extensions are flushing state."
   :type 'number
   :group 'claude-agent)
+
+(defcustom claude-agent-pi-read-buffer-cap (* 8 1024 1024)
+  "Maximum bytes the JSONL splitter will buffer before killing the process.
+Pi's =tools/list= response with many extensions can be large; this cap
+prevents Emacs OOM if Pi ever streams a multi-megabyte single line
+without a trailing newline.  Default 8 MiB."
+  :type 'integer
+  :group 'claude-agent)
 #+END_SRC
 
 ** Backend Struct
@@ -152,12 +160,11 @@ hold whatever didn't end at =\n=.
                :documentation "Pi --session-dir, e.g. \"<ws>/.pi-sessions/\"")
   (initial-session-id nil
                       :documentation "If non-nil, try to resume this Pi session (passed as --session)")
-  (save-session-id-fn nil
-                      :documentation "Function (session-id) -> void, invoked when Pi reports a session id")
   (show-thinking claude-agent-pi-show-thinking
                  :documentation "If non-nil, route thinking_delta events as :on-token")
   ;; Runtime state
   (process nil :documentation "OS process object (set by spawn)")
+  (stderr-buffer nil :documentation "Buffer for the subprocess's stderr; killed on sentinel")
   (read-buffer "" :documentation "String accumulator for stdin-side LF-JSONL splitter")
   (session-key nil :documentation "Emacs session key (for shared verbose buffer)")
   (session-id nil :documentation "Pi session UUID (from get_state response or extension_session_started)")
@@ -209,12 +216,12 @@ tracked so =kill-emacs-hook= can drain orphans.
 #+BEGIN_SRC elisp
 (defun claude-agent-pi--verbose-log (backend text)
   "Write TEXT to the shared verbose buffer for BACKEND's session.
-Uses `claude-agent--verbose-insert' which creates the buffer on demand."
+Uses `claude-agent--verbose-insert' which creates the buffer on demand
+(loaded transitively via `claude-agent-backend')."
   (when-let* ((sk (claude-agent-pi-backend-session-key backend)))
-    (when (fboundp 'claude-agent--verbose-insert)
-      (claude-agent--verbose-insert
-       sk (format "  %s  [pi] %s"
-                  (format-time-string "%H:%M:%S") text)))))
+    (claude-agent--verbose-insert
+     sk (format "  %s  [pi] %s"
+                (format-time-string "%H:%M:%S") text))))
 #+END_SRC
 
 ** JSONL Framing
@@ -234,7 +241,12 @@ U+2028 / U+2029 which are legal inside JSON strings).
 #+BEGIN_SRC elisp
 (defun claude-agent-pi--feed-chunk (backend chunk)
   "Append CHUNK to BACKEND's read-buffer; yield complete lines via
-`claude-agent-pi--dispatch-line'."
+`claude-agent-pi--dispatch-line'.
+
+If the accumulated buffer ever exceeds `claude-agent-pi-read-buffer-cap'
+before producing a newline, the process is killed and an error logged —
+this guards against pathological large-line streams (e.g. a corrupted
+multi-MB `tools/list' response) OOM-ing Emacs."
   (let ((buf (concat (claude-agent-pi-backend-read-buffer backend) chunk)))
     (let (nl)
       (while (setq nl (string-search "\n" buf))
@@ -250,6 +262,14 @@ U+2028 / U+2029 which are legal inside JSON strings).
                (message "claude-agent-pi: dispatch error: %s\n  line: %s"
                         (error-message-string err)
                         (substring line 0 (min 200 (length line))))))))))
+    (when (> (length buf) claude-agent-pi-read-buffer-cap)
+      (claude-agent-pi--verbose-log
+       backend
+       (format "read-buffer cap exceeded (%d > %d); killing process"
+               (length buf) claude-agent-pi-read-buffer-cap))
+      (when-let* ((proc (claude-agent-pi-backend-process backend)))
+        (ignore-errors (delete-process proc)))
+      (setq buf ""))
     (setf (claude-agent-pi-backend-read-buffer backend) buf)))
 #+END_SRC
 
@@ -403,9 +423,10 @@ prompt at a time (steer/follow_up queue but only one streams)."
        backend
        (format "tool_start %s args=%s"
                (map-elt obj 'toolName)
-               (let ((args (map-elt obj 'args)))
-                 (and args (substring (json-encode args) 0
-                                      (min 120 (length (json-encode args)))))))))
+               (let* ((args (map-elt obj 'args))
+                      (encoded (and args (json-encode args))))
+                 (and encoded
+                      (substring encoded 0 (min 120 (length encoded))))))))
      ((equal type "tool_execution_end")
       (claude-agent-pi--verbose-log
        backend
@@ -449,9 +470,7 @@ prompt at a time (steer/follow_up queue but only one streams)."
     (claude-agent-pi--verbose-log
      backend
      (format "agent_end (%d msgs)"
-             (cond ((vectorp messages) (length messages))
-                   ((listp messages) (length messages))
-                   (t 0))))
+             (if (sequencep messages) (length messages) 0)))
     (when-let* ((on-complete (plist-get cbs :on-complete)))
       (ignore-errors (funcall on-complete messages)))))
 #+END_SRC
@@ -492,18 +511,15 @@ configured spawn-args."
   (let* ((base (or (claude-agent-pi-backend-spawn-args backend)
                    claude-agent-pi-spawn-default))
          (session-dir (claude-agent-pi-backend-session-dir backend))
-         (initial-sid (claude-agent-pi-backend-initial-session-id backend))
-         (args (append base (list "--mode" "rpc"))))
-    (when session-dir
-      (setq args (append args (list "--session-dir"
-                                    (expand-file-name session-dir)))))
-    (when initial-sid
-      (setq args (append args (list "--session" initial-sid))))
-    (unless session-dir
-      ;; No --session-dir means we want an ephemeral session; Pi
-      ;; supports --no-session for that.
-      (setq args (append args (list "--no-session"))))
-    args))
+         (initial-sid (claude-agent-pi-backend-initial-session-id backend)))
+    `(,@base "--mode" "rpc"
+      ,@(when session-dir
+          (list "--session-dir" (expand-file-name session-dir)))
+      ,@(when initial-sid
+          (list "--session" initial-sid))
+      ;; No --session-dir means we want an ephemeral session;
+      ;; Pi supports --no-session for that.
+      ,@(unless session-dir '("--no-session")))))
 
 (defun claude-agent-pi--spawn (backend)
   "Start the Pi subprocess for BACKEND. Returns the process.
@@ -534,6 +550,7 @@ event after the let* unwinds would see `backend' as void.  We
                   :sentinel (lambda (_p event)
                               (claude-agent-pi--sentinel bk event)))))
       (setf (claude-agent-pi-backend-process bk) proc)
+      (setf (claude-agent-pi-backend-stderr-buffer bk) stderr-buf)
       (claude-agent-pi--register bk)
       (claude-agent-pi--verbose-log
        bk (format "spawn pid=%d cmd=%s" (process-id proc)
@@ -541,7 +558,10 @@ event after the let* unwinds would see `backend' as void.  We
       proc)))
 
 (defun claude-agent-pi--sentinel (backend event)
-  "Sentinel: log process EVENT and drain pending callbacks on death."
+  "Sentinel: log process EVENT and drain pending callbacks on death.
+Also kills the stderr-buf created in `claude-agent-pi--spawn' so
+long-running Emacs sessions don't accumulate one ` *pi-stderr*' per
+spawned backend."
   (let ((proc (claude-agent-pi-backend-process backend)))
     (when (and proc (not (process-live-p proc)))
       (claude-agent-pi--verbose-log
@@ -549,7 +569,7 @@ event after the let* unwinds would see `backend' as void.  We
       (claude-agent-pi--unregister backend)
       ;; Drain any in-flight prompts with an error.
       (maphash
-       (lambda (pid cbs)
+       (lambda (_pid cbs)
          (when-let* ((on-error (plist-get cbs :on-error)))
            (ignore-errors
              (funcall on-error
@@ -557,7 +577,14 @@ event after the let* unwinds would see `backend' as void.  We
        (claude-agent-pi-backend-pending-by-id backend))
       (clrhash (claude-agent-pi-backend-pending-by-id backend))
       (setf (claude-agent-pi-backend-active-prompt-id backend) nil)
-      (setf (claude-agent-pi-backend-handshake-done backend) nil))))
+      (setf (claude-agent-pi-backend-handshake-done backend) nil)
+      ;; Drain handshake callbacks too (no-op if already drained).
+      (setf (claude-agent-pi-backend-handshake-callbacks backend) nil)
+      ;; Kill stderr-buf to release memory.
+      (when-let* ((sb (claude-agent-pi-backend-stderr-buffer backend)))
+        (when (buffer-live-p sb)
+          (kill-buffer sb))
+        (setf (claude-agent-pi-backend-stderr-buffer backend) nil)))))
 #+END_SRC
 
 ** Handshake
@@ -599,6 +626,10 @@ ON-ERROR: (string) -> void, called on spawn failure or handshake timeout."
                (unless (claude-agent-pi-backend-handshake-done backend)
                  (claude-agent-pi--verbose-log
                   backend "handshake timeout")
+                 ;; Prevent a late get_state response from also firing
+                 ;; on-ready (H1) — clear the callback list now.
+                 (setf (claude-agent-pi-backend-handshake-callbacks backend)
+                       nil)
                  (funcall on-error "Pi handshake timeout"))))))
       (error
        (funcall on-error
@@ -683,9 +714,19 @@ callbacks. Returns the prompt id as the cancellation handle.
 #+BEGIN_SRC elisp
 (cl-defmethod claude-agent-backend-cancel
   ((backend claude-agent-pi-backend) _handle)
-  "Abort the in-flight Pi prompt."
-  (when (process-live-p (claude-agent-pi-backend-process backend))
-    (claude-agent-pi--send backend '((type . "abort")))))
+  "Abort the in-flight Pi prompt.
+Sends the =abort= RPC and immediately resolves the active prompt's
+=:on-error= with \"cancelled\".  Without this, Pi would emit a normal
+=agent_end= post-abort and the caller could not distinguish completion
+from cancellation."
+  (let ((pid (claude-agent-pi-backend-active-prompt-id backend))
+        (proc (claude-agent-pi-backend-process backend)))
+    (when (process-live-p proc)
+      (ignore-errors
+        (claude-agent-pi--send backend '((type . "abort")))))
+    (when pid
+      (claude-agent-pi--fire-error backend pid "cancelled")
+      (setf (claude-agent-pi-backend-active-prompt-id backend) nil))))
 #+END_SRC
 
 *** Cleanup
@@ -811,8 +852,7 @@ exposing the internal struct constructor.
           spawn-args
           environment
           cwd
-          show-thinking
-          save-session-id-fn)
+          (show-thinking claude-agent-pi-show-thinking))
   "Construct a Pi backend instance.
 
 SESSION-KEY      Emacs session key (for shared verbose buffer).
@@ -821,8 +861,9 @@ SESSION-DIR      Pi --session-dir (absolute path). If nil, --no-session.
 SPAWN-ARGS       Override the spawn command. Defaults to `claude-agent-pi-spawn-default'.
 ENVIRONMENT      Extra env vars (list of \"NAME=VALUE\").
 CWD              Working directory for the subprocess.
-SHOW-THINKING    If non-nil, route thinking_delta as :on-token.
-SAVE-SESSION-ID-FN  (session-id) -> void, called when Pi reports a session id."
+SHOW-THINKING    If non-nil, route thinking_delta as :on-token.  Defaults
+                 to `claude-agent-pi-show-thinking'; pass an explicit nil
+                 to opt out even when the global default is t."
   (claude-agent-pi-backend--create
    :session-key session-key
    :initial-session-id session-id
@@ -830,10 +871,7 @@ SAVE-SESSION-ID-FN  (session-id) -> void, called when Pi reports a session id."
    :spawn-args spawn-args
    :environment environment
    :cwd cwd
-   :show-thinking (if (eq show-thinking nil)
-                      claude-agent-pi-show-thinking
-                    show-thinking)
-   :save-session-id-fn save-session-id-fn))
+   :show-thinking show-thinking))
 #+END_SRC
 
 ** Provide

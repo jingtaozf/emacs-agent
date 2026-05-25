@@ -13,25 +13,22 @@
 (require 'cl-lib)
 (require 'map)
 
-;; --- Load dependencies in batch (mirrors the test-acp pattern) ---
+;; --- Load dependencies (works both batch + standalone) ---
+;;
+;; In batch invocations `test-claude-agent-project-root' is set by the
+;; Makefile; standalone (M-x ert) we derive the project root from this
+;; file's path.  Either way we load backend + pi-backend exactly once.
 
-(when (boundp 'test-claude-agent-project-root)
-  (let ((root test-claude-agent-project-root))
-    (unless (featurep 'claude-agent-backend)
-      (literate-elisp-load (expand-file-name "claude-agent-backend.org" root)))
-    (unless (featurep 'claude-agent-pi-backend)
-      (literate-elisp-load
-       (expand-file-name "claude-agent-pi-backend.org" root)))))
-
-(unless (featurep 'claude-agent-pi-backend)
-  ;; Standalone invocation: search relative to this file.
-  (let* ((here (file-name-directory
-                (or load-file-name buffer-file-name)))
-         (root (expand-file-name ".." here)))
-    (add-to-list 'load-path root)
-    (require 'literate-elisp)
-    (unless (featurep 'claude-agent-backend)
-      (literate-elisp-load (expand-file-name "claude-agent-backend.org" root)))
+(let* ((root (or (and (boundp 'test-claude-agent-project-root)
+                      test-claude-agent-project-root)
+                 (expand-file-name
+                  ".."
+                  (file-name-directory (or load-file-name buffer-file-name))))))
+  (add-to-list 'load-path root)
+  (require 'literate-elisp)
+  (unless (featurep 'claude-agent-backend)
+    (literate-elisp-load (expand-file-name "claude-agent-backend.org" root)))
+  (unless (featurep 'claude-agent-pi-backend)
     (literate-elisp-load
      (expand-file-name "claude-agent-pi-backend.org" root))))
 
