@@ -453,7 +453,13 @@ prompt at a time (steer/follow_up queue but only one streams)."
      ((null delta) nil)  ;; *_start / *_end carry no delta — ignore
      ((equal sub "text_delta")
       (when-let* ((on-token (plist-get cbs :on-token)))
-        (ignore-errors (funcall on-token delta))))
+        (condition-case err
+            (funcall on-token delta)
+          (error
+           (claude-agent-pi--verbose-log
+            backend
+            (format "on-token error (delta=%S): %s"
+                    delta (error-message-string err)))))))
      ((equal sub "thinking_delta")
       (when (claude-agent-pi-backend-show-thinking backend)
         (when-let* ((on-token (plist-get cbs :on-token)))
@@ -473,8 +479,16 @@ prompt at a time (steer/follow_up queue but only one streams)."
      backend
      (format "agent_end (%d msgs)"
              (if (sequencep messages) (length messages) 0)))
+    ;; Wrap on-complete in condition-case so a hook error in the
+    ;; user's chain doesn't leak silently — the verbose buffer
+    ;; surfaces the failure for diagnosis.
     (when-let* ((on-complete (plist-get cbs :on-complete)))
-      (ignore-errors (funcall on-complete messages)))))
+      (condition-case err
+          (funcall on-complete messages)
+        (error
+         (claude-agent-pi--verbose-log
+          backend
+          (format "on-complete error: %s" (error-message-string err))))))))
 #+END_SRC
 
 *** Extension UI Stub

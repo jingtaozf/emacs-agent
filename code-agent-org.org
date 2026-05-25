@@ -1554,13 +1554,25 @@ IMPORTANT: phase 2's loop-continuation check must happen BEFORE the
 marker is freed because execute-loop-iteration needs the marker to
 find the buffer.  When the loop continues, :busy and :marker stay
 alive for the next iteration (including across run-at-time delays
-for :interval)."
+for :interval).
+
+Resilience: phase 1's hook chain (response-section insert, mode-line
+refresh, user `--complete-hook' bodies, telemetry persistence) can
+raise — historically a hook error short-circuited phase 2 and left
+the session permanently `:busy t', queuing every subsequent
+`C-c C-c'.  Wrap phase 1 in `condition-case' so the failure is
+recorded but `--complete-finish-or-loop' always runs.  2026-05-25
+multi-block regression caught by `test-e2e-pi-multiblock'."
   (let ((trace-ctx (code-agent-org--session-get session-key :trace-ctx)))
     (claude-agent-with-span "handle-complete"
         (code-agent-org--complete-span-attrs session-key result)
         trace-ctx
       (code-agent-org--stop-spinner session-key)
-      (code-agent-org--complete-fire-hooks session-key result)
+      (condition-case err
+          (code-agent-org--complete-fire-hooks session-key result)
+        (error
+         (message "code-agent-org: complete-fire-hooks raised: %s"
+                  (error-message-string err))))
       (code-agent-org--complete-finish-or-loop session-key))))
 #+END_SRC
 

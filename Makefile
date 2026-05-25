@@ -365,6 +365,17 @@ test-e2e-pi:
 		-l tests/test-e2e-pi-backend.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :e2e-pi))"
 
+# Multi-block same-workspace E2E.  Drives `code-agent-org-execute'
+# (the real C-c C-c path) against a 3-block fixture, asserting one Pi
+# PID across blocks 1+2 and Pi respawn after block-3 kill.  Requires
+# the full org integration stack (loaded via claude-code.el).
+.PHONY: test-e2e-pi-multiblock
+test-e2e-pi-multiblock:
+	@echo "Running Pi multi-block same-workspace E2E..."
+	$(BATCH) $(LOAD_PATH) -L tests/support \
+		-l tests/test-e2e-pi-multiblock.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :e2e-pi-multiblock))"
+
 # Tangle the Pi extension .org → ~/.pi/agent/extensions/emacs-mcp.ts.
 # Per the user's decision, the .ts is installed at $HOME (not repo-local)
 # so multiple consumer repos share one extension.
