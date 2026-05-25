@@ -411,6 +411,7 @@ test-org-unit:
 		-l tests/test-mcp-report-invocation.el \
 		-l tests/test-plugin-discovery.el \
 		-l tests/test-code-agent-org-edge-cases.el \
+		-l tests/test-code-agent-org-resolve-backend.el \
 		-l tests/test-slash-completion.el \
 		-l tests/test-code-agent-org-loop-detection.el \
 		-l tests/test-code-agent-org-pre-completion.el \

@@ -329,6 +329,42 @@ the property (e.g. \"json-stream\" → \"claude-code\")."
                prop-value))
     (funcall constructor session-key options)))
 
+(defun code-agent-org--resolve-backend (session-key options)
+  "Return the backend for SESSION-KEY, invalidating the cache if the
+=:CLAUDE_BACKEND:= org property changed since the cached backend was
+constructed.
+
+Without invalidation the session's =:backend= slot is sticky: setting
+=:CLAUDE_BACKEND: pi= on a heading whose session previously ran on
+=cmux= silently keeps dispatching to the old cmux backend.  This was
+the user-reported 2026-05-25 bug.
+
+Mechanism: cache both the backend struct (slot =:backend=) and the
+=CLAUDE_BACKEND= string used to build it (slot =:backend-property=).
+On every resolve, compare current property against cached property —
+mismatch ⇒ `claude-agent-backend-cleanup' on the stale struct +
+rebuild via `code-agent-org--make-default-backend' + cache both new
+slots atomically.
+
+OPTIONS is forwarded to the constructor (plist with :cwd etc.)."
+  (let* ((current-prop (code-agent-org--get-org-property "CLAUDE_BACKEND" t))
+         (cached       (code-agent-org--session-get session-key :backend))
+         (cached-prop  (code-agent-org--session-get session-key :backend-property)))
+    (cond
+     ;; Cache hit — property unchanged since last dispatch.
+     ((and cached (equal current-prop cached-prop))
+      cached)
+     ;; Cache miss or property change — cleanup old (if any) + rebuild.
+     (t
+      (when cached
+        (message "code-agent-org: CLAUDE_BACKEND changed (%s → %s); rebuilding backend"
+                 (or cached-prop "?") (or current-prop "?"))
+        (ignore-errors (claude-agent-backend-cleanup cached)))
+      (let ((fresh (code-agent-org--make-default-backend session-key options)))
+        (code-agent-org--session-put session-key :backend fresh)
+        (code-agent-org--session-put session-key :backend-property current-prop)
+        fresh)))))
+
 #+END_SRC
 
 * Lifecycle Hooks

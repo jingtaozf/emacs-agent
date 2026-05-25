@@ -15,55 +15,6 @@
   - [[#features][Features]]
   - [[#usage-example][Usage Example]]
 - [[#dependencies][Dependencies]]
-- [[file:code-agent-org-customize.org::#overview][Customization (extracted module)]]
-- [[#session-management][Session Management]]
-  - [[#file-level-property-lookup][File-Level Property Lookup]]
-  - [[#session-id-functions][Session ID Functions]]
-  - [[#session-scope-detection][Session Scope Detection]]
-  - [[#sdk-uuid-management][SDK UUID Management]]
-  - [[#session-recovery][Session Recovery]]
-- [[file:code-agent-org-env-permission.org::#overview][Environment + Permission Mode (extracted module)]]
-- [[file:code-agent-org-project-prompts.org::#overview][Project Configuration + System Prompts (extracted module)]]
-- [[#process-management][Process Management]]
-  - [[#session-state-cross-reference][Session State Cross-Reference]]
-  - [[#persistent-client-registry][Persistent Client Registry]]
-    - [[#the-entry-class][The Entry Class]]
-    - [[#the-registry-class--singleton][The Registry Class + Singleton]]
-    - [[#customization-1][Customization]]
-    - [[#lookup][Lookup]]
-    - [[#registration--activity][Registration + Activity]]
-    - [[#disconnection][Disconnection]]
-    - [[#enumeration][Enumeration]]
-    - [[#backend-registry-dispatch][Backend Registry Dispatch]]
-  - [[#lifecycle-hooks][Lifecycle Hooks]]
-  - [[#query-id-system][Query-ID System]]
-    - [[file:code-agent-org-response.org][Query-ID Generation (see code-agent-org-response.org)]]
-    - [[#response-section-creation][Response Section Creation]]
-    - [[#query-id-based-response-lookup][Query-ID Based Response Lookup]]
-    - [[#marker-free-token-insertion][Marker-Free Token Insertion]]
-  - [[#marker-lifecycle-management][Marker Lifecycle Management]]
-  - [[file:code-agent-org-queue.org][Pending Block Queue (see code-agent-org-queue.org)]]
-  - [[#execution-status-property][Execution Status Property]]
-- [[#behavior-prompts][Behavior Prompts]]
-  - [[#the-living-workspace-model][The Living Workspace Model]]
-    - [[#two-channels-same-session][Two Channels, Same Session]]
-    - [[#active_story-lifecycle][=ACTIVE_STORY= Lifecycle]]
-    - [[#per-story-system-prompt][Per-Story System Prompt]]
-  - [[#workspace-root-detection][Workspace Root Detection]]
-    - [[#workspace-heading-navigation][Workspace Heading Navigation]]
-    - [[#active_story-tracking][ACTIVE_STORY Tracking]]
-    - [[#story-navigation][Story Navigation]]
-    - [[#custom_id-utilities][CUSTOM_ID Utilities]]
-    - [[#custom_id-generation][CUSTOM_ID Generation]]
-  - [[#collect-current-context][Collect Current Context]]
-- [[#block-detection][Block Detection]]
-  - [[#section-level-detection][Section Level Detection]]
-  - [[#ai-block-boundary-detection][AI Block Boundary Detection]]
-  - [[#block-content-replacement][Block Content Replacement]]
-  - [[#output-section-and-instruction-detection][Output Section and Instruction Detection]]
-    - [[#design-note-instruction-identification][Design Note: Instruction Identification]]
-    - [[#copilot-title-generator-class][Copilot Title Generator Class]]
-    - [[#backend-dispatch][Backend Dispatch]]
 - [[#block-insertion][Block Insertion]]
   - [[#instruction-numbering][Instruction Numbering]]
   - [[#standard-block-insertion][Standard Block Insertion]]
@@ -81,8 +32,6 @@
   - [[#company-backend][Company Backend]]
 - [[#response-handling][Response Handling]]
   - [[#response-section-boundary-detection][Response Section Boundary Detection]]
-  - [[file:code-agent-org-response.org][Debounced Font-Lock (see code-agent-org-response.org)]]
-  - [[file:code-agent-org-response.org][Header Normalization (see code-agent-org-response.org)]]
   - [[#token-handling][Token Handling]]
   - [[#message-handling][Message Handling]]
   - [[#error-handling][Error Handling]]
@@ -1861,11 +1810,12 @@ If the session is busy, queues the block for execution when current query comple
     ;; full launch/send/register dance and returns; response delivery is
     ;; the bridge's job.
     (let* ((mux-options (list :cwd default-directory))
-           (mux-backend (or (code-agent-org--session-get session-key :backend)
-                            (code-agent-org--make-default-backend
-                             session-key mux-options))))
+           ;; `--resolve-backend' invalidates + rebuilds when the cached
+           ;; backend's CLAUDE_BACKEND no longer matches the property at
+           ;; point; without it, switching :CLAUDE_BACKEND: silently keeps
+           ;; dispatching to the previously-used backend.
+           (mux-backend (code-agent-org--resolve-backend session-key mux-options)))
       (when (cl-typep mux-backend 'claude-agent-multiplexer-backend)
-        (code-agent-org--session-put session-key :backend mux-backend)
         ;; If multiplexer session is already busy, queue this block instead
         ;; of firing a second prompt in parallel.  Mux dispatch had been
         ;; placed BEFORE the queue check, so two C-c C-c invocations would
@@ -2105,8 +2055,9 @@ Stores the resulting backend and query handle in the session."
             :session-key session-key) nil
   (let* ((props (plist-put props :session-key session-key))
          (options (plist-get props :options))
-         (backend (or (code-agent-org--session-get session-key :backend)
-                      (code-agent-org--make-default-backend session-key options)))
+         ;; Property-aware resolution — see `code-agent-org--resolve-backend'
+         ;; rationale.  Caches both struct + originating CLAUDE_BACKEND.
+         (backend (code-agent-org--resolve-backend session-key options))
          ;; Protocol 3 dispatch — see claude-agent-backend.org
          ;; §Org-Integration Protocol.  `block-info' is the plist the
          ;; generic contract expects; the default method unpacks it
@@ -2117,8 +2068,8 @@ Stores the resulting backend and query handle in the session."
                            :props props
                            :session-key session-key))
          (handle (claude-org-backend-execute-block backend block-info)))
-    ;; Store backend and handle in session
-    (code-agent-org--session-put session-key :backend backend)
+    ;; `--resolve-backend' already cached :backend + :backend-property;
+    ;; only the handle still needs storing here.
     (code-agent-org--session-put session-key :query-handle handle)
     ;; Update persistent client activity if applicable
     (when (claude-agent-backend-supports-p backend :persistent-client)
@@ -2465,9 +2416,7 @@ their workspace / tab.  Agent backends default to a user-error
   (interactive)
   (let* ((session-key (code-agent-org--current-session-key))
          (options (list :cwd default-directory))
-         (backend (or (code-agent-org--session-get session-key :backend)
-                      (code-agent-org--make-default-backend
-                       session-key options))))
+         (backend (code-agent-org--resolve-backend session-key options)))
     (claude-org-backend-open-terminal-tab backend)))
 #+END_SRC
 
