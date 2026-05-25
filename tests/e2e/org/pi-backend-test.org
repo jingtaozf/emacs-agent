@@ -1,0 +1,157 @@
+# -*- mode: org; eval: (code-agent-org-mode 1) -*-
+#+TITLE: Pi Backend E2E Fixture
+#+PROPERTY: LITERATE_ORG_LANGUAGES ai
+#+PROPERTY: PROJECT_ROOT /Users/jingtao/projects/claude-agent
+
+* Pi Backend Test Workspace
+:PROPERTIES:
+:CUSTOM_ID: pi-e2e-workspace
+:CLAUDE_BACKEND: pi
+:CLAUDE_SESSION_ID: pi-e2e-fixture
+:END:
+
+This file is the canonical *fixture* for the Pi backend's end-to-end
+test suite. Each story below is a self-contained prompt + expected
+outcome; the runner at =tests/test-e2e-pi-backend.el= reads the
+properties of every =:pi-e2e:= tagged heading, drives the prompt
+through =claude-agent-pi-backend=, and asserts against =EXPECTED=.
+
+The stories progress from simple (text-only round trip) to the
+bi-directional Pi-↔-Emacs integration enabled by the
+=emacs-mcp.ts= extension.
+
+Why a fixture file and not pure elisp? Two reasons:
+
+1. *Reviewable* — a human reader can scan the prompts + expected
+   outcomes without parsing elisp.
+2. *Future C-c C-c usable* — once A3 wires the dispatch path
+   (=CLAUDE_BACKEND="pi"= in =code-agent-org-execute=), the same
+   stories run interactively as well as in the test harness.
+
+Properties consumed by the runner:
+
+| Property | Required | Meaning |
+|----------|----------|---------|
+| =CUSTOM_ID= | yes | Stable anchor, also used as test name |
+| =EXPECTED= | yes | Substring that must appear in the streamed tokens |
+| =TIMEOUT= | yes | Seconds to wait for =on-complete= or =on-error= |
+| =NEEDS= | no | Comma list of extras to skip-unless: =mcp=, =extension= |
+| =CANCEL_AFTER= | no | Seconds — if set, send =backend-cancel= mid-flight |
+| =SHOW_THINKING= | no | If =yes=, route =thinking_delta= as tokens too |
+
+** Story 1 — simple-query :pi-e2e:
+:PROPERTIES:
+:CUSTOM_ID: pi-e2e-simple-query
+:EXPECTED: MARKER_ALPHA
+:TIMEOUT: 45
+:END:
+
+Simplest possible round-trip: ask for a literal marker string and
+verify it lands in the token stream. This is the smoke for the
+entire spawn → handshake → prompt → text_delta → complete chain.
+
+#+begin_src ai
+Reply with exactly the text MARKER_ALPHA and nothing else. No punctuation, no quotes.
+#+end_src
+
+** Story 2 — multi-line-streaming :pi-e2e:
+:PROPERTIES:
+:CUSTOM_ID: pi-e2e-multiline
+:EXPECTED: BETA_THREE
+:TIMEOUT: 60
+:END:
+
+A reply that forces multiple =text_delta= events so we exercise the
+token concatenation path. The =EXPECTED= marker is in the last line
+so the test only passes if every chunk made it through the filter
+without loss.
+
+#+begin_src ai
+Reply with exactly these three lines, one per line, no other text:
+BETA_ONE
+BETA_TWO
+BETA_THREE
+#+end_src
+
+** Story 3 — cancel-mid-stream :pi-e2e:
+:PROPERTIES:
+:CUSTOM_ID: pi-e2e-cancel
+:EXPECTED:
+:TIMEOUT: 30
+:CANCEL_AFTER: 2.0
+:END:
+
+Start a long generation, send =abort= after 2 s, verify the callback
+chain terminates promptly (within TIMEOUT). =EXPECTED= is empty —
+the test asserts ON-COMPLETE-OR-ERROR fires, not specific content.
+
+#+begin_src ai
+Count slowly from 1 to 200, one number per line, with a brief commentary on the mathematical significance of each number.
+#+end_src
+
+** Story 4 — mcp-buffer-list :pi-e2e:
+:PROPERTIES:
+:CUSTOM_ID: pi-e2e-mcp-buffer-list
+:EXPECTED: FOUND_BUFFERS
+:TIMEOUT: 60
+:NEEDS: mcp,extension
+:END:
+
+The LLM is asked to invoke =emacs_buffer_list=. This exercises the
+*bi-directional loop* — Pi → extension → MCP HTTP → host Emacs →
+back. Without the Pi extension installed and the MCP server running,
+this story is skipped.
+
+#+begin_src ai
+Use the emacs_buffer_list tool with pattern="scratch" to find scratch buffer names.
+Once you have the result, reply with exactly: FOUND_BUFFERS
+#+end_src
+
+** Story 5 — mcp-org-property :pi-e2e:
+:PROPERTIES:
+:CUSTOM_ID: pi-e2e-mcp-property
+:EXPECTED: pi
+:TIMEOUT: 60
+:NEEDS: mcp,extension
+:END:
+
+A more interesting MCP call: read the =CLAUDE_BACKEND= property of
+the workspace heading in this very fixture file. The expected value
+is =pi= (set at the workspace heading above). Tests that the LLM
+can introspect the literate-org structure that drives it.
+
+#+begin_src ai
+Use the emacs_org_get_property tool with these arguments:
+- buffer = "pi-backend-test.org"
+- heading = "#pi-e2e-workspace"
+- property = "CLAUDE_BACKEND"
+
+Then reply with just the returned value and nothing else.
+#+end_src
+
+** Story 6 — confirm-gate (manual) :pi-e2e-manual:
+:PROPERTIES:
+:CUSTOM_ID: pi-e2e-confirm-gate
+:END:
+
+The =emacs_eval= tool is gated by an interactive =ctx.ui.confirm=
+dialog in the Pi extension. In headless test runs the gate refuses
+(no UI to confirm), and the LLM's reaction to a refused tool is
+non-deterministic — sometimes it tries again, sometimes it
+gracefully explains. This story is intentionally *not* in the
+automated runner; it's here as the canonical manual-verification
+scenario.
+
+How to verify manually:
+
+1. =M-x emacs-mcp-server-start=
+2. =EMACS_MCP_VERBOSE=1 pi= (interactive TUI)
+3. Send the prompt below
+4. Confirm the =Allow emacs_eval?= dialog appears
+5. Press =n= — LLM should fall back to text-only reasoning
+6. Re-run with =EMACS_MCP_ALLOW_EVAL=1 pi= and confirm the gate is
+   skipped
+
+#+begin_src ai
+Use the emacs_eval tool with code="(+ 1 2 3 4 5)" and report the result.
+#+end_src

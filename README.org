@@ -14,6 +14,10 @@
   - [[#what-is-emacs-claude-agent][What is Emacs Claude Agent?]]
   - [[#why-org-mode-as-the-ui][Why Org-mode as the UI?]]
   - [[#modules][Modules]]
+    - [[#architecture][Architecture]]
+    - [[#terminal-backends][Terminal Backends]]
+    - [[#acp-backends-multi-agent-opencode-gemini-codex][ACP Backends (multi-agent: OpenCode, Gemini, Codex)]]
+    - [[#pi-backend-pidev--deepseek--15-providers][Pi Backend (pi.dev — DeepSeek / 15+ providers)]]
 - [[#tutorial][Tutorial]]
   - [[#step-1-prerequisites--installation][Step 1: Prerequisites & Installation]]
     - [[#prerequisites][Prerequisites]]
@@ -35,7 +39,10 @@
     - [[#section-scoped-sessions][Section-Scoped Sessions]]
     - [[#session-recovery][Session Recovery]]
   - [[#step-6-sdd-spec-driven-development][Step 6: SDD (Spec-Driven Development)]]
+    - [[#docs-as-the-single-source-of-truth][docs/ as the Single Source of Truth]]
+    - [[#notebook-structure][Notebook Structure]]
     - [[#creating-an-sdd-structure][Creating an SDD Structure]]
+    - [[#docs-file-format-configuration][Docs File Format Configuration]]
     - [[#workflow-phases][Workflow Phases]]
     - [[#key-principles][Key Principles]]
 - [[#features][Features]]
@@ -47,19 +54,19 @@
     - [[#built-in-permission-functions][Built-in Permission Functions]]
     - [[#pattern-based-permissions][Pattern-Based Permissions]]
     - [[#custom-permission-functions][Custom Permission Functions]]
-    - [[#org-file-protection][Org File Protection]]
   - [[#permission-modes][Permission Modes]]
     - [[#permission-presets][Permission Presets]]
     - [[#in-code-agent-org-mode-1][In code-agent-org-mode]]
     - [[#pattern-syntax][Pattern Syntax]]
   - [[#ide-context][IDE Context]]
     - [[#excluding-buffers][Excluding Buffers]]
-  - [[#ref-docker-sandbox][Docker Sandbox Support]]
-    - [[#quick-start-1][Quick Start]]
+  - [[#docker-sandbox-support][Docker Sandbox Support]]
+    - [[#quick-start][Quick Start]]
     - [[#file-properties-for-docker][File Properties for Docker]]
     - [[#per-section-docker-configuration][Per-Section Docker Configuration]]
     - [[#path-translation][Path Translation]]
     - [[#docker-commands][Docker Commands]]
+    - [[#testing-docker-integration][Testing Docker Integration]]
   - [[#project-configuration-code-agent-org][Project Configuration (code-agent-org)]]
     - [[#project_root][PROJECT_ROOT]]
     - [[#system-prompts][System Prompts]]
@@ -67,10 +74,21 @@
   - [[#org-link-resolution][Org Link Resolution]]
     - [[#supported-link-types][Supported Link Types]]
     - [[#usage-example][Usage Example]]
+  - [[#prompt-templates][Prompt Templates]]
+    - [[#directory-structure][Directory Structure]]
+    - [[#creating-custom-prompts][Creating Custom Prompts]]
+    - [[#configuration][Configuration]]
+  - [[#ai-block-templates][AI Block Templates]]
+    - [[#built-in-templates][Built-in Templates]]
+    - [[#customizing-templates][Customizing Templates]]
+    - [[#writing-dynamic-templates][Writing Dynamic Templates]]
   - [[#behavior-prompts-tagheader-system][Behavior Prompts (Tag/Header System)]]
     - [[#phase-tags][Phase Tags]]
     - [[#modifier-tags][Modifier Tags]]
     - [[#header-arguments][Header Arguments]]
+    - [[#specialized-tags][Specialized Tags]]
+    - [[#default-tags-claude_tags-property][Default Tags (CLAUDE_TAGS Property)]]
+- [[#my-project][My Project]]
   - [[#mcp-server-emacs-tools-for-claude][MCP Server (Emacs Tools for Claude)]]
     - [[#manual-control][Manual Control]]
     - [[#available-tools][Available Tools]]
@@ -79,24 +97,19 @@
     - [[#header-normalization][Header Normalization]]
     - [[#auto-line-breaking][Auto Line Breaking]]
     - [[#auto-title-generation][Auto Title Generation]]
-  - [[#ref-scheduled-execution][Scheduled AI Block Execution]]
+  - [[#scheduled-ai-block-execution][Scheduled AI Block Execution]]
     - [[#requirements][Requirements]]
-    - [[#setup-1][Setup]]
+    - [[#setup][Setup]]
     - [[#example][Example]]
     - [[#repeating-schedules][Repeating Schedules]]
     - [[#how-it-works-1][How It Works]]
     - [[#commands][Commands]]
-  - [[#ref-timestamped-responses][Timestamped Response Sections]]
+  - [[#timestamped-response-sections][Timestamped Response Sections]]
     - [[#response-structure][Response Structure]]
     - [[#benefits][Benefits]]
     - [[#loop-execution][Loop Execution]]
   - [[#error-analysis][Error Analysis]]
-    - [[#usage][Usage]]
-    - [[#automatic-analysis-recommended][Automatic Analysis (Recommended)]]
   - [[#activity-mode-line][Activity Mode-Line]]
-  - [[#usage-mode-line][Usage Mode-Line]]
-    - [[#setup][Setup]]
-    - [[#usage-1][Usage]]
   - [[#verbose-output-buffers][Verbose Output Buffers]]
   - [[#skills-user-settings][Skills (User Settings)]]
     - [[#setting-sources][Setting Sources]]
@@ -116,15 +129,16 @@
     - [[#session-issues][Session Issues]]
     - [[#permission-issues][Permission Issues]]
     - [[#mcp-server-issues][MCP Server Issues]]
-    - [[#faq-docker][Docker Issues]]
+    - [[#docker-issues][Docker Issues]]
     - [[#org-mode-issues][Org-mode Issues]]
 - [[#appendix][Appendix]]
   - [[#related-projects][Related Projects]]
     - [[#reference-implementation][Reference Implementation]]
     - [[#dependencies][Dependencies]]
+    - [[#methodology][Methodology]]
     - [[#alternative-approaches][Alternative Approaches]]
   - [[#running-tests][Running Tests]]
-    - [[#quick-start][Quick Start]]
+    - [[#quick-start-1][Quick Start]]
     - [[#running-tests-in-emacs][Running Tests in Emacs]]
   - [[#license][License]]
 
@@ -415,6 +429,85 @@ All settings can be set as org properties at the file or subtree level:
 Individual subtrees override by adding their own =:CLAUDE_BACKEND:=
 property.  Mix and match — one subtree runs OpenCode, another Gemini,
 another the default claude-code Claude, all in the same file.
+
+*** Pi Backend (pi.dev — DeepSeek / 15+ providers)
+:PROPERTIES:
+:CUSTOM_ID: pi-backend
+:END:
+
+The *Pi* backend embeds [[https://github.com/earendil-works/pi][pi.dev]], a minimal MIT-licensed coding-agent
+harness with 15+ LLM providers (Anthropic, OpenAI, DeepSeek, Google,
+Bedrock, OpenRouter, …). Unlike the ACP backends, Pi has its own
+provider/model/auth configuration (=~/.pi/agent/settings.json= +
+=auth.json=) — set it once via =pi config= and the same Pi install
+serves every project on the machine.
+
+The integration is *bi-directional* via a Pi-side TypeScript
+extension that calls back into the Emacs MCP server:
+
+#+begin_example
+  Emacs  ──RPC──►  pi --mode rpc  ──tool call──►  Pi extension
+    ▲                                                    │
+    │                                                    │ HTTP
+    └──MCP /eval──── emacs-mcp-server ◄──────────────────┘
+#+end_example
+
+So the LLM running inside Pi can read your buffers, navigate org
+headings, get properties — not just produce text.
+
+**** Install
+
+#+begin_src bash :load no
+,# 1. pi binary (one-time, machine-global)
+npm install -g @earendil-works/pi-coding-agent
+pi config   # configure default provider/model + API key
+
+,# 2. Pi-side extension that bridges to Emacs MCP server
+make tangle-pi-extension
+,# → writes ~/.pi/agent/extensions/emacs-mcp.ts
+
+,# 3. opt-in load (in your init.el)
+,#    (literate-elisp-load ".../claude-agent-pi-backend.org")
+#+end_src
+
+**** Org property
+
+#+begin_example
+,* Pi-driven subtree
+:PROPERTIES:
+:CLAUDE_BACKEND: pi
+:END:
+
+,#+begin_src ai
+Use the emacs_buffer_list tool to find buffers containing
+"test", then summarise what they test.
+,#+end_src
+#+end_example
+
+Press =C-c C-c=. The LLM (whichever model your Pi settings select)
+will call =emacs_buffer_list= via the extension, get a real answer
+from the live Emacs session, and stream the summary back.
+
+**** Tools exposed to the Pi-side LLM
+
+| Tool | Purpose |
+|------+---------|
+| =emacs_eval= | Run arbitrary elisp — gated by confirm dialog (=EMACS_MCP_ALLOW_EVAL=1= to bypass) |
+| =emacs_org_get_property= | Read a property at a given heading |
+| =emacs_org_navigate= | Read the body of a heading subtree |
+| =emacs_buffer_read= / =_list= | Inspect buffer contents / names |
+| =emacs_report_invocation= | Declare skill / rule usage (shows in Phoenix traces) |
+
+**** Verify the install
+
+#+begin_src bash :load no
+make test-pi-backend         # 8 smoke tests, hermetic, <1 s
+make test-pi-backend-live    # 4 live tests against real pi (12 s)
+make test-e2e-pi             # 5 fixture stories (24 s)
+#+end_src
+
+The fixture file =tests/e2e/org/pi-backend-test.org= is the
+canonical place to add new test stories.
 
 * Tutorial
 :PROPERTIES:

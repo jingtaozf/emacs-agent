@@ -1,0 +1,540 @@
+# -*- mode: org; -*-
+#+TITLE: Claude Agent — Pi Extension (Emacs MCP bridge)
+#+PROPERTY: header-args:typescript :tangle ~/.pi/agent/extensions/emacs-mcp.ts :mkdirp yes :comments no
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA 6829b0532227efa4e9fd99ad2fb593f836e2bc8e
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-25T09:42:44Z
+
+* Claude Agent — Pi Extension (Emacs MCP bridge)
+:PROPERTIES:
+:CUSTOM_ID: pi-extension-overview
+:END:
+
+** Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-overview
+:END:
+
+A Pi-side TypeScript extension that exposes a handful of *Emacs tools*
+to whichever LLM Pi is driving. When Pi is the backend for an Emacs
+=#+begin_src ai= block (via =claude-agent-pi-backend.org=), this
+extension closes the loop:
+
+#+begin_example
+,#+begin_src ai      Emacs
+   │                                                              ▲
+   │  prompt                                            tool result│
+   ▼                                                              │
+pi --mode rpc ───► LLM ───► emacs_* tool call ──► this extension ─┘
+                                                       │
+                                                       │ POST /mcp
+                                                       ▼
+                                            emacs-mcp-server (port 9999)
+                                                       │
+                                                       ▼
+                                            evalElisp on host Emacs
+#+end_example
+
+The LLM running inside Pi can now say "read buffer X", "get the
+=CLAUDE_BACKEND= property of this heading", "run this elisp" — and
+get a real answer from the user's live Emacs session, not a
+hallucination.
+
+** Concerns owned
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-concerns
+:END:
+
+| Concern | Where |
+|---------|-------|
+| Discover MCP server URL | =Configuration= |
+| Wrap =evalElisp= in higher-level tools | =Tool implementations= |
+| Pre-execution safety gate for =emacs_eval= | =Confirm gate= |
+| MCP health check at session start | =Lifecycle hooks= |
+| Stable JSON-RPC client (id correlation, error mapping) | =MCP HTTP client= |
+
+** Install
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-install
+:END:
+
+This module tangles to =~/.pi/agent/extensions/emacs-mcp.ts=
+(=:mkdirp yes= creates the directory if missing). Pi auto-discovers
+=.ts= files in that directory at startup. Hot-reload via the
+=/reload= command inside Pi.
+
+Build / install:
+
+#+begin_example
+make tangle-pi-extension          # writes the .ts
+pi config                          # (optional) verify it's listed
+,# then start any Pi RPC session via the Emacs backend
+#+end_example
+
+Uninstall:
+
+#+begin_example
+rm ~/.pi/agent/extensions/emacs-mcp.ts
+#+end_example
+
+The =.ts= file is *tangle output*. Per the project's literate hook
+(=block-tangled-edit.sh=), never edit it directly — edit this =.org=
+and re-tangle.
+
+** Configuration
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-config
+:END:
+
+Per the dual-audience reader principle: configuration constants live
+at the top so a reader's first encounter with the module surfaces the
+knobs immediately.
+
+| Env var | Default | Role |
+|---------|---------|------|
+| =EMACS_MCP_URL= | =http://localhost:9999/mcp= | Endpoint of the Emacs MCP HTTP server |
+| =EMACS_MCP_TIMEOUT_MS= | =5000= | Per-call HTTP timeout |
+| =EMACS_MCP_ALLOW_EVAL= | (unset) | =1= → skip the confirm gate for =emacs_eval= |
+| =EMACS_MCP_VERBOSE= | (unset) | =1= → log every MCP call to stderr |
+
+#+begin_src typescript
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+
+const MCP_URL = process.env.EMACS_MCP_URL ?? "http://localhost:9999/mcp";
+const MCP_TIMEOUT_MS = Number(process.env.EMACS_MCP_TIMEOUT_MS ?? "5000");
+const ALLOW_EVAL = process.env.EMACS_MCP_ALLOW_EVAL === "1";
+const VERBOSE = process.env.EMACS_MCP_VERBOSE === "1";
+
+const vlog = (msg: string): void => {
+	if (VERBOSE) process.stderr.write(`[emacs-mcp] ${msg}\n`);
+};
+#+end_src
+
+** MCP HTTP client
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-mcp-client
+:END:
+
+A single helper that POSTs a JSON-RPC 2.0 =tools/call= request and
+returns the unwrapped result string. Errors are surfaced as thrown
+=Error= objects whose message is shaped for direct return to the LLM.
+
+The =emacs-mcp-server= treats every call as independent (no =initialize=
+handshake required for stateless tool invocation), so we don't bother
+with session tracking.
+
+#+begin_src typescript
+let nextRpcId = 1;
+
+interface McpToolResult {
+	content?: Array<{ type: string; text?: string }>;
+	isError?: boolean;
+}
+
+async function callMcpTool(toolName: string, args: Record<string, unknown>): Promise<string> {
+	const id = nextRpcId++;
+	const body = JSON.stringify({
+		jsonrpc: "2.0",
+		id,
+		method: "tools/call",
+		params: { name: toolName, arguments: args },
+	});
+	vlog(`tools/call ${toolName} ${JSON.stringify(args).slice(0, 200)}`);
+
+	const ac = new AbortController();
+	const timer = setTimeout(() => ac.abort(), MCP_TIMEOUT_MS);
+	let resp: Response;
+	try {
+		resp = await fetch(MCP_URL, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body,
+			signal: ac.signal,
+		});
+	} catch (err) {
+		throw new Error(`Emacs MCP unreachable at ${MCP_URL}: ${err instanceof Error ? err.message : String(err)}`);
+	} finally {
+		clearTimeout(timer);
+	}
+
+	if (!resp.ok) {
+		throw new Error(`Emacs MCP HTTP ${resp.status}: ${await resp.text()}`);
+	}
+	const payload = (await resp.json()) as {
+		result?: McpToolResult;
+		error?: { code?: number; message?: string };
+	};
+	if (payload.error) {
+		throw new Error(`Emacs MCP error ${payload.error.code ?? ""}: ${payload.error.message ?? "unknown"}`);
+	}
+	const result = payload.result;
+	if (!result) return "";
+	if (result.isError) {
+		const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
+		throw new Error(`Emacs tool failed: ${text || "no detail"}`);
+	}
+	return (result.content ?? []).map((c) => c.text ?? "").join("\n");
+}
+#+end_src
+
+*** evalElisp wrapper
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-evalelisp
+:END:
+
+Every high-level tool ultimately calls =evalElisp= with a precomputed
+elisp expression — the MCP server only exposes =evalElisp= and
+=report_invocation=, everything else is constructed here from elisp
+primitives.
+
+#+begin_src typescript
+async function evalElisp(code: string): Promise<string> {
+	return callMcpTool("evalElisp", { code });
+}
+
+/** Quote a JS string as an elisp string literal — escapes \ and ". */
+function elispString(s: string): string {
+	return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+#+end_src
+
+** Tool implementations
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-tools
+:END:
+
+Six tools, designed for the operations an LLM most often needs to do
+when reasoning about a literate-programming Emacs session: read
+buffers, navigate headings, get properties, run elisp, list buffers,
+and report skill invocations.
+
+*** emacs_eval
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-tool-eval
+:END:
+
+The lowest-level, most dangerous tool — runs arbitrary elisp. Gated
+by the =tool_call= hook below (the LLM cannot bypass the gate).
+
+#+begin_src typescript
+const EVAL_PARAMS = Type.Object({
+	code: Type.String({ description: "Elisp expression to evaluate in the host Emacs." }),
+});
+
+function registerEvalTool(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "emacs_eval",
+		label: "Emacs eval",
+		description:
+			"Evaluate an arbitrary Elisp expression in the host Emacs and return the printed result. " +
+			"USE SPARINGLY — prefer the more specific emacs_buffer_read / emacs_org_get_property tools. " +
+			"This tool is gated by user confirmation by default.",
+		promptSnippet: "Use emacs_eval only when no narrower tool fits and you need raw Emacs introspection.",
+		parameters: EVAL_PARAMS,
+		async execute(_callId, { code }) {
+			const out = await evalElisp(code);
+			return { content: [{ type: "text", text: out }] };
+		},
+	});
+}
+#+end_src
+
+*** emacs_org_get_property
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-tool-getprop
+:END:
+
+Reads an org property at a given heading. =heading= can be either
+the literal heading text (e.g. =* Test Dev Workspace=) or a
+=CUSTOM_ID= prefixed with =#=. =buffer= names the org buffer.
+
+#+begin_src typescript
+const GETPROP_PARAMS = Type.Object({
+	buffer: Type.String({ description: "Org buffer name, e.g. 'workspace-test.org'." }),
+	heading: Type.String({
+		description:
+			"Either the heading text (e.g. '* Test Dev Workspace') or a CUSTOM_ID prefixed with '#' (e.g. '#e2e-test-dev-workspace').",
+	}),
+	property: Type.String({ description: "Property name (case-insensitive), e.g. 'CLAUDE_BACKEND'." }),
+});
+
+function registerGetPropTool(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "emacs_org_get_property",
+		label: "Org property",
+		description:
+			"Get an org property from a heading in a given org buffer. Returns the property value as a string, or empty string if absent.",
+		parameters: GETPROP_PARAMS,
+		async execute(_callId, { buffer, heading, property }) {
+			const code = `
+(with-current-buffer ${elispString(buffer)}
+  (save-excursion
+    (let ((case-fold-search t)
+          (h ${elispString(heading)}))
+      (goto-char (point-min))
+      (cond
+       ((string-prefix-p "#" h)
+        (org-link-search (concat "#" (substring h 1))))
+       (t (re-search-forward (concat "^" (regexp-quote h) "$"))))
+      (or (org-entry-get nil ${elispString(property)} t) ""))))`;
+			const out = await evalElisp(code);
+			return { content: [{ type: "text", text: out }] };
+		},
+	});
+}
+#+end_src
+
+*** emacs_org_navigate
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-tool-nav
+:END:
+
+Returns the body (prose + first src block) of a specific heading.
+Useful for an LLM to inspect a story, system-prompt, or workflow
+section without dumping the entire buffer.
+
+#+begin_src typescript
+const NAVIGATE_PARAMS = Type.Object({
+	buffer: Type.String({ description: "Org buffer name." }),
+	heading: Type.String({
+		description: "Heading text or '#custom-id' to navigate to.",
+	}),
+	max_chars: Type.Optional(
+		Type.Number({ description: "Truncation cap on returned body (default 4000)." }),
+	),
+});
+
+function registerNavigateTool(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "emacs_org_navigate",
+		label: "Org navigate",
+		description:
+			"Read the body of a specific org heading (everything between the heading and the next sibling/parent heading). Returns the body text, truncated to max_chars.",
+		parameters: NAVIGATE_PARAMS,
+		async execute(_callId, { buffer, heading, max_chars }) {
+			const cap = max_chars ?? 4000;
+			const code = `
+(with-current-buffer ${elispString(buffer)}
+  (save-excursion
+    (let ((h ${elispString(heading)}))
+      (goto-char (point-min))
+      (cond
+       ((string-prefix-p "#" h) (org-link-search (concat "#" (substring h 1))))
+       (t (re-search-forward (concat "^" (regexp-quote h) "$"))))
+      (let* ((start (line-beginning-position 2))
+             (end (save-excursion (org-end-of-subtree t t) (point)))
+             (body (buffer-substring-no-properties start end))
+             (cap ${cap}))
+        (if (> (length body) cap)
+            (concat (substring body 0 cap) "\\n... (truncated)")
+          body)))))`;
+			const out = await evalElisp(code);
+			return { content: [{ type: "text", text: out }] };
+		},
+	});
+}
+#+end_src
+
+*** emacs_buffer_read
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-tool-buffer
+:END:
+
+#+begin_src typescript
+const BUFFER_READ_PARAMS = Type.Object({
+	buffer: Type.String({ description: "Buffer name to read." }),
+	max_chars: Type.Optional(
+		Type.Number({ description: "Truncation cap (default 8000)." }),
+	),
+});
+
+function registerBufferReadTool(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "emacs_buffer_read",
+		label: "Buffer read",
+		description: "Return the entire contents of a named Emacs buffer (truncated to max_chars).",
+		parameters: BUFFER_READ_PARAMS,
+		async execute(_callId, { buffer, max_chars }) {
+			const cap = max_chars ?? 8000;
+			const code = `
+(with-current-buffer ${elispString(buffer)}
+  (let ((body (buffer-substring-no-properties (point-min) (point-max)))
+        (cap ${cap}))
+    (if (> (length body) cap)
+        (concat (substring body 0 cap) "\\n... (truncated)")
+      body)))`;
+			const out = await evalElisp(code);
+			return { content: [{ type: "text", text: out }] };
+		},
+	});
+}
+#+end_src
+
+*** emacs_buffer_list
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-tool-list
+:END:
+
+#+begin_src typescript
+const BUFFER_LIST_PARAMS = Type.Object({
+	pattern: Type.Optional(
+		Type.String({ description: "Optional substring filter on buffer name." }),
+	),
+});
+
+function registerBufferListTool(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "emacs_buffer_list",
+		label: "Buffer list",
+		description:
+			"List visible buffer names (excluding hidden buffers whose name starts with a space). Optional case-sensitive substring filter via the `pattern` argument.",
+		parameters: BUFFER_LIST_PARAMS,
+		async execute(_callId, { pattern }) {
+			const code = `
+(let ((pat ${pattern ? elispString(pattern) : "nil"}))
+  (mapconcat
+    'identity
+    (sort
+      (cl-remove-if-not
+        (lambda (n)
+          (and (not (string-prefix-p " " n))
+               (or (null pat) (string-match-p (regexp-quote pat) n))))
+        (mapcar 'buffer-name (buffer-list)))
+      'string<)
+    "\\n"))`;
+			const out = await evalElisp(code);
+			return { content: [{ type: "text", text: out }] };
+		},
+	});
+}
+#+end_src
+
+*** emacs_report_invocation
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-tool-report
+:END:
+
+Direct passthrough to the MCP server's =report_invocation= tool —
+lets the LLM declare "I used skill X / rule Y" so the Phoenix trace
+captures it.
+
+#+begin_src typescript
+const REPORT_PARAMS = Type.Object({
+	skill_or_rule: Type.String({ description: "Name of the skill or rule being invoked." }),
+	context: Type.Optional(Type.String({ description: "Optional one-line context note." })),
+});
+
+function registerReportInvocationTool(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "emacs_report_invocation",
+		label: "Report invocation",
+		description:
+			"Tell the host Emacs that you (the LLM) are invoking a particular skill or applying a particular rule. Enables real-time monitoring in Phoenix traces.",
+		parameters: REPORT_PARAMS,
+		async execute(_callId, { skill_or_rule, context }) {
+			const args: Record<string, unknown> = { skill_or_rule };
+			if (context) args.context = context;
+			await callMcpTool("report_invocation", args);
+			return { content: [{ type: "text", text: "logged" }] };
+		},
+	});
+}
+#+end_src
+
+** Lifecycle hooks
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-lifecycle
+:END:
+
+*** session_start health check
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-health
+:END:
+
+Probe the MCP server once when a Pi session starts. If unreachable
+we warn — but don't block; the user may not have started the Emacs
+MCP server yet, or may be using Pi standalone for an unrelated task.
+
+#+begin_src typescript
+function attachHealthCheck(pi: ExtensionAPI): void {
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			// tools/list is a cheap probe and confirms both transport + dispatcher.
+			const body = JSON.stringify({ jsonrpc: "2.0", id: "hc", method: "tools/list" });
+			const ac = new AbortController();
+			const timer = setTimeout(() => ac.abort(), 2000);
+			try {
+				const r = await fetch(MCP_URL, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body,
+					signal: ac.signal,
+				});
+				if (!r.ok) throw new Error(`HTTP ${r.status}`);
+				vlog("MCP health check OK");
+			} finally {
+				clearTimeout(timer);
+			}
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			vlog(`MCP health check FAILED: ${msg}`);
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					`Emacs MCP unreachable at ${MCP_URL} (${msg}). emacs_* tools will fail until you start the server (M-x emacs-mcp-server-start).`,
+					"warning",
+				);
+			}
+		}
+	});
+}
+#+end_src
+
+*** Confirm gate for emacs_eval
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-confirm
+:END:
+
+The =tool_call= event fires *before* a tool is executed. Returning
+=block: true= aborts the call. We gate =emacs_eval= behind a y/n
+confirm — except when the user has explicitly set
+=EMACS_MCP_ALLOW_EVAL=1=, which is appropriate for trusted sandboxes
+(e.g. an SDD workspace where every Pi turn is supervised).
+
+#+begin_src typescript
+function attachConfirmGate(pi: ExtensionAPI): void {
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "emacs_eval") return;
+		if (ALLOW_EVAL) return;
+		if (!ctx.hasUI) {
+			// Headless run with no allowlist override → fail closed.
+			return { block: true, reason: "emacs_eval blocked: no UI to confirm and EMACS_MCP_ALLOW_EVAL not set." };
+		}
+		const code = String((event.input as Record<string, unknown>).code ?? "");
+		const preview = code.length > 240 ? code.slice(0, 240) + "..." : code;
+		const ok = await ctx.ui.confirm("Allow emacs_eval?", preview);
+		if (!ok) return { block: true, reason: "User declined emacs_eval." };
+	});
+}
+#+end_src
+
+** Extension entry point
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-entry
+:END:
+
+Pi calls the default export once per session with an =ExtensionAPI=
+instance. The extension's job is to wire tools + lifecycle handlers
+during this single call — everything else is event-driven.
+
+#+begin_src typescript
+export default function emacsMcpExtension(pi: ExtensionAPI): void {
+	registerEvalTool(pi);
+	registerGetPropTool(pi);
+	registerNavigateTool(pi);
+	registerBufferReadTool(pi);
+	registerBufferListTool(pi);
+	registerReportInvocationTool(pi);
+	attachHealthCheck(pi);
+	attachConfirmGate(pi);
+}
+#+end_src

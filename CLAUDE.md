@@ -150,7 +150,8 @@ LP source lives in `.org` files loaded via `literate-elisp`:
 |-------|------|---------|
 | Core SDK | `claude-agent.org` | CLI subprocess, JSON stream parsing |
 | Org Integration | `code-agent-org.org` | `#+begin_src ai` blocks, response sections |
-| MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude |
+| MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude / Pi |
+| Pi (opt-in) | `claude-agent-pi-{backend,extension}.org` | pi.dev RPC backend + TS extension tangling to `~/.pi/agent/extensions/emacs-mcp.ts`; `:CLAUDE_BACKEND: pi` |
 | Entry Point | `claude-code.el` | Package requires, autoloads |
 
 Load with: `(literate-elisp-load "claude-agent.org")`. Data flow:
@@ -289,7 +290,7 @@ autonomous**; exploration → **L1-L2 inline**.
 | Mock CLI | `tests/mock-claude-cli.sh` |
 | Docker sandbox | `.devcontainer/` |
 | Prompt tags | `prompts/tags/` |
-| Reference SDK | `reference/claude-agent-sdk-python/` |
+| Reference SDK | `reference/claude-agent-sdk-python/`; pi.dev source `reference/pi/` (submodule); Pi E2E `make test-e2e-pi` |
 
 ## Final Reminder
 

@@ -492,6 +492,8 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-cmux-backend-create"
     ;; claude-agent-tmux-backend (Phase 4 multiplexer factory)
     "claude-agent-tmux-backend-create"
+    ;; claude-agent-pi-backend (pi.dev RPC factory)
+    "claude-agent-pi-backend-create"
     ;; claude-agent-backend public API
     "claude-agent-backend-register"
     "claude-agent-backend-get"

@@ -40,6 +40,7 @@ LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-jsonrpc.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-opencode.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-gemini.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-codex.org\")"
+LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/claude-agent-pi-backend.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/code-agent-org.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/code-agent-org-header-line.org\")"
@@ -329,6 +330,57 @@ test-acp-unit:
 		$(LOAD_ACP) \
 		-l tests/test-claude-agent-acp.el \
 		-f ert-run-tests-batch-and-exit
+
+.PHONY: test-pi-backend
+test-pi-backend:
+	@echo "Running Pi backend smoke tests..."
+	$(BATCH) $(LOAD_PATH) -L tests/support \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_PI) \
+		-l tests/test-claude-agent-pi-backend.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :pi-backend))"
+
+# Live tests spawn `pi --mode rpc' for real and exercise the full
+# stack against the user's configured provider (DeepSeek by default
+# via ~/.pi/agent/settings.json).  Skipped automatically if pi is
+# missing.  Roughly 30-60 seconds depending on provider latency.
+.PHONY: test-pi-backend-live
+test-pi-backend-live:
+	@echo "Running Pi backend LIVE tests (spawns real pi subprocess)..."
+	$(BATCH) $(LOAD_PATH) -L tests/support \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_PI) \
+		-l tests/test-claude-agent-pi-backend.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :pi-backend-live))"
+
+# Fixture-driven E2E stories — runs each :pi-e2e: heading in
+# tests/e2e/org/pi-backend-test.org as a parameterized story.  Skips
+# stories whose prerequisites are missing (pi / mcp / extension).
+.PHONY: test-e2e-pi
+test-e2e-pi:
+	@echo "Running Pi backend fixture E2E stories..."
+	$(BATCH) $(LOAD_PATH) -L tests/support \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_PI) \
+		-l tests/test-e2e-pi-backend.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :e2e-pi))"
+
+# Tangle the Pi extension .org → ~/.pi/agent/extensions/emacs-mcp.ts.
+# Per the user's decision, the .ts is installed at $HOME (not repo-local)
+# so multiple consumer repos share one extension.
+PI_EXTENSION_OUT = $(HOME)/.pi/agent/extensions/emacs-mcp.ts
+.PHONY: tangle-pi-extension
+tangle-pi-extension:
+	@echo "Tangling claude-agent-pi-extension.org → $(PI_EXTENSION_OUT)..."
+	$(BATCH) -l org \
+		--eval "(let ((org-confirm-babel-evaluate nil)) (org-babel-tangle-file \"$(PWD)/claude-agent-pi-extension.org\"))"
+	@test -f $(PI_EXTENSION_OUT) || (echo "tangle failed: $(PI_EXTENSION_OUT) not created" && exit 1)
+	@echo "Tangled $$(wc -l < $(PI_EXTENSION_OUT)) lines to $(PI_EXTENSION_OUT)"
+
+.PHONY: untangle-pi-extension
+untangle-pi-extension:
+	@rm -f $(PI_EXTENSION_OUT)
+	@echo "Removed $(PI_EXTENSION_OUT)"
 
 .PHONY: test-org-unit
 test-org-unit:
@@ -682,6 +734,15 @@ EMACS_MCP_PORT ?= 9999
 test-workspace-bridge:
 	@echo "Running Workspace Bridge E2E tests (MCP port $(EMACS_MCP_PORT))..."
 	bash tests/test-workspace-bridge-e2e.sh $(EMACS_MCP_PORT)
+
+# Cross-workspace routing reproducer (2026-05-21 bug).  Verifies that
+# CUSTOM_ID-based routing wins over stale session_id, that legacy
+# session_id routing still works, and that the strict cmux-resume
+# detection aborts cleanly.
+.PHONY: test-cross-workspace-routing
+test-cross-workspace-routing:
+	@echo "Running cross-workspace routing E2E (MCP port $(EMACS_MCP_PORT))..."
+	bash tests/test-cross-workspace-routing-e2e.sh $(EMACS_MCP_PORT)
 
 # OTel server targets
 .PHONY: otel-server

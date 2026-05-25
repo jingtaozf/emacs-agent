@@ -1,0 +1,850 @@
+# -*- mode: org; -*-
+#+TITLE: Claude Agent — Pi Backend
+#+PROPERTY: literate-load yes
+
+* Claude Agent — Pi Backend
+:PROPERTIES:
+:CUSTOM_ID: overview
+:END:
+
+** Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-overview
+:END:
+
+Pi backend — embeds pi.dev's [[https://github.com/earendil-works/pi][coding agent]] via its =--mode rpc=
+subprocess protocol. Pi is a minimal, MIT-licensed agent harness that
+supports 15+ LLM providers (DeepSeek, Anthropic, OpenAI, Google,
+Bedrock, OpenRouter, …) and exposes a stable JSONL-over-stdio
+interface designed for embedding.
+
+Why a separate backend module:
+
+- *Long-lived per session* — one =pi --mode rpc= subprocess per Emacs
+  session, queries multiplex on a single =id=-keyed dispatch table.
+- *LF-only JSONL framing* — Pi explicitly warns against splitting on
+  Unicode separators (U+2028 / U+2029 are legal inside JSON strings).
+  Node =readline= is non-compliant; we hand-write a =\n=-only splitter.
+- *Extension UI on the same channel* — Pi extensions can emit
+  =extension_ui_request= messages on stdout; the client (us) responds
+  with =extension_ui_response= on stdin. This unlocks bi-directional
+  integration with =emacs-mcp-server= via a Pi-side extension.
+- *Provider/model agnostic* — the actual provider, model, API keys,
+  and compaction policy live in Pi's own =~/.pi/agent/settings.json=
+  + =auth.json=. The backend just spawns =pi --mode rpc= and talks
+  JSONL; switching from DeepSeek to Anthropic or OpenAI is a Pi
+  settings change, not an Emacs config change.
+
+** Concerns owned
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-concerns
+:END:
+
+| Concern | Where |
+|---------|-------|
+| =pi --mode rpc= subprocess lifecycle | =Process Spawn= + =Cleanup= |
+| LF-only JSONL framing | =JSONL Framing= |
+| Response correlation by id | =Filter Dispatch= → =Pending Callbacks= |
+| Streaming token routing | =Filter Dispatch= → =Agent Event Routing= |
+| Thinking event filtering | =text_delta= vs =thinking_delta= branching |
+| Handshake (=get_state= round-trip) | =Handshake= |
+| 8 =claude-agent-backend-*= generics | =Backend Protocol Methods= |
+
+** Load-order constraint
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-load-order
+:END:
+
+Loads AFTER =claude-agent-backend= (parent struct + generics must
+exist). Loads BEFORE any frontend dispatch (=code-agent-org-execute=
+needs the factory + cl-defmethod registrations). This module is *opt-in*
+— not loaded by =claude-code.el= unconditionally; users add
+=(literate-elisp-load "claude-agent-pi-backend.org")= to their init,
+or it's loaded by an explicit dispatcher entry.
+
+** Dependencies
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-dependencies
+:END:
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'cl-generic)
+(require 'json)
+(require 'map)
+(require 'subr-x)
+(require 'claude-agent-backend)
+#+END_SRC
+
+** Customization
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-customization
+:END:
+
+Defaults to bare =pi= on PATH.  Provider, model, and API credentials
+are read by Pi itself from =~/.pi/agent/settings.json= +
+=~/.pi/agent/auth.json= (managed via =pi config= or by editing the
+files directly).  Per-session overrides go through =:spawn-args= on
+the backend struct (e.g. to point at a forked Pi build, or to inject
+=--provider=/=--model= flags for a one-off invocation).
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-pi-spawn-default
+  '("pi")
+  "Default spawn command (a list) for a Pi RPC subprocess.
+Bare =pi= picks up provider/model from `~/.pi/agent/settings.json'.
+Override at the struct level via =:spawn-args= for a custom binary
+or to inject one-shot flags.  The =--mode rpc= flag is appended by
+`claude-agent-pi--spawn-command'."
+  :type '(repeat string)
+  :group 'claude-agent)
+
+(defcustom claude-agent-pi-show-thinking nil
+  "If non-nil, stream extended-thinking deltas as on-token callbacks.
+DeepSeek (and other thinking-capable providers) emit dozens of
+thinking_delta events before the actual text reply.  Default is to
+discard them so the response section is not flooded.  Set to t when
+debugging or when you want to see the model's reasoning trace."
+  :type 'boolean
+  :group 'claude-agent)
+
+(defcustom claude-agent-pi-handshake-timeout 10.0
+  "Seconds to wait for the get_state handshake response.
+Pi normally responds in well under 1 second; a timeout here means
+the subprocess crashed before initializing."
+  :type 'number
+  :group 'claude-agent)
+
+(defcustom claude-agent-pi-cleanup-grace 2.0
+  "Seconds to wait between close-stdin → SIGTERM → SIGKILL.
+Pi normally exits within ~0.5 s of stdin EOF; the grace period
+accommodates slow shutdown when extensions are flushing state."
+  :type 'number
+  :group 'claude-agent)
+#+END_SRC
+
+** Backend Struct
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-struct
+:END:
+
+One Pi subprocess per session.  =process= is the live OS process;
+=pending-by-id= keys the dispatch table for response correlation;
+=handshake-done= gates =ready-p=.
+
+The =read-buffer= is a string accumulator — Pi may flush partial lines
+in a single chunk, and the LF-only splitter needs a stable buffer to
+hold whatever didn't end at =\n=.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (claude-agent-pi-backend
+               (:include claude-agent-backend (type :pi))
+               (:constructor claude-agent-pi-backend--create)
+               (:copier nil))
+  "Pi (pi.dev) coding-agent backend — one RPC subprocess, one session."
+  ;; Spawn config
+  (spawn-args nil
+              :documentation "List: command + args, e.g. (\"pi\") or (\"/path/to/pi-dev\" \"--provider\" \"openai\")")
+  (environment nil
+               :documentation "Extra env vars (list of \"NAME=VALUE\") for the subprocess")
+  (cwd nil :documentation "Working directory for the subprocess")
+  (session-dir nil
+               :documentation "Pi --session-dir, e.g. \"<ws>/.pi-sessions/\"")
+  (initial-session-id nil
+                      :documentation "If non-nil, try to resume this Pi session (passed as --session)")
+  (save-session-id-fn nil
+                      :documentation "Function (session-id) -> void, invoked when Pi reports a session id")
+  (show-thinking claude-agent-pi-show-thinking
+                 :documentation "If non-nil, route thinking_delta events as :on-token")
+  ;; Runtime state
+  (process nil :documentation "OS process object (set by spawn)")
+  (read-buffer "" :documentation "String accumulator for stdin-side LF-JSONL splitter")
+  (session-key nil :documentation "Emacs session key (for shared verbose buffer)")
+  (session-id nil :documentation "Pi session UUID (from get_state response or extension_session_started)")
+  (state nil :documentation "Cached :data from last get_state response (alist)")
+  (handshake-done nil :documentation "t after first successful get_state response")
+  (handshake-callbacks nil
+                       :documentation "List of (lambda) — fire when handshake completes")
+  (pending-by-id (make-hash-table :test 'equal)
+                 :documentation "id (string) -> callbacks plist for in-flight prompts")
+  (active-prompt-id nil :documentation "Most-recent prompt id (for cancel routing)")
+  (next-id 0 :documentation "Monotonic counter for generated request ids"))
+#+END_SRC
+
+** Live-Backend Registry
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-registry
+:END:
+
+Mirrors =claude-agent-acp='s pattern — every live Pi subprocess is
+tracked so =kill-emacs-hook= can drain orphans.
+
+#+BEGIN_SRC elisp
+(defvar claude-agent-pi--live-backends nil
+  "List of Pi backends with running subprocesses.")
+
+(defun claude-agent-pi--register (backend)
+  "Add BACKEND to the live-backend registry (idempotent)."
+  (unless (memq backend claude-agent-pi--live-backends)
+    (push backend claude-agent-pi--live-backends)))
+
+(defun claude-agent-pi--unregister (backend)
+  "Remove BACKEND from the live-backend registry."
+  (setq claude-agent-pi--live-backends
+        (delq backend claude-agent-pi--live-backends)))
+
+(defun claude-agent-pi--cleanup-all ()
+  "Kill every live Pi backend; registered on `kill-emacs-hook'."
+  (dolist (backend (copy-sequence claude-agent-pi--live-backends))
+    (ignore-errors (claude-agent-backend-cleanup backend))))
+
+(add-hook 'kill-emacs-hook #'claude-agent-pi--cleanup-all)
+#+END_SRC
+
+** Verbose Buffer Helper
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-verbose
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--verbose-log (backend text)
+  "Write TEXT to the shared verbose buffer for BACKEND's session.
+Uses `claude-agent--verbose-insert' which creates the buffer on demand."
+  (when-let* ((sk (claude-agent-pi-backend-session-key backend)))
+    (when (fboundp 'claude-agent--verbose-insert)
+      (claude-agent--verbose-insert
+       sk (format "  %s  [pi] %s"
+                  (format-time-string "%H:%M:%S") text)))))
+#+END_SRC
+
+** JSONL Framing
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-framing
+:END:
+
+*** Reader
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-framing-reader
+:END:
+
+Pi's JSONL contract: split on =\n= only, optionally strip trailing
+=\r=. Never use Emacs's line-oriented helpers blindly (some honor
+U+2028 / U+2029 which are legal inside JSON strings).
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--feed-chunk (backend chunk)
+  "Append CHUNK to BACKEND's read-buffer; yield complete lines via
+`claude-agent-pi--dispatch-line'."
+  (let ((buf (concat (claude-agent-pi-backend-read-buffer backend) chunk)))
+    (let (nl)
+      (while (setq nl (string-search "\n" buf))
+        (let ((line (substring buf 0 nl)))
+          (when (and (> (length line) 0)
+                     (eq (aref line (1- (length line))) ?\r))
+            (setq line (substring line 0 -1)))
+          (setq buf (substring buf (1+ nl)))
+          (when (> (length line) 0)
+            (condition-case err
+                (claude-agent-pi--dispatch-line backend line)
+              (error
+               (message "claude-agent-pi: dispatch error: %s\n  line: %s"
+                        (error-message-string err)
+                        (substring line 0 (min 200 (length line))))))))))
+    (setf (claude-agent-pi-backend-read-buffer backend) buf)))
+#+END_SRC
+
+*** Writer
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-framing-writer
+:END:
+
+Match Pi's =serializeJsonLine= shape exactly: =JSON.stringify(value) + "\n"=.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--send (backend obj)
+  "Encode OBJ as a JSON line and send to BACKEND's process stdin.
+OBJ should be an alist (or hash-table) suitable for `json-encode'.
+Errors if the process is dead."
+  (let ((proc (claude-agent-pi-backend-process backend)))
+    (unless (process-live-p proc)
+      (error "claude-agent-pi: process not running"))
+    (let ((line (concat (json-encode obj) "\n")))
+      (process-send-string proc line))))
+
+(defun claude-agent-pi--gen-id (backend prefix)
+  "Generate a unique RPC id like \"PREFIX-N\" for BACKEND."
+  (let ((n (1+ (claude-agent-pi-backend-next-id backend))))
+    (setf (claude-agent-pi-backend-next-id backend) n)
+    (format "%s-%d" prefix n)))
+#+END_SRC
+
+** Filter Dispatch
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-dispatch
+:END:
+
+Three classes of inbound message (per the JSONL fixture taxonomy):
+
+1. =response= — command ack, correlate by =id=
+2. =extension_ui_request= — Pi extension wants user input (stub for A1)
+3. AgentSessionEvent (=agent_start=, =message_update=, …) — stream to callbacks
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--dispatch-line (backend line)
+  "Parse a single JSONL LINE and dispatch to the right handler."
+  (let* ((obj (json-parse-string line :object-type 'alist :null-object nil :false-object nil))
+         (type (map-elt obj 'type)))
+    (cond
+     ((equal type "response")
+      (claude-agent-pi--handle-response backend obj))
+     ((equal type "extension_ui_request")
+      (claude-agent-pi--handle-extension-ui backend obj))
+     ((equal type "extension_error")
+      (claude-agent-pi--verbose-log
+       backend
+       (format "extension_error in %s: %s"
+               (map-elt obj 'extensionPath)
+               (map-elt obj 'error))))
+     (t
+      (claude-agent-pi--handle-agent-event backend obj)))))
+#+END_SRC
+
+*** Response Routing
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-dispatch-response
+:END:
+
+=response= messages are command acks. The handshake response (=command=
+=get_state=) flips =handshake-done= and drains queued callbacks. Other
+responses match against =pending-by-id= via the =id= field.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--handle-response (backend obj)
+  "Handle a {type:\"response\", command:..., success:..., id:..., ...} message."
+  (let ((id (map-elt obj 'id))
+        (command (map-elt obj 'command))
+        (success (map-elt obj 'success))
+        (error-msg (map-elt obj 'error))
+        (data (map-elt obj 'data)))
+    (cond
+     ;; Handshake response (we always send id="hs" for get_state at startup).
+     ((and (equal command "get_state") (equal id "hs"))
+      (if success
+          (progn
+            (setf (claude-agent-pi-backend-state backend) data)
+            (let ((sid (and (listp data) (map-elt data 'sessionId))))
+              (when sid
+                (setf (claude-agent-pi-backend-session-id backend) sid)))
+            (setf (claude-agent-pi-backend-handshake-done backend) t)
+            (claude-agent-pi--verbose-log backend "handshake OK")
+            (dolist (cb (claude-agent-pi-backend-handshake-callbacks backend))
+              (ignore-errors (funcall cb)))
+            (setf (claude-agent-pi-backend-handshake-callbacks backend) nil))
+        (claude-agent-pi--verbose-log
+         backend (format "handshake failed: %s" error-msg))
+        (dolist (cb (claude-agent-pi-backend-handshake-callbacks backend))
+          (ignore-errors (funcall cb)))  ;; still drain so callers don't hang
+        (setf (claude-agent-pi-backend-handshake-callbacks backend) nil)))
+     ;; Prompt-ack: success=true means the prompt was accepted; the real
+     ;; completion signal is `agent_end'.  success=false is a hard error.
+     ((equal command "prompt")
+      (when (and (not success) id)
+        (claude-agent-pi--fire-error backend id
+                                     (or error-msg "prompt rejected"))))
+     ;; abort / new_session / fork / compact / ... — log success/failure;
+     ;; no callbacks to fire (caller used the sync wrapper, not query).
+     (t
+      (claude-agent-pi--verbose-log
+       backend
+       (format "%s %s%s"
+               command
+               (if success "OK" "FAILED")
+               (if error-msg (format ": %s" error-msg) "")))))))
+
+(defun claude-agent-pi--fire-error (backend prompt-id message)
+  "Invoke the :on-error callback registered for PROMPT-ID, then drop it."
+  (let ((cbs (gethash prompt-id (claude-agent-pi-backend-pending-by-id backend))))
+    (when cbs
+      (remhash prompt-id (claude-agent-pi-backend-pending-by-id backend))
+      (when-let* ((on-error (plist-get cbs :on-error)))
+        (ignore-errors (funcall on-error message))))))
+#+END_SRC
+
+*** Agent Event Routing
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-dispatch-events
+:END:
+
+AgentSessionEvent stream:
+- =agent_start= / =turn_start= / =message_start= / =turn_end= / =message_end= — minimal, log to verbose
+- =message_update= — extract =assistantMessageEvent.delta= for text or thinking, route to :on-token
+- =tool_execution_*= — log to verbose buffer (A2 will surface in modeline)
+- =agent_end= — fire :on-complete, drop pending entry
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--current-callbacks (backend)
+  "Return the callbacks plist for the most-recently-fired prompt, or nil.
+Pi events don't carry our request id; the assumption is one in-flight
+prompt at a time (steer/follow_up queue but only one streams)."
+  (when-let* ((pid (claude-agent-pi-backend-active-prompt-id backend)))
+    (gethash pid (claude-agent-pi-backend-pending-by-id backend))))
+
+(defun claude-agent-pi--handle-agent-event (backend obj)
+  "Dispatch a single AgentSessionEvent to the active callbacks."
+  (let ((type (map-elt obj 'type))
+        (cbs (claude-agent-pi--current-callbacks backend)))
+    (cond
+     ((equal type "agent_start")
+      (claude-agent-pi--verbose-log backend "agent_start"))
+     ((equal type "message_update")
+      (claude-agent-pi--handle-message-update backend obj cbs))
+     ((equal type "tool_execution_start")
+      (claude-agent-pi--verbose-log
+       backend
+       (format "tool_start %s args=%s"
+               (map-elt obj 'toolName)
+               (let ((args (map-elt obj 'args)))
+                 (and args (substring (json-encode args) 0
+                                      (min 120 (length (json-encode args)))))))))
+     ((equal type "tool_execution_end")
+      (claude-agent-pi--verbose-log
+       backend
+       (format "tool_end %s%s"
+               (map-elt obj 'toolName)
+               (if (map-elt obj 'isError) " ERROR" ""))))
+     ((equal type "agent_end")
+      (claude-agent-pi--handle-agent-end backend obj cbs))
+     ;; Quiet events — log only if verbose buffer is heavy enough to absorb.
+     ((member type '("turn_start" "turn_end" "message_start"
+                     "message_end" "tool_execution_update")))
+     (t
+      (claude-agent-pi--verbose-log
+       backend (format "unhandled event: %s" type))))))
+
+(defun claude-agent-pi--handle-message-update (backend obj cbs)
+  "Extract a text or thinking delta from OBJ and route to CBS plist."
+  (let* ((ame (map-elt obj 'assistantMessageEvent))
+         (sub (and ame (map-elt ame 'type)))
+         (delta (and ame (map-elt ame 'delta))))
+    (cond
+     ((null delta) nil)  ;; *_start / *_end carry no delta — ignore
+     ((equal sub "text_delta")
+      (when-let* ((on-token (plist-get cbs :on-token)))
+        (ignore-errors (funcall on-token delta))))
+     ((equal sub "thinking_delta")
+      (when (claude-agent-pi-backend-show-thinking backend)
+        (when-let* ((on-token (plist-get cbs :on-token)))
+          (ignore-errors (funcall on-token delta)))))
+     ((equal sub "toolcall_delta")
+      ;; Tool call args streaming — verbose only for now.
+      nil))))
+
+(defun claude-agent-pi--handle-agent-end (backend obj cbs)
+  "Finalize the active prompt — drop pending entry, fire :on-complete."
+  (let ((pid (claude-agent-pi-backend-active-prompt-id backend))
+        (messages (map-elt obj 'messages)))
+    (when pid
+      (remhash pid (claude-agent-pi-backend-pending-by-id backend))
+      (setf (claude-agent-pi-backend-active-prompt-id backend) nil))
+    (claude-agent-pi--verbose-log
+     backend
+     (format "agent_end (%d msgs)"
+             (cond ((vectorp messages) (length messages))
+                   ((listp messages) (length messages))
+                   (t 0))))
+    (when-let* ((on-complete (plist-get cbs :on-complete)))
+      (ignore-errors (funcall on-complete messages)))))
+#+END_SRC
+
+*** Extension UI Stub
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-dispatch-extui
+:END:
+
+A1 stub — just deny every request so untrusted extensions can't hang
+queries waiting for input. A2 will implement =completing-read= / =y-or-n-p=
+prompts and a proper allowlist.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--handle-extension-ui (backend obj)
+  "Stub: respond `cancelled' to every extension UI request (A1 safety)."
+  (let ((id (map-elt obj 'id))
+        (method (map-elt obj 'method)))
+    (claude-agent-pi--verbose-log
+     backend (format "extension_ui_request %s (auto-cancelled)" method))
+    (when id
+      (claude-agent-pi--send backend
+                             `((type . "extension_ui_response")
+                               (id . ,id)
+                               (cancelled . t))))))
+#+END_SRC
+
+** Process Spawn
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-spawn
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--spawn-command (backend)
+  "Build the full spawn command list for BACKEND.
+Appends =--mode rpc= and (if set) =--session-dir= / =--session= to the
+configured spawn-args."
+  (let* ((base (or (claude-agent-pi-backend-spawn-args backend)
+                   claude-agent-pi-spawn-default))
+         (session-dir (claude-agent-pi-backend-session-dir backend))
+         (initial-sid (claude-agent-pi-backend-initial-session-id backend))
+         (args (append base (list "--mode" "rpc"))))
+    (when session-dir
+      (setq args (append args (list "--session-dir"
+                                    (expand-file-name session-dir)))))
+    (when initial-sid
+      (setq args (append args (list "--session" initial-sid))))
+    (unless session-dir
+      ;; No --session-dir means we want an ephemeral session; Pi
+      ;; supports --no-session for that.
+      (setq args (append args (list "--no-session"))))
+    args))
+
+(defun claude-agent-pi--spawn (backend)
+  "Start the Pi subprocess for BACKEND. Returns the process.
+Sets up the filter, sentinel, and registers BACKEND for kill-emacs cleanup.
+
+CRITICAL: literate-elisp does NOT honor `lexical-binding: t' in org
+file headers, so the :filter and :sentinel lambdas below would NOT
+capture BACKEND under default dynamic scoping — the next process
+event after the let* unwinds would see `backend' as void.  We
+`lexical-let' BK to force a lexical capture.  See CLAUDE.md
+\"Lexical Variable Capture in Callbacks\"."
+  (lexical-let ((bk backend))
+    (let* ((command (claude-agent-pi--spawn-command bk))
+           (cwd (or (claude-agent-pi-backend-cwd bk) default-directory))
+           (env (claude-agent-pi-backend-environment bk))
+           (default-directory cwd)
+           (process-environment (append env process-environment))
+           (stderr-buf (generate-new-buffer " *pi-stderr*"))
+           (proc (make-process
+                  :name "pi-rpc"
+                  :command command
+                  :connection-type 'pipe
+                  :coding 'utf-8-unix
+                  :noquery t
+                  :stderr stderr-buf
+                  :filter (lambda (_p chunk)
+                            (claude-agent-pi--feed-chunk bk chunk))
+                  :sentinel (lambda (_p event)
+                              (claude-agent-pi--sentinel bk event)))))
+      (setf (claude-agent-pi-backend-process bk) proc)
+      (claude-agent-pi--register bk)
+      (claude-agent-pi--verbose-log
+       bk (format "spawn pid=%d cmd=%s" (process-id proc)
+                  (string-join command " ")))
+      proc)))
+
+(defun claude-agent-pi--sentinel (backend event)
+  "Sentinel: log process EVENT and drain pending callbacks on death."
+  (let ((proc (claude-agent-pi-backend-process backend)))
+    (when (and proc (not (process-live-p proc)))
+      (claude-agent-pi--verbose-log
+       backend (format "process died: %s" (string-trim event)))
+      (claude-agent-pi--unregister backend)
+      ;; Drain any in-flight prompts with an error.
+      (maphash
+       (lambda (pid cbs)
+         (when-let* ((on-error (plist-get cbs :on-error)))
+           (ignore-errors
+             (funcall on-error
+                      (format "pi process exited: %s" (string-trim event))))))
+       (claude-agent-pi-backend-pending-by-id backend))
+      (clrhash (claude-agent-pi-backend-pending-by-id backend))
+      (setf (claude-agent-pi-backend-active-prompt-id backend) nil)
+      (setf (claude-agent-pi-backend-handshake-done backend) nil))))
+#+END_SRC
+
+** Handshake
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-handshake
+:END:
+
+Pi has no explicit =ready= event. We send =get_state= with =id="hs"=
+immediately after spawn and treat the response as the ready signal.
+Callers that need to wait register on =handshake-callbacks= and are
+fired by =handle-response= when the ack lands.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--ensure-spawn-and-handshake (backend on-ready on-error)
+  "Spawn (if needed) and complete handshake for BACKEND.
+ON-READY: () -> void, called when handshake response arrives.
+ON-ERROR: (string) -> void, called on spawn failure or handshake timeout."
+  (cond
+   ;; Already ready — fast path.
+   ((claude-agent-pi-backend-handshake-done backend)
+    (funcall on-ready))
+   ;; Handshake in flight — queue the callback.
+   ((and (claude-agent-pi-backend-process backend)
+         (process-live-p (claude-agent-pi-backend-process backend)))
+    (push on-ready (claude-agent-pi-backend-handshake-callbacks backend)))
+   ;; Cold start: spawn + send handshake + set a timeout.
+   (t
+    (condition-case spawn-err
+        (progn
+          (claude-agent-pi--spawn backend)
+          (push on-ready (claude-agent-pi-backend-handshake-callbacks backend))
+          (claude-agent-pi--send backend
+                                 '((id . "hs") (type . "get_state")))
+          (lexical-let ((backend backend)
+                        (on-error on-error))
+            (run-at-time
+             claude-agent-pi-handshake-timeout nil
+             (lambda ()
+               (unless (claude-agent-pi-backend-handshake-done backend)
+                 (claude-agent-pi--verbose-log
+                  backend "handshake timeout")
+                 (funcall on-error "Pi handshake timeout"))))))
+      (error
+       (funcall on-error
+                (format "Pi spawn failed: %s"
+                        (error-message-string spawn-err))))))))
+#+END_SRC
+
+** Cleanup
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-cleanup-helper
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi--graceful-shutdown (backend)
+  "Close stdin → wait → SIGTERM → wait → SIGKILL.
+The grace periods come from `claude-agent-pi-cleanup-grace'."
+  (let ((proc (claude-agent-pi-backend-process backend)))
+    (when (and proc (process-live-p proc))
+      (ignore-errors (process-send-eof proc))
+      (lexical-let ((backend backend)
+                    (proc proc))
+        (run-at-time
+         claude-agent-pi-cleanup-grace nil
+         (lambda ()
+           (when (and (process-live-p proc))
+             (ignore-errors (interrupt-process proc))
+             (run-at-time
+              claude-agent-pi-cleanup-grace nil
+              (lambda ()
+                (when (process-live-p proc)
+                  (ignore-errors (kill-process proc))))))))))))
+#+END_SRC
+
+** Backend Protocol Methods
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-methods
+:END:
+
+*** Query
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-method-query
+:END:
+
+Ensures spawn+handshake (deferring the actual =prompt= send until
+=on-ready=), then sends =prompt= with a fresh id and registers
+callbacks. Returns the prompt id as the cancellation handle.
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-query
+  ((backend claude-agent-pi-backend) prompt callbacks &rest _args)
+  "Send PROMPT to Pi BACKEND, wiring CALLBACKS for streaming."
+  (let ((pid (claude-agent-pi--gen-id backend "p")))
+    (puthash pid callbacks
+             (claude-agent-pi-backend-pending-by-id backend))
+    (setf (claude-agent-pi-backend-active-prompt-id backend) pid)
+    (lexical-let ((backend backend)
+                  (prompt prompt)
+                  (pid pid))
+      (claude-agent-pi--ensure-spawn-and-handshake
+       backend
+       (lambda ()
+         (condition-case send-err
+             (claude-agent-pi--send
+              backend
+              `((id . ,pid)
+                (type . "prompt")
+                (message . ,prompt)))
+           (error
+            (claude-agent-pi--fire-error
+             backend pid
+             (format "send failed: %s" (error-message-string send-err))))))
+       (lambda (msg)
+         (claude-agent-pi--fire-error backend pid msg))))
+    pid))
+#+END_SRC
+
+*** Cancel
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-method-cancel
+:END:
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-cancel
+  ((backend claude-agent-pi-backend) _handle)
+  "Abort the in-flight Pi prompt."
+  (when (process-live-p (claude-agent-pi-backend-process backend))
+    (claude-agent-pi--send backend '((type . "abort")))))
+#+END_SRC
+
+*** Cleanup
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-method-cleanup
+:END:
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-cleanup
+  ((backend claude-agent-pi-backend))
+  "Tear down BACKEND: shutdown subprocess, clear pending callbacks."
+  (claude-agent-pi--graceful-shutdown backend)
+  (clrhash (claude-agent-pi-backend-pending-by-id backend))
+  (setf (claude-agent-pi-backend-active-prompt-id backend) nil)
+  (setf (claude-agent-pi-backend-handshake-done backend) nil)
+  (setf (claude-agent-pi-backend-handshake-callbacks backend) nil)
+  (claude-agent-pi--unregister backend))
+#+END_SRC
+
+*** Active-p / Session-id / Ready-p
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-method-state
+:END:
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-active-p
+  ((backend claude-agent-pi-backend))
+  (not (null (claude-agent-pi-backend-active-prompt-id backend))))
+
+(cl-defmethod claude-agent-backend-session-id
+  ((backend claude-agent-pi-backend))
+  (claude-agent-pi-backend-session-id backend))
+
+(cl-defmethod claude-agent-backend-ready-p
+  ((backend claude-agent-pi-backend))
+  (and (let ((p (claude-agent-pi-backend-process backend)))
+         (and p (process-live-p p)))
+       (claude-agent-pi-backend-handshake-done backend)))
+#+END_SRC
+
+*** Verbose Buffer
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-method-verbose
+:END:
+
+Pi backend uses the shared session verbose buffer (created on demand
+by =claude-agent--verbose-insert=). Returning =nil= signals to the
+caller "use the default."
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-verbose-buffer
+  ((_backend claude-agent-pi-backend))
+  nil)
+#+END_SRC
+
+*** Supports-p
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-method-supports
+:END:
+
+Capabilities advertised against the proven RPC command list (see
+=reference/pi/packages/coding-agent/src/modes/rpc/rpc-types.ts=).
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-supports-p
+  ((_backend claude-agent-pi-backend) capability)
+  (memq capability
+        '(:streaming-tokens
+          :structured-messages
+          :session-resume
+          :session-fork
+          :images
+          :extension-ui
+          :compact
+          :model-switch
+          :abort
+          :steer
+          :follow-up)))
+#+END_SRC
+
+*** Classify Error
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-method-classify
+:END:
+
+Pi error strings are free-form; we match a few common patterns.
+
+#+BEGIN_SRC elisp
+(cl-defmethod claude-agent-backend-classify-error
+  ((_backend claude-agent-pi-backend) error)
+  (let ((msg (cond ((stringp error) error)
+                   ((listp error) (or (map-elt error 'error)
+                                      (format "%S" error)))
+                   (t (format "%S" error)))))
+    (cond
+     ((string-match-p "context\\|token.*limit\\|too long" msg)
+      'context-limit)
+     ((string-match-p "session.*\\(expired\\|not found\\|invalid\\)" msg)
+      'session-expired)
+     ((string-match-p "auth\\|401\\|unauthor\\|invalid.*key\\|api[ _-]?key" msg)
+      'auth)
+     ((string-match-p "network\\|timeout\\|ECONN\\|ENOTFOUND\\|DNS" msg)
+      'network)
+     ((string-match-p "process exited" msg)
+      'network)
+     (t 'unknown))))
+#+END_SRC
+
+** Public Factory
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-factory
+:END:
+
+Single entry point for constructing a Pi backend instance. The
+keyword arguments cover the common provider configurations without
+exposing the internal struct constructor.
+
+#+BEGIN_SRC elisp
+(cl-defun claude-agent-pi-backend-create
+    (&key session-key
+          session-id
+          session-dir
+          spawn-args
+          environment
+          cwd
+          show-thinking
+          save-session-id-fn)
+  "Construct a Pi backend instance.
+
+SESSION-KEY      Emacs session key (for shared verbose buffer).
+SESSION-ID       Pi session UUID to resume (passed as --session if non-nil).
+SESSION-DIR      Pi --session-dir (absolute path). If nil, --no-session.
+SPAWN-ARGS       Override the spawn command. Defaults to `claude-agent-pi-spawn-default'.
+ENVIRONMENT      Extra env vars (list of \"NAME=VALUE\").
+CWD              Working directory for the subprocess.
+SHOW-THINKING    If non-nil, route thinking_delta as :on-token.
+SAVE-SESSION-ID-FN  (session-id) -> void, called when Pi reports a session id."
+  (claude-agent-pi-backend--create
+   :session-key session-key
+   :initial-session-id session-id
+   :session-dir session-dir
+   :spawn-args spawn-args
+   :environment environment
+   :cwd cwd
+   :show-thinking (if (eq show-thinking nil)
+                      claude-agent-pi-show-thinking
+                    show-thinking)
+   :save-session-id-fn save-session-id-fn))
+#+END_SRC
+
+** Provide
+:PROPERTIES:
+:CUSTOM_ID: pi-backend-provide
+:END:
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-pi-backend)
+#+END_SRC
+
+# Local Variables:
+# eval: (require 'literate-elisp)
+# End:
