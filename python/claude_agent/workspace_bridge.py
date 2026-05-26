@@ -15,7 +15,7 @@ path, the session id, and an optional OpenTelemetry tracer — and each
 hook invocation calls ``bridge.handle(event, input_data)``. Dispatch
 happens by method lookup (``_handle_<event>``), the Smalltalk-flavoured
 style used throughout the project (see
-``.claude/rules/oop-smalltalk-protocols.md``). Callers never branch on
+the imported `oop-smalltalk-protocols` rule). Callers never branch on
 the event string themselves.
 
 Tracing: every handler opens a span under the process-root span created
@@ -172,6 +172,76 @@ def _cli_session_property() -> str:
     for the existing call site in `WorkspaceBridge._save_cli_session_elisp`.
     """
     return AgentKind.from_env().cli_session_property
+
+
+def _read_agent_name_from_ppid() -> str | None:
+    """Return the value of ``--name`` on the parent process's argv.
+
+    See module-level cross-cmux-restart recovery design in
+    ``_resolve_routing_via_agent_name``.
+    """
+    ppid = os.getppid()
+    if ppid <= 1:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(ppid), "-ww", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    tokens = result.stdout.strip().split()
+    for i, tok in enumerate(tokens):
+        if tok == "--name" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith("--name="):
+            return tok[len("--name=") :]
+    return None
+
+
+def _resolve_routing_via_agent_name(
+    env_org_file: str,
+    env_session_id: str,
+    env_custom_id: str,
+    mcp_url: str,
+) -> tuple[str, str, str, bool]:
+    """Recover routing tuple from claude's ``--name`` slug via Emacs MCP.
+
+    See section docstring above for the full design.  Tuple shape:
+    ``(org_file, session_id, custom_id, recovered)``.
+    """
+    agent_name = _read_agent_name_from_ppid()
+    if not agent_name:
+        return env_org_file, env_session_id, env_custom_id, False
+    cwd = os.environ.get("CMUX_AGENT_LAUNCH_CWD") or os.getcwd()
+    try:
+        mcp = McpClient(url=mcp_url)
+        elisp = (
+            "(let ((debug-on-error nil) (debug-on-quit nil))"
+            "  (if (fboundp 'code-agent-org-cmux--lookup-session-by-agent-name-as-string)"
+            "      (code-agent-org-cmux--lookup-session-by-agent-name-as-string "
+            f'        "{_escape_elisp_string(agent_name)}" '
+            f'        "{_escape_elisp_string(cwd)}")'
+            '    ""))'
+        )
+        result = mcp.eval_elisp(elisp)
+    except (McpConnectionError, McpElispError, OSError):
+        return env_org_file, env_session_id, env_custom_id, False
+    if not result:
+        return env_org_file, env_session_id, env_custom_id, False
+    parts = result.split("\0", 2)
+    mcp_org_file = parts[0] if len(parts) > 0 else ""
+    mcp_session_id = parts[1] if len(parts) > 1 else ""
+    mcp_custom_id = parts[2] if len(parts) > 2 else ""
+    if not (mcp_org_file and mcp_session_id):
+        return env_org_file, env_session_id, env_custom_id, False
+    changed = (mcp_org_file != env_org_file) or (mcp_session_id != env_session_id)
+    return mcp_org_file, mcp_session_id, mcp_custom_id, changed
 
 
 def _check_any_recent_from_emacs_flag() -> tuple[bool, str]:
@@ -474,11 +544,36 @@ class WorkspaceBridge:
         org_file: str,
         session_id: str,
         tracer: object | None = None,
+        workspace_custom_id: str = "",
+        cmux_workspace: str = "",
     ):
         self.mcp = mcp
         self.org_file = org_file
         self.session_id = session_id
         self.tracer = tracer
+        # workspace_custom_id is the org heading's :CUSTOM_ID: — the
+        # stable, globally-unique routing key.  Preferred over session_id
+        # because it survives heading rename + cmux workspace rename.
+        # Empty string means "fall back to session_id-based routing"
+        # (legacy path for tests that haven't migrated).
+        self.workspace_custom_id = workspace_custom_id
+        # cmux_workspace is the cmux workspace title at launch time —
+        # used for display/error messages only.  Not a routing key.
+        self.cmux_workspace = cmux_workspace
+
+    def _routing_key(self) -> str:
+        """Return the preferred routing key for elisp workspace lookups.
+
+        Prefers ``workspace_custom_id`` (the org heading's ``:CUSTOM_ID:``
+        — globally unique within the file, survives heading rename and
+        cmux workspace rename).  Falls back to ``session_id`` (legacy
+        path matched against ``:CLAUDE_SESSION_ID:``).
+
+        The Elisp ``--goto-session`` accepts both — it tries ``:CUSTOM_ID:``
+        first, then ``:CLAUDE_SESSION_ID:``.  This lets us thread a single
+        argument through without changing every elisp signature.
+        """
+        return self.workspace_custom_id or self.session_id
 
     # ------------------------------------------------------------------
     # Public dispatch
@@ -634,7 +729,7 @@ class WorkspaceBridge:
         return (
             f"(code-agent-org-workspace-bridge-save-cli-session "
             f'"{_escape_elisp_string(self.org_file)}" '
-            f'"{_escape_elisp_string(self.session_id)}" '
+            f'"{_escape_elisp_string(self._routing_key())}" '
             f'"{_escape_elisp_string(cli_session)}" '
             f'"{prop}")'
         )
@@ -728,7 +823,7 @@ class WorkspaceBridge:
                 elisp = (
                     f"(code-agent-org-workspace-bridge-insert-prompt "
                     f'"{_escape_elisp_string(self.org_file)}" '
-                    f'"{_escape_elisp_string(self.session_id)}" '
+                    f'"{_escape_elisp_string(self._routing_key())}" '
                     f'"{_escape_elisp_string(prompt)}")'
                 )
                 try:
@@ -885,7 +980,7 @@ class WorkspaceBridge:
         elisp = (
             f"(code-agent-org-workspace-bridge-latest-instruction-custom-id "
             f'"{_escape_elisp_string(self.org_file)}" '
-            f'"{_escape_elisp_string(self.session_id)}")'
+            f'"{_escape_elisp_string(self._routing_key())}")'
         )
         try:
             result = self._mcp_eval(elisp)
@@ -963,7 +1058,7 @@ class WorkspaceBridge:
             f"(progn "
             f"(code-agent-org-workspace-bridge-insert-response "
             f'"{_escape_elisp_string(self.org_file)}" '
-            f'"{_escape_elisp_string(self.session_id)}" '
+            f'"{_escape_elisp_string(self._routing_key())}" '
             f'"{_escape_elisp_string(response)}" '
             f'"{_escape_elisp_string(custom_id)}") '
             f"{save_sexp} "
@@ -994,7 +1089,7 @@ class WorkspaceBridge:
         elisp = (
             f"(code-agent-org-workspace-bridge-mark-cancelled "
             f'"{_escape_elisp_string(self.org_file)}" '
-            f'"{_escape_elisp_string(self.session_id)}" '
+            f'"{_escape_elisp_string(self._routing_key())}" '
             f'"{_escape_elisp_string(custom_id)}")'
         )
         try:
@@ -1092,7 +1187,7 @@ class WorkspaceBridge:
         elisp = (
             f"(code-agent-org-workspace-bridge-insert-prompt "
             f'"{_escape_elisp_string(self.org_file)}" '
-            f'"{_escape_elisp_string(self.session_id)}" '
+            f'"{_escape_elisp_string(self._routing_key())}" '
             f'"{_escape_elisp_string(last_user_message)}")'
         )
         try:
@@ -1142,7 +1237,7 @@ class WorkspaceBridge:
         elisp = (
             f"(code-agent-org-workspace-bridge-update-todos "
             f'"{_escape_elisp_string(self.org_file)}" '
-            f'"{_escape_elisp_string(self.session_id)}" '
+            f'"{_escape_elisp_string(self._routing_key())}" '
             f"'{_format_todos_as_elisp(todos)} "
             f'"{_escape_elisp_string(custom_id)}")'
         )
@@ -1259,12 +1354,69 @@ def main() -> None:
     event = sys.argv[1]
     input_text = sys.stdin.read()
 
-    org_file = os.environ.get("WORKSPACE_ORG_FILE")
-    session_id = os.environ.get("WORKSPACE_SESSION_ID")
+    env_org_file = os.environ.get("WORKSPACE_ORG_FILE", "")
+    env_session_id = os.environ.get("WORKSPACE_SESSION_ID", "")
+    env_custom_id = os.environ.get("WORKSPACE_CUSTOM_ID", "")
+    cmux_workspace = os.environ.get("CMUX_WORKSPACE", "")
     mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
+
+    # Cross-cmux-restart routing recovery — see
+    # ``_resolve_routing_via_agent_name`` docstring for the full design.
+    # Read the live ``--name`` slug from the parent claude argv (cmux
+    # preserves this across restart, unlike the WORKSPACE_* env vars)
+    # and ask Emacs MCP which (org-file, session-id, custom-id) owns
+    # that slug.  When the MCP-recovered tuple differs from env, the
+    # env is stale (inherited from this surface's original launch
+    # before cmux re-attached it elsewhere) — prefer MCP and log a
+    # notice so the user knows recovery worked.
+    org_file, session_id, workspace_custom_id, recovered = (
+        _resolve_routing_via_agent_name(
+            env_org_file, env_session_id, env_custom_id, mcp_url
+        )
+    )
+    if recovered:
+        print(
+            "workspace-bridge: routing recovered via claude --name slug — "
+            f"env said {env_org_file!r}::{env_session_id!r}, MCP says "
+            f"{org_file!r}::{session_id!r}. Cmux restart lost the "
+            "original launch's WORKSPACE_* env vars; the --name flag "
+            "is the anchor we use to find the right routing on every "
+            "restart.",
+            file=sys.stderr,
+        )
 
     if not org_file or not session_id:
         sys.exit(0)  # soft-fail: don't break hooks for non-workspace sessions
+
+    # Cross-routing guard (2026-05-21 bug): when running inside cmux
+    # (it sets CMUX_WORKSPACE_ID for every pane) without launcher
+    # metadata (CMUX_WORKSPACE empty), env routing is suspect.  After
+    # the 2026-05-26 ``--name``-based recovery, this guard becomes a
+    # last-resort safety net: skip routing only if recovery ALSO
+    # failed (``recovered`` False AND env still says cmux_workspace
+    # empty).  Tests opt out with WORKSPACE_BRIDGE_TEST_BYPASS=1.
+    if (
+        not recovered
+        and os.environ.get("CMUX_WORKSPACE_ID")
+        and not cmux_workspace
+        and not os.environ.get("WORKSPACE_BRIDGE_TEST_BYPASS")
+    ):
+        print(
+            "workspace-bridge: skipping routing — running inside cmux "
+            "(CMUX_WORKSPACE_ID is set) but launcher metadata is "
+            "missing (CMUX_WORKSPACE empty) AND --name recovery "
+            "found no matching Emacs session.  This usually means "
+            "cmux resumed a saved claude session without going "
+            "through workspace_launcher.py and the matching org "
+            "heading is not currently open in Emacs.  Open the org "
+            "notebook so its sessions are loaded, or relaunch "
+            "claude via the cmux 'New Claude session' action so the "
+            "launcher can set CMUX_WORKSPACE + WORKSPACE_CUSTOM_ID "
+            "from the current cmux workspace.  Non-fatal; the hook "
+            "chain continues.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
 
     tracer = setup_tracer("claude-agent-workspace-bridge") if setup_tracer else None
     trace_store = (
@@ -1279,7 +1431,12 @@ def main() -> None:
 
     mcp = McpClient(url=mcp_url)
     bridge = WorkspaceBridge(
-        mcp=mcp, org_file=org_file, session_id=session_id, tracer=tracer
+        mcp=mcp,
+        org_file=org_file,
+        session_id=session_id,
+        tracer=tracer,
+        workspace_custom_id=workspace_custom_id,
+        cmux_workspace=cmux_workspace,
     )
 
     # Root span shape depends on whether Emacs already wrote a

@@ -62,6 +62,8 @@
     - [[#function-_escape_elisp_string][Function _escape_elisp_string]]
     - [[#function-_format_todos_as_elisp][Function _format_todos_as_elisp]]
     - [[#class-agentkind--function-_cli_session_property][Class AgentKind + function _cli_session_property]]
+    - [[#function-_read_agent_name_from_ppid][Function _read_agent_name_from_ppid]]
+    - [[#function-_resolve_routing_via_agent_name][Function _resolve_routing_via_agent_name]]
     - [[#function-_check_any_recent_from_emacs_flag][Function _check_any_recent_from_emacs_flag]]
     - [[#function-write_status][Function write_status]]
     - [[#function-_extract_full_response][Function _extract_full_response]]
@@ -150,6 +152,8 @@
     - [[#class-testhandlepermissionclear][Class TestHandlePermissionClear]]
     - [[#class-testmcpeval][Class TestMcpEval]]
     - [[#class-testhandleresponsepromptinsertion][Class TestHandleResponsePromptInsertion]]
+    - [[#class-testreadagentnamefromppid][Class TestReadAgentNameFromPpid]]
+    - [[#class-testresolveroutingviaagentname][Class TestResolveRoutingViaAgentName]]
   - [[#test_claude_workspace][test_claude_workspace]]
     - [[#docstring-13][Docstring]]
     - [[#import-statements-4][Import statements]]
@@ -2216,6 +2220,122 @@ def _cli_session_property() -> str:
     return AgentKind.from_env().cli_session_property
 
 #+end_src
+*** Function _read_agent_name_from_ppid
+:PROPERTIES:
+:LITERATE_ORG_CONTAINS_DEFS: _read_agent_name_from_ppid
+:CUSTOM_ID: function-_read_agent_name_from_ppid
+:END:
+
+The bridge is invoked as a child of the claude (or copilot / opencode)
+CLI.  cmux preserves the =--name <slug>= flag on every (re)spawn of the
+agent — see =claude_workspace._normalize_story_slug= for the slug rule.
+This is the *cross-cmux-restart anchor*: env vars set at original
+launch are lost when cmux restarts, but the =--name= flag survives.
+
+Returns =None= when the bridge isn't running under cmux (=PPID == 1=),
+when the =ps= shell-out fails / times out, or when =--name= is absent
+(non-cmux invocation, e.g. direct test run).
+
+#+begin_src python
+def _read_agent_name_from_ppid() -> str | None:
+    """Return the value of ``--name`` on the parent process's argv.
+
+    See module-level cross-cmux-restart recovery design in
+    ``_resolve_routing_via_agent_name``.
+    """
+    ppid = os.getppid()
+    if ppid <= 1:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(ppid), "-ww", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    tokens = result.stdout.strip().split()
+    for i, tok in enumerate(tokens):
+        if tok == "--name" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith("--name="):
+            return tok[len("--name=") :]
+    return None
+
+#+end_src
+*** Function _resolve_routing_via_agent_name
+:PROPERTIES:
+:LITERATE_ORG_CONTAINS_DEFS: _resolve_routing_via_agent_name
+:CUSTOM_ID: function-_resolve_routing_via_agent_name
+:END:
+
+Cross-cmux-restart fix.  When cmux's app restarts, the per-surface env
+vars (=WORKSPACE_ORG_FILE=, =WORKSPACE_SESSION_ID=, =WORKSPACE_CUSTOM_ID=,
+=CMUX_WORKSPACE=) are *lost* — cmux only preserves
+=CMUX_AGENT_LAUNCH_ARGV_B64= + =CMUX_AGENT_LAUNCH_CWD= + the live
+=--name= flag on claude argv.  Trusting the inherited env (which may
+carry STALE values from the surface's *original* launch, before cmux
+re-attached it to a different workspace) silently misroutes every Stop
+hook for the entire session — that's the 2026-05-26 edo-dev1 incident.
+
+Recovery: read the live =--name= from PPID argv +
+=CMUX_AGENT_LAUNCH_CWD= (or =os.getcwd()=), ask Emacs MCP for the
+matching session's (org-file, session-id, custom-id).  If the MCP
+result differs from env, prefer MCP — that is the live truth.
+
+Returns =(org_file, session_id, custom_id, recovered)= where
+=recovered= is =True= iff the values came from MCP *and* differ from
+env (the caller logs a notice in that case so the user knows their
+cmux restart was healed automatically).  When MCP is unreachable, the
+agent name is missing, or no session matches, returns the original env
+tuple with =recovered=False= — the bridge then proceeds on env exactly
+as before this fix shipped.
+
+#+begin_src python
+def _resolve_routing_via_agent_name(
+    env_org_file: str,
+    env_session_id: str,
+    env_custom_id: str,
+    mcp_url: str,
+) -> tuple[str, str, str, bool]:
+    """Recover routing tuple from claude's ``--name`` slug via Emacs MCP.
+
+    See section docstring above for the full design.  Tuple shape:
+    ``(org_file, session_id, custom_id, recovered)``.
+    """
+    agent_name = _read_agent_name_from_ppid()
+    if not agent_name:
+        return env_org_file, env_session_id, env_custom_id, False
+    cwd = os.environ.get("CMUX_AGENT_LAUNCH_CWD") or os.getcwd()
+    try:
+        mcp = McpClient(url=mcp_url)
+        elisp = (
+            "(let ((debug-on-error nil) (debug-on-quit nil))"
+            "  (if (fboundp 'code-agent-org-cmux--lookup-session-by-agent-name-as-string)"
+            "      (code-agent-org-cmux--lookup-session-by-agent-name-as-string "
+            f'        "{_escape_elisp_string(agent_name)}" '
+            f'        "{_escape_elisp_string(cwd)}")'
+            '    ""))'
+        )
+        result = mcp.eval_elisp(elisp)
+    except (McpConnectionError, McpElispError, OSError):
+        return env_org_file, env_session_id, env_custom_id, False
+    if not result:
+        return env_org_file, env_session_id, env_custom_id, False
+    parts = result.split("\0", 2)
+    mcp_org_file = parts[0] if len(parts) > 0 else ""
+    mcp_session_id = parts[1] if len(parts) > 1 else ""
+    mcp_custom_id = parts[2] if len(parts) > 2 else ""
+    if not (mcp_org_file and mcp_session_id):
+        return env_org_file, env_session_id, env_custom_id, False
+    changed = (mcp_org_file != env_org_file) or (mcp_session_id != env_session_id)
+    return mcp_org_file, mcp_session_id, mcp_custom_id, changed
+
+#+end_src
 *** Function _check_any_recent_from_emacs_flag
 :PROPERTIES:
 :LITERATE_ORG_CONTAINS_DEFS: _check_any_recent_from_emacs_flag
@@ -3371,56 +3491,65 @@ def main() -> None:
     event = sys.argv[1]
     input_text = sys.stdin.read()
 
-    org_file = os.environ.get("WORKSPACE_ORG_FILE")
-    session_id = os.environ.get("WORKSPACE_SESSION_ID")
-    workspace_custom_id = os.environ.get("WORKSPACE_CUSTOM_ID", "")
+    env_org_file = os.environ.get("WORKSPACE_ORG_FILE", "")
+    env_session_id = os.environ.get("WORKSPACE_SESSION_ID", "")
+    env_custom_id = os.environ.get("WORKSPACE_CUSTOM_ID", "")
     cmux_workspace = os.environ.get("CMUX_WORKSPACE", "")
     mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
+
+    # Cross-cmux-restart routing recovery — see
+    # ``_resolve_routing_via_agent_name`` docstring for the full design.
+    # Read the live ``--name`` slug from the parent claude argv (cmux
+    # preserves this across restart, unlike the WORKSPACE_* env vars)
+    # and ask Emacs MCP which (org-file, session-id, custom-id) owns
+    # that slug.  When the MCP-recovered tuple differs from env, the
+    # env is stale (inherited from this surface's original launch
+    # before cmux re-attached it elsewhere) — prefer MCP and log a
+    # notice so the user knows recovery worked.
+    org_file, session_id, workspace_custom_id, recovered = (
+        _resolve_routing_via_agent_name(
+            env_org_file, env_session_id, env_custom_id, mcp_url
+        )
+    )
+    if recovered:
+        print(
+            "workspace-bridge: routing recovered via claude --name slug — "
+            f"env said {env_org_file!r}::{env_session_id!r}, MCP says "
+            f"{org_file!r}::{session_id!r}. Cmux restart lost the "
+            "original launch's WORKSPACE_* env vars; the --name flag "
+            "is the anchor we use to find the right routing on every "
+            "restart.",
+            file=sys.stderr,
+        )
 
     if not org_file or not session_id:
         sys.exit(0)  # soft-fail: don't break hooks for non-workspace sessions
 
-    # Name-based routing: when launched via workspace_launcher, these
-    # two env vars pin the bridge to a specific (cmux workspace, org
-    # heading) pair so it cannot misroute even if a stale claude
-    # process is resumed inside the wrong cmux workspace.  Detection
-    # trigger: we are clearly running inside cmux (it set CMUX_WORKSPACE_ID
-    # for every pane) but our launcher did NOT run (CMUX_WORKSPACE +
-    # WORKSPACE_CUSTOM_ID would be set if it had).  That combination
-    # is the 2026-05-21 cross-routing bug — a cmux resume of a saved
-    # claude session inherited stale routing env from the original
-    # workspace.
-    #
-    # Response: skip routing and exit 0.  We deliberately do NOT
-    # ``sys.exit(2)`` — that would break the Claude CLI hook chain
-    # for every pre-existing session that was launched before this
-    # check shipped (those sessions never had the launcher set
-    # CMUX_WORKSPACE either).  Logging + skip means the session
-    # keeps running; the cost is that prompts/responses are dropped
-    # rather than misrouted.  Users see the warning, relaunch via
-    # workspace_launcher.py once, and the next session has the new
-    # env and routes correctly.
-    #
-    # Tests that exercise the legacy session_id path while themselves
-    # running inside cmux (so CMUX_WORKSPACE_ID is inherited from the
-    # test runner's shell) opt out by setting WORKSPACE_BRIDGE_TEST_BYPASS=1
-    # so they continue to insert into the org buffer.
+    # Cross-routing guard (2026-05-21 bug): when running inside cmux
+    # (it sets CMUX_WORKSPACE_ID for every pane) without launcher
+    # metadata (CMUX_WORKSPACE empty), env routing is suspect.  After
+    # the 2026-05-26 ``--name``-based recovery, this guard becomes a
+    # last-resort safety net: skip routing only if recovery ALSO
+    # failed (``recovered`` False AND env still says cmux_workspace
+    # empty).  Tests opt out with WORKSPACE_BRIDGE_TEST_BYPASS=1.
     if (
-        os.environ.get("CMUX_WORKSPACE_ID")
+        not recovered
+        and os.environ.get("CMUX_WORKSPACE_ID")
         and not cmux_workspace
         and not os.environ.get("WORKSPACE_BRIDGE_TEST_BYPASS")
     ):
         print(
             "workspace-bridge: skipping routing — running inside cmux "
             "(CMUX_WORKSPACE_ID is set) but launcher metadata is "
-            "missing (CMUX_WORKSPACE empty). This usually means cmux "
-            "resumed a saved claude session without going through "
-            "workspace_launcher.py, so the WORKSPACE_ORG_FILE / "
-            "WORKSPACE_SESSION_ID env vars may be stale from the "
-            "original launch.  Relaunch claude via the cmux 'New "
-            "Claude session' action so the launcher can set "
-            "CMUX_WORKSPACE + WORKSPACE_CUSTOM_ID from the current "
-            "cmux workspace.  This message is non-fatal; the hook "
+            "missing (CMUX_WORKSPACE empty) AND --name recovery "
+            "found no matching Emacs session.  This usually means "
+            "cmux resumed a saved claude session without going "
+            "through workspace_launcher.py and the matching org "
+            "heading is not currently open in Emacs.  Open the org "
+            "notebook so its sessions are loaded, or relaunch "
+            "claude via the cmux 'New Claude session' action so the "
+            "launcher can set CMUX_WORKSPACE + WORKSPACE_CUSTOM_ID "
+            "from the current cmux workspace.  Non-fatal; the hook "
             "chain continues.",
             file=sys.stderr,
         )
@@ -6468,6 +6597,192 @@ class TestHandleResponsePromptInsertion:
         )
         assert not flag.exists()
         assert result == "recent-cid"
+#+end_src
+
+*** Class TestReadAgentNameFromPpid
+:PROPERTIES:
+:LITERATE_ORG_BLOCK_KIND: atomic
+:LITERATE_ORG_CONTAINS_DEFS: TestReadAgentNameFromPpid TestReadAgentNameFromPpid._patch_ps TestReadAgentNameFromPpid.test_returns_value_after_double_dash_name TestReadAgentNameFromPpid.test_returns_value_in_equals_form TestReadAgentNameFromPpid.test_returns_none_when_name_absent TestReadAgentNameFromPpid.test_returns_none_when_ps_fails TestReadAgentNameFromPpid.test_returns_none_when_ppid_root
+:CUSTOM_ID: class-TestReadAgentNameFromPpid
+:END:
+
+Covers =_read_agent_name_from_ppid= — the half of the cross-cmux-restart
+recovery that peeks at the parent claude argv.  Edge cases: =ps= fails,
+=--name= absent, =--name= present in both forms (=--name X= and
+=--name=X=), =PPID <= 1=.
+
+#+begin_src python
+class TestReadAgentNameFromPpid:
+    """Verify --name extraction from parent process argv."""
+
+    def _patch_ps(self, monkeypatch, stdout: str, returncode: int = 0):
+        from claude_agent import workspace_bridge as wb
+
+        def fake_run(*_args, **_kwargs):
+            r = MagicMock()
+            r.returncode = returncode
+            r.stdout = stdout
+            return r
+
+        monkeypatch.setattr(wb.subprocess, "run", fake_run)
+
+    def test_returns_value_after_double_dash_name(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(
+            monkeypatch,
+            "claude --resume X --plugin-dir /p --name edo-dev1 --system-prompt foo",
+        )
+        assert _read_agent_name_from_ppid() == "edo-dev1"
+
+    def test_returns_value_in_equals_form(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(monkeypatch, "claude --resume X --name=edo-dev2")
+        assert _read_agent_name_from_ppid() == "edo-dev2"
+
+    def test_returns_none_when_name_absent(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(monkeypatch, "claude --resume X --plugin-dir /p")
+        assert _read_agent_name_from_ppid() is None
+
+    def test_returns_none_when_ps_fails(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(monkeypatch, "", returncode=1)
+        assert _read_agent_name_from_ppid() is None
+
+    def test_returns_none_when_ppid_root(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 1)
+        assert _read_agent_name_from_ppid() is None
+#+end_src
+
+*** Class TestResolveRoutingViaAgentName
+:PROPERTIES:
+:LITERATE_ORG_BLOCK_KIND: atomic
+:LITERATE_ORG_CONTAINS_DEFS: TestResolveRoutingViaAgentName TestResolveRoutingViaAgentName.test_no_agent_name_returns_env_unchanged TestResolveRoutingViaAgentName.test_mcp_match_overrides_stale_env TestResolveRoutingViaAgentName.test_mcp_match_equals_env_recovered_false TestResolveRoutingViaAgentName.test_mcp_unreachable_returns_env_unchanged TestResolveRoutingViaAgentName.test_mcp_returns_empty_string_returns_env
+:CUSTOM_ID: class-TestResolveRoutingViaAgentName
+:END:
+
+Covers =_resolve_routing_via_agent_name= — the other half: takes the
+slug from =_read_agent_name_from_ppid=, asks Emacs MCP for the live
+routing, prefers MCP over env when they diverge.  Three scenarios:
+agent name missing → no recovery; MCP returns matching tuple →
+recovery; MCP returns same tuple as env → no change flag.
+
+#+begin_src python
+class TestResolveRoutingViaAgentName:
+    """Verify the env→MCP routing recovery path."""
+
+    def test_no_agent_name_returns_env_unchanged(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(
+            wb, "_read_agent_name_from_ppid", lambda: None
+        )
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "env-file.org", "env-sid", "env-cid", "http://localhost:9999/mcp"
+        )
+        assert (org, sid, cid, recovered) == (
+            "env-file.org",
+            "env-sid",
+            "env-cid",
+            False,
+        )
+
+    def test_mcp_match_overrides_stale_env(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+        monkeypatch.setenv("CMUX_AGENT_LAUNCH_CWD", "/edo")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                return "mega-code-dev.org\0sdd-real-edo\0mega-cid-real"
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "claude-agent-dev.org",
+            "sdd-stale-from-restart",
+            "stale-cid",
+            "http://localhost:9999/mcp",
+        )
+        assert org == "mega-code-dev.org"
+        assert sid == "sdd-real-edo"
+        assert cid == "mega-cid-real"
+        assert recovered is True
+
+    def test_mcp_match_equals_env_recovered_false(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+        monkeypatch.setenv("CMUX_AGENT_LAUNCH_CWD", "/edo")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                return "mega-code-dev.org\0sdd-real\0mega-cid"
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "mega-code-dev.org",
+            "sdd-real",
+            "mega-cid",
+            "http://localhost:9999/mcp",
+        )
+        assert recovered is False  # env already correct, no override notice
+
+    def test_mcp_unreachable_returns_env_unchanged(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                raise McpConnectionError("emacs offline")
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "env.org", "env-sid", "env-cid", "http://localhost:9999/mcp"
+        )
+        assert (org, sid, cid, recovered) == ("env.org", "env-sid", "env-cid", False)
+
+    def test_mcp_returns_empty_string_returns_env(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                return ""  # no candidate matched the slug
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "env.org", "env-sid", "env-cid", "http://localhost:9999/mcp"
+        )
+        assert recovered is False
 #+end_src
 
 ** test_claude_workspace

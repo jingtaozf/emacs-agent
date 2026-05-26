@@ -1149,6 +1149,140 @@ reads a CMUX_WORKSPACE_ID org property (deprecated)."
   (code-agent-org-cmux--find-workspace-by-name
    (code-agent-org-cmux--session-workspace-title)))
 
+#+END_SRC
+
+** Cross-restart routing recovery (via claude =--name= slug)
+:PROPERTIES:
+:CUSTOM_ID: cmux-cross-restart-routing-recovery
+:END:
+
+When the cmux app restarts (=Cmd-Q= + relaunch), the per-surface env
+=process-environment= we injected at original launch — =WORKSPACE_ORG_FILE=,
+=WORKSPACE_SESSION_ID=, =WORKSPACE_CUSTOM_ID=, =CMUX_WORKSPACE= — is
+*lost*.  cmux only preserves =CMUX_AGENT_LAUNCH_ARGV_B64= + =CMUX_AGENT_LAUNCH_CWD=
+and re-injects =--name <current-cmux-workspace-title>= on every claude
+respawn (slug rule lives in =claude_workspace._normalize_story_slug=:
+lowercase, non-alphanumeric → =-=, strip edges).
+
+The bridge therefore can no longer trust env vars across restart.  Its
+fallback path is to read the live =--name= off claude's argv (via PPID),
+mirror the slug rule here, and walk all open org buffers asking "which
+cmux-backed session's heading title slugifies to this name?"  When
+multiple sessions match (genuinely rare —— heading titles inside one
+Emacs are usually unique by construction), =cwd= is the tiebreaker.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org-cmux--normalize-name-slug (name)
+  "Return the cmux =--name= slug for NAME.
+
+Mirrors `claude_workspace._normalize_story_slug' exactly:
+lowercases, collapses runs of non-alphanumeric to single =-=, and
+strips leading/trailing dashes.  Any divergence between the two
+implementations breaks cross-restart recovery — keep them in sync."
+  (if (null name)
+      ""
+    (let* ((lowered (downcase name))
+           (dashed (replace-regexp-in-string "[^a-z0-9]+" "-" lowered)))
+      (replace-regexp-in-string "\\`-+\\|-+\\'" "" dashed))))
+
+(defun code-agent-org-cmux--lookup-session-by-agent-name (name &optional cwd)
+  "Locate an org session whose heading slug equals NAME.
+
+NAME is the slug claude sees in its =--name= flag (see
+`code-agent-org-cmux--normalize-name-slug').  Optional CWD is used as
+a tiebreaker when multiple open buffers contain matching headings;
+exact match wins, prefix match second, otherwise first found.
+
+Returns a plist =(:org-file F :session-id S :custom-id C :heading H
+:project-root R)= or nil when no session matches.
+
+Used by =workspace_bridge.py= to recover the (org-file, session-id)
+tuple after a cmux app restart loses the routing env vars — see
+=workspace_bridge._resolve_routing=.  Walks =buffer-list= so only
+already-loaded org files are considered, matching the
+property-cache invariant the rest of the cmux backend relies on."
+  ;; Hot-path optimisation: =org-map-entries= on every open org buffer is
+  ;; O(headings) including full org-element parsing — easily 10s on a single
+  ;; ~200kB notebook with 100+ headings.  Bridge calls this on every Stop
+  ;; hook so it must be <100ms.  Instead, regex-scan each org buffer for
+  ;; lines matching =:CLAUDE_SESSION_ID:= (cheap), and for each hit jump
+  ;; to the surrounding heading + slugify only that one heading.  Bound is
+  ;; O(sessions), not O(headings).
+  (let ((target-slug (code-agent-org-cmux--normalize-name-slug name))
+        candidates)
+    (when (and target-slug (not (string-empty-p target-slug)))
+      (dolist (buf (buffer-list))
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'org-mode)
+                     (buffer-file-name))
+            (save-excursion
+              (save-restriction
+                (widen)
+                (goto-char (point-min))
+                (while (re-search-forward
+                        "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+\\(\\S-+\\)" nil t)
+                  (let ((sid (match-string-no-properties 1))
+                        (drawer-pos (match-beginning 0)))
+                    (save-excursion
+                      (goto-char drawer-pos)
+                      (when (ignore-errors (org-back-to-heading t) t)
+                        (let* ((heading
+                                (substring-no-properties
+                                 (or (org-get-heading t t t t) "")))
+                               (slug (code-agent-org-cmux--normalize-name-slug
+                                      heading)))
+                          (when (string= slug target-slug)
+                            (push (list :org-file (buffer-file-name)
+                                        :session-id sid
+                                        :custom-id (or (org-entry-get nil "CUSTOM_ID") "")
+                                        :heading heading
+                                        :project-root (or (org-entry-get nil "PROJECT_ROOT" t) ""))
+                                  candidates))))))))))))
+      (cond
+       ((null candidates) nil)
+       ((null (cdr candidates)) (car candidates))
+       ;; Multiple candidates with the same slug — disambiguate by cwd.
+       ((and cwd (not (string-empty-p cwd)))
+        (or (cl-find-if (lambda (c) (string= (plist-get c :project-root) cwd))
+                        candidates)
+            (cl-find-if (lambda (c)
+                          (let ((pr (plist-get c :project-root)))
+                            (and (not (string-empty-p pr))
+                                 (string-prefix-p pr cwd))))
+                        candidates)
+            (car candidates)))
+       (t (car candidates))))))
+
+(defun code-agent-org-cmux--lookup-session-by-agent-name-as-string (name cwd)
+  "Bridge entry point: same lookup, returned as =\"file\\0sid\\0cid\"=.
+
+Empty string for unmatched / unset fields.  Returns the literal
+string =\"\"= when no candidate matches at all — the bridge keys
+off that to decide whether to override env or keep it.  NUL is the
+field separator because no field can legitimately contain it.
+
+Called from `workspace_bridge._resolve_routing' via
+`mcp.eval_elisp'.  Keep the return shape stable; the python
+splitter is one line and assumes exactly two NUL separators."
+  (let ((r (code-agent-org-cmux--lookup-session-by-agent-name name cwd)))
+    (if r
+        (format "%s\0%s\0%s"
+                (or (plist-get r :org-file) "")
+                (or (plist-get r :session-id) "")
+                (or (plist-get r :custom-id) ""))
+      "")))
+
+#+END_SRC
+
+** Workspace lifecycle (restore + launch + persist)
+
+The workspace lifecycle owns three concerns: bringing an already-running
+cmux workspace back under Emacs's hash-table control on Emacs restart,
+launching a brand-new workspace + claude pair, and persisting the org
+properties cmux relies on for cross-restart workspace identity.
+
+#+BEGIN_SRC elisp
+
 (defun code-agent-org-cmux--restore-workspace (saved-surface workspace-session-id
                                                           tab-title workspace-ref)
   "Restore in-memory state for a cmux workspace that already exists.

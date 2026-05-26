@@ -1272,3 +1272,160 @@ class TestHandleResponsePromptInsertion:
         result = bridge._mint_missing_custom_id({"last_user_message": "prompt"}, None)
         assert not flag.exists()
         assert result == "recent-cid"
+
+
+class TestReadAgentNameFromPpid:
+    """Verify --name extraction from parent process argv."""
+
+    def _patch_ps(self, monkeypatch, stdout: str, returncode: int = 0):
+        from claude_agent import workspace_bridge as wb
+
+        def fake_run(*_args, **_kwargs):
+            r = MagicMock()
+            r.returncode = returncode
+            r.stdout = stdout
+            return r
+
+        monkeypatch.setattr(wb.subprocess, "run", fake_run)
+
+    def test_returns_value_after_double_dash_name(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(
+            monkeypatch,
+            "claude --resume X --plugin-dir /p --name edo-dev1 --system-prompt foo",
+        )
+        assert _read_agent_name_from_ppid() == "edo-dev1"
+
+    def test_returns_value_in_equals_form(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(monkeypatch, "claude --resume X --name=edo-dev2")
+        assert _read_agent_name_from_ppid() == "edo-dev2"
+
+    def test_returns_none_when_name_absent(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(monkeypatch, "claude --resume X --plugin-dir /p")
+        assert _read_agent_name_from_ppid() is None
+
+    def test_returns_none_when_ps_fails(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 12345)
+        self._patch_ps(monkeypatch, "", returncode=1)
+        assert _read_agent_name_from_ppid() is None
+
+    def test_returns_none_when_ppid_root(self, monkeypatch):
+        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+
+        monkeypatch.setattr("os.getppid", lambda: 1)
+        assert _read_agent_name_from_ppid() is None
+
+
+class TestResolveRoutingViaAgentName:
+    """Verify the env→MCP routing recovery path."""
+
+    def test_no_agent_name_returns_env_unchanged(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: None)
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "env-file.org", "env-sid", "env-cid", "http://localhost:9999/mcp"
+        )
+        assert (org, sid, cid, recovered) == (
+            "env-file.org",
+            "env-sid",
+            "env-cid",
+            False,
+        )
+
+    def test_mcp_match_overrides_stale_env(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+        monkeypatch.setenv("CMUX_AGENT_LAUNCH_CWD", "/edo")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                return "mega-code-dev.org\0sdd-real-edo\0mega-cid-real"
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "claude-agent-dev.org",
+            "sdd-stale-from-restart",
+            "stale-cid",
+            "http://localhost:9999/mcp",
+        )
+        assert org == "mega-code-dev.org"
+        assert sid == "sdd-real-edo"
+        assert cid == "mega-cid-real"
+        assert recovered is True
+
+    def test_mcp_match_equals_env_recovered_false(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+        monkeypatch.setenv("CMUX_AGENT_LAUNCH_CWD", "/edo")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                return "mega-code-dev.org\0sdd-real\0mega-cid"
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "mega-code-dev.org",
+            "sdd-real",
+            "mega-cid",
+            "http://localhost:9999/mcp",
+        )
+        assert recovered is False  # env already correct, no override notice
+
+    def test_mcp_unreachable_returns_env_unchanged(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                raise McpConnectionError("emacs offline")
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "env.org", "env-sid", "env-cid", "http://localhost:9999/mcp"
+        )
+        assert (org, sid, cid, recovered) == ("env.org", "env-sid", "env-cid", False)
+
+    def test_mcp_returns_empty_string_returns_env(self, monkeypatch):
+        from claude_agent import workspace_bridge as wb
+
+        monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
+
+        class FakeMcp:
+            def __init__(self, **_kw):
+                pass
+
+            def eval_elisp(self, _code):
+                return ""  # no candidate matched the slug
+
+        monkeypatch.setattr(wb, "McpClient", FakeMcp)
+
+        org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
+            "env.org", "env-sid", "env-cid", "http://localhost:9999/mcp"
+        )
+        assert recovered is False
