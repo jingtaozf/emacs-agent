@@ -469,12 +469,53 @@ prompt at a time (steer/follow_up queue but only one streams)."
       (claude-agent-pi--handle-tool-end backend obj cbs))
      ((equal type "agent_end")
       (claude-agent-pi--handle-agent-end backend obj cbs))
+     ;; Phase 4: render custom messages (extension `pi.sendMessage' or
+     ;; `appendEntry' with display:true) as a foldable subheading.
+     ;; Pi's TUI registerMessageRenderer hook is silent in RPC mode,
+     ;; so we degrade to a JSON pretty-print of the message — better
+     ;; than dropping the data on the floor.
+     ((and (equal type "message_start")
+           (let ((msg (map-elt obj 'message)))
+             (and msg (equal (map-elt msg 'role) "custom"))))
+      (claude-agent-pi--handle-custom-message backend obj cbs))
      ;; Quiet events — log only if verbose buffer is heavy enough to absorb.
      ((member type '("turn_start" "turn_end" "message_start"
                      "message_end" "tool_execution_update")))
      (t
       (claude-agent-pi--verbose-log
        backend (format "unhandled event: %s" type))))))
+
+(defcustom claude-agent-pi-show-custom-messages t
+  "If non-nil, render Pi `role=custom' messages (extension-injected)
+inline in the response section as `**** Extension: <customType>'
+foldable subheadings.  Set to nil to suppress."
+  :type 'boolean
+  :group 'claude-agent)
+
+(defun claude-agent-pi--handle-custom-message (backend obj cbs)
+  "Render a custom-role message as a foldable subheading + JSON dump."
+  (when claude-agent-pi-show-custom-messages
+    (let* ((msg (map-elt obj 'message))
+           (ctype (or (and msg (map-elt msg 'customType)) "untyped"))
+           (display (and msg (map-elt msg 'display)))
+           (display-str (and display
+                             (if (stringp display) display
+                               (json-encode display))))
+           (content (and msg (map-elt msg 'content)))
+           (content-str (and content
+                             (if (stringp content) content
+                               (json-encode content)))))
+      (claude-agent-pi--verbose-log
+       backend (format "custom message: %s" ctype))
+      (claude-agent-pi--render-tool-text
+       (format "\n**** Extension: %s :ext:\n%s%s\n"
+               ctype
+               (if display-str (format "Display: %s\n\n" display-str) "")
+               (if content-str
+                   (format "#+begin_src js\n%s\n#+end_src"
+                           (claude-agent-pi--truncate content-str 4096))
+                 ""))
+       cbs))))
 
 (defcustom claude-agent-pi-show-tool-calls t
   "If non-nil, render Pi tool-execution events inline in the response

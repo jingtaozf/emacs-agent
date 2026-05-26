@@ -333,6 +333,100 @@ verify it does NOT raise and produces the expected message."
       (should (string-match-p "hello from test" captured)))))
 
 
+(ert-deftest claude-agent-pi-ui-live--list-session-files-returns-list ()
+  "Drive one micro-exchange + force a session-id capture; verify the
+session file shows up under `claude-agent-pi-ui-sessions-dir/<cwd-hash>/'.
+Proves the file-scan helper backing `resume-session' works."
+  :tags '(:pi-ui-live)
+  (skip-unless (test-pi--available-p))
+  (test-pi--with-backend b
+    ;; cwd defaults to default-directory which in batch tests is the
+    ;; project root; we want a clean cwd to scope this test to.
+    (let* ((default-directory (file-name-as-directory
+                               (expand-file-name "tests/e2e/org/"
+                                                  default-directory)))
+           (sub (claude-agent-pi-ui--cwd-hash default-directory))
+           (dir (expand-file-name sub claude-agent-pi-ui-sessions-dir))
+           (before (and (file-directory-p dir)
+                        (length (directory-files dir nil "\\.jsonl\\'")))))
+      ;; Spawn with this cwd so Pi creates the session under our subdir.
+      (setf (claude-agent-pi-backend-cwd b) default-directory)
+      (let ((done nil))
+        (claude-agent-backend-query
+         b "Reply OK."
+         (list :on-token (lambda (_d) nil)
+               :on-complete (lambda (_m) (setq done t))
+               :on-error (lambda (_e) (setq done :err))))
+        (should (test-pi--wait-until (lambda () done) 60))
+        (should (eq done t)))
+      (let* ((files (claude-agent-pi-ui--list-session-files default-directory))
+             (after-count (length files)))
+        (should files)
+        (should (> after-count (or before 0)))
+        ;; The newest file should parse cleanly to a header alist.
+        (let ((hdr (claude-agent-pi-ui--read-session-header (car files))))
+          (should hdr)
+          (should (stringp (map-elt hdr 'id))))))))
+
+
+(ert-deftest claude-agent-pi-ui-live--cwd-hash-shape ()
+  "`--cwd-hash' produces the same encoding Pi uses for session dirs:
+slashes → dashes, leading + trailing dashes wrap the path."
+  :tags '(:smoke :pi-ui)
+  (should (equal (claude-agent-pi-ui--cwd-hash "/home/user/proj")
+                 "--home-user-proj-"))
+  (should (equal (claude-agent-pi-ui--cwd-hash "/tmp/")
+                 "--tmp--"))
+  (let ((default-directory "/home/user/proj/"))
+    (should (string-prefix-p "--home-user-proj-"
+                              (claude-agent-pi-ui--cwd-hash default-directory)))))
+
+
+(ert-deftest claude-agent-pi-ui-live--extension-ui-set-status-surfaces ()
+  "Phase 4: setStatus with a non-empty text → user-visible message."
+  :tags '(:pi-ui-live)
+  (skip-unless (test-pi--available-p))
+  (test-pi-ui--with-ready-backend b
+    (let ((captured nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) captured))))
+        (claude-agent-pi-ui--extension-ui-handler
+         b '((type . "extension_ui_request")
+             (id . "test-status-1")
+             (method . "setStatus")
+             (statusKey . "test-key")
+             (statusText . "Loaded 99 rules"))))
+      (should (cl-some (lambda (m) (string-match-p "Loaded 99 rules" m))
+                       captured)))))
+
+
+(ert-deftest claude-agent-pi-ui-live--extension-ui-set-widget-acks ()
+  "Phase 4: setWidget request gets an empty-value ack reply.
+We can't reliably introspect the verbose-buffer side effect in batch
+(buffer creation is buffer-local-state-dependent); the load-bearing
+behaviour is that Pi gets its ack so the extension's `await ui.setWidget()'
+resolves and the LLM isn't stuck."
+  :tags '(:pi-ui-live)
+  (skip-unless (test-pi--available-p))
+  (test-pi-ui--with-ready-backend b
+    (setf (claude-agent-pi-backend-session-key b) "widget-test")
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'claude-agent-pi--send)
+                 (lambda (_backend obj) (push obj sent))))
+        (claude-agent-pi-ui--extension-ui-handler
+         b '((type . "extension_ui_request")
+             (id . "test-widget-1")
+             (method . "setWidget")
+             (widgetKey . "test-w")
+             (widgetLines . ["line A" "line B"]))))
+      ;; Exactly one extension_ui_response should have been emitted.
+      (should (= 1 (length sent)))
+      (let ((resp (car sent)))
+        (should (equal "extension_ui_response" (map-elt resp 'type)))
+        (should (equal "test-widget-1" (map-elt resp 'id)))))))
+
+
 (ert-deftest claude-agent-pi-ui-live--login-command-shells-out ()
   "`claude-agent-pi-ui-login' should call `async-shell-command' with
 the expected target buffer.  Mock the dispatcher to capture args."

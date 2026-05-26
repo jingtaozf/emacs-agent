@@ -246,6 +246,147 @@ Returns the parsed response object (alist).  Signals `user-error' on timeout."
     (message "Pi: compaction completed")))
 #+END_SRC
 
+*** Session resume + tree (Phase 3)
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-cmd-resume
+:END:
+
+Pi stores sessions as JSONL files under =~/.pi/agent/sessions/<cwd-hash>/=
+where the cwd hash is the absolute path with =/= → =-= substitution.
+Each file's first line is a =SessionHeader= entry containing the id +
+parent-session pointer + creation timestamp.
+
+The resume picker scans the current workspace's session directory,
+shows them via =completing-read=, and dispatches =switch_session=.
+=session-tree= is the BFS over parent links, rendered into a
+read-only =*Pi Sessions: <cwd>*= buffer with =org-mode= folding.
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-pi-ui-sessions-dir
+  (expand-file-name "~/.pi/agent/sessions/")
+  "Root directory under which Pi stores per-cwd session subdirs."
+  :type 'directory
+  :group 'claude-agent)
+
+(defun claude-agent-pi-ui--cwd-hash (cwd)
+  "Return Pi's filesystem-encoded cwd subdir name for CWD.
+Pi replaces =/= with =-= and wraps with dashes; e.g.
+=/Users/jt/proj/= → =--Users-jt-proj--=."
+  (let ((normalised (expand-file-name cwd)))
+    (concat "-"
+            (replace-regexp-in-string "/" "-" normalised)
+            "-")))
+
+(defun claude-agent-pi-ui--list-session-files (&optional cwd)
+  "Return absolute paths of all session JSONL files for CWD (default
+=default-directory=).  Newest first."
+  (let* ((root (file-name-as-directory claude-agent-pi-ui-sessions-dir))
+         (sub (claude-agent-pi-ui--cwd-hash (or cwd default-directory)))
+         (dir (expand-file-name sub root)))
+    (when (file-directory-p dir)
+      (sort (directory-files dir t "\\.jsonl\\'" t)
+            (lambda (a b)
+              (time-less-p (nth 5 (file-attributes b))
+                            (nth 5 (file-attributes a))))))))
+
+(defun claude-agent-pi-ui--read-session-header (path)
+  "Parse the first JSONL line of PATH; return the header alist or nil."
+  (with-temp-buffer
+    (condition-case nil
+        (progn
+          (insert-file-contents path nil 0 4096)
+          (goto-char (point-min))
+          (let ((line (buffer-substring-no-properties
+                       (point) (line-end-position))))
+            (json-parse-string line :object-type 'alist :null-object nil :false-object nil)))
+      (error nil))))
+
+(defun claude-agent-pi-ui-resume-session ()
+  "Pick + resume a Pi session for the current workspace.
+Scans `claude-agent-pi-ui-sessions-dir' for the cwd subdir, parses
+each JSONL header to extract id + name + timestamp, presents via
+`completing-read', dispatches `switch_session' on the chosen path."
+  (interactive)
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (files (claude-agent-pi-ui--list-session-files default-directory))
+         (entries
+          (mapcar
+           (lambda (path)
+             (let* ((hdr (claude-agent-pi-ui--read-session-header path))
+                    (id (and hdr (map-elt hdr 'id)))
+                    (ts (and hdr (map-elt hdr 'timestamp)))
+                    (label (format "%s  %s"
+                                    (or ts "(no timestamp)")
+                                    (or id (file-name-base path)))))
+               (cons label path)))
+           files)))
+    (unless entries
+      (user-error "No Pi sessions found under %s for cwd %s"
+                  claude-agent-pi-ui-sessions-dir default-directory))
+    (let* ((pick (completing-read "Resume Pi session: "
+                                   (mapcar #'car entries) nil t))
+           (path (cdr (assoc pick entries))))
+      (claude-agent-pi-ui--unwrap
+       (claude-agent-pi-ui--call b `((type . "switch_session")
+                                      (sessionPath . ,path))
+                                  30.0))
+      (message "Pi: switched to %s" (file-name-base path)))))
+
+(defun claude-agent-pi-ui-session-tree ()
+  "Open a buffer showing the session DAG for the current workspace.
+Each session row links to its parent via the JSONL header's
+=parentSession= field; we render the tree as indented org headings
+in a read-only =*Pi Sessions: <cwd>*= buffer."
+  (interactive)
+  (let* ((files (claude-agent-pi-ui--list-session-files default-directory))
+         (by-id (make-hash-table :test 'equal))
+         (children (make-hash-table :test 'equal))
+         (roots nil))
+    (unless files
+      (user-error "No Pi sessions found for cwd %s" default-directory))
+    ;; Index every session by id; build parent → children index.
+    (dolist (path files)
+      (let* ((hdr (claude-agent-pi-ui--read-session-header path))
+             (id (and hdr (map-elt hdr 'id)))
+             (parent (and hdr (map-elt hdr 'parentSession))))
+        (when id
+          (puthash id (list :path path :hdr hdr) by-id)
+          (if parent
+              (push id (gethash parent children))
+            (push id roots)))))
+    (let ((buf (get-buffer-create
+                (format "*Pi Sessions: %s*"
+                        (abbreviate-file-name default-directory)))))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (org-mode)
+          (insert (format "#+TITLE: Pi sessions for %s\n\n"
+                          (abbreviate-file-name default-directory)))
+          (claude-agent-pi-ui--render-session-subtree roots by-id children 1))
+        (goto-char (point-min))
+        (setq buffer-read-only t))
+      (pop-to-buffer buf))))
+
+(defun claude-agent-pi-ui--render-session-subtree (ids by-id children depth)
+  "Render the IDS at DEPTH as org headings; recurse into children."
+  (dolist (id (nreverse ids))
+    (let* ((entry (gethash id by-id))
+           (hdr (and entry (plist-get entry :hdr)))
+           (ts (or (and hdr (map-elt hdr 'timestamp)) ""))
+           (path (and entry (plist-get entry :path))))
+      (insert (format "%s %s — %s\n"
+                       (make-string (1+ depth) ?\*)
+                       (or id "(unknown)")
+                       ts))
+      (when path
+        (insert (format "  :PROPERTIES:\n  :PATH: %s\n  :END:\n" path)))
+      (let ((kids (gethash id children)))
+        (when kids
+          (claude-agent-pi-ui--render-session-subtree
+           kids by-id children (1+ depth)))))))
+#+END_SRC
+
 *** Stats / Export / Login
 :PROPERTIES:
 :CUSTOM_ID: pi-ui-cmd-stats
@@ -289,6 +430,8 @@ Returns the parsed response object (alist).  Signals `user-error' on timeout."
    ["Session"
     ("n" "New session" claude-agent-pi-ui-new-session)
     ("N" "Set session name" claude-agent-pi-ui-set-session-name)
+    ("r" "Resume session" claude-agent-pi-ui-resume-session)
+    ("t" "Session tree" claude-agent-pi-ui-session-tree)
     ("e" "Export HTML" claude-agent-pi-ui-export-html)]
    ["Model + Thinking"
     ("m" "Cycle model" claude-agent-pi-ui-cycle-model)
@@ -366,10 +509,39 @@ real implementations.
           (display-warning 'claude-agent-pi msg :warning))
          (t (message "Pi: %s" msg)))
         (claude-agent-pi-ui--respond backend id '((value . "")))))
-     ((member method '("setStatus" "setWidget" "setTitle" "set_editor_text"))
+     ((equal method "setStatus")
+      ;; Track per-key extension status; surface to user as a message
+      ;; so a "loaded N rules" notification doesn't vanish into the
+      ;; verbose buffer.
+      (let ((status-key (map-elt obj 'statusKey))
+            (status-text (map-elt obj 'statusText)))
+        (when (and status-text (stringp status-text)
+                   (> (length status-text) 0))
+          (message "Pi ext [%s]: %s" status-key status-text))
+        (claude-agent-pi--verbose-log
+         backend (format "ext setStatus %s = %S" status-key status-text)))
+      (claude-agent-pi-ui--respond backend id '((value . ""))))
+     ((equal method "setWidget")
+      ;; Phase 4 widget surface: write the widget lines as a header
+      ;; section into the verbose buffer.  A real overlay zone
+      ;; above/below the ai block is future work; the data is
+      ;; preserved + visible here so an extension can experiment.
+      (let* ((wkey (map-elt obj 'widgetKey))
+             (lines (map-elt obj 'widgetLines))
+             (placement (or (map-elt obj 'widgetPlacement) "above"))
+             (lines-str (cond
+                         ((null lines) "(cleared)")
+                         ((sequencep lines)
+                          (mapconcat #'identity (append lines nil) "\n  "))
+                         (t (format "%S" lines)))))
+        (claude-agent-pi--verbose-log
+         backend
+         (format "ext setWidget[%s/%s]:\n  %s" wkey placement lines-str))
+        (claude-agent-pi-ui--respond backend id '((value . "")))))
+     ((member method '("setTitle" "set_editor_text"))
       (claude-agent-pi--verbose-log
        backend
-       (format "extension_ui %s (ack only, Phase 4 will render)" method))
+       (format "extension_ui %s (ack only)" method))
       (claude-agent-pi-ui--respond backend id '((value . ""))))
      (t
       (claude-agent-pi--verbose-log

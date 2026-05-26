@@ -509,6 +509,8 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-pi-ui-stats"
     "claude-agent-pi-ui-export-html"
     "claude-agent-pi-ui-login"
+    "claude-agent-pi-ui-resume-session"
+    "claude-agent-pi-ui-session-tree"
     ;; claude-agent-backend public API
     "claude-agent-backend-register"
     "claude-agent-backend-get"
