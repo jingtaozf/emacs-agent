@@ -40,7 +40,8 @@ LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-jsonrpc.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-opencode.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-gemini.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-codex.org\")"
-LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/claude-agent-pi-backend.org\")"
+LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/claude-agent-pi-backend.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/claude-agent-pi-ui.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/code-agent-org.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/code-agent-org-header-line.org\")"
@@ -352,6 +353,25 @@ test-pi-backend-live:
 		$(LOAD_PI) \
 		-l tests/test-claude-agent-pi-backend.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :pi-backend-live))"
+
+# Pi UI Phase 1 — smoke (no spawn) + live (real pi RPC commands).
+.PHONY: test-pi-ui
+test-pi-ui:
+	@echo "Running Pi UI Phase 1 smoke tests..."
+	$(BATCH) $(LOAD_PATH) -L tests/support \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_PI) \
+		-l tests/test-claude-agent-pi-ui.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :pi-ui))"
+
+.PHONY: test-pi-ui-live
+test-pi-ui-live:
+	@echo "Running Pi UI live tests (real pi RPC commands)..."
+	$(BATCH) $(LOAD_PATH) -L tests/support \
+		$(LOAD_AGENT_ONLY) \
+		$(LOAD_PI) \
+		-l tests/test-claude-agent-pi-ui.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :pi-ui-live))"
 
 # Fixture-driven E2E stories — runs each :pi-e2e: heading in
 # tests/e2e/org/pi-backend-test.org as a parameterized story.  Skips

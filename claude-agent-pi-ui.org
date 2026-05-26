@@ -1,0 +1,387 @@
+# -*- mode: org; -*-
+#+TITLE: Claude Agent — Pi UI (Phase 1 RPC controls)
+#+PROPERTY: literate-load yes
+
+* Claude Agent — Pi UI
+:PROPERTIES:
+:CUSTOM_ID: overview
+:END:
+
+** Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-overview
+:END:
+
+Phase 1 of the *Pi TUI → Emacs migration* described in =draft.org=.
+Gives the user every routine Pi-TUI control reachable from one
+transient submenu — =C-c C-/ p= — so day-to-day Pi usage never
+requires opening Pi's terminal UI.
+
+Phase 1 is *RPC-only*: each command maps to one or more existing
+=pi --mode rpc= commands.  Multimodal input, tool-call inline
+rendering, session-tree browsing, and widget overlays land in
+subsequent phases (=draft.org= §pi-mig-phase-2/3/4).
+
+** Dependencies
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-deps
+:END:
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'transient)
+(require 'claude-agent-pi-backend)
+#+END_SRC
+
+** Customization
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-customization
+:END:
+
+#+BEGIN_SRC elisp
+(defcustom claude-agent-pi-ui-rpc-timeout 6.0
+  "Seconds to wait for a synchronous RPC response.
+Used by `claude-agent-pi-ui--call' for menu commands like
+`cycle_model'.  Most Pi commands respond in well under a second; the
+generous timeout is for the rare slow-start case (cold provider
+handshake).  Raise this if you frequently hit `Pi RPC timeout' errors."
+  :type 'number
+  :group 'claude-agent)
+#+END_SRC
+
+** Backend lookup + synchronous RPC call
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-helpers
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi-ui--current-backend ()
+  "Return the Pi backend for the session at point, or signal `user-error'."
+  (let* ((sk (and (fboundp 'code-agent-org--current-session-key)
+                  (code-agent-org--current-session-key)))
+         (b (and sk (fboundp 'code-agent-org--session-get)
+                 (code-agent-org--session-get sk :backend))))
+    (cond
+     ((null sk)
+      (user-error "claude-agent-pi-ui: not in a code-agent-org session"))
+     ((null b)
+      (user-error
+       "claude-agent-pi-ui: no active backend.  Run C-c C-c on an ai block first to spawn pi"))
+     ((not (claude-agent-pi-backend-p b))
+      (user-error
+       "claude-agent-pi-ui: active backend is %s, not Pi.  Set :CLAUDE_BACKEND: pi on this workspace"
+       (type-of b)))
+     (t b))))
+
+(defun claude-agent-pi-ui--call (backend command-alist &optional timeout)
+  "Send COMMAND-ALIST to BACKEND with auto-generated id and wait for response.
+Returns the parsed response object (alist).  Signals `user-error' on timeout."
+  (let* ((id (claude-agent-pi--gen-id backend "ui"))
+         (cmd (cons (cons 'id id) command-alist))
+         (result nil)
+         (limit (+ (float-time) (or timeout claude-agent-pi-ui-rpc-timeout))))
+    (puthash id (list :on-response (lambda (obj) (setq result obj)))
+             (claude-agent-pi-backend-pending-by-id backend))
+    (claude-agent-pi--send backend cmd)
+    (while (and (null result) (< (float-time) limit))
+      (accept-process-output nil 0.05))
+    (when (null result)
+      (remhash id (claude-agent-pi-backend-pending-by-id backend))
+      (user-error "Pi RPC timeout waiting for response to %s"
+                  (or (cdr (assq 'type command-alist)) "<unknown>")))
+    result))
+
+(defun claude-agent-pi-ui--unwrap (response)
+  "Extract data from an RPC RESPONSE alist; signal on success=false."
+  (if (eq (map-elt response 'success) t)
+      (map-elt response 'data)
+    (user-error "Pi RPC %s failed: %s"
+                (map-elt response 'command)
+                (or (map-elt response 'error) "no detail"))))
+#+END_SRC
+
+** Phase 1 commands
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-commands
+:END:
+
+*** Session
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-cmd-session
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi-ui-new-session ()
+  "Tell Pi to drop the current session and start a fresh one."
+  (interactive)
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (resp (claude-agent-pi-ui--call b '((type . "new_session")))))
+    (claude-agent-pi-ui--unwrap resp)
+    (setf (claude-agent-pi-backend-session-id b) nil)
+    (message "Pi: started new session")))
+
+(defun claude-agent-pi-ui-set-session-name (name)
+  "Give the current Pi session a human label NAME."
+  (interactive (list (read-string "Session name: ")))
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (resp (claude-agent-pi-ui--call
+                b `((type . "set_session_name") (name . ,name)))))
+    (claude-agent-pi-ui--unwrap resp)
+    (message "Pi: session named %S" name)))
+#+END_SRC
+
+*** Model
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-cmd-model
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi-ui-cycle-model ()
+  "Cycle to the next model in the user's `models' settings list."
+  (interactive)
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (resp (claude-agent-pi-ui--call b '((type . "cycle_model"))))
+         (data (claude-agent-pi-ui--unwrap resp)))
+    (if data
+        (message "Pi model: %s (thinking %s)"
+                 (map-elt (map-elt data 'model) 'id)
+                 (map-elt data 'thinkingLevel))
+      (message "Pi: no scoped models configured (use `pi config' to add)"))))
+
+(defun claude-agent-pi-ui-pick-model ()
+  "Prompt for a model via `completing-read', then set it on Pi."
+  (interactive)
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (resp (claude-agent-pi-ui--call b '((type . "get_available_models"))))
+         (data (claude-agent-pi-ui--unwrap resp))
+         (models (and data (map-elt data 'models)))
+         (choices
+          (mapcar (lambda (m)
+                    (let ((provider (map-elt m 'provider))
+                          (id (map-elt m 'id))
+                          (name (map-elt m 'name)))
+                      (cons (format "%s/%s — %s" provider id name)
+                            (cons provider id))))
+                  (if (sequencep models) (append models nil) nil))))
+    (unless choices (user-error "Pi reported zero available models"))
+    (let* ((picked (completing-read "Pi model: " (mapcar #'car choices) nil t))
+           (entry (cdr (assoc picked choices)))
+           (provider (car entry))
+           (id (cdr entry)))
+      (claude-agent-pi-ui--unwrap
+       (claude-agent-pi-ui--call b `((type . "set_model")
+                                     (provider . ,provider)
+                                     (modelId . ,id))))
+      (message "Pi model set to %s/%s" provider id))))
+#+END_SRC
+
+*** Thinking
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-cmd-thinking
+:END:
+
+#+BEGIN_SRC elisp
+(defconst claude-agent-pi-ui--thinking-levels
+  '("off" "minimal" "low" "medium" "high" "xhigh")
+  "Allowed thinking levels — see Pi's `ThinkingLevel' type.")
+
+(defun claude-agent-pi-ui-cycle-thinking ()
+  "Cycle thinking level forward (off → minimal → … → xhigh → off)."
+  (interactive)
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (resp (claude-agent-pi-ui--call b '((type . "cycle_thinking_level"))))
+         (data (claude-agent-pi-ui--unwrap resp)))
+    (message "Pi thinking: %s" (and data (map-elt data 'level)))))
+
+(defun claude-agent-pi-ui-set-thinking (level)
+  "Set Pi thinking LEVEL via `completing-read'."
+  (interactive (list (completing-read "Thinking level: "
+                                       claude-agent-pi-ui--thinking-levels
+                                       nil t)))
+  (let ((b (claude-agent-pi-ui--current-backend)))
+    (claude-agent-pi-ui--unwrap
+     (claude-agent-pi-ui--call b `((type . "set_thinking_level")
+                                    (level . ,level))))
+    (message "Pi thinking: %s" level)))
+#+END_SRC
+
+*** Steer / Follow-up / Abort / Compact
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-cmd-flow
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi-ui-steer (text)
+  "Queue TEXT to be delivered to Pi BEFORE the next LLM call finishes."
+  (interactive (list (read-string "Steer: ")))
+  (let ((b (claude-agent-pi-ui--current-backend)))
+    (claude-agent-pi-ui--unwrap
+     (claude-agent-pi-ui--call b `((type . "steer") (message . ,text))))
+    (message "Pi: steering message queued")))
+
+(defun claude-agent-pi-ui-follow-up (text)
+  "Queue TEXT to be delivered AFTER the current agent loop finishes."
+  (interactive (list (read-string "Follow-up: ")))
+  (let ((b (claude-agent-pi-ui--current-backend)))
+    (claude-agent-pi-ui--unwrap
+     (claude-agent-pi-ui--call b `((type . "follow_up") (message . ,text))))
+    (message "Pi: follow-up queued")))
+
+(defun claude-agent-pi-ui-abort ()
+  "Abort the current Pi agent loop."
+  (interactive)
+  (let ((b (claude-agent-pi-ui--current-backend)))
+    (claude-agent-pi-ui--call b '((type . "abort")))
+    (message "Pi: abort sent")))
+
+(defun claude-agent-pi-ui-compact (instructions)
+  "Tell Pi to compact the conversation now."
+  (interactive (list (read-string "Custom compaction instructions (blank for default): ")))
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (cmd `((type . "compact")
+                ,@(when (and instructions (> (length instructions) 0))
+                    `((customInstructions . ,instructions)))))
+         (resp (claude-agent-pi-ui--call b cmd 30.0)))
+    (claude-agent-pi-ui--unwrap resp)
+    (message "Pi: compaction completed")))
+#+END_SRC
+
+*** Stats / Export / Login
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-cmd-stats
+:END:
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi-ui-stats ()
+  "Echo Pi session stats (tokens, cost, context %)."
+  (interactive)
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (resp (claude-agent-pi-ui--call b '((type . "get_session_stats"))))
+         (data (claude-agent-pi-ui--unwrap resp)))
+    (message "Pi stats: %s" (json-encode data))))
+
+(defun claude-agent-pi-ui-export-html (path)
+  "Export the current Pi session as a standalone HTML file."
+  (interactive (list (when current-prefix-arg
+                       (read-file-name "Export HTML to: "))))
+  (let* ((b (claude-agent-pi-ui--current-backend))
+         (cmd `((type . "export_html")
+                ,@(when path `((outputPath . ,(expand-file-name path))))))
+         (resp (claude-agent-pi-ui--call b cmd 15.0))
+         (data (claude-agent-pi-ui--unwrap resp)))
+    (message "Pi: exported to %s" (map-elt data 'path))))
+
+(defun claude-agent-pi-ui-login ()
+  "Run `pi login' in an `async-shell-command'."
+  (interactive)
+  (async-shell-command "pi login" "*pi-login*"))
+#+END_SRC
+
+** Transient menu
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-menu
+:END:
+
+#+BEGIN_SRC elisp
+(transient-define-prefix claude-agent-pi-ui-menu ()
+  "Pi backend control panel."
+  ["Pi Backend"
+   ["Session"
+    ("n" "New session" claude-agent-pi-ui-new-session)
+    ("N" "Set session name" claude-agent-pi-ui-set-session-name)
+    ("e" "Export HTML" claude-agent-pi-ui-export-html)]
+   ["Model + Thinking"
+    ("m" "Cycle model" claude-agent-pi-ui-cycle-model)
+    ("M" "Pick model" claude-agent-pi-ui-pick-model)
+    ("k" "Cycle thinking" claude-agent-pi-ui-cycle-thinking)
+    ("K" "Set thinking" claude-agent-pi-ui-set-thinking)]
+   ["Send"
+    ("s" "Steer" claude-agent-pi-ui-steer)
+    ("F" "Follow-up" claude-agent-pi-ui-follow-up)
+    ("c" "Compact" claude-agent-pi-ui-compact)
+    ("a" "Abort" claude-agent-pi-ui-abort)]
+   ["Info / Setup"
+    ("S" "Stats" claude-agent-pi-ui-stats)
+    ("L" "Login (async pi)" claude-agent-pi-ui-login)
+    ("q" "Back" transient-quit-one)]])
+#+END_SRC
+
+** Extension UI handlers
+:PROPERTIES:
+:CUSTOM_ID: pi-ui-extension-ui
+:END:
+
+Replaces =claude-agent-pi--default-ui-handler= (auto-cancel stub) with
+real implementations.
+
+#+BEGIN_SRC elisp
+(defun claude-agent-pi-ui--respond (backend id payload)
+  "Send `extension_ui_response' for ID with PAYLOAD plist members."
+  (claude-agent-pi--send
+   backend
+   `((type . "extension_ui_response")
+     (id . ,id)
+     ,@payload)))
+
+(defun claude-agent-pi-ui--extension-ui-handler (backend obj)
+  "Real handler for Pi `extension_ui_request' events."
+  (let* ((id (map-elt obj 'id))
+         (method (map-elt obj 'method)))
+    (cond
+     ((null id)
+      (when (equal method "notify")
+        (message "Pi extension notify: %s" (map-elt obj 'message))))
+     ((equal method "select")
+      (let* ((title (map-elt obj 'title))
+             (opts (map-elt obj 'options))
+             (opts-list (if (sequencep opts) (append opts nil) nil))
+             (pick (and opts-list
+                        (completing-read (format "%s: " title) opts-list nil t))))
+        (if pick
+            (claude-agent-pi-ui--respond backend id `((value . ,pick)))
+          (claude-agent-pi-ui--respond backend id '((cancelled . t))))))
+     ((equal method "confirm")
+      (let* ((title (map-elt obj 'title))
+             (msg (map-elt obj 'message))
+             (answer (yes-or-no-p (format "%s: %s " title msg))))
+        (claude-agent-pi-ui--respond backend id `((confirmed . ,(if answer t :json-false))))))
+     ((equal method "input")
+      (let* ((title (map-elt obj 'title))
+             (placeholder (or (map-elt obj 'placeholder) ""))
+             (val (read-string (format "%s: " title) placeholder)))
+        (claude-agent-pi-ui--respond backend id `((value . ,val)))))
+     ((equal method "editor")
+      (let* ((title (map-elt obj 'title))
+             (prefill (or (map-elt obj 'prefill) ""))
+             (val (read-string (format "%s (one line, RET to submit): " title)
+                                prefill)))
+        (claude-agent-pi-ui--respond backend id `((value . ,val)))))
+     ((equal method "notify")
+      (let ((msg (map-elt obj 'message))
+            (kind (or (map-elt obj 'notifyType) "info")))
+        (cond
+         ((equal kind "error")
+          (display-warning 'claude-agent-pi msg :error))
+         ((equal kind "warning")
+          (display-warning 'claude-agent-pi msg :warning))
+         (t (message "Pi: %s" msg)))
+        (claude-agent-pi-ui--respond backend id '((value . "")))))
+     ((member method '("setStatus" "setWidget" "setTitle" "set_editor_text"))
+      (claude-agent-pi--verbose-log
+       backend
+       (format "extension_ui %s (ack only, Phase 4 will render)" method))
+      (claude-agent-pi-ui--respond backend id '((value . ""))))
+     (t
+      (claude-agent-pi--verbose-log
+       backend (format "extension_ui_request unknown method %S — cancelled" method))
+      (claude-agent-pi-ui--respond backend id '((cancelled . t)))))))
+
+(setq claude-agent-pi-extension-ui-handler
+      #'claude-agent-pi-ui--extension-ui-handler)
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'claude-agent-pi-ui)
+#+END_SRC

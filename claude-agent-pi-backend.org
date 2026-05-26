@@ -399,8 +399,23 @@ responses match against =pending-by-id= via the =id= field.
       (when (and (not success) id)
         (claude-agent-pi--fire-error backend id
                                      (or error-msg "prompt rejected"))))
-     ;; abort / new_session / fork / compact / ... — log success/failure;
-     ;; no callbacks to fire (caller used the sync wrapper, not query).
+     ;; Generic RPC response: if caller registered `:on-response' in
+     ;; pending-by-id for this id, fire it with the parsed OBJ — this
+     ;; is how `claude-agent-pi-ui--call' implements synchronous-feel
+     ;; menu commands (cycle_model, get_state, get_session_stats, …).
+     ((and id (gethash id (claude-agent-pi-backend-pending-by-id backend)))
+      (let* ((cbs (gethash id (claude-agent-pi-backend-pending-by-id backend)))
+             (on-response (plist-get cbs :on-response)))
+        (when on-response
+          (remhash id (claude-agent-pi-backend-pending-by-id backend))
+          (condition-case err
+              (funcall on-response obj)
+            (error
+             (claude-agent-pi--verbose-log
+              backend
+              (format "on-response error for %s: %s"
+                      command (error-message-string err))))))))
+     ;; abort / new_session / fork / compact / ... fire-and-forget — log only.
      (t
       (claude-agent-pi--verbose-log
        backend
@@ -527,17 +542,35 @@ queries waiting for input. A2 will implement =completing-read= / =y-or-n-p=
 prompts and a proper allowlist.
 
 #+BEGIN_SRC elisp
-(defun claude-agent-pi--handle-extension-ui (backend obj)
-  "Stub: respond `cancelled' to every extension UI request (A1 safety)."
+(defvar claude-agent-pi-extension-ui-handler #'claude-agent-pi--default-ui-handler
+  "Function (BACKEND OBJ) -> void invoked for each =extension_ui_request= event.
+The default `claude-agent-pi--default-ui-handler' auto-cancels every
+request (safe stub).  The =claude-agent-pi-ui.org= module installs a
+richer implementation backed by `completing-read', `yes-or-no-p',
+`read-string', etc.")
+
+(defun claude-agent-pi--default-ui-handler (backend obj)
+  "Safe default — respond `cancelled' to every extension UI request.
+Logs the method so the verbose buffer surfaces what was suppressed."
   (let ((id (map-elt obj 'id))
         (method (map-elt obj 'method)))
     (claude-agent-pi--verbose-log
-     backend (format "extension_ui_request %s (auto-cancelled)" method))
+     backend (format "extension_ui_request %s (auto-cancelled — install pi-ui)" method))
     (when id
       (claude-agent-pi--send backend
                              `((type . "extension_ui_response")
                                (id . ,id)
                                (cancelled . t))))))
+
+(defun claude-agent-pi--handle-extension-ui (backend obj)
+  "Dispatch via the pluggable `claude-agent-pi-extension-ui-handler'."
+  (condition-case err
+      (funcall claude-agent-pi-extension-ui-handler backend obj)
+    (error
+     (claude-agent-pi--verbose-log
+      backend (format "extension_ui_request handler raised: %s; auto-cancelling"
+                      (error-message-string err)))
+     (claude-agent-pi--default-ui-handler backend obj))))
 #+END_SRC
 
 ** Process Spawn

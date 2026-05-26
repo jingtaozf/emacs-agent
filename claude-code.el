@@ -80,6 +80,12 @@
 ;; runtime; absent that, dispatch fails with a clear error from the
 ;; factory rather than `void-function'.
 (claude-code--load-module "claude-agent-pi-backend")
+;; Pi-side UI controls (transient submenu C-c C-/ p, extension UI
+;; request handlers).  Auto-loaded so the menu binding works
+;; immediately after a fresh package install.  Independent of whether
+;; the `pi' binary is actually on PATH — the module's commands raise
+;; clear `user-error's at call time when Pi isn't reachable.
+(claude-code--load-module "claude-agent-pi-ui")
 ;; ACP backends (OpenCode / Gemini / Codex) remain OPT-IN — users load
 ;; them explicitly in their init file if they use those agents.
 ;; The `code-agent-org-backend-registry' entries reference those

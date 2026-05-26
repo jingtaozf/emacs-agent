@@ -1,0 +1,138 @@
+# -*- mode: org; -*-
+#+TITLE: Design Drafts — claude-agent
+#+OPTIONS: toc:nil
+
+Proposal queue.  Each proposal is a top-level =* <year>-<month>-<slug>=
+section.  Approved designs migrate from here into the relevant code
+.org module's prose preamble (per the project's =design-stays-in-org=
+rule); rejected proposals stay here as historical record.
+
+* 2026-05-26-pi-tui-to-emacs-migration
+:PROPERTIES:
+:CUSTOM_ID: pi-tui-migration
+:STATUS: phase-1-shipping
+:OWNER: jt
+:END:
+
+** Motivation
+Pi.dev (=pi --mode rpc=) is embedded as the =:CLAUDE_BACKEND: pi=
+backend.  Today, several configuration / discovery / interaction
+features (model picker, OAuth login, session tree, =pi install=,
+=pi config=) still require dropping into Pi's terminal UI in a separate
+window.
+
+Goal: a user who lives in Emacs should never need to leave it to do
+*anything* Pi can do.
+
+** Comprehensive feature matrix (Phase 1-4 plan)
+
+10 categories cataloged from =reference/pi/packages/coding-agent/src/modes/interactive/=
+(14 609 LOC, 24 components):
+- Conversation rendering (assistant / user / thinking / tool / diff / bash / skill / compaction / branch / custom / error)
+- Input handling (editor, autocomplete, external editor, bash mode, follow-up queue, image paste, extension editors)
+- Selectors (model, session resume, session tree, fork, theme, thinking, settings, OAuth, extension select/confirm/input)
+- Status / footer / header (cwd+git+tokens, working spinner, retry countdown, extension status, terminal title)
+- Keybindings (~20 standard + extension shortcuts)
+- Slash commands (=/settings=, =/model=, =/export=, =/import=, =/share=, =/name=, =/fork=, =/clone=, =/tree=, =/login=, =/logout=, =/new=, =/compact=, =/reload=, =/debug=, =/resume=, =/skill:*=)
+- Extension UI (=ctx.ui.select/confirm/input/editor/notify/setStatus/setWidget/setTitle=)
+- Streaming / progress
+- Image / multimodal
+- Help / discovery
+
+Difficulty taxonomy: T (trivial, RPC already received) / E (easy, small Emacs handler) / M (medium, new Emacs UI) / H (hard, no RPC surface — Pi PR needed).
+
+*** RPC commands available (30 total)
+
+prompt, steer, follow_up, abort, new_session, get_state, set_model,
+cycle_model, get_available_models, set_thinking_level, cycle_thinking_level,
+set_steering_mode, set_follow_up_mode, compact, set_auto_compaction,
+set_auto_retry, abort_retry, bash, abort_bash, get_session_stats,
+export_html, switch_session, fork, clone, get_fork_messages,
+get_last_assistant_text, set_session_name, get_messages, get_commands,
+extension_ui_response.
+
+*** Pi features WITHOUT an RPC surface (the hard cases)
+- =registerMessageRenderer= (silent no-op in RPC mode)
+- =setWorkingMessage / setWorkingIndicator= (TUI-only)
+- =ctx.ui.custom(factory)= (returns undefined in RPC)
+- =setFooter / setHeader= (no-op)
+- =setEditorComponent / addAutocompleteProvider= (no-op)
+- =setTheme / getAllThemes= (returns failure / empty)
+- =registerShortcut= (no keyboard source in RPC)
+- =onTerminalInput= (no-op)
+- session tree (internal data structure; needs Pi PR or Emacs reads JSONL directly)
+- OAuth login flow (TUI-internal; =async-shell-command "pi login"= is the workaround)
+
+** Phase 1 — RPC controls + extension UI request handlers
+:PROPERTIES:
+:CUSTOM_ID: pi-mig-phase-1
+:STATUS: shipping
+:END:
+
+Status: *implementing*.  All commands bound under =C-c C-/ p=
+(submenu =claude-agent-pi-ui-menu= defined in =claude-agent-pi-ui.org=).
+
+Commands wired:
+- Session: new, set-name, export-html
+- Model: cycle, pick (=completing-read=)
+- Thinking: cycle, set (=completing-read=)
+- Send: steer, follow-up, abort, compact
+- Info / Setup: stats, login (=async-shell-command "pi login"=)
+
+Extension UI request handler (replaces the auto-cancel stub):
+=select= → completing-read; =confirm= → yes-or-no-p; =input= → read-string;
+=editor= → read-string (multi-line later); =notify= → message/display-warning;
+=setStatus/setWidget/setTitle/set_editor_text= → log + ack (Phase 4 will
+render properly).
+
+E2E: =test-claude-agent-pi-ui.el= covers smoke (symbols + menu prefix +
+extension handler swap + error path) and live (cycle-thinking actually
+mutates state via Pi RPC; steer/follow_up accepted).
+
+** Phase 2 — Multimodal + tool-call inline rendering
+:PROPERTIES:
+:CUSTOM_ID: pi-mig-phase-2
+:STATUS: queued
+:END:
+
+| Item | Approach |
+|------+----------|
+| =#+ATTR_AI: :image <path>= header parser | In =code-agent-org-block.org=; reads file, base64s, packs into Pi's =prompt.images= field |
+| Per-tool inline rendering | =tool_execution_*= events → foldable =*** Tool: name= subheading inside response section |
+| Diff overlay | unified-diff text → =#+begin_src diff= block (=diff-mode= fontification) |
+
+** Phase 3 — Session tree + resume picker
+:PROPERTIES:
+:CUSTOM_ID: pi-mig-phase-3
+:STATUS: queued
+:END:
+
+| Item | Approach |
+|------+----------|
+| Resume picker | Scan =~/.pi/agent/sessions/<cwd-hash>/=, =completing-read= over entries, dispatch =switch_session= |
+| Session tree | Read JSONL parentId chain, render with =hierarchy.el= in =*Pi Sessions*= buffer |
+
+** Phase 4 — Widget overlay + custom message rendering
+:PROPERTIES:
+:CUSTOM_ID: pi-mig-phase-4
+:END:
+
+| Item | Approach |
+|------+----------|
+| =setWidget= overlay | Buffer-local overlay zone above/below ai block |
+| Custom message renderer | Fallback: pretty-print =message_start role=custom= JSON; pending Pi PR for native dispatch |
+
+** Pi-side change set (potential upstream PRs)
+1. =registerMessageRenderer= result over RPC (=custom_message_render= event)
+2. =setWorkingMessage/setWorkingIndicator= passthrough event
+3. =ctx.ui.custom()= degrade to =notify= + serializable description
+4. =get_session_tree= RPC (currently we read JSONL directly as workaround)
+5. =onTerminalInput= / =registerShortcut= — document as TUI-only
+
+** References
+- =reference/pi/packages/coding-agent/src/modes/interactive/= — Pi TUI source.
+- =reference/pi/packages/coding-agent/src/modes/rpc/rpc-types.ts= — RPC contract.
+- =reference/pi/packages/coding-agent/src/core/extensions/types.ts= — extension API.
+- =claude-agent-pi-backend.org= — backend integration.
+- =claude-agent-pi-ui.org= — Phase 1 control panel.
+- =tests/test-claude-agent-pi-ui.el= — Phase 1 tests.
