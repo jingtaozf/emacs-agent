@@ -19,9 +19,9 @@
                        (or load-file-name buffer-file-name))))))
   (load (expand-file-name "tests/support/test-helpers.el" project-root) nil t)
   (require 'literate-elisp)
-  (literate-elisp-load (expand-file-name "code-agent.org" project-root))
-  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))
-  (literate-elisp-load (expand-file-name "code-agent-org-cmux.org" project-root)))
+  (literate-elisp-load (expand-file-name "lp/chat/code-agent.org" project-root))
+  (literate-elisp-load (expand-file-name "lp/org/code-agent-org.org" project-root))
+  (literate-elisp-load (expand-file-name "lp/org/code-agent-org-cmux.org" project-root)))
 
 (defvar test-cmux--project-root
   (file-name-directory

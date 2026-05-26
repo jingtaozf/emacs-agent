@@ -11,7 +11,7 @@
 (let ((project-root (file-name-directory
                      (directory-file-name
                       (file-name-directory load-file-name)))))
-  (load (expand-file-name "code-agent-org.org" project-root) nil t))
+  (load (expand-file-name "lp/org/code-agent-org.org" project-root) nil t))
 
 ;;; Query-ID Generation Tests
 

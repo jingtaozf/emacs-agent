@@ -106,12 +106,28 @@ The library mirrors the Python Claude Agent SDK API, providing:
 (require 'json)
 (require 'subr-x)
 
-;; Load extracted modules (literate-elisp .org files)
-(let ((module-dir (file-name-directory (or load-file-name buffer-file-name ""))))
+;; Load extracted modules (literate-elisp .org files).
+;; After the 2026-05-26 layout restructure, modules live under
+;; ``lp/<group>/`` rather than as siblings of this file.  Walk every
+;; immediate subdir of ``lp/`` (resolved from the repo root via the
+;; sentinel ``code-agent.el``) so the loader finds the module wherever
+;; the layout puts it.
+(let* ((module-dir (file-name-directory (or load-file-name buffer-file-name "")))
+       (repo-root (locate-dominating-file module-dir "code-agent.el"))
+       (lp-dir (and repo-root (expand-file-name "lp" repo-root))))
   (dolist (module '("code-agent-backend" "code-agent-permission" "code-agent-ide"))
     (unless (featurep (intern module))
-      (literate-elisp-load
-       (expand-file-name (concat module ".org") module-dir)))))
+      (let* ((basename (concat module ".org"))
+             (candidates
+              (cons (expand-file-name basename module-dir)
+                    (and lp-dir (file-directory-p lp-dir)
+                         (mapcar (lambda (sub) (expand-file-name basename sub))
+                                 (cl-remove-if-not
+                                  #'file-directory-p
+                                  (directory-files lp-dir t "\\`[^.]" t))))))
+             (file (cl-find-if #'file-exists-p candidates)))
+        (when file
+          (literate-elisp-load file))))))
 #+END_SRC
 
 * Tests

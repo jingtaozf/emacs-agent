@@ -205,18 +205,26 @@ ELISP-STRING is the source for re-parsing struct definitions."
 ;;; ============================================================================
 
 (defun test-static--find-project-root ()
-  "Find the project root directory."
-  (or (locate-dominating-file default-directory "code-agent.org")
+  "Find the project root directory.
+
+Uses `code-agent.el` as the sentinel — it's at the repo root and
+survives the 2026-05-26 ``lp/<group>/`` restructure that moved every
+top-level .org into a subdir.  Falls back to .git, then cwd."
+  (or (locate-dominating-file default-directory "code-agent.el")
       (locate-dominating-file default-directory ".git")
       default-directory))
 
 (defvar test-static--source-files
-  '("code-agent-trace.org" "code-agent.org" "code-agent-org.org"
-    "code-agent-org-workspace-bridge.org" "code-agent-org-terminal-base.org"
-    "code-agent-org-cmux.org" "emacs-mcp-server.org")
-  "List of .org source files to analyze.
+  '("lp/trace/code-agent-trace.org"
+    "lp/chat/code-agent.org"
+    "lp/org/code-agent-org.org"
+    "lp/org/code-agent-org-workspace-bridge.org"
+    "lp/org/code-agent-org-terminal-base.org"
+    "lp/org/code-agent-org-cmux.org"
+    "lp/sdk/emacs-mcp-server.org")
+  "List of .org source files to analyze, repo-relative.
 Load order matters: workspace-bridge and terminal-base before backends.
-Customize this for your project.")
+Paths reflect the 2026-05-26 lp/<group>/ restructure.")
 
 (defvar test-static--skip-files-without-deps t
   "If non-nil, skip files that fail to load due to missing dependencies.

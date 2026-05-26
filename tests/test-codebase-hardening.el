@@ -31,7 +31,7 @@ FIX: Wrap process-send-eof in timer callbacks with (when (process-live-p proc) .
 See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    (let* ((file (expand-file-name "code-agent-backend.org" test-hardening--project-root))
+    (let* ((file (expand-file-name "lp/sdk/code-agent-backend.org" test-hardening--project-root))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string))))
@@ -68,7 +68,7 @@ FIX: Add (when (buffer-live-p buf) ...) inside the timer lambda in
 code-agent-org--schedule-fontlock. See ARCHITECTURE.org Invariants."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    (let* ((file (expand-file-name "code-agent-org-response.org" test-hardening--project-root))
+    (let* ((file (expand-file-name "lp/org/code-agent-org-response.org" test-hardening--project-root))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string))))
@@ -86,8 +86,9 @@ See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
     ;; Check code-agent.org and code-agent-backend.org: any process-send-eof
-    ;; near run-at-time should have process-live-p nearby
-    (dolist (org-file '("code-agent.org" "code-agent-backend.org"))
+    ;; near run-at-time should have process-live-p nearby.
+    ;; Paths reflect the 2026-05-26 lp/<group>/ restructure.
+    (dolist (org-file '("lp/chat/code-agent.org" "lp/sdk/code-agent-backend.org"))
       (let* ((file (expand-file-name org-file test-hardening--project-root))
              (content (with-temp-buffer
                         (insert-file-contents file)

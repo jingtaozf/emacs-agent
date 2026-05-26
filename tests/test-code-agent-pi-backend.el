@@ -27,10 +27,10 @@
   (add-to-list 'load-path root)
   (require 'literate-elisp)
   (unless (featurep 'code-agent-backend)
-    (literate-elisp-load (expand-file-name "code-agent-backend.org" root)))
+    (literate-elisp-load (expand-file-name "lp/sdk/code-agent-backend.org" root)))
   (unless (featurep 'code-agent-pi-backend)
     (literate-elisp-load
-     (expand-file-name "code-agent-pi-backend.org" root))))
+     (expand-file-name "lp/backend/code-agent-pi-backend.org" root))))
 
 (require 'code-agent-backend)
 (require 'code-agent-pi-backend)

@@ -280,7 +280,7 @@ FIX: Remove (require 'code-agent-org...) from code-agent.org.
 See ARCHITECTURE.org Module Boundary Diagram for allowed dependency directions."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let ((agent-file (expand-file-name "code-agent.org" test-structural--project-root)))
+    (let ((agent-file (expand-file-name "lp/chat/code-agent.org" test-structural--project-root)))
       (when (file-exists-p agent-file)
         (let ((content (with-temp-buffer
                          (insert-file-contents agent-file)
@@ -294,7 +294,7 @@ FIX: Remove the (require 'claude-...) from emacs-mcp-server.org.
 The MCP server is an independent module. See ARCHITECTURE.org."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let ((mcp-file (expand-file-name "emacs-mcp-server.org" test-structural--project-root)))
+    (let ((mcp-file (expand-file-name "lp/sdk/emacs-mcp-server.org" test-structural--project-root)))
       (when (file-exists-p mcp-file)
         (let ((content (with-temp-buffer
                          (insert-file-contents mcp-file)
@@ -1024,7 +1024,7 @@ FIX: Add (and parsed (listp parsed)) guard in process-json-buffer and
      the sentinel remaining-JSON handler."
   :tags '(:unit :fast :stable :structural)
   (let ((violations '())
-        (backend-file (expand-file-name "code-agent-backend.org"
+        (backend-file (expand-file-name "lp/sdk/code-agent-backend.org"
                                         test-structural--project-root)))
     (with-temp-buffer
       (insert-file-contents backend-file)
@@ -1156,7 +1156,7 @@ The type-specific formatting logic belongs in dedicated helpers
 FIX: Extract formatting logic into type-specific helpers."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let* ((file (expand-file-name "code-agent-backend.org"
+    (let* ((file (expand-file-name "lp/sdk/code-agent-backend.org"
                                     test-structural--project-root))
            (line-count 0)
            (found nil))
@@ -1184,7 +1184,7 @@ The alert and query-spinner rendering logic belongs in dedicated helpers
 FIX: Extract rendering logic into helper functions."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let* ((file (expand-file-name "code-agent.org"
+    (let* ((file (expand-file-name "lp/chat/code-agent.org"
                                     test-structural--project-root))
            (line-count 0)
            (found nil))
@@ -1211,7 +1211,7 @@ in --setup-ide-after-ready.
 FIX: Extract phase-specific logic into helper functions."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let* ((file (expand-file-name "code-agent-org-cmux.org"
+    (let* ((file (expand-file-name "lp/org/code-agent-org-cmux.org"
                                     test-structural--project-root))
            (line-count 0)
            (found nil))
@@ -1249,7 +1249,7 @@ FIX: Do not reintroduce `code-agent-org-cmux--start-streaming',
 `code-agent-org-cmux--stop-streaming', or `code-agent-org-cmux--stream-tick'.
 If you need live terminal echo, use the async verbose mirror."
   :tags '(:unit :fast :stable :structural)
-  (let ((cmux-org (expand-file-name "code-agent-org-cmux.org"
+  (let ((cmux-org (expand-file-name "lp/org/code-agent-org-cmux.org"
                                     test-structural--project-root)))
     (with-temp-buffer
       (insert-file-contents cmux-org)

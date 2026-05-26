@@ -26,25 +26,25 @@ LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COM
 # Common literate-elisp load sequences (DRY — used by all test targets)
 # Load order: trace → agent (includes backend) → mcp → org
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
-LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/code-agent-trace.org\")"
-LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/code-agent.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/code-agent-chat.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/code-agent-translate.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/code-agent-title.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/code-agent-refine.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/code-agent-multiplexer.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/code-agent-cmux-backend.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/code-agent-tmux-backend.org\")"
-LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/code-agent-jsonrpc.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp-opencode.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp-gemini.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp-codex.org\")"
-LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/code-agent-pi-backend.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/code-agent-pi-ui.org\")"
-LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
-LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/code-agent-org.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/code-agent-org-header-line.org\")"
+LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/lp/trace/code-agent-trace.org\")"
+LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-chat.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-translate.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-title.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-refine.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-multiplexer.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-cmux-backend.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-tmux-backend.org\")"
+LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-jsonrpc.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp-opencode.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp-gemini.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp-codex.org\")"
+LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-pi-backend.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-pi-ui.org\")"
+LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/sdk/emacs-mcp-server.org\")"
+LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-header-line.org\")"
 # Presets for common combinations
 LOAD_AGENT_ONLY = $(LOAD_LITERATE) $(LOAD_AGENT)
 LOAD_ALL = $(LOAD_LITERATE) $(LOAD_AGENT) $(LOAD_MCP) $(LOAD_ORG)
@@ -130,9 +130,9 @@ reload:
 	@echo "Reloading org files requires running Emacs session"
 	@echo "In Emacs, run: M-x eval-expression RET"
 	@echo "  (progn"
-	@echo "    (literate-elisp-load \"$(PWD)/code-agent-trace.org\")"
-	@echo "    (literate-elisp-load \"$(PWD)/code-agent.org\")"
-	@echo "    (literate-elisp-load \"$(PWD)/code-agent-org.org\"))"
+	@echo "    (literate-elisp-load \"$(PWD)/lp/trace/code-agent-trace.org\")"
+	@echo "    (literate-elisp-load \"$(PWD)/lp/chat/code-agent.org\")"
+	@echo "    (literate-elisp-load \"$(PWD)/lp/org/code-agent-org.org\"))"
 
 .PHONY: install-hooks
 install-hooks:
@@ -169,9 +169,9 @@ test-cmux:
 	@echo "Running cmux backend E2E tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-workspace-bridge.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-terminal-base.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-cmux.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-workspace-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-cmux.org\")" \
 		-l tests/test-cmux-e2e-simulated.el \
 		-l tests/test-cmux-e2e-agent-profiles.el \
 		-l tests/test-cmux-env-injection.el \
@@ -458,8 +458,8 @@ test-org-unit:
 		-l tests/test-mcp-http.el \
 		-l tests/test-code-agent-org-cleanup.el \
 		-l tests/test-code-agent-org-cleanup-r2.el \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-workspace-bridge.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-terminal-base.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-workspace-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
 		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
 		-l tests/test-code-agent-input-validation.el \
@@ -730,9 +730,9 @@ test-e2e-local:
 	@echo "Running local E2E tests (requires Phoenix + OTel bridge)..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-workspace-bridge.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-terminal-base.org\")" \
-		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-cmux.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-workspace-bridge.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
+		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-cmux.org\")" \
 		-l tests/test-e2e-local-trace.el \
 		-l tests/test-acp-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"
@@ -815,7 +815,7 @@ config:
 	@for file in $(ALL_TESTS); do echo "  - $$file"; done
 
 # Literate programming — tangle Python sources
-PYTHON_LP_ORG := code-agent-python.org
+PYTHON_LP_ORG := lp/sdk/code-agent-python.org
 
 .PHONY: tangle-python
 tangle-python:

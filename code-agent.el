@@ -49,11 +49,27 @@
   :group 'code-agent)
 
 (defun code-agent--load-module (name)
-  "Load Claude Code module NAME from org file."
-  (let ((file (expand-file-name (concat name ".org") claude-code-directory)))
-    (if (file-exists-p file)
+  "Load Claude Code module NAME (basename, no extension) from .org file.
+
+After the 2026-05-26 restructure, modules live under
+``claude-code-directory/lp/<group>/`` rather than at the repo root.
+This function transparently searches both layouts so callers stay
+agnostic.  The search order is: repo root first (back-compat with any
+ad-hoc files added later), then every immediate subdir of ``lp/``."
+  (let* ((basename (concat name ".org"))
+         (root claude-code-directory)
+         (lp-dir (expand-file-name "lp" root))
+         (candidates (cons (expand-file-name basename root)
+                           (and (file-directory-p lp-dir)
+                                (mapcar (lambda (sub)
+                                          (expand-file-name basename sub))
+                                        (cl-remove-if-not
+                                         #'file-directory-p
+                                         (directory-files lp-dir t "\\`[^.]" t))))))
+         (file (cl-find-if #'file-exists-p candidates)))
+    (if file
         (literate-elisp-load file)
-      (error "Claude Code module not found: %s" file))))
+      (error "Claude Code module not found: %s (searched root + lp/*)" basename))))
 
 ;; Load all modules
 (code-agent--load-module "code-agent-trace")

@@ -132,10 +132,28 @@ Response will appear here after pressing C-c C-c inside the ai block.
 (require 'code-agent-cmux-backend)
 (require 'code-agent-tmux-backend)
 
-;; Load extracted modules (literate-elisp .org files, not .el packages)
-;; customize must load FIRST so every subsequent module sees the
-;; defcustoms / defconsts / hook defvars already bound.
-(let ((module-dir (file-name-directory (or load-file-name buffer-file-name ""))))
+;; Load extracted modules (literate-elisp .org files, not .el packages).
+;; After the 2026-05-26 layout restructure, sibling modules live under
+;; ``lp/<group>/`` rather than next to this file.  We walk every
+;; immediate subdir of ``lp/`` (resolved from the repo root via the
+;; ``code-agent.el`` sentinel) so the loader finds each module wherever
+;; the new layout puts it.  customize must load FIRST so every
+;; subsequent module sees the defcustoms / defconsts / hook defvars
+;; already bound — `dolist' iteration order is preserved.
+(let* ((module-dir (file-name-directory (or load-file-name buffer-file-name "")))
+       (repo-root (locate-dominating-file module-dir "code-agent.el"))
+       (lp-dir (and repo-root (expand-file-name "lp" repo-root)))
+       (lp-subdirs (and lp-dir (file-directory-p lp-dir)
+                        (cl-remove-if-not
+                         #'file-directory-p
+                         (directory-files lp-dir t "\\`[^.]" t))))
+       (locate (lambda (name)
+                 (let* ((basename (concat name ".org"))
+                        (candidates (cons (expand-file-name basename module-dir)
+                                          (mapcar (lambda (sub)
+                                                    (expand-file-name basename sub))
+                                                  lp-subdirs))))
+                   (cl-find-if #'file-exists-p candidates)))))
   (dolist (module '("code-agent-org-customize"
                     "code-agent-org-session"
                     "code-agent-org-session-context"
@@ -149,8 +167,8 @@ Response will appear here after pressing C-c C-c inside the ai block.
                     "code-agent-org-process"
                     "code-agent-org-scheduled"))
     (unless (featurep (intern module))
-      (literate-elisp-load
-       (expand-file-name (concat module ".org") module-dir))))
+      (when-let* ((f (funcall locate module)))
+        (literate-elisp-load f))))
   ;; Load ACP backend (our own JSON-RPC transport, no external deps)
   (dolist (module '("code-agent-jsonrpc"
                     "code-agent-acp"
@@ -158,14 +176,13 @@ Response will appear here after pressing C-c C-c inside the ai block.
                     "code-agent-acp-gemini"
                     "code-agent-acp-codex"))
     (unless (featurep (intern module))
-      (let ((path (expand-file-name (concat module ".org") module-dir)))
-        (when (file-exists-p path)
-          (literate-elisp-load path)))))
+      (when-let* ((f (funcall locate module)))
+        (literate-elisp-load f))))
   ;; Load claude-ide conditionally (requires websocket package)
   (when (require 'websocket nil t)
     (unless (featurep 'claude-ide)
-      (literate-elisp-load
-       (expand-file-name "claude-ide.org" module-dir)))))
+      (when-let* ((f (funcall locate "claude-ide")))
+        (literate-elisp-load f)))))
 
 ;; Forward declarations for claude-ide (conditionally loaded)
 (declare-function claude-ide--session-alive-p "claude-ide" (key))

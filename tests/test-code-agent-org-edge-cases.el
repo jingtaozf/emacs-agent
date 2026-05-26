@@ -17,8 +17,8 @@
   (let ((project-root (file-name-directory
                        (directory-file-name
                         (file-name-directory (or load-file-name default-directory))))))
-    (literate-elisp-load (expand-file-name "code-agent.org" project-root))
-    (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))))
+    (literate-elisp-load (expand-file-name "lp/chat/code-agent.org" project-root))
+    (literate-elisp-load (expand-file-name "lp/org/code-agent-org.org" project-root))))
 
 ;;; ============================================================
 ;;; 1. Constructor Odd-Args Handling

@@ -14,7 +14,7 @@
 (let ((project-root (file-name-directory
                      (directory-file-name
                       (file-name-directory load-file-name)))))
-  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root)))
+  (literate-elisp-load (expand-file-name "lp/org/code-agent-org.org" project-root)))
 
 ;;; Issue 2: Content should have blank line after :END:
 

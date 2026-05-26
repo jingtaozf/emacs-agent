@@ -1336,7 +1336,7 @@ Provides inside :load no blocks (tangle templates) are excluded."
   (let* ((test-dir (file-name-directory (or load-file-name buffer-file-name default-directory)))
          (org-file (or (let ((f (expand-file-name "../code-agent.org" test-dir)))
                          (and (file-exists-p f) f))
-                       (let ((f (expand-file-name "code-agent.org" default-directory)))
+                       (let ((f (expand-file-name "lp/chat/code-agent.org" default-directory)))
                          (and (file-exists-p f) f))))
          (count 0))
     (when (file-exists-p org-file)

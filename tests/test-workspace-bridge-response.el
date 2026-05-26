@@ -27,10 +27,10 @@
                       (file-name-directory
                        (or load-file-name buffer-file-name))))))
   (require 'literate-elisp)
-  (literate-elisp-load (expand-file-name "code-agent-trace.org" project-root))
-  (literate-elisp-load (expand-file-name "code-agent.org" project-root))
-  (literate-elisp-load (expand-file-name "code-agent-backend.org" project-root))
-  (literate-elisp-load (expand-file-name "code-agent-org.org" project-root)))
+  (literate-elisp-load (expand-file-name "lp/trace/code-agent-trace.org" project-root))
+  (literate-elisp-load (expand-file-name "lp/chat/code-agent.org" project-root))
+  (literate-elisp-load (expand-file-name "lp/sdk/code-agent-backend.org" project-root))
+  (literate-elisp-load (expand-file-name "lp/org/code-agent-org.org" project-root)))
 
 ;;; ============================================================================
 ;;; Test Fixtures
