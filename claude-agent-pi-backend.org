@@ -492,30 +492,88 @@ foldable subheadings.  Set to nil to suppress."
   :type 'boolean
   :group 'claude-agent)
 
+(defvar claude-agent-pi-custom-renderers nil
+  "Alist mapping customType STRING → render function.
+
+The render function is called as
+  (RENDER-FN backend obj msg ctype display content)
+and must return a STRING that will be inserted into the response
+section verbatim.  Returning nil triggers the default JSON
+fallback for that message.
+
+Use `claude-agent-pi-register-renderer' to add entries.
+Built-ins may be added by extension-specific modules
+(see Phase 4 in `draft.org §pi-mig-phase-4').")
+
+(defun claude-agent-pi-register-renderer (custom-type render-fn)
+  "Register RENDER-FN as the renderer for CUSTOM-TYPE (a string).
+
+RENDER-FN is called as
+  (funcall RENDER-FN backend obj msg ctype display content)
+where MSG is the full message alist, DISPLAY is its `display' field
+(may be nil), and CONTENT is the `content' field (may be nil).
+
+It must return a STRING to insert (typically wrapped in an org
+foldable subheading), or nil to fall through to the default JSON
+dump renderer.
+
+Replaces any existing renderer for CUSTOM-TYPE.  Multiple modules
+calling this with the same custom-type clobber each other in
+load order — that's intentional, last-loaded wins."
+  (setf (alist-get custom-type claude-agent-pi-custom-renderers
+                   nil nil #'equal)
+        render-fn))
+
+(defun claude-agent-pi--default-custom-message-render (_backend _obj _msg ctype display content)
+  "Default renderer: JSON pretty-print under `**** Extension: <ctype>'.
+Mirrors the pre-registry behaviour so removing every registered
+entry leaves the system identical to its A1-shipping state."
+  (let ((display-str (and display
+                          (if (stringp display) display
+                            (json-encode display))))
+        (content-str (and content
+                          (if (stringp content) content
+                            (json-encode content)))))
+    (format "\n**** Extension: %s :ext:\n%s%s\n"
+            ctype
+            (if display-str (format "Display: %s\n\n" display-str) "")
+            (if content-str
+                (format "#+begin_src json\n%s\n#+end_src"
+                        (claude-agent-pi--truncate content-str 4096))
+              ""))))
+
 (defun claude-agent-pi--handle-custom-message (backend obj cbs)
-  "Render a custom-role message as a foldable subheading + JSON dump."
+  "Render a custom-role message via the registry (with default fallback).
+
+Lookup order:
+  1. `claude-agent-pi-custom-renderers' for CUSTOM-TYPE.  If present
+     and the registered fn returns a non-nil string, use it.
+  2. Otherwise call `claude-agent-pi--default-custom-message-render'.
+
+The fallback contract is identical to what was hand-coded inline
+before Phase 4 — old extensions don't lose anything by this change."
   (when claude-agent-pi-show-custom-messages
     (let* ((msg (map-elt obj 'message))
            (ctype (or (and msg (map-elt msg 'customType)) "untyped"))
            (display (and msg (map-elt msg 'display)))
-           (display-str (and display
-                             (if (stringp display) display
-                               (json-encode display))))
            (content (and msg (map-elt msg 'content)))
-           (content-str (and content
-                             (if (stringp content) content
-                               (json-encode content)))))
+           (registered (alist-get ctype claude-agent-pi-custom-renderers
+                                  nil nil #'equal))
+           (rendered (or (and registered
+                              (condition-case err
+                                  (funcall registered backend obj msg ctype display content)
+                                (error
+                                 (claude-agent-pi--verbose-log
+                                  backend
+                                  (format "custom renderer for %s errored: %s — falling back to default"
+                                          ctype (error-message-string err)))
+                                 nil)))
+                         (claude-agent-pi--default-custom-message-render
+                          backend obj msg ctype display content))))
       (claude-agent-pi--verbose-log
-       backend (format "custom message: %s" ctype))
-      (claude-agent-pi--render-tool-text
-       (format "\n**** Extension: %s :ext:\n%s%s\n"
-               ctype
-               (if display-str (format "Display: %s\n\n" display-str) "")
-               (if content-str
-                   (format "#+begin_src json\n%s\n#+end_src"
-                           (claude-agent-pi--truncate content-str 4096))
-                 ""))
-       cbs))))
+       backend (format "custom message: %s%s"
+                       ctype (if registered " [registry]" " [fallback]")))
+      (claude-agent-pi--render-tool-text rendered cbs))))
 
 (defcustom claude-agent-pi-show-tool-calls t
   "If non-nil, render Pi tool-execution events inline in the response

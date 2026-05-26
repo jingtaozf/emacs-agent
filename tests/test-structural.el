@@ -511,6 +511,16 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-agent-pi-ui-login"
     "claude-agent-pi-ui-resume-session"
     "claude-agent-pi-ui-session-tree"
+    ;; Phase 3 session-tree interactive commands (bound under the
+    ;; *Pi Sessions: <cwd>* buffer's keymap; user-invocable)
+    "claude-agent-pi-ui-session-tree-resume-at-point"
+    "claude-agent-pi-ui-session-tree-fork-at-point"
+    "claude-agent-pi-ui-session-tree-refresh"
+    ;; Phase 4 widget store interactive commands
+    "claude-agent-pi-ui-show-widgets"
+    "claude-agent-pi-ui-clear-all-widgets"
+    ;; Phase 4 custom message renderer registration (extension API)
+    "claude-agent-pi-register-renderer"
     ;; claude-agent-backend public API
     "claude-agent-backend-register"
     "claude-agent-backend-get"
