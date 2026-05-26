@@ -27,6 +27,19 @@ jobs:
         with:
           submodules: false
 
+      # Pre-configure Nix with the workflow's GITHUB_TOKEN BEFORE
+      # purcell/setup-emacs installs Nix.  Without this, Nix's flake
+      # fetcher hits api.github.com anonymously and 403s on shared
+      # runner IPs that recently exceeded the 60 req/hour anonymous
+      # rate limit.  The workflow-level NIX_CONFIG env alone is
+      # insufficient because install-nix writes /etc/nix/nix.conf
+      # with no access-tokens line and Nix loads that first.
+      - name: Pre-configure Nix access token
+        run: |
+          mkdir -p ~/.config/nix
+          echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" \
+            >> ~/.config/nix/nix.conf
+
       - uses: purcell/setup-emacs@v8.0
         with:
           version: ${{ matrix.emacs-version }}
@@ -60,6 +73,19 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: false
+
+      # Pre-configure Nix with the workflow's GITHUB_TOKEN BEFORE
+      # purcell/setup-emacs installs Nix.  Without this, Nix's flake
+      # fetcher hits api.github.com anonymously and 403s on shared
+      # runner IPs that recently exceeded the 60 req/hour anonymous
+      # rate limit.  The workflow-level NIX_CONFIG env alone is
+      # insufficient because install-nix writes /etc/nix/nix.conf
+      # with no access-tokens line and Nix loads that first.
+      - name: Pre-configure Nix access token
+        run: |
+          mkdir -p ~/.config/nix
+          echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" \
+            >> ~/.config/nix/nix.conf
 
       - uses: purcell/setup-emacs@v8.0
         with:
@@ -121,6 +147,19 @@ jobs:
         with:
           submodules: false
 
+      # Pre-configure Nix with the workflow's GITHUB_TOKEN BEFORE
+      # purcell/setup-emacs installs Nix.  Without this, Nix's flake
+      # fetcher hits api.github.com anonymously and 403s on shared
+      # runner IPs that recently exceeded the 60 req/hour anonymous
+      # rate limit.  The workflow-level NIX_CONFIG env alone is
+      # insufficient because install-nix writes /etc/nix/nix.conf
+      # with no access-tokens line and Nix loads that first.
+      - name: Pre-configure Nix access token
+        run: |
+          mkdir -p ~/.config/nix
+          echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" \
+            >> ~/.config/nix/nix.conf
+
       - uses: purcell/setup-emacs@v8.0
         with:
           version: ${{ matrix.emacs-version }}
@@ -152,11 +191,22 @@ jobs:
           fetch-depth: 0  # full history — gitleaks needs all commits, not just HEAD
           submodules: false
 
+      # gitleaks/gitleaks-action@v2 now requires a paid license per
+      # https://github.com/gitleaks/gitleaks-action#-announcement —
+      # the announcement breaking-change applies to personal repos
+      # too.  Invoke the gitleaks binary directly instead; the binary
+      # itself stays MIT-licensed for OSS use.
+      - name: Install gitleaks
+        run: |
+          version=8.21.2
+          curl -sSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
+            | tar -xz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # GITLEAKS_LICENSE not required for OSS repos
+        run: gitleaks detect --source . --redact --no-banner --verbose
 
   supply-chain:
     name: Python supply-chain scan
