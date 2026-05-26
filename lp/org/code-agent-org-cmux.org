@@ -563,7 +563,85 @@ Three phases under one ``cmux-call'' span:
   "Max seconds to wait for Claude Code to become ready in cmux."
   :type 'integer
   :group 'code-agent-org)
+#+END_SRC
 
+** Pre-flight: workspace-bridge hook verification
+:PROPERTIES:
+:CUSTOM_ID: cmux-preflight-hooks
+:END:
+
+When the user fires =C-c C-c= (or =code-agent-menu I=) on an AI block,
+Emacs sends the prompt text into the cmux pane and assumes the
+running claude there has our workspace-bridge ~UserPromptSubmit~ and
+~Stop~ hooks loaded.  Without those hooks, the prompt vanishes —
+claude responds in the terminal, but nothing reaches the org buffer.
+
+The hooks come from a launcher-supplied flag:
+
+#+begin_example
+claude --settings <project>/workspace-hooks.json ... --resume <slug>
+#+end_example
+
+=code-agent-org-cmux-restart= (and the initial =--ensure-session=
+launch) build that flag via =--build-claude-legacy-launch-command=,
+so any claude *we* spawn has the hooks.  The hole is *cmux's own
+session-restore*: when cmux's app restarts (or the user reopens a
+saved workspace), it replays the bare =claude --resume <slug>= and
+strips our launcher's extras.  The restored claude is "alive" — its
+TUI works, the user can chat with it — but every hook fires silently
+because Claude Code never loaded our settings.
+
+** Triggering incident, 2026-05-26 (twice in one week)
+
+The user pressed =code-agent-menu I= twice on different days and
+typed prompts into =claude-agent-dev.org=; both times nothing
+appeared in the org buffer.  Both times the root cause was the
+same: the dev1 pane held a cmux-restored claude with stripped
+launcher extras.  Operational workaround (=R= → manual restart)
+worked but didn't prevent the next recurrence.
+
+** Why a pre-flight check rather than a restart hook
+
+Alternatives considered:
+
+- *Detect at restart time.*  =code-agent-org-cmux-restart= already
+  recovers from a corrupt session — but only fires when the user
+  manually invokes it.  We need automatic recovery.
+- *Detect at the workspace-bridge side.*  When the bridge sees a
+  prompt without a registered query, it could detect the
+  "hook-not-wired" pattern.  But the bridge doesn't even *run* in
+  the broken case — that's the whole problem.
+- *Reactive: wait, then check.*  After =--send-text=, poll for an
+  expected org-buffer side effect.  If absent → assume hooks dead,
+  restart.  Adds latency on every send, racy.
+- *Proactive (chosen): check before send.*  ~ps -t <tty> -o command=~
+  on the surface's tty reveals the claude argv.  Cheap (~10ms), no
+  false positives (the argv either has =workspace-hooks.json= or it
+  doesn't), no race.
+
+** Design choices
+
+| Decision | Rationale |
+|---+---|
+| Inspect via =ps -t <tty>= rather than cmux RPC | cmux has no command to fetch a pane's process argv; =ps -t= over a known tty is portable and synchronous. |
+| Hook check string = ~workspace-hooks.json~ | Stable marker the launcher always appends; no false positives on bare =claude= or shell prompts. |
+| Auto-restart on miss | The user already pressed =I=; making them press =R= first is a worse UX than just doing the restart. |
+| Defcustom opt-out | Some users may prefer the warning-only behaviour (default before this fix); honour their choice. |
+| Pre-flight at =--execute-ai-block= (not =--send-text=) | =--send-text= is also called from restart-internal flows (sending =/exit=, sending the relaunch command).  Putting the check at the outer block-execute level scopes it to the user-initiated path. |
+
+** Implementation
+
+The three helpers:
+
+| Function | Role |
+|---+---|
+| =--surface-tty= | Look up the surface's tty via =cmux tree --json= |
+| =--claude-has-bridge-hooks-p= | =ps= the tty, search for =workspace-hooks.json= |
+| =--ensure-hooks-wired= | Pre-flight: call =restart= + =wait-for-ready= when missing |
+
+The defcustom toggle:
+
+#+BEGIN_SRC elisp
 (defcustom code-agent-org-cmux-auto-relaunch-on-missing-hooks t
   "When non-nil, auto-relaunch the cmux pane's claude process if it lacks
 the workspace-bridge hook settings.
