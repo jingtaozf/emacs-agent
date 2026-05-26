@@ -7,60 +7,60 @@ full design lives in =code-agent-backend.org= → "Tri-Protocol
 Architecture"; this file's "Tri-Protocol Architecture" section below
 is the meta-map summary.
 
+* Layout — =lp/<group>/= subtree
+
+| Group | Role | Examples |
+|---+---+---|
+| =lp/trace/= | tracing macros (no deps) | code-agent-trace |
+| =lp/sdk/= | core SDK + Python bridge + MCP server | backend, permission, ide, python, emacs-mcp-server |
+| =lp/chat/= | UI/coordination + comint utilities | code-agent, chat, translate, title, refine |
+| =lp/org/= | org-mode integration | 17 =code-agent-org-*= modules |
+| =lp/backend/= | concrete backends (tri-protocol) | multiplexer, cmux, tmux, acp-*, pi-* |
+| =lp/ide/= | optional websocket IDE | claude-ide |
+| =lp/_drafts/= | design proposals queue | draft.org |
+
+=code-agent.el= loader searches the repo root + every =lp/*/= subdir,
+so caller code stays layout-agnostic.  Cross-file links inside .org
+use repo-relative =[[file:lp/<group>/X.org]]= form.
+
 * Module Boundary Diagram
 
 #+begin_example
   Entry: code-agent.el (loads all modules in order below)
   ─────────────────────────────────────────────────────────
 
-  ┌─────────────────────────────────────────────────────┐
-  │ TOP: code-agent-org.org                                 │
-  │   Org integration — AI blocks, streaming, execution │
-  │   Depends on: code-agent, org sub-modules         │
-  └──────────────────────┬──────────────────────────────┘
+  ┌─────────────────────────────────────────────────────────────┐
+  │ TOP: lp/org/code-agent-org.org                              │
+  │   Org integration — AI blocks, streaming, execution         │
+  │   Depends on: code-agent, org sub-modules                   │
+  └──────────────────────┬──────────────────────────────────────┘
                          │ requires
   ┌──────────┬───────────┼───────────┬───────────┐
-  │ session  │  queue    │ response  │ scheduled │
+  │ session  │  queue    │ response  │ scheduled │     (lp/org/*)
   │  .org    │  .org     │  .org     │  .org     │
   └──────────┴───────────┼───────────┴───────────┘
                          │ all depend on
-  ┌──────────────────────┴──────────────────────────────┐
-  │ code-agent.org  (thin UI/coordination layer)      │
-  │   Mode-lines, Chat Mode, Utilities (translate/title)│
-  │   Loads: backend, permission, ide                   │
-  └──────────────────────┬──────────────────────────────┘
+  ┌──────────────────────┴──────────────────────────────────────┐
+  │ lp/chat/code-agent.org  (thin UI/coordination layer)        │
+  │   Mode-lines, Chat Mode, Utilities (translate/title)        │
+  │   Loads: backend, permission, ide                           │
+  └──────────────────────┬──────────────────────────────────────┘
                          │ depends on
-  ┌──────────────────────┴──────────────────────────────┐
-  │ code-agent-backend.org  (bulk of SDK logic)       │
-  │   Customization, data structures, process mgmt,     │
-  │   session mgmt, JSON protocol, core API, client API,│
-  │   backend protocol, JSON stream & CLI backends,     │
-  │   verbose output, query cancellation                │
-  └───┬────────────────────────────────────────────┬────┘
-      │ cross-module dep                           │
-  ┌───┴──────────┐                      ┌──────────┴──┐
-  │ permission   │                      │     ide      │
-  │  .org        │                      │     .org     │
-  └──────────────┘                      └─────────────┘
+  ┌──────────────────────┴──────────────────────────────────────┐
+  │ lp/sdk/code-agent-backend.org  (bulk of SDK logic)          │
+  │   Customization, data structures, process mgmt,             │
+  │   session mgmt, JSON protocol, core API, client API,        │
+  │   backend protocol, JSON stream & CLI backends,             │
+  │   verbose output, query cancellation                        │
+  └───┬────────────────────────────────────────────────┬────────┘
+      │ cross-module dep                               │
+  ┌───┴──────────────┐                  ┌──────────────┴────────┐
+  │ lp/sdk/          │                  │ lp/sdk/               │
+  │ permission       │                  │ ide.org               │
+  │  .org            │                  │ (Buffer Context)      │
+  └──────────────────┘                  └───────────────────────┘
   BOTTOM LAYER: no cross-dependencies
-
-  ════════════════════════════════════════════════════════
-   INDEPENDENT: emacs-mcp-server.org (zero claude-* deps)
-   INDEPENDENT: code-agent-trace.org (OTel tracing, zero claude-* deps)
-   UTILITY:     code-agent-chat.org (interactive comint-based chat REPL)
-   UTILITY:     code-agent-translate.org (streaming translation commands)
-   UTILITY:     code-agent-title.org (conversation titling helper)
-   UTILITY:     code-agent-refine.org (AI-assisted prompt refinement helper)
-   OPTIONAL:    claude-ide.org (WebSocket IDE server, needs websocket pkg)
-   OPTIONAL:    code-agent-jsonrpc.org (JSON-RPC 2.0 over stdio, transport)
-   OPTIONAL:    code-agent-acp.org (generic ACP backend, requires jsonrpc)
-   OPTIONAL:    code-agent-acp-opencode.org (OpenCode ACP profile)
-   OPTIONAL:    code-agent-acp-gemini.org (Gemini ACP profile)
-   OPTIONAL:    code-agent-acp-codex.org (Codex ACP profile, needs codex-acp shim)
-   DEFAULT:     code-agent-pi-backend.org + code-agent-pi-ui.org (pi.dev)
-   OPTIONAL:    code-agent-pi-extension.org (tangles Pi-side TS, on demand)
-   TRI-PROTO:   code-agent-multiplexer.org
-                code-agent-cmux-backend.org code-agent-tmux-backend.org
+  (independent / utility / optional: see Layout table above)
 #+end_example
 
 Load order in code-agent.el:

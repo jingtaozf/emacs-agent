@@ -1,12 +1,13 @@
-<!-- This file is the BASE agent instructions for OpenCode / Cursor / other
-     non-Claude-Code agents reading the AGENTS.md standard.
-     Keep this <= 60 lines. Detailed rules live in CLAUDE.md and docs/.
-
-     KNOWN BUG (2026-04-30): opencode_workspace.py prepends ephemeral
-     session instructions ABOVE this base, then atexit restore writes the
-     polluted content back, causing self-perpetuating bloat. Fix tracked
-     in tasks/lessons.md → "AGENTS.md 被错误 commit". Until fixed, treat
-     anything between BEGIN/END markers as transient noise. -->
+<!-- This file is the BASE agent instructions for OpenCode / Cursor /
+     other non-Claude-Code agents reading the AGENTS.md standard.
+     Keep this <= 60 lines.  Detailed rules live in CLAUDE.md and the
+     literate-agent imports it pulls in.  Per-agent ephemeral context
+     gets wrapped in BEGIN_EMACS_AGENT_INJECT / END_EMACS_AGENT_INJECT
+     markers by opencode_workspace.py + copilot_workspace.py, written
+     at session start and stripped at session end via the content-
+     driven idempotent cleanup landed in commit a6e9d21 (2026-04-30
+     pollution fix; see lp/backend/code-agent-pi-extension.org and
+     code-agent-python.org § workspace_launcher for the helpers). -->
 
 # code-agent — AGENTS.md (base)
 
