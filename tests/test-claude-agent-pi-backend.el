@@ -120,9 +120,13 @@
 
 
 (ert-deftest claude-agent-pi-smoke--spawn-command-builder ()
-  "The spawn-command builder appends --mode rpc + session flags correctly."
+  "The spawn-command builder appends --mode rpc + session flags correctly.
+
+Persistence-on (default) means NO `--no-session` is appended; Pi
+uses its default sessions store and the registry captures the
+fresh session-id.  Persistence-off restores legacy ephemeral mode."
   :tags '(:smoke :pi-backend)
-  ;; With --session-dir and resume id
+  ;; With --session-dir + resume id — both flags should appear
   (let* ((b (claude-agent-pi-backend-create
              :session-key "s1"
              :spawn-args '("/bin/echo")
@@ -134,14 +138,26 @@
       (should (member "--session-dir" cmd))
       (should (member (expand-file-name "/tmp/sessions") cmd))
       (should (member "--session" cmd))
-      (should (member "session-abc" cmd))))
-  ;; Ephemeral (no session-dir) → --no-session
-  (let* ((b (claude-agent-pi-backend-create
-             :session-key "s2"
-             :spawn-args '("/bin/echo"))))
-    (let ((cmd (claude-agent-pi--spawn-command b)))
-      (should (member "--no-session" cmd))
-      (should-not (member "--session-dir" cmd)))))
+      (should (member "session-abc" cmd))
+      (should-not (member "--no-session" cmd))))
+  ;; Default persistence (no flags, no override) — NO --no-session,
+  ;; Pi will use its default sessions dir.
+  (let ((claude-agent-pi-persist-sessions t))
+    (let* ((b (claude-agent-pi-backend-create
+               :session-key "s2"
+               :spawn-args '("/bin/echo"))))
+      (let ((cmd (claude-agent-pi--spawn-command b)))
+        (should-not (member "--no-session" cmd))
+        (should-not (member "--session-dir" cmd))
+        (should-not (member "--session" cmd)))))
+  ;; Persistence disabled and no overrides — legacy ephemeral mode.
+  (let ((claude-agent-pi-persist-sessions nil))
+    (let* ((b (claude-agent-pi-backend-create
+               :session-key "s3"
+               :spawn-args '("/bin/echo"))))
+      (let ((cmd (claude-agent-pi--spawn-command b)))
+        (should (member "--no-session" cmd))
+        (should-not (member "--session-dir" cmd))))))
 
 
 (ert-deftest claude-agent-pi-smoke--jsonl-feed-chunk ()

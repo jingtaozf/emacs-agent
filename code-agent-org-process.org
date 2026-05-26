@@ -264,6 +264,43 @@ void-variable error."
                    (message "code-agent-org: failed to persist ACP_SESSION_ID: %s"
                             (error-message-string err))))))))))
 
+(defun code-agent-org--pi-session-persistence ()
+  "Read `:PI_SESSION_ID:` (inheritance-aware) and return (INITIAL-ID . SAVE-FN).
+
+SAVE-FN writes the new id back to the *session-scope* heading (the
+workspace heading, not the Instruction child) so sibling AI blocks
+inherit the same Pi session.  ACP's analogue writes to the current
+Instruction heading; that breaks inheritance across siblings.  For
+Pi we want the id to be a workspace-level fact.
+
+Captures the session-scope heading as a marker NOW (registry
+construction time) so save-fn isn't sensitive to where point is
+when Pi's handshake response lands."
+  (let* ((initial (code-agent-org--get-org-property "PI_SESSION_ID" t))
+         (scope-pos (or (code-agent-org--find-session-scope-heading)
+                        (save-excursion
+                          (when (ignore-errors (org-back-to-heading t))
+                            (point))))))
+    (lexical-let ((marker (and scope-pos (copy-marker scope-pos)))
+                  (buf (current-buffer)))
+      (cons initial
+            (lambda (session-id)
+              (when (and session-id marker (marker-buffer marker))
+                (condition-case err
+                    (with-current-buffer (marker-buffer marker)
+                      (save-excursion
+                        (goto-char marker)
+                        (org-entry-put nil "PI_SESSION_ID" session-id))
+                      ;; DELIBERATELY skip `save-buffer' here — the buffer
+                      ;; is mid-query (response section markers are live;
+                      ;; org-mode property writes interleave with token
+                      ;; insertion).  Persistence-to-disk piggy-backs on
+                      ;; the normal auto-save or the next user save.
+                      (set-buffer-modified-p (buffer-modified-p)))
+                  (error
+                   (message "code-agent-org: failed to persist PI_SESSION_ID: %s"
+                            (error-message-string err))))))))))
+
 (defvar code-agent-org-backend-registry
   `(("claude-code"   . ,(lambda (session-key _options)
                           (claude-agent-claude-code-backend--create
@@ -297,12 +334,17 @@ void-variable error."
                           (claude-agent-tmux-backend-create
                            :session-key session-key)))
     ("pi"            . ,(lambda (session-key options)
-                          ;; Opt-in: user must load `claude-agent-pi-backend.org'
-                          ;; in their init (see README.org § Pi backend).
-                          ;; Reads provider/model from ~/.pi/agent/settings.json.
-                          (claude-agent-pi-backend-create
-                           :session-key session-key
-                           :cwd (plist-get options :cwd)))))
+                          ;; Default-loaded by claude-code.el.  Reads
+                          ;; provider/model from ~/.pi/agent/settings.json
+                          ;; and persists the Pi-side session id to
+                          ;; :PI_SESSION_ID: so respawn after subprocess
+                          ;; death continues the same conversation.
+                          (let ((persist (code-agent-org--pi-session-persistence)))
+                            (claude-agent-pi-backend-create
+                             :session-key session-key
+                             :cwd (plist-get options :cwd)
+                             :session-id (car persist)
+                             :save-session-id-fn (cdr persist))))))
   "Alist mapping CLAUDE_BACKEND string → constructor (session-key options).
 Each constructor returns a backend struct.  Add new agents by appending
 entries here; no code change in `code-agent-org--make-default-backend' needed.

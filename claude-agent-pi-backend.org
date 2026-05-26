@@ -124,6 +124,16 @@ accommodates slow shutdown when extensions are flushing state."
   :type 'number
   :group 'claude-agent)
 
+(defcustom claude-agent-pi-persist-sessions t
+  "When non-nil, Pi runs WITHOUT =--no-session= so the agent persists
+conversation state to its default storage (=~/.pi/agent/sessions/=).
+Combined with the registry's =:PI_SESSION_ID:= org-property capture,
+this lets Pi pick up the prior conversation after the subprocess
+dies — same context, new process.  Set to nil for ephemeral
+fire-and-forget queries (legacy behaviour)."
+  :type 'boolean
+  :group 'claude-agent)
+
 (defcustom claude-agent-pi-read-buffer-cap (* 8 1024 1024)
   "Maximum bytes the JSONL splitter will buffer before killing the process.
 Pi's =tools/list= response with many extensions can be large; this cap
@@ -162,6 +172,8 @@ hold whatever didn't end at =\n=.
                :documentation "Pi --session-dir, e.g. \"<ws>/.pi-sessions/\"")
   (initial-session-id nil
                       :documentation "If non-nil, try to resume this Pi session (passed as --session)")
+  (save-session-id-fn nil
+                      :documentation "Function (session-id) -> void, invoked the first time Pi reports a new session id via get_state.  Used to write =:PI_SESSION_ID:= back to the org workspace heading so the next backend rebuild can resume the same conversation.")
   (show-thinking claude-agent-pi-show-thinking
                  :documentation "If non-nil, route thinking_delta events as :on-token")
   ;; Runtime state
@@ -356,7 +368,21 @@ responses match against =pending-by-id= via the =id= field.
             (setf (claude-agent-pi-backend-state backend) data)
             (let ((sid (and (listp data) (map-elt data 'sessionId))))
               (when sid
-                (setf (claude-agent-pi-backend-session-id backend) sid)))
+                (let ((prior-sid (claude-agent-pi-backend-session-id backend)))
+                  (setf (claude-agent-pi-backend-session-id backend) sid)
+                  ;; First time we see this session id: persist via the
+                  ;; save-fn (typically writes `:PI_SESSION_ID:` back to the
+                  ;; org workspace heading).  Subsequent get_state on the
+                  ;; same id is a no-op.
+                  (when (and (not (equal prior-sid sid))
+                             (functionp (claude-agent-pi-backend-save-session-id-fn backend)))
+                    (condition-case err
+                        (funcall (claude-agent-pi-backend-save-session-id-fn backend) sid)
+                      (error
+                       (claude-agent-pi--verbose-log
+                        backend
+                        (format "save-session-id-fn failed: %s"
+                                (error-message-string err)))))))))
             (setf (claude-agent-pi-backend-handshake-done backend) t)
             (claude-agent-pi--verbose-log backend "handshake OK")
             (dolist (cb (claude-agent-pi-backend-handshake-callbacks backend))
@@ -522,20 +548,29 @@ prompts and a proper allowlist.
 #+BEGIN_SRC elisp
 (defun claude-agent-pi--spawn-command (backend)
   "Build the full spawn command list for BACKEND.
-Appends =--mode rpc= and (if set) =--session-dir= / =--session= to the
-configured spawn-args."
+Appends =--mode rpc= and the right combination of =--session-dir= /
+=--session= / =--no-session= depending on persistence configuration:
+
+- =initial-session-id= set  → pass =--session <id>= to resume
+- =session-dir= set          → pass =--session-dir <dir>= (custom store)
+- =claude-agent-pi-persist-sessions= nil (and neither of the above)
+                            → pass =--no-session= for ephemeral runs
+- Otherwise                 → no session flag; Pi uses its default
+                              store (=~/.pi/agent/sessions/=) and the
+                              registry captures the freshly-minted
+                              session-id on first =get_state= response."
   (let* ((base (or (claude-agent-pi-backend-spawn-args backend)
                    claude-agent-pi-spawn-default))
          (session-dir (claude-agent-pi-backend-session-dir backend))
-         (initial-sid (claude-agent-pi-backend-initial-session-id backend)))
+         (initial-sid (claude-agent-pi-backend-initial-session-id backend))
+         (persist claude-agent-pi-persist-sessions))
     `(,@base "--mode" "rpc"
       ,@(when session-dir
           (list "--session-dir" (expand-file-name session-dir)))
       ,@(when initial-sid
           (list "--session" initial-sid))
-      ;; No --session-dir means we want an ephemeral session;
-      ;; Pi supports --no-session for that.
-      ,@(unless session-dir '("--no-session")))))
+      ,@(when (and (not persist) (not session-dir) (not initial-sid))
+          '("--no-session")))))
 
 (defun claude-agent-pi--spawn (backend)
   "Start the Pi subprocess for BACKEND. Returns the process.
@@ -868,18 +903,27 @@ exposing the internal struct constructor.
           spawn-args
           environment
           cwd
-          (show-thinking claude-agent-pi-show-thinking))
+          (show-thinking claude-agent-pi-show-thinking)
+          save-session-id-fn)
   "Construct a Pi backend instance.
 
 SESSION-KEY      Emacs session key (for shared verbose buffer).
 SESSION-ID       Pi session UUID to resume (passed as --session if non-nil).
-SESSION-DIR      Pi --session-dir (absolute path). If nil, --no-session.
+SESSION-DIR      Pi --session-dir (absolute path).  When both this and
+                 SESSION-ID are nil and `claude-agent-pi-persist-sessions'
+                 is t, Pi uses its default sessions dir and persists
+                 conversation across spawns.
 SPAWN-ARGS       Override the spawn command. Defaults to `claude-agent-pi-spawn-default'.
 ENVIRONMENT      Extra env vars (list of \"NAME=VALUE\").
 CWD              Working directory for the subprocess.
 SHOW-THINKING    If non-nil, route thinking_delta as :on-token.  Defaults
                  to `claude-agent-pi-show-thinking'; pass an explicit nil
-                 to opt out even when the global default is t."
+                 to opt out even when the global default is t.
+SAVE-SESSION-ID-FN  Function (session-id) -> void, called once per
+                    backend when get_state first reports the Pi session
+                    id.  Used by the registry to persist the id to
+                    `:PI_SESSION_ID:` on the workspace heading so future
+                    rebuilds can resume the same conversation."
   (claude-agent-pi-backend--create
    :session-key session-key
    :initial-session-id session-id
@@ -887,7 +931,8 @@ SHOW-THINKING    If non-nil, route thinking_delta as :on-token.  Defaults
    :spawn-args spawn-args
    :environment environment
    :cwd cwd
-   :show-thinking show-thinking))
+   :show-thinking show-thinking
+   :save-session-id-fn save-session-id-fn))
 #+END_SRC
 
 ** Provide
