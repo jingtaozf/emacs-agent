@@ -82,18 +82,26 @@ because file-level `#+PROPERTY:' inheritance is resolved through
 ;; --- env-prefix helper -------------------------------------------------
 
 (ert-deftest test-cmux-env-prefix/empty-when-nothing-set ()
-  "No ENV_FILE → empty string (zero behaviour change)."
+  "No ENV_FILE → just the always-on `unset VIRTUAL_ENV;' guard.
+
+Post-2026-05-26 (the ``claude-agent`` → ``emacs-agent`` rename
+incident), the prefix unconditionally clears ``VIRTUAL_ENV`` so a
+stale value inherited from cmux's process ancestry can't make `uv
+run' emit its mismatched-venv warning.  No ENV_FILE means no file
+sourcing, but the guard remains."
   :tags '(:cmux-env-injection :fast)
   (test-cmux-env--with-org-file
       "#+TITLE: empty\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
     (goto-char (point-max))
-    (should (equal "" (code-agent-org-cmux--build-env-prefix)))))
+    (should (equal "unset VIRTUAL_ENV; "
+                   (code-agent-org-cmux--build-env-prefix)))))
 
 (ert-deftest test-cmux-env-prefix/per-name-property-is-ignored ()
-  "`#+PROPERTY: ANTHROPIC_MODEL …' alone (no ENV_FILE) → empty prefix.
+  "`#+PROPERTY: ANTHROPIC_MODEL …' alone (no ENV_FILE) → unset-only prefix.
 
 After the ENV_FILE-only refactor, per-name org properties are not read.
-Asserts the legacy inline VAR=VAL emission path is gone."
+Asserts the legacy inline VAR=VAL emission path is gone.  Only the
+always-on `unset VIRTUAL_ENV;' guard remains (see sibling test)."
   :tags '(:cmux-env-injection :fast)
   (test-cmux-env--with-org-file
       (concat
@@ -103,7 +111,7 @@ Asserts the legacy inline VAR=VAL emission path is gone."
        "* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n")
     (goto-char (point-max))
     (let ((prefix (code-agent-org-cmux--build-env-prefix)))
-      (should (equal "" prefix)))))
+      (should (equal "unset VIRTUAL_ENV; " prefix)))))
 
 (ert-deftest test-cmux-env-prefix/env-file-only ()
   "ENV_FILE → `set -a; . FILE; set +a; ' source block."
@@ -167,7 +175,9 @@ present; the file-sourcing block comes before the launcher."
 
 (ert-deftest test-cmux-env-prefix/build-launch-command-no-env-is-pass-through ()
   "When org has no ENV_FILE, `--build-launch-command' returns the bare
-launcher unchanged."
+launcher prefixed only by the always-on `unset VIRTUAL_ENV;' guard
+(post-2026-05-26 rename-incident change — see sibling
+`empty-when-nothing-set' for the motivation)."
   :tags '(:cmux-env-injection :fast)
   (test-cmux-env--with-org-file
       "#+TITLE: t\n* Story\n:PROPERTIES:\n:CLAUDE_BACKEND: cmux\n:END:\n"
@@ -178,7 +188,7 @@ launcher unchanged."
                (lambda (_o _s _p) "STUB_LAUNCHER")))
       (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/tmp/fake.org" "sdd-fake" "/tmp")))
-        (should (equal "STUB_LAUNCHER" cmd))))))
+        (should (equal "unset VIRTUAL_ENV; STUB_LAUNCHER" cmd))))))
 
 ;; --- ENV_FILE → CLI flag surfacing --------------------------------------
 

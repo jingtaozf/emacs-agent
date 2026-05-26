@@ -657,20 +657,29 @@ query-completed clears busy and unregisters query."
         (should (string-match-p "sid-001" cmd))))))
 
 (ert-deftest test-cmux-build-launch-cmd-custom ()
-  "Build launch command for custom string mode."
+  "Build launch command for custom string mode.
+
+The always-on `unset VIRTUAL_ENV;' guard (added 2026-05-26 to suppress
+uv's stale-venv warning under cmux process ancestry) prefixes every
+launch command — see test-cmux-env-injection.el for the rationale."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
     (let ((code-agent-org-cmux-launch-command "my-custom-command"))
       (let ((cmd (code-agent-org-cmux--build-launch-command
                   "/tmp/test.org" "sid-001" "/tmp")))
-        (should (equal cmd "my-custom-command"))))))
+        (should (equal cmd "unset VIRTUAL_ENV; my-custom-command"))))))
 
 ;;; ============================================================================
 ;;; E19: Claude bare launch command
 ;;; ============================================================================
 
 (ert-deftest test-cmux-build-launch-cmd-claude-bare ()
-  "E19: Build launch command for bare 'claude mode includes --system-prompt."
+  "E19: Build launch command for bare 'claude mode includes --system-prompt.
+
+Matches `claude ` *anywhere* in the command (no `\\`' anchor) because
+the always-on `unset VIRTUAL_ENV;' guard now prefixes the launcher
+— see test-cmux-env-injection.el and the 2026-05-26 rename-incident
+notes in code-agent-org-cmux.org § --build-env-prefix."
   :tags '(:unit :stable :e2e)
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
@@ -683,8 +692,8 @@ query-completed clears busy and unregisters query."
         (let ((cmd (code-agent-org-cmux--build-launch-command
                     "/tmp/test.org" "sid-001" "/tmp")))
           (should (stringp cmd))
-          ;; Starts with 'claude'
-          (should (string-match-p "\\`claude " cmd))
+          ;; `claude ` appears after the env-prefix guard.
+          (should (string-match-p "\\bclaude " cmd))
           ;; Has --system-prompt
           (should (string-match-p "--system-prompt" cmd)))))))
 

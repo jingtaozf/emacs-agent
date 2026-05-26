@@ -740,10 +740,23 @@ longer read here — put values in the .env file instead.  Section-level
 overrides are still possible via `:ENV_FILE:' inheritance on a heading."
   (let* ((env-file-raw (ignore-errors
                          (code-agent-org--get-org-property "ENV_FILE" t)))
-         (env-file (and env-file-raw (expand-file-name env-file-raw))))
+         (env-file (and env-file-raw (expand-file-name env-file-raw)))
+         ;; cmux propagates its own ``VIRTUAL_ENV`` to every spawned
+         ;; pane.  When the agent's project dir is renamed (the
+         ;; 2026-05-26 ``claude-agent`` → ``emacs-agent`` rename),
+         ;; the inherited ``VIRTUAL_ENV`` keeps pointing at the old
+         ;; venv path.  ``uv run --project X`` already ignores a
+         ;; mismatched ``VIRTUAL_ENV`` and uses the project's own
+         ;; venv, but it emits a noisy stderr warning every time.
+         ;; Unset the var at the top of the launch chain so uv runs
+         ;; quietly.  Harmless for the no-rename case because the
+         ;; spawned shell does not need ``VIRTUAL_ENV`` itself —
+         ;; ``uv run`` activates the project venv on its own.
+         (unset-prefix "unset VIRTUAL_ENV; "))
     (if (and env-file (file-readable-p env-file))
-        (format "set -a; . %s; set +a; " (shell-quote-argument env-file))
-      "")))
+        (format "%sset -a; . %s; set +a; "
+                unset-prefix (shell-quote-argument env-file))
+      unset-prefix)))
 
 (defun code-agent-org-cmux--env-cli-fallback-args (user-extra-args)
   "Surface ENV_FILE values for `ANTHROPIC_MODEL' / `CLAUDE_CODE_EFFORT_LEVEL'

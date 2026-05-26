@@ -51,7 +51,7 @@ class McpClientProtocol(Protocol):
     Declared as a ``typing.Protocol`` (structural) so tests can
     substitute a ``MagicMock()`` without inheriting from the concrete
     class; the Smalltalk-style guidance in
-    ``.claude/rules/oop-smalltalk-protocols.md`` calls this pattern out
+    the imported `oop-smalltalk-protocols` rule calls this pattern out
     explicitly.
     """
 

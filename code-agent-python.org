@@ -1751,10 +1751,21 @@ class WorkspaceLauncher:
         self.session_id = session_id
         self.extra_args = extra_args
         self.project_root = os.getcwd()
-        self.plugin_dir = os.environ.get(
-            "CLAUDE_PLUGIN_ROOT",
-            str(Path(__file__).resolve().parent.parent.parent),
-        )
+        # ``__file__`` always points at the actually-running launcher,
+        # so its ancestor directory is authoritative even if the agent's
+        # process tree inherited a stale ``CLAUDE_PLUGIN_ROOT`` from a
+        # previous launch (e.g. the directory was renamed between
+        # sessions — the 2026-05-26 ``claude-agent`` → ``emacs-agent``
+        # rename left every shell under cmux exporting the old path,
+        # and the launcher used to write its hooks file there, failing
+        # with FileNotFoundError).  Prefer the env var only when it
+        # resolves to a real directory.
+        env_plugin_dir = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+        file_plugin_dir = str(Path(__file__).resolve().parent.parent.parent)
+        if env_plugin_dir and os.path.isdir(env_plugin_dir):
+            self.plugin_dir = env_plugin_dir
+        else:
+            self.plugin_dir = file_plugin_dir
         self.mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
         self.model = os.environ.get("AGENT_MODEL", "")
         self.mcp = McpClient(url=self.mcp_url, read_timeout=30.0)

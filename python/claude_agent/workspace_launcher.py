@@ -113,7 +113,7 @@ def restore_file(path: Path, original_content: str | None) -> None:
 # OpenCode and exited before child cleanup), the next session would read
 # the polluted file as ``original`` and restore-back the pollution — each
 # new session adding another stacked inject block. Real instance: AGENTS.md
-# in claude-agent grew to 736 lines / 30K from this loop.
+# in code-agent grew to 736 lines / 30K from this loop.
 #
 # The helpers below replace that with a content-driven, idempotent design:
 # we strip blocks delimited by the BEGIN/END markers from the current file
@@ -332,10 +332,21 @@ class WorkspaceLauncher:
         self.session_id = session_id
         self.extra_args = extra_args
         self.project_root = os.getcwd()
-        self.plugin_dir = os.environ.get(
-            "CLAUDE_PLUGIN_ROOT",
-            str(Path(__file__).resolve().parent.parent.parent),
-        )
+        # ``__file__`` always points at the actually-running launcher,
+        # so its ancestor directory is authoritative even if the agent's
+        # process tree inherited a stale ``CLAUDE_PLUGIN_ROOT`` from a
+        # previous launch (e.g. the directory was renamed between
+        # sessions — the 2026-05-26 ``claude-agent`` → ``emacs-agent``
+        # rename left every shell under cmux exporting the old path,
+        # and the launcher used to write its hooks file there, failing
+        # with FileNotFoundError).  Prefer the env var only when it
+        # resolves to a real directory.
+        env_plugin_dir = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+        file_plugin_dir = str(Path(__file__).resolve().parent.parent.parent)
+        if env_plugin_dir and os.path.isdir(env_plugin_dir):
+            self.plugin_dir = env_plugin_dir
+        else:
+            self.plugin_dir = file_plugin_dir
         self.mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
         self.model = os.environ.get("AGENT_MODEL", "")
         self.mcp = McpClient(url=self.mcp_url, read_timeout=30.0)
@@ -343,6 +354,11 @@ class WorkspaceLauncher:
         self.mcp_ok: bool = False
         self.story_name: str = ""
         self.system_prompt: str = ""
+        # ``workspace_custom_id`` is the org heading's ``:CUSTOM_ID:`` for
+        # the workspace section.  Populated by ``fetch_session_metadata``
+        # and exported as ``WORKSPACE_CUSTOM_ID`` so the bridge can route
+        # by stable id rather than the rename-prone session_id.
+        self.workspace_custom_id: str = ""
 
     @classmethod
     def from_argv(cls, argv: list[str]) -> WorkspaceLauncher:
@@ -380,32 +396,47 @@ class WorkspaceLauncher:
         """Ask Emacs for the story name + system prompt for this session.
 
         Identical in all three agents — the Emacs side owns the shape.
-        Populates ``self.story_name`` and ``self.system_prompt``.
+        Populates ``self.story_name``, ``self.system_prompt``, and
+        ``self.workspace_custom_id`` (the workspace heading's
+        ``:CUSTOM_ID:`` — used as the routing key by the bridge so
+        renaming the heading or cmux workspace cannot misroute prompts).
         """
         if not (self.mcp_ok and self.session_id):
             return
         print(f"Building session metadata for {self.session_id}...")
         esc_org = _escape_elisp_string(self.org_file)
         esc_sid = _escape_elisp_string(self.session_id)
+        # One round-trip pulls three values separated by NULs: heading
+        # text, CUSTOM_ID, and the system prompt body.  NUL is safe
+        # because none of the three can legitimately contain it.
         elisp = (
             "(let ((debug-on-error nil) (debug-on-quit nil))"
-            "  (let* ((prompt (code-agent-org-workspace-bridge-system-prompt "
-            f'    "{esc_org}" "{esc_sid}"))'
-            f'         (story (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer "{esc_org}")'
-            "            (save-excursion (save-restriction (widen)"
-            f'              (code-agent-org-workspace-bridge--goto-session "{esc_sid}")'
-            "              (substring-no-properties (org-get-heading t t t t)))))))"
-            r'    (substring-no-properties (format "%s\n%s" story prompt))))'
+            f'  (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer "{esc_org}")'
+            "    (save-excursion (save-restriction (widen)"
+            f'      (code-agent-org-workspace-bridge--goto-session "{esc_sid}")'
+            "      (let ((story (substring-no-properties (org-get-heading t t t t)))"
+            '            (cid (or (org-entry-get nil "CUSTOM_ID") ""))'
+            "            (prompt (code-agent-org-workspace-bridge-system-prompt "
+            f'              "{esc_org}" "{esc_sid}")))'
+            r'        (format "%s\0%s\0%s" story cid prompt))))))'
         )
         result = self.mcp.eval_elisp(elisp)
         if not result:
             return
-        lines = result.split("\n", 1)
-        self.story_name = lines[0]
-        self.system_prompt = lines[1] if len(lines) > 1 else ""
+        parts = result.split("\0", 2)
+        self.story_name = parts[0] if len(parts) > 0 else ""
+        self.workspace_custom_id = parts[1] if len(parts) > 1 else ""
+        self.system_prompt = parts[2] if len(parts) > 2 else ""
         if not is_valid_session(self.system_prompt):
             print(
                 "  WARNING: Could not build system prompt — launching without it",
+                file=sys.stderr,
+            )
+        if not self.workspace_custom_id:
+            print(
+                "  WARNING: Workspace heading has no :CUSTOM_ID: — bridge "
+                "will fall back to :CLAUDE_SESSION_ID: routing. Add "
+                ":CUSTOM_ID: to the heading for name-based routing.",
                 file=sys.stderr,
             )
 
@@ -414,13 +445,72 @@ class WorkspaceLauncher:
     # ------------------------------------------------------------------
 
     def export_env_vars(self) -> None:
-        """Export env vars read by hook scripts / bridge plugins."""
+        """Export env vars read by hook scripts / bridge plugins.
+
+        Four routing-relevant vars are pinned at launch time so the
+        in-process bridge never needs to re-query cmux:
+
+        * ``WORKSPACE_ORG_FILE``    — which .org file holds the workspace
+        * ``WORKSPACE_SESSION_ID``  — legacy routing key (back-compat)
+        * ``WORKSPACE_CUSTOM_ID``   — preferred routing key (org heading
+          ``:CUSTOM_ID:`` — globally unique, survives heading rename)
+        * ``CMUX_WORKSPACE``        — cmux workspace title at launch
+          time (display + sanity check only, not a routing key)
+
+        ``CMUX_WORKSPACE`` falls back to ``self.story_name`` when cmux
+        cannot be reached (CI / direct invocation), which matches the
+        existing tab-title convention.
+        """
         os.environ["WORKSPACE_ORG_FILE"] = self.org_file
         os.environ["WORKSPACE_SESSION_ID"] = self.session_id or ""
+        os.environ["WORKSPACE_CUSTOM_ID"] = self.workspace_custom_id or ""
+        cmux_ws = self._detect_cmux_workspace_title() or self.story_name or ""
+        if cmux_ws:
+            os.environ["CMUX_WORKSPACE"] = cmux_ws
         os.environ["EMACS_MCP_URL"] = self.mcp_url
         os.environ["CLAUDE_PLUGIN_ROOT"] = self.plugin_dir
         if self.agent_type_env_value:
             os.environ["AGENT_TYPE"] = self.agent_type_env_value
+
+    def _detect_cmux_workspace_title(self) -> str:
+        """Best-effort: ask cmux for the current workspace title.
+
+        Returns an empty string if cmux is not reachable (CI sandbox,
+        non-cmux terminal).  The caller falls back to ``story_name``;
+        the bridge's fail-loud check then refuses to route only when
+        BOTH are empty — which is itself a useful invariant.
+        """
+        try:
+            ident = subprocess.run(
+                ["cmux", "identify", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if ident.returncode != 0 or not ident.stdout.strip():
+                return ""
+            ident_data = json.loads(ident.stdout)
+            ws_ref = ident_data.get("caller", {}).get("workspace_ref")
+            if not ws_ref:
+                return ""
+            tree = subprocess.run(
+                ["cmux", "tree", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            if tree.returncode != 0 or not tree.stdout.strip():
+                return ""
+            tree_data = json.loads(tree.stdout)
+            for win in tree_data.get("windows", []):
+                for ws in win.get("workspaces", []):
+                    if ws.get("ref") == ws_ref:
+                        return ws.get("title", "") or ""
+        except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+            return ""
+        return ""
 
     def set_tab_title(self) -> None:
         """Set the terminal-tab title so cmux pane name shows the story."""

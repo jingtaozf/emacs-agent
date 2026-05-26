@@ -13,6 +13,15 @@ cd "$PROJECT_DIR"
 EMACS_MCP_PORT="${1:-9999}"
 export EMACS_MCP_URL="http://localhost:${EMACS_MCP_PORT}/mcp"
 
+# These tests run inside a cmux pane during development (so the
+# parent shell inherits CMUX_WORKSPACE_ID).  The bridge's new
+# stale-resume detection would fire for every invocation without
+# WORKSPACE_BRIDGE_TEST_BYPASS=1 — even though these tests are not
+# exercising the resume scenario.  See
+# test-cross-workspace-routing-e2e.sh TC3 for the assertion that
+# the strict check still aborts when bypass is *not* set.
+export WORKSPACE_BRIDGE_TEST_BYPASS=1
+
 source tests/helpers/mcp-call.sh
 
 PASS=0
