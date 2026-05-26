@@ -40,8 +40,8 @@ AI block execution — not just unit tests or manual curl.
 ## When to use
 
 - After modifying `code-agent-trace.org` (span creation)
-- After modifying `python/claude_agent/otel_bridge.py` (span export)
-- After modifying `python/claude_agent/otel_setup.py` (OTel configuration)
+- After modifying `python/code_agent/otel_bridge.py` (span export)
+- After modifying `python/code_agent/otel_setup.py` (OTel configuration)
 - When root spans are missing from Phoenix UI
 
 ## Key services

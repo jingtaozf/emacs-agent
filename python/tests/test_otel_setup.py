@@ -41,7 +41,7 @@ def otel_setup():
     """Reload the module so its module-level code sees the mocked OTel."""
     import importlib
 
-    import claude_agent.otel_setup as mod
+    import code_agent.otel_setup as mod
 
     importlib.reload(mod)
     return mod

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from hypothesis import given, strategies as st, settings, HealthCheck
 
-from claude_agent.workspace_bridge import _escape_elisp_string
+from code_agent.workspace_bridge import _escape_elisp_string
 
 # Reasonable budget — pure-string functions don't need 100k iterations.
 SETTINGS = settings(

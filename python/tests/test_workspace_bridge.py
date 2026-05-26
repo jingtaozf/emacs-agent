@@ -11,9 +11,9 @@ import pytest
 
 from unittest.mock import MagicMock, patch
 
-from claude_agent.mcp_client import McpConnectionError
+from code_agent.mcp_client import McpConnectionError
 
-from claude_agent.workspace_bridge import (
+from code_agent.workspace_bridge import (
     WorkspaceBridge,
     _escape_elisp_string,
     _extract_copilot_response,
@@ -39,12 +39,12 @@ def make_bridge(mcp=None, org_file="/tmp/f.org", session_id="sid"):
 
 class TestWriteStatus:
     def test_writes_status_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         write_status("test-session", "busy")
         assert (tmp_path / "test-session").read_text() == "busy"
 
     def test_overwrites_existing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         write_status("test-session", "busy")
         write_status("test-session", "ready")
         assert (tmp_path / "test-session").read_text() == "ready"
@@ -54,32 +54,32 @@ class TestCustomIdPersistence:
     """Custom-id read/write/clear are now methods on the bridge."""
 
     def test_write_and_read(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
         bridge._append_custom_id("sdd-123-instr-3")
         assert bridge._read_custom_id() == "sdd-123-instr-3"
 
     def test_read_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="nonexistent")
         assert bridge._read_custom_id() is None
 
     def test_overwrite(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
         bridge._append_custom_id("sdd-123-instr-1")
         bridge._append_custom_id("sdd-123-instr-2")
         assert bridge._read_custom_id() == "sdd-123-instr-2"
 
     def test_clear_removes_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
         bridge._append_custom_id("cid")
         bridge._clear_custom_ids()
         assert bridge._read_custom_id() is None
 
     def test_clear_missing_is_noop(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="never-written")
         bridge._clear_custom_ids()  # should not raise
 
@@ -88,7 +88,7 @@ class TestCustomIdQueue:
     """Regression tests for the queue-based custom-id storage (PCR dev1 bug)."""
 
     def test_append_preserves_order(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
         bridge._append_custom_id("a")
         bridge._append_custom_id("b")
@@ -96,14 +96,14 @@ class TestCustomIdQueue:
         assert bridge._read_custom_ids() == ["a", "b", "c"]
 
     def test_read_custom_id_returns_newest(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
         bridge._append_custom_id("older")
         bridge._append_custom_id("newer")
         assert bridge._read_custom_id() == "newer"
 
     def test_clear_drains_queue(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
         bridge._append_custom_id("a")
         bridge._append_custom_id("b")
@@ -112,7 +112,7 @@ class TestCustomIdQueue:
 
     def test_write_custom_id_is_append(self, tmp_path, monkeypatch):
         """Back-compat alias should append, not overwrite (bug fix)."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge(session_id="sid")
         bridge._append_custom_id("first")
         bridge._append_custom_id("second")
@@ -151,7 +151,7 @@ class TestExtractTurns:
         }
 
     def test_single_turn(self, tmp_path):
-        from claude_agent.workspace_bridge import _extract_turns
+        from code_agent.workspace_bridge import _extract_turns
 
         path = self._write_transcript(
             tmp_path,
@@ -163,7 +163,7 @@ class TestExtractTurns:
         assert _extract_turns(path) == [("q", "a")]
 
     def test_two_sequential_turns(self, tmp_path):
-        from claude_agent.workspace_bridge import _extract_turns
+        from code_agent.workspace_bridge import _extract_turns
 
         path = self._write_transcript(
             tmp_path,
@@ -178,7 +178,7 @@ class TestExtractTurns:
 
     def test_superseded_first_turn_has_empty_assistant(self, tmp_path):
         """The PCR dev1 bug: user typed q2 before Claude finished q1."""
-        from claude_agent.workspace_bridge import _extract_turns
+        from code_agent.workspace_bridge import _extract_turns
 
         path = self._write_transcript(
             tmp_path,
@@ -191,7 +191,7 @@ class TestExtractTurns:
         assert _extract_turns(path) == [("q1", ""), ("q2", "a2")]
 
     def test_tool_use_turns_skipped(self, tmp_path):
-        from claude_agent.workspace_bridge import _extract_turns
+        from code_agent.workspace_bridge import _extract_turns
 
         path = self._write_transcript(
             tmp_path,
@@ -204,14 +204,14 @@ class TestExtractTurns:
         assert _extract_turns(path) == [("q1", "final answer")]
 
     def test_empty_transcript(self, tmp_path):
-        from claude_agent.workspace_bridge import _extract_turns
+        from code_agent.workspace_bridge import _extract_turns
 
         path = self._write_transcript(tmp_path, [])
         assert _extract_turns(path) == []
 
     def test_user_without_assistant(self, tmp_path):
         """Final user entry with no assistant follow-up (cancelled during generation)."""
-        from claude_agent.workspace_bridge import _extract_turns
+        from code_agent.workspace_bridge import _extract_turns
 
         path = self._write_transcript(
             tmp_path,
@@ -228,7 +228,7 @@ class TestHandleDispatch:
     """The ``handle`` method routes events to ``_handle_<event>``."""
 
     def test_known_event_dispatches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge()
         seen = []
         bridge._handle_prompt = lambda data: seen.append(("prompt", data))
@@ -236,7 +236,7 @@ class TestHandleDispatch:
         assert seen == [("prompt", {"prompt": "hi"})]
 
     def test_hyphenated_event_dispatches(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge()
         seen = []
         bridge._handle_permission_clear = lambda data: seen.append(data)
@@ -244,7 +244,7 @@ class TestHandleDispatch:
         assert seen == [{"tool_name": "X"}]
 
     def test_unknown_event_warns_and_returns(self, capsys, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         bridge = make_bridge()
         bridge.handle("never-seen-event", {})
         assert "unknown event" in capsys.readouterr().err
@@ -254,7 +254,7 @@ class TestHandleResponseQueryCompleted:
     """``_handle_response`` notifies query-completed on every exit path."""
 
     def test_query_completed_called(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
         bridge._append_custom_id("instr-custom-id")
@@ -263,7 +263,7 @@ class TestHandleResponseQueryCompleted:
         assert any("code-agent-org--terminal-query-completed" in c for c in calls)
 
     def test_query_completed_called_even_without_response(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
         bridge._handle_response({})
@@ -513,7 +513,7 @@ class TestHandleResponseCopilotFormat:
     """handle_response handles Copilot's camelCase fields."""
 
     def test_camelcase_transcript_path(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         transcript = tmp_path / "events.jsonl"
         transcript.write_text(
             json.dumps({"type": "session.start", "data": {"sessionId": "abc"}})
@@ -535,7 +535,7 @@ class TestHandleResponseCopilotFormat:
         assert any("answer" in c for c in calls)
 
     def test_camelcase_session_id_saved(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid")
         bridge._append_custom_id("cid")
@@ -546,7 +546,7 @@ class TestHandleResponseCopilotFormat:
         assert len(calls) > 0
 
     def test_auto_discover_copilot_events_jsonl(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         copilot_session_id = "abc-123-def"
         session_dir = tmp_path / ".copilot" / "session-state" / copilot_session_id
         session_dir.mkdir(parents=True)
@@ -621,7 +621,7 @@ class TestHandlePromptFiltering:
         return mcp
 
     def test_normal_prompt_calls_mcp(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         mcp.eval_elisp.return_value = "sid-instr-1"
         bridge = make_bridge(mcp)
@@ -629,7 +629,7 @@ class TestHandlePromptFiltering:
         assert mcp.eval_elisp.called
 
     def test_prompt_saves_custom_id(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         mcp.eval_elisp.return_value = "sdd-123-instr-5"
         bridge = make_bridge(mcp, session_id="sid")
@@ -637,7 +637,7 @@ class TestHandlePromptFiltering:
         assert bridge._read_custom_id() == "sdd-123-instr-5"
 
     def test_task_notification_skipped(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         prompt = (
             "<task-notification>\n"
@@ -652,7 +652,7 @@ class TestHandlePromptFiltering:
         assert not mcp.eval_elisp.called
 
     def test_system_reminder_skipped(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         prompt = "<system-reminder>\nThe task tools haven't been used recently.\n</system-reminder>"
         bridge = make_bridge(mcp)
@@ -660,7 +660,7 @@ class TestHandlePromptFiltering:
         assert not mcp.eval_elisp.called
 
     def test_empty_prompt_skipped(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._make_mcp()
         bridge = make_bridge(mcp)
         bridge._handle_prompt({"prompt": ""})
@@ -696,7 +696,7 @@ class TestHandleResponseSupersede:
     def test_two_prompts_one_stop_inserts_both_actions(self, tmp_path, monkeypatch):
         """Two UserPromptSubmit events followed by one Stop: response
         for the newer prompt + cancelled mark for the older prompt."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._mcp_returning_each_prompt_id(["cid-older", "cid-newer"])
         bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
 
@@ -737,7 +737,7 @@ class TestHandleResponseSupersede:
         assert bridge._read_custom_ids() == []
 
     def test_three_prompts_two_responses_one_cancelled(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = self._mcp_returning_each_prompt_id(["A", "B", "C"])
         bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
         bridge._handle_prompt({"prompt": "q1"})
@@ -800,7 +800,7 @@ class TestHandleResponseSentinelPrompt:
     def test_sentinel_response_routes_to_latest_instruction(
         self, tmp_path, monkeypatch
     ):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
 
         # Simulate the autonomous-loop scenario:
@@ -869,7 +869,7 @@ class TestHandleResponseSentinelPrompt:
         """If the workspace has no instructions at all, the fallback
         returns None and we drop the response rather than synthesise a
         ghost heading."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.return_value = None  # no latest cid
         bridge = make_bridge(mcp, session_id="empty-sid", org_file="/tmp/t.org")
@@ -912,7 +912,7 @@ class TestHandleResponseSpuriousStop:
     """
 
     def test_spurious_stop_preserves_queue(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
         bridge._append_custom_id("cid-genuine")
@@ -934,7 +934,7 @@ class TestHandleResponseSpuriousStop:
         """When queue IS empty, the legacy path still mints a custom-id
         and inserts the response — preserves backward-compat for
         terminal-typed prompts that never fired UserPromptSubmit."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = ["freshly-minted-cid", None, None]
         bridge = make_bridge(mcp, session_id="sid", org_file="/tmp/test.org")
@@ -1042,7 +1042,7 @@ class TestMcpEval:
         mock_span = MagicMock()
         mock_span.get_span_context.return_value = mock_ctx
 
-        import claude_agent.workspace_bridge as bridge_mod
+        import code_agent.workspace_bridge as bridge_mod
 
         monkeypatch.setattr(
             bridge_mod.otel_trace, "get_current_span", lambda: mock_span
@@ -1070,7 +1070,7 @@ class TestHandleResponsePromptInsertion:
     """``_handle_response`` mints a custom_id when OpenCode provides none."""
 
     def test_terminal_prompt_inserts_prompt_then_response(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = ["test-custom-id", None, None]
         bridge = make_bridge(mcp, session_id="sid")
@@ -1093,7 +1093,7 @@ class TestHandleResponsePromptInsertion:
         """Updated 2026-04-22: no last_user_message → can't mint a new
         instruction, but the fallback now queries for the latest
         instruction and appends there so the response isn't lost."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         # Fallback returns a fake latest-instruction cid.
         mcp.eval_elisp.side_effect = lambda elisp: (
@@ -1110,7 +1110,7 @@ class TestHandleResponsePromptInsertion:
 
     def test_no_custom_id_no_user_message_no_latest_drops(self, tmp_path, monkeypatch):
         """If there's no instruction at all, the response is dropped."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.return_value = None
         bridge = make_bridge(mcp, session_id="sid")
@@ -1129,7 +1129,7 @@ class TestHandleResponsePromptInsertion:
         valid transcript) can route against it later.  Prevents
         cross-agent response leakage observed when opencode test
         output was inserted under a claude instruction."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         (tmp_path / "sid.from-emacs").write_text("1")
         bridge = make_bridge(MagicMock(), session_id="sid")
         bridge._append_custom_id("emacs-custom-id")
@@ -1150,7 +1150,7 @@ class TestHandleResponsePromptInsertion:
         """Updated 2026-04-22: from-emacs flag present but no custom-id
         in file → mint returns None → fallback queries latest
         instruction so the response still lands somewhere visible."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         (tmp_path / "sid.from-emacs").write_text("1")
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = lambda elisp: (
@@ -1167,7 +1167,7 @@ class TestHandleResponsePromptInsertion:
         assert not (tmp_path / "sid.from-emacs").exists()
 
     def test_insert_prompt_failure_returns_early(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = McpConnectionError("timeout")
         bridge = make_bridge(mcp, session_id="sid")
@@ -1179,7 +1179,7 @@ class TestHandleResponsePromptInsertion:
 
     def test_custom_id_written_after_prompt_insertion(self, tmp_path, monkeypatch):
         """After successful insert-prompt, custom_id is persisted to disk during execution."""
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         mcp = MagicMock()
         mcp.eval_elisp.side_effect = ["new-custom-id", None, None]
         bridge = make_bridge(mcp, session_id="sid")
@@ -1219,7 +1219,7 @@ class TestHandleResponsePromptInsertion:
         import os
         import time
 
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         flag = tmp_path / "sid.from-emacs"
         flag.write_text("1")
         stale_mtime = time.time() - 120  # 2 minutes ago
@@ -1227,7 +1227,7 @@ class TestHandleResponsePromptInsertion:
         (tmp_path / "sid.custom-ids").write_text("stale-old-cid\n")
         # Bridge process started AFTER the stale flag was written.
         monkeypatch.setattr(
-            "claude_agent.workspace_bridge._process_start_time", time.time()
+            "code_agent.workspace_bridge._process_start_time", time.time()
         )
         # MCP returns a deterministic minted cid so we can assert the
         # value the bridge returns is the fresh one, not the stale one.
@@ -1260,13 +1260,13 @@ class TestHandleResponsePromptInsertion:
         """
         import time
 
-        monkeypatch.setattr("claude_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
+        monkeypatch.setattr("code_agent.workspace_bridge.STATUS_DIR", str(tmp_path))
         flag = tmp_path / "sid.from-emacs"
         flag.write_text("1")
         (tmp_path / "sid.custom-ids").write_text("recent-cid\n")
         # Flag mtime is now (fresh); bridge started 5s earlier.
         monkeypatch.setattr(
-            "claude_agent.workspace_bridge._process_start_time", time.time() - 5
+            "code_agent.workspace_bridge._process_start_time", time.time() - 5
         )
         bridge = make_bridge(MagicMock(), session_id="sid")
         result = bridge._mint_missing_custom_id({"last_user_message": "prompt"}, None)
@@ -1278,7 +1278,7 @@ class TestReadAgentNameFromPpid:
     """Verify --name extraction from parent process argv."""
 
     def _patch_ps(self, monkeypatch, stdout: str, returncode: int = 0):
-        from claude_agent import workspace_bridge as wb
+        from code_agent import workspace_bridge as wb
 
         def fake_run(*_args, **_kwargs):
             r = MagicMock()
@@ -1289,7 +1289,7 @@ class TestReadAgentNameFromPpid:
         monkeypatch.setattr(wb.subprocess, "run", fake_run)
 
     def test_returns_value_after_double_dash_name(self, monkeypatch):
-        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+        from code_agent.workspace_bridge import _read_agent_name_from_ppid
 
         monkeypatch.setattr("os.getppid", lambda: 12345)
         self._patch_ps(
@@ -1299,28 +1299,28 @@ class TestReadAgentNameFromPpid:
         assert _read_agent_name_from_ppid() == "edo-dev1"
 
     def test_returns_value_in_equals_form(self, monkeypatch):
-        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+        from code_agent.workspace_bridge import _read_agent_name_from_ppid
 
         monkeypatch.setattr("os.getppid", lambda: 12345)
         self._patch_ps(monkeypatch, "claude --resume X --name=edo-dev2")
         assert _read_agent_name_from_ppid() == "edo-dev2"
 
     def test_returns_none_when_name_absent(self, monkeypatch):
-        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+        from code_agent.workspace_bridge import _read_agent_name_from_ppid
 
         monkeypatch.setattr("os.getppid", lambda: 12345)
         self._patch_ps(monkeypatch, "claude --resume X --plugin-dir /p")
         assert _read_agent_name_from_ppid() is None
 
     def test_returns_none_when_ps_fails(self, monkeypatch):
-        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+        from code_agent.workspace_bridge import _read_agent_name_from_ppid
 
         monkeypatch.setattr("os.getppid", lambda: 12345)
         self._patch_ps(monkeypatch, "", returncode=1)
         assert _read_agent_name_from_ppid() is None
 
     def test_returns_none_when_ppid_root(self, monkeypatch):
-        from claude_agent.workspace_bridge import _read_agent_name_from_ppid
+        from code_agent.workspace_bridge import _read_agent_name_from_ppid
 
         monkeypatch.setattr("os.getppid", lambda: 1)
         assert _read_agent_name_from_ppid() is None
@@ -1330,7 +1330,7 @@ class TestResolveRoutingViaAgentName:
     """Verify the env→MCP routing recovery path."""
 
     def test_no_agent_name_returns_env_unchanged(self, monkeypatch):
-        from claude_agent import workspace_bridge as wb
+        from code_agent import workspace_bridge as wb
 
         monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: None)
         org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
@@ -1344,7 +1344,7 @@ class TestResolveRoutingViaAgentName:
         )
 
     def test_mcp_match_overrides_stale_env(self, monkeypatch):
-        from claude_agent import workspace_bridge as wb
+        from code_agent import workspace_bridge as wb
 
         monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
         monkeypatch.setenv("CMUX_AGENT_LAUNCH_CWD", "/edo")
@@ -1370,7 +1370,7 @@ class TestResolveRoutingViaAgentName:
         assert recovered is True
 
     def test_mcp_match_equals_env_recovered_false(self, monkeypatch):
-        from claude_agent import workspace_bridge as wb
+        from code_agent import workspace_bridge as wb
 
         monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
         monkeypatch.setenv("CMUX_AGENT_LAUNCH_CWD", "/edo")
@@ -1393,7 +1393,7 @@ class TestResolveRoutingViaAgentName:
         assert recovered is False  # env already correct, no override notice
 
     def test_mcp_unreachable_returns_env_unchanged(self, monkeypatch):
-        from claude_agent import workspace_bridge as wb
+        from code_agent import workspace_bridge as wb
 
         monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
 
@@ -1412,7 +1412,7 @@ class TestResolveRoutingViaAgentName:
         assert (org, sid, cid, recovered) == ("env.org", "env-sid", "env-cid", False)
 
     def test_mcp_returns_empty_string_returns_env(self, monkeypatch):
-        from claude_agent import workspace_bridge as wb
+        from code_agent import workspace_bridge as wb
 
         monkeypatch.setattr(wb, "_read_agent_name_from_ppid", lambda: "edo-dev1")
 

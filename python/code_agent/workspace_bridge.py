@@ -44,7 +44,7 @@ from typing import Protocol
 from opentelemetry import trace as otel_trace
 from opentelemetry.trace import SpanKind
 
-from claude_agent.mcp_client import (
+from code_agent.mcp_client import (
     McpClient,
     McpClientProtocol,
     McpConnectionError,
@@ -52,7 +52,7 @@ from claude_agent.mcp_client import (
 )
 
 try:
-    from claude_agent.otel_setup import (
+    from code_agent.otel_setup import (
         OI_KIND_ATTR,
         STATUS_DIR,
         TraceContextStore,

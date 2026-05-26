@@ -38,7 +38,7 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator
 from opentelemetry.trace import NonRecordingSpan, SpanContext, SpanKind, TraceFlags
 from opentelemetry.trace.status import Status, StatusCode
 
-from claude_agent.otel_setup import create_exporter
+from code_agent.otel_setup import create_exporter
 
 # OpenInference is Phoenix-specific metadata — see
 # https://github.com/Arize-ai/openinference for the full enum. These

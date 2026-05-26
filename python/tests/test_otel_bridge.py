@@ -9,7 +9,7 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace.status import StatusCode
 
-from claude_agent.otel_bridge import OtelBridgeServer
+from code_agent.otel_bridge import OtelBridgeServer
 
 
 @pytest.fixture

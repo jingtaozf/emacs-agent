@@ -31,8 +31,8 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
-from claude_agent.mcp_client import McpClient
-from claude_agent.workspace_bridge import _escape_elisp_string
+from code_agent.mcp_client import McpClient
+from code_agent.workspace_bridge import _escape_elisp_string
 
 
 # ======================================================================

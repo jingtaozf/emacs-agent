@@ -21,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-from claude_agent.workspace_launcher import (
+from code_agent.workspace_launcher import (
     McpConfigInjector,
     WorkspaceLauncher,
     cleanup_emacs_agent_inject,

@@ -2,7 +2,7 @@
 
 import pytest
 
-from claude_agent.mcp_client import McpClient, McpConnectionError, McpElispError
+from code_agent.mcp_client import McpClient, McpConnectionError, McpElispError
 
 
 class TestMcpClientUnit:

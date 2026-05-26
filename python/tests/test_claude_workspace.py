@@ -12,12 +12,12 @@ import pytest
 
 from unittest.mock import MagicMock, patch
 
-from claude_agent.claude_workspace import (
+from code_agent.claude_workspace import (
     ClaudeWorkspaceLauncher,
     _cleanup_ide_server,
     _normalize_story_slug,
 )
-from claude_agent.workspace_launcher import (
+from code_agent.workspace_launcher import (
     is_valid_session,
     split_positional_args,
 )

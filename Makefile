@@ -680,11 +680,11 @@ test-python:
 vulture:
 	@echo "Running vulture (dead-code scan, 80% confidence)..."
 	@if command -v uvx >/dev/null 2>&1; then \
-		uvx vulture python/claude_agent/ --min-confidence 80 || \
+		uvx vulture python/code_agent/ --min-confidence 80 || \
 		echo "(see findings above — may include false positives from dynamic dispatch)"; \
 	else \
 		echo "uvx not found; install uv (https://docs.astral.sh/uv/) or run:"; \
-		echo "  pip install vulture && vulture python/claude_agent/ --min-confidence 80"; \
+		echo "  pip install vulture && vulture python/code_agent/ --min-confidence 80"; \
 		exit 1; \
 	fi
 
@@ -781,7 +781,7 @@ test-cross-workspace-routing:
 .PHONY: otel-server
 otel-server:
 	@echo "Starting OTel bridge server on port 7331..."
-	cd python && uv run python -m claude_agent.otel_bridge
+	cd python && uv run python -m code_agent.otel_bridge
 
 .PHONY: phoenix-start
 phoenix-start:
@@ -849,7 +849,7 @@ build-python-index:
 	@$(LP_ENV) python3 $(LITERATE_AGENT_HOME)/scripts/build_index.py \
 	    --output INDEX-python.org \
 	    --preamble /dev/null \
-	    --filter 'python/claude_agent/.*\.py$$' \
+	    --filter 'python/code_agent/.*\.py$$' \
 	    $(PYTHON_LP_ORG)
 
 # build-tangle-map populates .cache/tangle-map.tsv used by the

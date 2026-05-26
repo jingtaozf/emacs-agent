@@ -38,7 +38,7 @@ approvaltests = pytest.importorskip("approvaltests")
 from approvaltests import verify, Options  # noqa: E402
 from approvaltests.reporters import PythonNativeReporter  # noqa: E402
 
-from claude_agent.workspace_bridge import _format_todos_as_elisp
+from code_agent.workspace_bridge import _format_todos_as_elisp
 
 
 # Default reporter is GUI-launching (BeyondCompare, Meld, etc.) — that hangs

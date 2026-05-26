@@ -2,7 +2,7 @@
 
 import pytest
 
-from claude_agent.mcp_client import McpClient
+from code_agent.mcp_client import McpClient
 
 MCP_URL = "http://localhost:9999/mcp"
 

@@ -21,9 +21,9 @@ import re
 import sys
 from pathlib import Path
 
-from claude_agent.mcp_client import McpClient
-from claude_agent.workspace_bridge import _escape_elisp_string
-from claude_agent.workspace_launcher import (
+from code_agent.mcp_client import McpClient
+from code_agent.workspace_bridge import _escape_elisp_string
+from code_agent.workspace_launcher import (
     WorkspaceLauncher,
     is_valid_session,
     split_positional_args,

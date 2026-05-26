@@ -11,12 +11,12 @@ import pytest
 
 from pathlib import Path
 
-from claude_agent.opencode_workspace import (
+from code_agent.opencode_workspace import (
     OpencodeWorkspaceLauncher,
     _inject_emacs_mcp,
     _parse_jsonc,
 )
-from claude_agent.workspace_launcher import (
+from code_agent.workspace_launcher import (
     AgentsMdInjector,
     filter_claude_args,
     is_valid_session,
@@ -340,7 +340,7 @@ class TestWriteAgentsMd:
         durable base. If the file existed before with no base content,
         cleanup deletes it.
         """
-        from claude_agent.workspace_launcher import cleanup_emacs_agent_inject
+        from code_agent.workspace_launcher import cleanup_emacs_agent_inject
 
         # Case 1: file existed with base content; cleanup leaves base.
         agents_md = tmp_path / "AGENTS.md"
