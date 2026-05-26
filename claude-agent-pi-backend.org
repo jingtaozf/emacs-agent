@@ -189,7 +189,9 @@ hold whatever didn't end at =\n=.
   (pending-by-id (make-hash-table :test 'equal)
                  :documentation "id (string) -> callbacks plist for in-flight prompts")
   (active-prompt-id nil :documentation "Most-recent prompt id (for cancel routing)")
-  (next-id 0 :documentation "Monotonic counter for generated request ids"))
+  (next-id 0 :documentation "Monotonic counter for generated request ids")
+  (active-tools (make-hash-table :test 'equal)
+                :documentation "toolCallId -> {:tool-name string :rendered-start-p bool} for inline tool-call rendering across tool_execution_start/end events"))
 #+END_SRC
 
 ** Live-Backend Registry
@@ -462,20 +464,9 @@ prompt at a time (steer/follow_up queue but only one streams)."
      ((equal type "message_update")
       (claude-agent-pi--handle-message-update backend obj cbs))
      ((equal type "tool_execution_start")
-      (claude-agent-pi--verbose-log
-       backend
-       (format "tool_start %s args=%s"
-               (map-elt obj 'toolName)
-               (let* ((args (map-elt obj 'args))
-                      (encoded (and args (json-encode args))))
-                 (and encoded
-                      (substring encoded 0 (min 120 (length encoded))))))))
+      (claude-agent-pi--handle-tool-start backend obj cbs))
      ((equal type "tool_execution_end")
-      (claude-agent-pi--verbose-log
-       backend
-       (format "tool_end %s%s"
-               (map-elt obj 'toolName)
-               (if (map-elt obj 'isError) " ERROR" ""))))
+      (claude-agent-pi--handle-tool-end backend obj cbs))
      ((equal type "agent_end")
       (claude-agent-pi--handle-agent-end backend obj cbs))
      ;; Quiet events — log only if verbose buffer is heavy enough to absorb.
@@ -484,6 +475,104 @@ prompt at a time (steer/follow_up queue but only one streams)."
      (t
       (claude-agent-pi--verbose-log
        backend (format "unhandled event: %s" type))))))
+
+(defcustom claude-agent-pi-show-tool-calls t
+  "If non-nil, render Pi tool-execution events inline in the response
+section: a folded `**** Tool: <name>' subheading with args + result.
+Set to nil to keep the response visually clean (tool activity still
+shows up in the verbose buffer)."
+  :type 'boolean
+  :group 'claude-agent)
+
+(defun claude-agent-pi--render-tool-text (text cbs)
+  "Synthesize TEXT into the response section via the :on-token chain.
+Tool events fire BETWEEN message_update text deltas; injecting the
+rendered text through the same callback the assistant text uses
+keeps everything in narrative order in the org buffer."
+  (when-let ((on-token (plist-get cbs :on-token)))
+    (ignore-errors (funcall on-token text))))
+
+(defun claude-agent-pi--truncate (s n)
+  "Return S truncated to N chars (with `…' suffix if cut)."
+  (if (or (null s) (<= (length s) n))
+      s
+    (concat (substring s 0 n) "…")))
+
+(defun claude-agent-pi--handle-tool-start (backend obj cbs)
+  "On tool_execution_start: record the toolCallId and emit a
+foldable `**** Tool: <name>' heading + args block into the response
+section.  Only fires when `claude-agent-pi-show-tool-calls' is t."
+  (let* ((id (map-elt obj 'toolCallId))
+         (name (map-elt obj 'toolName))
+         (args (map-elt obj 'args))
+         (args-json (and args (json-encode args)))
+         (args-preview (claude-agent-pi--truncate args-json 4096)))
+    (when id
+      (puthash id (list :tool-name name :rendered-start-p t)
+               (claude-agent-pi-backend-active-tools backend)))
+    (claude-agent-pi--verbose-log
+     backend
+     (format "tool_start %s args=%s" name
+             (claude-agent-pi--truncate args-json 120)))
+    (when claude-agent-pi-show-tool-calls
+      (claude-agent-pi--render-tool-text
+       (format "\n**** Tool: %s :tool:\n#+begin_src js\n%s\n#+end_src\n"
+               (or name "<unknown>")
+               (or args-preview "(no args)"))
+       cbs))))
+
+(defun claude-agent-pi--extract-result-text (result)
+  "Extract a printable string from a tool RESULT alist/object.
+Pi sometimes nests under .content[0].text, sometimes returns the
+text directly.  This shim handles both."
+  (cond
+   ((stringp result) result)
+   ((null result) "")
+   (t
+    (let ((content (map-elt result 'content)))
+      (cond
+       ((null content) (json-encode result))
+       ((stringp content) content)
+       ((sequencep content)
+        (mapconcat (lambda (c)
+                     (or (and (listp c) (map-elt c 'text)) (json-encode c)))
+                   (append content nil)
+                   "\n"))
+       (t (json-encode result)))))))
+
+(defun claude-agent-pi--handle-tool-end (backend obj cbs)
+  "On tool_execution_end: emit the result block (truncated) into the
+response section, paired with the heading inserted at tool_start.
+Drops the active-tools entry."
+  (let* ((id (map-elt obj 'toolCallId))
+         (name (map-elt obj 'toolName))
+         (result (map-elt obj 'result))
+         (is-error (eq (map-elt obj 'isError) t))
+         (rendered (claude-agent-pi--extract-result-text result))
+         (preview (claude-agent-pi--truncate rendered 4096)))
+    (when id
+      (remhash id (claude-agent-pi-backend-active-tools backend)))
+    (claude-agent-pi--verbose-log
+     backend
+     (format "tool_end %s%s" name (if is-error " ERROR" "")))
+    (when claude-agent-pi-show-tool-calls
+      ;; Detect unified-diff output and switch to a diff src block so
+      ;; the org buffer fontifies +/- lines correctly.  Otherwise plain
+      ;; example block.  The detection is heuristic: presence of both
+      ;; `--- ` and `+++ ` anchors at line starts.
+      (let ((block-type
+             (if (and preview
+                      (string-match-p "^--- " preview)
+                      (string-match-p "^\\+\\+\\+ " preview))
+                 (cons "#+begin_src diff" "#+end_src")
+               (cons "#+begin_example" "#+end_example"))))
+        (claude-agent-pi--render-tool-text
+         (format "%s\n%s\n%s\n%s\n\n"
+                 (if is-error "ERROR:" "Result:")
+                 (car block-type)
+                 preview
+                 (cdr block-type))
+         cbs)))))
 
 (defun claude-agent-pi--handle-message-update (backend obj cbs)
   "Extract a text or thinking delta from OBJ and route to CBS plist."

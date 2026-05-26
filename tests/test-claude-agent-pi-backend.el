@@ -283,6 +283,30 @@ LLM can only produce text; with it, the LLM can introspect Emacs."
       (should (string-match-p "FOUND_BUFFERS" collected)))))
 
 
+(ert-deftest claude-agent-pi-live--tool-call-renders-inline ()
+  "When Pi runs a tool (bash here), tool_execution_start/end events
+inject a `**** Tool: <name>' subheading + args block + result block
+into the response stream via the :on-token callback.  Verifies the
+Phase 2 inline tool-call rendering wiring."
+  :tags '(:pi-backend-live)
+  (skip-unless (test-pi--available-p))
+  (test-pi--with-backend b
+    (let ((tokens "")
+          (complete nil))
+      (claude-agent-backend-query
+       b
+       "Use the bash tool to run: echo PHASE2_TOOL_OK\nThen reply OK."
+       (list :on-token (lambda (delta) (setq tokens (concat tokens delta)))
+             :on-complete (lambda (_m) (setq complete t))
+             :on-error (lambda (_e) (setq complete :err))))
+      (should (test-pi--wait-until (lambda () complete) 60))
+      (should (eq complete t))
+      ;; Tool-call rendering markers we synthesize on tool_start/tool_end.
+      (should (string-match-p "\\*\\*\\*\\* Tool: bash" tokens))
+      (should (string-match-p "PHASE2_TOOL_OK" tokens))
+      (should (string-match-p "Result:" tokens)))))
+
+
 (ert-deftest claude-agent-pi-live--cleanup-kills-process ()
   "After backend-cleanup, the subprocess is no longer live."
   :tags '(:pi-backend-live)
