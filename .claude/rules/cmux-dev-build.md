@@ -57,6 +57,22 @@ export CMUX_ZIG=/opt/homebrew/opt/zig@0.15/bin/zig
 
 If `zig@0.15` isn't installed, run `brew install zig@0.15` first.
 
+**Also prepend zig@0.15 to `PATH`** — `CMUX_ZIG` alone is not enough.
+`scripts/reload.sh` builds `cmuxd` via a bare `cd cmuxd && zig build`
+(line 680 in v0.64.9), which resolves `zig` through `$PATH` and ignores
+`CMUX_ZIG`. With brew's 0.16.0 first on PATH this trips the same
+"requires v0.15.2" `@compileError`, even though every other build step
+honours `CMUX_ZIG`. Fix:
+
+```bash
+export PATH="/opt/homebrew/opt/zig@0.15/bin:$PATH"
+```
+
+Verified bite on 2026-05-22 — the regression appeared after the
+v0.64.9 ghostty pin (`ff6e1260d`) introduced a Zig 0.16 std-lib
+incompatibility in `cmuxd`'s build path. Setting only `CMUX_ZIG`
+worked on older ghostty pins; v0.64.9 onward needs both.
+
 ### 2. Architecture — build arm64-only on Apple Silicon
 
 Release config defaults to a universal (arm64 + x86_64) build, but some
@@ -97,6 +113,7 @@ needs this if you invoke xcodebuild directly; `reload.sh` handles it.)
 ```bash
 cd reference/cmux
 git config --global url."git@github.com:".insteadOf "https://github.com/"
+PATH="/opt/homebrew/opt/zig@0.15/bin:$PATH" \
 CMUX_ZIG=/opt/homebrew/opt/zig@0.15/bin/zig \
   ./scripts/reload.sh --tag emacs-test
 git config --global --unset url."git@github.com:".insteadOf
@@ -115,9 +132,10 @@ release-config build, drive xcodebuild directly:
 ```bash
 cd reference/cmux
 git config --global url."git@github.com:".insteadOf "https://github.com/"
+PATH="/opt/homebrew/opt/zig@0.15/bin:$PATH" \
 CMUX_ZIG=/opt/homebrew/opt/zig@0.15/bin/zig \
 xcodebuild \
-  -project GhosttyTabs.xcodeproj \
+  -project cmux.xcodeproj \
   -scheme cmux \
   -configuration Release \
   -destination 'platform=macOS' \
