@@ -306,7 +306,7 @@ Without explicit MOCK_SCENARIO, '2+2' in prompt selects simple-query."
      "What is 2+2? Just give me the number."
      :options (test-claude-mock-options-with-scenario
                "simple-query"
-               :cwd (expand-file-name "~/projects/claude-agent")
+               :cwd (expand-file-name "~/projects/emacs-agent")
                :permission-mode "default")
      :on-message (lambda (msg)
                    (when (code-agent-assistant-message-p msg)

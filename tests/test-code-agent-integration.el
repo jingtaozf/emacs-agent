@@ -137,7 +137,7 @@ NOTE: This test can be flaky due to API variability."
     (code-agent-query
      "Use the Read tool to read the file README.md and tell me the first word."
      :options (test-claude-default-options
-               :cwd (expand-file-name "~/projects/claude-agent")
+               :cwd (expand-file-name "~/projects/emacs-agent")
                :permission-mode "acceptEdits")
      :on-message (lambda (msg)
                    (when (code-agent-assistant-message-p msg)
@@ -172,7 +172,7 @@ NOTE: This test can be flaky due to API variability."
     (code-agent-query
      "What is 2+2? Just give me the number."
      :options (test-claude-default-options
-               :cwd (expand-file-name "~/projects/claude-agent")
+               :cwd (expand-file-name "~/projects/emacs-agent")
                :permission-mode "default")
      :on-message (lambda (msg)
                    (when (code-agent-assistant-message-p msg)

@@ -380,7 +380,7 @@ should be able to execute in parallel without interference."
 
   (test-claude-with-fixture
    (lambda (org-file)
-     ;; The fixture has PROJECT_ROOT set to ~/projects/claude-agent
+     ;; The fixture has PROJECT_ROOT set to ~/projects/emacs-agent
      ;; Instruction 7 asks to read README.md from project root
      (let ((response (test-claude-execute-and-wait org-file 7 90)))
        (should (stringp response))
