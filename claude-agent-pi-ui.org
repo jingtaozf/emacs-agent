@@ -75,19 +75,31 @@ handshake).  Raise this if you frequently hit `Pi RPC timeout' errors."
 
 (defun claude-agent-pi-ui--call (backend command-alist &optional timeout)
   "Send COMMAND-ALIST to BACKEND with auto-generated id and wait for response.
-Returns the parsed response object (alist).  Signals `user-error' on timeout."
-  (let* ((id (claude-agent-pi--gen-id backend "ui"))
-         (cmd (cons (cons 'id id) command-alist))
-         (result nil)
-         (limit (+ (float-time) (or timeout claude-agent-pi-ui-rpc-timeout))))
-    (puthash id (list :on-response (lambda (obj) (setq result obj)))
-             (claude-agent-pi-backend-pending-by-id backend))
-    (claude-agent-pi--send backend cmd)
-    (while (and (null result) (< (float-time) limit))
-      (accept-process-output nil 0.05))
+Returns the parsed response object (alist).  Signals `user-error' on timeout.
+
+`lexical-let' binds RESULT so the on-response closure captures THIS
+call's slot under literate-elisp's dynamic-binding default (H1 from
+the 2026-05-26 review).  `unwind-protect' around the send +
+event-loop pump guarantees the pending-by-id entry is reaped even if
+`--send' signals (e.g. process died after we puthash'd; C2 from the
+same review)."
+  (lexical-let* ((id (claude-agent-pi--gen-id backend "ui"))
+                 (cmd (cons (cons 'id id) command-alist))
+                 (result nil)
+                 (limit (+ (float-time) (or timeout claude-agent-pi-ui-rpc-timeout)))
+                 (pending (claude-agent-pi-backend-pending-by-id backend)))
+    (puthash id (list :on-response (lambda (obj) (setq result obj))) pending)
+    (unwind-protect
+        (progn
+          (claude-agent-pi--send backend cmd)
+          (while (and (null result) (< (float-time) limit))
+            (accept-process-output nil 0.05)))
+      ;; Always reap; if send raised or we timed out, the entry stays
+      ;; stale forever otherwise.
+      (when (null result)
+        (remhash id pending)))
     (when (null result)
-      (remhash id (claude-agent-pi-backend-pending-by-id backend))
-      (user-error "Pi RPC timeout waiting for response to %s"
+      (user-error "Pi RPC timeout (or send failed) for %s"
                   (or (cdr (assq 'type command-alist)) "<unknown>")))
     result))
 
@@ -270,8 +282,14 @@ read-only =*Pi Sessions: <cwd>*= buffer with =org-mode= folding.
 
 (defun claude-agent-pi-ui--cwd-hash (cwd)
   "Return Pi's filesystem-encoded cwd subdir name for CWD.
-Pi replaces =/= with =-= and wraps with dashes; e.g.
-=/Users/jt/proj/= → =--Users-jt-proj--=."
+Pi replaces =/= with =-= verbatim then wraps with leading + trailing
+dash, so =/Users/jt/proj/= → =--Users-jt-proj--= and =/Users/jt/proj=
+(no trailing slash) → =--Users-jt-proj-= (single).  Emacs's
+`default-directory' always carries a trailing slash, so the common
+case maps to the double-dash form Pi creates at spawn time.  M3
+from the 2026-05-26 review proposed normalising via
+`directory-file-name', but that BREAKS the encoding for the
+trailing-slash inputs we always see — kept as-is."
   (let ((normalised (expand-file-name cwd)))
     (concat "-"
             (replace-regexp-in-string "/" "-" normalised)
@@ -368,23 +386,32 @@ in a read-only =*Pi Sessions: <cwd>*= buffer."
         (setq buffer-read-only t))
       (pop-to-buffer buf))))
 
-(defun claude-agent-pi-ui--render-session-subtree (ids by-id children depth)
-  "Render the IDS at DEPTH as org headings; recurse into children."
-  (dolist (id (nreverse ids))
-    (let* ((entry (gethash id by-id))
-           (hdr (and entry (plist-get entry :hdr)))
-           (ts (or (and hdr (map-elt hdr 'timestamp)) ""))
-           (path (and entry (plist-get entry :path))))
-      (insert (format "%s %s — %s\n"
-                       (make-string (1+ depth) ?\*)
-                       (or id "(unknown)")
-                       ts))
-      (when path
-        (insert (format "  :PROPERTIES:\n  :PATH: %s\n  :END:\n" path)))
-      (let ((kids (gethash id children)))
-        (when kids
-          (claude-agent-pi-ui--render-session-subtree
-           kids by-id children (1+ depth)))))))
+(defun claude-agent-pi-ui--render-session-subtree (ids by-id children depth &optional visited)
+  "Render IDS at DEPTH as org headings; recurse into children.
+VISITED is an internal hash-set of already-rendered ids, used to
+break cycles in case a Pi session JSONL on disk has a malformed
+parentSession pointer (M1 from the 2026-05-26 review).
+
+Uses `reverse' (not `nreverse') so callers can re-use the hash-table
+values without observing the destructive side-effect."
+  (let ((seen (or visited (make-hash-table :test 'equal))))
+    (dolist (id (reverse ids))
+      (unless (gethash id seen)
+        (puthash id t seen)
+        (let* ((entry (gethash id by-id))
+               (hdr (and entry (plist-get entry :hdr)))
+               (ts (or (and hdr (map-elt hdr 'timestamp)) ""))
+               (path (and entry (plist-get entry :path))))
+          (insert (format "%s %s — %s\n"
+                          (make-string (1+ depth) ?\*)
+                          (or id "(unknown)")
+                          ts))
+          (when path
+            (insert (format "  :PROPERTIES:\n  :PATH: %s\n  :END:\n" path)))
+          (let ((kids (gethash id children)))
+            (when kids
+              (claude-agent-pi-ui--render-session-subtree
+               kids by-id children (1+ depth) seen))))))))
 #+END_SRC
 
 *** Stats / Export / Login

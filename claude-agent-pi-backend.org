@@ -512,7 +512,7 @@ foldable subheadings.  Set to nil to suppress."
                ctype
                (if display-str (format "Display: %s\n\n" display-str) "")
                (if content-str
-                   (format "#+begin_src js\n%s\n#+end_src"
+                   (format "#+begin_src json\n%s\n#+end_src"
                            (claude-agent-pi--truncate content-str 4096))
                  ""))
        cbs))))
@@ -530,7 +530,7 @@ shows up in the verbose buffer)."
 Tool events fire BETWEEN message_update text deltas; injecting the
 rendered text through the same callback the assistant text uses
 keeps everything in narrative order in the org buffer."
-  (when-let ((on-token (plist-get cbs :on-token)))
+  (when-let* ((on-token (plist-get cbs :on-token)))
     (ignore-errors (funcall on-token text))))
 
 (defun claude-agent-pi--truncate (s n)
@@ -557,7 +557,7 @@ section.  Only fires when `claude-agent-pi-show-tool-calls' is t."
              (claude-agent-pi--truncate args-json 120)))
     (when claude-agent-pi-show-tool-calls
       (claude-agent-pi--render-tool-text
-       (format "\n**** Tool: %s :tool:\n#+begin_src js\n%s\n#+end_src\n"
+       (format "\n**** Tool: %s :tool:\n#+begin_src json\n%s\n#+end_src\n"
                (or name "<unknown>")
                (or args-preview "(no args)"))
        cbs))))
@@ -790,6 +790,11 @@ spawned backend."
                       (format "pi process exited: %s" (string-trim event))))))
        (claude-agent-pi-backend-pending-by-id backend))
       (clrhash (claude-agent-pi-backend-pending-by-id backend))
+      ;; Clear active-tools too so orphan toolCallIds (Pi died
+      ;; mid-tool-execution before sending tool_execution_end) don't
+      ;; accumulate across spawn/crash cycles.  C1 from 2026-05-26
+      ;; review.
+      (clrhash (claude-agent-pi-backend-active-tools backend))
       (setf (claude-agent-pi-backend-active-prompt-id backend) nil)
       (setf (claude-agent-pi-backend-handshake-done backend) nil)
       ;; Drain handshake callbacks too (no-op if already drained).
@@ -954,6 +959,9 @@ from cancellation."
   "Tear down BACKEND: shutdown subprocess, clear pending callbacks."
   (claude-agent-pi--graceful-shutdown backend)
   (clrhash (claude-agent-pi-backend-pending-by-id backend))
+  ;; Mirror the sentinel path: active-tools must be drained or it
+  ;; survives `cleanup' + re-spawn cycles.
+  (clrhash (claude-agent-pi-backend-active-tools backend))
   (setf (claude-agent-pi-backend-active-prompt-id backend) nil)
   (setf (claude-agent-pi-backend-handshake-done backend) nil)
   (setf (claude-agent-pi-backend-handshake-callbacks backend) nil)
