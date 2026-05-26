@@ -4,7 +4,7 @@
 * Overview
 
 This file is the executable end-to-end verification checklist for
-the *user-visible features* of the claude-agent SDK after the
+the *user-visible features* of the code-agent SDK after the
 tri-protocol backend refactor (2026-04-24).
 
 Unlike =make test-unit= which exercises Elisp paths in isolation,
@@ -39,15 +39,15 @@ Section E will surface exactly what's missing.  Don't expect
 =[X]= on E1–E3 until a Phase 4b design doc + implementation
 delivers:
 
-1. =cl-defmethod claude-org-backend-execute-block ((b
-   claude-agent-tmux-backend) block-info)= — orchestrates
+1. =cl-defmethod code-agent-org-backend-execute-block ((b
+   code-agent-tmux-backend) block-info)= — orchestrates
    =ensure-session= + =launch-session= (with Claude Code as the
    command, =--settings= bag, =--mcp-config= flag) + =send-text= +
    =register-query= + =start-follower=
 2. Hook-delivery path for tmux Claude Code sessions — either a
    =tmux-claude-hook= helper analogous to cmux's, or a different
    delivery mechanism (named pipe, socket, file-watch on
-   =/tmp/claude-agent-status/=)
+   =/tmp/code-agent-status/=)
 3. Bridge-side awareness that the workspace was launched in tmux
    (so =workspace_bridge.py= addresses the right pane)
 
@@ -78,7 +78,7 @@ After completing a task — and especially when crossing a section boundary — 
 
 - *Per-task tmux sessions* (Section B's =claude-test-bN= sessions) — explicitly kill in each task's Cleanup block; verify with =tmux ls= after.
 - *cmux workspaces created by tests* — close via =cmux close-workspace --workspace <ref>= when no later task in the loop will reuse them.  Test Dev Workspace (sdd-e2e-test-005) is shared by ALL Section A tasks — close it after A15 succeeds, not earlier.  Other test workspaces (e.g. tmux-test) close when their section ends.
-- *Status files* under =/tmp/claude-agent-status/= — leave intact; they're shared with the bridge and useful for debugging.  Only the test fixtures' =.from-emacs= files should be cleaned up by individual task Cleanup blocks.
+- *Status files* under =/tmp/code-agent-status/= — leave intact; they're shared with the bridge and useful for debugging.  Only the test fixtures' =.from-emacs= files should be cleaned up by individual task Cleanup blocks.
 - *Temporary org files* under =/tmp= (e.g. =/tmp/e2e-c1.org=) — delete in the task's Cleanup block.
 - *Verbose buffers* (=*cmux: <id>*=) — let them die naturally with their workspace; don't manually kill (that's tested in A8 anyway).
 
@@ -171,7 +171,7 @@ Wait up to 60 s for completion.  Poll:
     (let ((sk (code-agent-org--current-session-key)))
       (list :busy (code-agent-org--session-get sk :busy)
             :backend-type (and (code-agent-org--session-get sk :backend)
-                               (claude-agent-backend-type
+                               (code-agent-backend-type
                                 (code-agent-org--session-get sk :backend)))
             :exec-status (org-entry-get-with-inheritance "AI_EXEC_STATUS")))))
 #+end_src
@@ -269,7 +269,7 @@ After ~2 seconds (while busy), invoke cancel:
 *** Common failures
 - string-match on backend slot → check
   =code-agent-org--unregister-active-query= and =code-agent-org-cancel=
-  call =claude-org-backend-cancel-from-org= on the backend instance,
+  call =code-agent-org-backend-cancel-from-org= on the backend instance,
   not =equal backend "cmux"=
 
 ** [X] A5: Loop execution (=:loop 2 :interval 0=)
@@ -430,7 +430,7 @@ Verbose buffer from A7 still alive.
                     (buffer-list))))
          (sk-list (let (found)
                     (maphash (lambda (k v) (when (eq v buf) (push k found)))
-                             claude-agent--session-verbose-buffers)
+                             code-agent--session-verbose-buffers)
                     found))
          (sk (car sk-list))
          (proc-before (and sk (code-agent-org--session-get sk :verbose-follow-process)))
@@ -479,7 +479,7 @@ workspace-test.org open, point in any session subtree.
 *** Common failures
 - =user-error: No terminal to open for cmux backend= → cmux
   Protocol 3 override missing for =open-terminal-tab=; add to
-  =claude-agent-cmux-backend.org=
+  =code-agent-cmux-backend.org=
 
 ** [X] A10: Story switch renames cmux tab
 :PROPERTIES:
@@ -601,8 +601,8 @@ Fire a long-running query first (for something to be in the list):
 #+begin_src elisp
 (let ((debug-on-error nil))
   (let ((buf "*Claude Queries*"))
-    (when (fboundp 'claude-agent-list-queries)
-      (claude-agent-list-queries))
+    (when (fboundp 'code-agent-list-queries)
+      (code-agent-list-queries))
     (when (get-buffer buf)
       (with-current-buffer buf
         (list :buffer-exists t
@@ -667,7 +667,7 @@ code-agent-org--e2e-notify-count
 ** [X] A15: Session resume — CLAUDE_CLI_SESSION property persisted
 :PROPERTIES:
 :CUSTOM_ID: a15-session-resume
-:STATUS:   PASS CLAUDE_CLI_SESSION=5097363e-4cf6-4982-88f0-c3c0b90ff6f4 (UUID-shape), .jsonl file confirmed at ~/.claude/projects/-Users-jingtao-projects-claude-agent/.
+:STATUS:   PASS CLAUDE_CLI_SESSION=5097363e-4cf6-4982-88f0-c3c0b90ff6f4 (UUID-shape), .jsonl file confirmed at ~/.claude/projects/-Users-jingtao-projects-code-agent/.
 :LAST_RUN: 2026-04-26 00:35
 :END:
 
@@ -737,13 +737,13 @@ the real tmux binary.
 =evalElisp=:
 #+begin_src elisp
 (let ((debug-on-error nil))
-  (let ((b (claude-agent-tmux-backend-create
+  (let ((b (code-agent-tmux-backend-create
             :session-key "test::b2")))
     ;; Override the auto-name so we hit a known session id.
-    (setf (claude-agent-multiplexer-backend-multiplexer-session-id b) nil)
-    (claude-agent-mux-launch-session b '("/bin/sh" "-c" "exec /bin/sh"))
-    (list :sid (claude-agent-multiplexer-backend-multiplexer-session-id b)
-          :pane (claude-agent-multiplexer-backend-pane-id b))))
+    (setf (code-agent-multiplexer-backend-multiplexer-session-id b) nil)
+    (code-agent-mux-launch-session b '("/bin/sh" "-c" "exec /bin/sh"))
+    (list :sid (code-agent-multiplexer-backend-multiplexer-session-id b)
+          :pane (code-agent-multiplexer-backend-pane-id b))))
 #+end_src
 
 Then verify externally:
@@ -771,14 +771,14 @@ Then verify externally:
 =evalElisp=:
 #+begin_src elisp
 (let ((debug-on-error nil))
-  (let ((b (claude-agent-tmux-backend-create
+  (let ((b (code-agent-tmux-backend-create
             :session-key "test::b3"
             :multiplexer-session-id "claude-test-b3"
             :pane-id "claude-test-b3:0.0")))
-    (claude-agent-mux-send-text b "echo 'b3-roundtrip-marker'")
-    (claude-agent-mux-send-key b :enter)
+    (code-agent-mux-send-text b "echo 'b3-roundtrip-marker'")
+    (code-agent-mux-send-key b :enter)
     (sleep-for 1)
-    (claude-agent-mux-capture-screen b)))
+    (code-agent-mux-capture-screen b)))
 #+end_src
 
 *** Verify
@@ -790,7 +790,7 @@ Then verify externally:
 ** [X] B4: tmux pipe-pane follower with embedded space in path
 :PROPERTIES:
 :CUSTOM_ID: b4-tmux-pipe-pane
-:STATUS:   PASS bytes=64 lines=4 in '/tmp/e2e b4 dir/output.log'. claude-agent-tmux--shell-quote handles embedded space correctly. (Same fixture quirk as B3: corrected pane-id to ':1.1' for this user's tmux base-index=1.)
+:STATUS:   PASS bytes=64 lines=4 in '/tmp/e2e b4 dir/output.log'. code-agent-tmux--shell-quote handles embedded space correctly. (Same fixture quirk as B3: corrected pane-id to ':1.1' for this user's tmux base-index=1.)
 :LAST_RUN: 2026-04-26 02:02
 :END:
 
@@ -805,15 +805,15 @@ tmux new-session -d -s claude-test-b4 -x 80 -y 24 'while true; do echo line-$(da
 =evalElisp=:
 #+begin_src elisp
 (let ((debug-on-error nil))
-  (let ((b (claude-agent-tmux-backend-create
+  (let ((b (code-agent-tmux-backend-create
             :session-key "test::b4"
             :multiplexer-session-id "claude-test-b4"
             :pane-id "claude-test-b4:0.0"))
         (sink "/tmp/e2e b4 dir/output.log"))
     (with-temp-file sink (insert ""))
-    (claude-agent-mux-start-follower b sink)
+    (code-agent-mux-start-follower b sink)
     (sleep-for 2)
-    (claude-agent-mux-stop-follower b)
+    (code-agent-mux-stop-follower b)
     (with-temp-buffer
       (insert-file-contents sink)
       (list :bytes (buffer-size)
@@ -826,7 +826,7 @@ tmux new-session -d -s claude-test-b4 -x 80 -y 24 'while true; do echo line-$(da
 
 *** Common failures
 - =:bytes= = 0 → shell quoting wrong; check
-  =claude-agent-tmux--shell-quote= produces single-quoted string
+  =code-agent-tmux--shell-quote= produces single-quoted string
 
 *** Cleanup
 =bash=:
@@ -849,12 +849,12 @@ rm -rf "/tmp/e2e b4 dir"
 =evalElisp=:
 #+begin_src elisp
 (let ((debug-on-error nil))
-  (let ((b (claude-agent-tmux-backend-create
+  (let ((b (code-agent-tmux-backend-create
             :session-key "test::b5"
             :multiplexer-session-id "claude-test-b5"
             :pane-id "claude-test-b5:0.0")))
     (sleep-for 0.5)
-    (claude-agent-mux-session-status b)))
+    (code-agent-mux-session-status b)))
 #+end_src
 
 *** Verify
@@ -938,12 +938,12 @@ The response section's =:CUSTOM_ID:= matches the heading
 ** [X] C3: from-emacs flag deduplicates Emacs-originated prompts
 :PROPERTIES:
 :CUSTOM_ID: c3-from-emacs-flag
-:STATUS:   PASS code-agent-org-execute writes /tmp/claude-agent-status/sdd-e2e-test-005.from-emacs (contents='1') before sending. Flag write call is wired into code-agent-org-cmux.org at lines 1120 and 1189. Bridge sees flag and skips duplicate heading insertion.
+:STATUS:   PASS code-agent-org-execute writes /tmp/code-agent-status/sdd-e2e-test-005.from-emacs (contents='1') before sending. Flag write call is wired into code-agent-org-cmux.org at lines 1120 and 1189. Bridge sees flag and skips duplicate heading insertion.
 :LAST_RUN: 2026-04-26 03:29
 :END:
 
 *** Setup
-=bash=: =rm -f /tmp/claude-agent-status/sdd-*.from-emacs=
+=bash=: =rm -f /tmp/code-agent-status/sdd-*.from-emacs=
 
 *** Action
 1. Execute an ai block via Emacs C-c C-c.
@@ -955,7 +955,7 @@ The response section's =:CUSTOM_ID:= matches the heading
 (with-current-buffer (find-file-noselect
   "/Users/jingtao/projects/claude-agent/tests/e2e/org/workspace-test.org")
   (let ((sk (org-entry-get-with-inheritance "CLAUDE_SESSION_ID")))
-    (file-exists-p (format "/tmp/claude-agent-status/%s.from-emacs" sk))))
+    (file-exists-p (format "/tmp/code-agent-status/%s.from-emacs" sk))))
 #+end_src
 - Returns =t= (flag was written before sending)
 
@@ -1146,20 +1146,20 @@ backend usable in production" question.
 - =bash=: =tmux capture-pane -t "claude-sdd-e2e-tmux-001:0.0" -p | head -20= shows Claude Code's TUI banner ("Welcome to Claude Code", "type a message", "INSERT", etc.) — *not* a bare shell prompt
 
 *** Expected today
-*FAIL* — tmux-backend has no =cl-defmethod claude-org-backend-execute-block=.  The Protocol 3 dispatch falls to the root default (=claude-agent-backend-query=), which then has no method on a multiplexer struct.  Result: silent no-op.
+*FAIL* — tmux-backend has no =cl-defmethod code-agent-org-backend-execute-block=.  The Protocol 3 dispatch falls to the root default (=code-agent-backend-query=), which then has no method on a multiplexer struct.  Result: silent no-op.
 
 *** Phase 4b fix (set =:STATUS: GAP=, document the gap, do not mark =[X]=)
-Add to =claude-agent-tmux-backend.org=:
+Add to =code-agent-tmux-backend.org=:
 
 #+begin_example
-(cl-defmethod claude-org-backend-execute-block
-  ((backend claude-agent-tmux-backend) block-info)
+(cl-defmethod code-agent-org-backend-execute-block
+  ((backend code-agent-tmux-backend) block-info)
   ;; 1. Build Claude Code launch command with --settings JSON that
   ;;    points the hooks at a tmux-aware delivery path (E2 below)
   ;; 2. ensure-session — launch with that command, or reuse if alive
   ;; 3. send-text the prompt, send-key :enter
   ;; 4. register-query (writes .request-id status file)
-  ;; 5. start-follower → /tmp/claude-agent-status/<sk>.stream
+  ;; 5. start-follower → /tmp/code-agent-status/<sk>.stream
   ...)
 #+end_example
 
@@ -1197,7 +1197,7 @@ session, and =workspace_bridge.handle_response= is never called.
 *** Phase 4b fix
 Either:
 1. Add a =tmux-claude-hook= CLI helper that writes events to
-   =/tmp/claude-agent-status/<workspace>.event= and have Python
+   =/tmp/code-agent-status/<workspace>.event= and have Python
    bridge poll that file, OR
 2. Bypass hooks for tmux: use =--output-format stream-json= in the
    tmux pane and have Emacs's follower-process consume the stream
@@ -1236,11 +1236,11 @@ Plus, the tmux backend has no equivalent of cmux's
 =resolve-session-by-heading= for live tmux sessions.
 
 *** Phase 4b fix
-Implement =resolve-session-by-heading= for =claude-agent-tmux-backend=:
+Implement =resolve-session-by-heading= for =code-agent-tmux-backend=:
 
 #+begin_example
-(cl-defmethod claude-agent-mux-resolve-session-by-heading
-  ((backend claude-agent-tmux-backend) heading)
+(cl-defmethod code-agent-mux-resolve-session-by-heading
+  ((backend code-agent-tmux-backend) heading)
   ;; tmux list-sessions -F '#{session_name}' | grep ^claude-...
   ...)
 #+end_example
@@ -1262,7 +1262,7 @@ remain =[!] GAP= until Phase 4b ships.  Update workflow:
      implemented; full E2E verified for cmux + tmux=.
    - Open follow-up design doc for *Phase 6 — cmux wire-code
      migration* (move legacy =code-agent-org-cmux.org= into
-     =claude-agent-cmux-backend.org=, delete duplicate verbose-cap
+     =code-agent-cmux-backend.org=, delete duplicate verbose-cap
      + ANSI strip, drop =code-agent-org-terminal-base.org=).
 
 3. If E1–E3 stay =[!] GAP= for more than one release cycle, decide:

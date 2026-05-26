@@ -20,7 +20,7 @@
 (require 'org)
 
 ;; Source modules loaded by batch command (literate-elisp-load from Makefile)
-(require 'claude-agent)
+(require 'code-agent)
 (require 'code-agent-org)
 
 ;;; ===========================================================================
@@ -302,7 +302,7 @@ rule.  Callers use `code-agent-org--parse-env' directly."
 (ert-deftest test-static-no-handle-token-v1-references ()
   "No references to the removed handle-token v1 should remain in source."
   :tags '(:unit :fast :stable :isolated :refactor :static)
-  (let ((source-files '("code-agent-org.org" "claude-agent.org")))
+  (let ((source-files '("code-agent-org.org" "code-agent.org")))
     (dolist (file source-files)
       (let ((path (expand-file-name file
                     (file-name-directory (or load-file-name

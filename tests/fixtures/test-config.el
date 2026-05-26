@@ -16,9 +16,9 @@
 
 ;;; Code:
 
-;; Note: claude-agent.org and code-agent-org.org are loaded by Makefile
+;; Note: code-agent.org and code-agent-org.org are loaded by Makefile
 ;; via literate-elisp-load before this file is loaded.
-;; We don't use (require 'claude-agent) or (require 'code-agent-org) because
+;; We don't use (require 'code-agent) or (require 'code-agent-org) because
 ;; the features are provided by the org files, not compiled .el files.
 
 ;; Configure MCP server to use a free port (0 = auto-select) to avoid conflicts
@@ -68,7 +68,7 @@ Returns t if claude command is found, nil otherwise."
 (defun test-claude-default-options (&rest args)
   "Create default options for tests, merged with ARGS.
 Uses `test-claude-default-setting-sources' to skip slow plugin loading."
-  (apply #'claude-agent-options
+  (apply #'code-agent-options
          :setting-sources test-claude-default-setting-sources
          args))
 
@@ -227,7 +227,7 @@ This script speaks the same JSON protocol as the real CLI.")
   "Create options using mock CLI instead of real Claude.
 Uses `test-claude-mock-cli-path' and skips slow plugin loading.
 Pass :env to set MOCK_SCENARIO for explicit scenario selection."
-  (apply #'claude-agent-options
+  (apply #'code-agent-options
          :cli-path test-claude-mock-cli-path
          :setting-sources test-claude-default-setting-sources
          args))
@@ -235,7 +235,7 @@ Pass :env to set MOCK_SCENARIO for explicit scenario selection."
 (defun test-claude-mock-options-with-scenario (scenario &rest args)
   "Create mock options with explicit SCENARIO selection.
 SCENARIO is the name of a fixture file in mock-scenarios/ (without .jsonl).
-ARGS are additional options passed to `claude-agent-options'."
+ARGS are additional options passed to `code-agent-options'."
   (apply #'test-claude-mock-options
          :env (list (cons "MOCK_SCENARIO" scenario))
          args))
@@ -244,9 +244,9 @@ ARGS are additional options passed to `claude-agent-options'."
 
 (defun test-claude-cleanup-all ()
   "Clean up all test resources.
-Kills active Claude processes tracked by claude-agent.
-Only kills processes registered in the unified `claude-agent--registry' and
-`claude-agent--active-queries' - does NOT kill other Claude instances."
+Kills active Claude processes tracked by code-agent.
+Only kills processes registered in the unified `code-agent--registry' and
+`code-agent--active-queries' - does NOT kill other Claude instances."
   ;; First, try graceful cancellation via code-agent-org sessions
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
@@ -254,9 +254,9 @@ Only kills processes registered in the unified `claude-agent--registry' and
         (when (bound-and-true-p code-agent-org-mode)
           (ignore-errors (code-agent-org-cancel-all))))))
   ;; Then forcefully kill any remaining tracked processes
-  ;; This only kills processes registered by claude-agent, NOT other sessions
-  (when (fboundp 'claude-agent-kill-all-processes)
-    (claude-agent-kill-all-processes)))
+  ;; This only kills processes registered by code-agent, NOT other sessions
+  (when (fboundp 'code-agent-kill-all-processes)
+    (code-agent-kill-all-processes)))
 
 (provide 'test-config)
 ;;; test-config.el ends here

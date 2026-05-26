@@ -23,7 +23,7 @@
 
 (require 'ert)
 (require 'cl-lib)
-(require 'claude-agent)
+(require 'code-agent)
 
 ;;; Helpers
 
@@ -36,20 +36,20 @@ REQUEST-ID is the owning query's request ID (default \"req-test\").
 SESSION-KEY is the session key (default \"test-perm-session\")."
   (let* ((req-id (or request-id "req-test"))
          (sess-key (or session-key "test-perm-session"))
-         (state (claude-agent--make-process-state
+         (state (code-agent--make-process-state
                  :request-id req-id
                  :session-key sess-key
                  :ready t))
          (process (start-process "test-perm-mock" nil "true")))
-    (process-put process 'claude-agent-state state)
-    (process-put process 'claude-agent-trace-ctx nil)
+    (process-put process 'code-agent-state state)
+    (process-put process 'code-agent-trace-ctx nil)
     process))
 
 (defmacro test-perm--with-clean-state (&rest body)
   "Execute BODY with clean pending-control-requests table.
 Restores original table after execution."
   (declare (indent 0))
-  `(let ((claude-agent--pending-control-requests (make-hash-table :test 'equal)))
+  `(let ((code-agent--pending-control-requests (make-hash-table :test 'equal)))
      ,@body))
 
 (defun test-perm--make-can-use-tool-request (request-id tool-name &optional tool-input)
@@ -89,7 +89,7 @@ TOOL-INPUT: optional plist of tool arguments."
            (process (test-perm--make-mock-process))
            (request (test-perm--make-can-use-tool-request "ctrl-001" "Read"
                       (list :file_path "/home/user/file.txt")))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (tool-name tool-input _ctx)
                     (setq permission-called t
                           permission-tool tool-name
@@ -101,8 +101,8 @@ TOOL-INPUT: optional plist of tool arguments."
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc data) (setq sent-json data)))
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Permission function was called with correct arguments
             (should permission-called)
@@ -122,7 +122,7 @@ TOOL-INPUT: optional plist of tool arguments."
                   (should (equal (plist-get resp-data :behavior) "allow")))))
 
             ;; Request was untracked (no longer pending)
-            (should-not (gethash "ctrl-001" claude-agent--pending-control-requests)))
+            (should-not (gethash "ctrl-001" code-agent--pending-control-requests)))
         (ignore-errors (delete-process process))))))
 
 ;;; Tests: can_use_tool Deny Round-trip
@@ -135,7 +135,7 @@ TOOL-INPUT: optional plist of tool arguments."
            (process (test-perm--make-mock-process))
            (request (test-perm--make-can-use-tool-request "ctrl-002" "Bash"
                       (list :command "rm -rf /")))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (_tool _input _ctx)
                     '(:behavior "deny" :message "Dangerous command blocked")))))
       (unwind-protect
@@ -143,8 +143,8 @@ TOOL-INPUT: optional plist of tool arguments."
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc data) (setq sent-json data)))
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Response has deny behavior
             (should sent-json)
@@ -157,7 +157,7 @@ TOOL-INPUT: optional plist of tool arguments."
                 (should (equal (plist-get resp-data :message) "Dangerous command blocked"))))
 
             ;; Request untracked
-            (should-not (gethash "ctrl-002" claude-agent--pending-control-requests)))
+            (should-not (gethash "ctrl-002" code-agent--pending-control-requests)))
         (ignore-errors (delete-process process))))))
 
 ;;; Tests: Permission Function Error
@@ -169,7 +169,7 @@ TOOL-INPUT: optional plist of tool arguments."
     (let* ((sent-json nil)
            (process (test-perm--make-mock-process))
            (request (test-perm--make-can-use-tool-request "ctrl-003" "Write"))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (_tool _input _ctx)
                     (error "Permission database offline")))))
       (unwind-protect
@@ -177,8 +177,8 @@ TOOL-INPUT: optional plist of tool arguments."
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc data) (setq sent-json data)))
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Response has deny behavior (security: deny on error)
             (should sent-json)
@@ -190,7 +190,7 @@ TOOL-INPUT: optional plist of tool arguments."
                 (should (equal (plist-get resp-data :behavior) "deny"))))
 
             ;; Still untracked
-            (should-not (gethash "ctrl-003" claude-agent--pending-control-requests)))
+            (should-not (gethash "ctrl-003" code-agent--pending-control-requests)))
         (ignore-errors (delete-process process))))))
 
 ;;; Tests: Tracking Lifecycle
@@ -202,21 +202,21 @@ TOOL-INPUT: optional plist of tool arguments."
     (let* ((tracked-during-permission nil)
            (process (test-perm--make-mock-process))
            (request (test-perm--make-can-use-tool-request "ctrl-004" "Grep"))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (_tool _input _ctx)
                     ;; Observe: request should be tracked at this point
                     (setq tracked-during-permission
-                          (gethash "ctrl-004" claude-agent--pending-control-requests))
+                          (gethash "ctrl-004" code-agent--pending-control-requests))
                     '(:behavior "allow")))))
       (unwind-protect
           (progn
             ;; Before: not tracked
-            (should-not (gethash "ctrl-004" claude-agent--pending-control-requests))
+            (should-not (gethash "ctrl-004" code-agent--pending-control-requests))
 
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string) #'ignore)
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; During: was tracked when permission function ran
             (should tracked-during-permission)
@@ -224,7 +224,7 @@ TOOL-INPUT: optional plist of tool arguments."
             (should (equal tracked-during-permission "req-test"))
 
             ;; After: untracked
-            (should-not (gethash "ctrl-004" claude-agent--pending-control-requests)))
+            (should-not (gethash "ctrl-004" code-agent--pending-control-requests)))
         (ignore-errors (delete-process process))))))
 
 ;;; Tests: hook_callback Subtype
@@ -241,8 +241,8 @@ TOOL-INPUT: optional plist of tool arguments."
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc data) (setq sent-json data)))
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Response sent with success subtype
             (should sent-json)
@@ -254,7 +254,7 @@ TOOL-INPUT: optional plist of tool arguments."
                 (should (equal (plist-get resp :request_id) "ctrl-005"))))
 
             ;; Untracked
-            (should-not (gethash "ctrl-005" claude-agent--pending-control-requests)))
+            (should-not (gethash "ctrl-005" code-agent--pending-control-requests)))
         (ignore-errors (delete-process process))))))
 
 ;;; Tests: Unsupported Subtype
@@ -271,8 +271,8 @@ TOOL-INPUT: optional plist of tool arguments."
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc data) (setq sent-json data)))
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Response sent with error subtype
             (should sent-json)
@@ -289,7 +289,7 @@ TOOL-INPUT: optional plist of tool arguments."
                                           (plist-get resp-data :error))))))
 
             ;; Still untracked after error response
-            (should-not (gethash "ctrl-006" claude-agent--pending-control-requests)))
+            (should-not (gethash "ctrl-006" code-agent--pending-control-requests)))
         (ignore-errors (delete-process process))))))
 
 ;;; Tests: Dead Process
@@ -301,7 +301,7 @@ TOOL-INPUT: optional plist of tool arguments."
     (let* ((send-called nil)
            (process (test-perm--make-mock-process))
            (request (test-perm--make-can-use-tool-request "ctrl-007" "Read"))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (_tool _input _ctx) '(:behavior "allow")))))
       (unwind-protect
           (progn
@@ -309,14 +309,14 @@ TOOL-INPUT: optional plist of tool arguments."
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) nil))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc _data) (setq send-called t)))
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Response was NOT sent (process was dead)
             (should-not send-called)
 
             ;; But request was still untracked (no leak)
-            (should-not (gethash "ctrl-007" claude-agent--pending-control-requests)))
+            (should-not (gethash "ctrl-007" code-agent--pending-control-requests)))
         (ignore-errors (delete-process process))))))
 
 ;;; Tests: Context Propagation
@@ -334,7 +334,7 @@ TOOL-INPUT: optional plist of tool arguments."
                                         :input (list :command "ls")
                                         :permission_suggestions
                                         (list (list :type "allow_once")))))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (_tool _input ctx)
                     (setq received-ctx ctx)
                     '(:behavior "allow")))))
@@ -345,8 +345,8 @@ TOOL-INPUT: optional plist of tool arguments."
           (progn
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string) #'ignore)
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Context should include session-id
             (should received-ctx)
@@ -366,7 +366,7 @@ TOOL-INPUT: optional plist of tool arguments."
            (process (test-perm--make-mock-process))
            (request (test-perm--make-can-use-tool-request "ctrl-009" "Write"
                       (list :file_path "/etc/passwd" :content "hacked")))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (_tool _input _ctx)
                     '(:behavior "allow"
                       :updated-input (:file_path "/tmp/safe.txt" :content "safe"))))))
@@ -375,8 +375,8 @@ TOOL-INPUT: optional plist of tool arguments."
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc data) (setq sent-json data)))
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process request))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process request))
 
             ;; Response should contain updatedInput from permission result
             (should sent-json)
@@ -402,30 +402,30 @@ TOOL-INPUT: optional plist of tool arguments."
            (process-b (test-perm--make-mock-process "req-B" "session-B"))
            (request-a (test-perm--make-can-use-tool-request "ctrl-A1" "Read"))
            (request-b (test-perm--make-can-use-tool-request "ctrl-B1" "Write"))
-           (claude-agent-permission-functions
+           (code-agent-permission-functions
             (list (lambda (_tool _input _ctx) '(:behavior "allow")))))
       (unwind-protect
           (progn
             ;; Track request A but don't respond yet (simulate slow permission)
-            (claude-agent--track-control-request "ctrl-A1" "req-A")
-            (should (gethash "ctrl-A1" claude-agent--pending-control-requests))
+            (code-agent--track-control-request "ctrl-A1" "req-A")
+            (should (gethash "ctrl-A1" code-agent--pending-control-requests))
 
             ;; Handle request B fully — should not affect A's tracking
             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string) #'ignore)
-                      ((symbol-function 'claude-agent--drain-output) #'ignore))
-              (claude-agent--handle-control-request process-b request-b))
+                      ((symbol-function 'code-agent--drain-output) #'ignore))
+              (code-agent--handle-control-request process-b request-b))
 
             ;; B is untracked
-            (should-not (gethash "ctrl-B1" claude-agent--pending-control-requests))
+            (should-not (gethash "ctrl-B1" code-agent--pending-control-requests))
             ;; A is still tracked (independent)
-            (should (gethash "ctrl-A1" claude-agent--pending-control-requests))
+            (should (gethash "ctrl-A1" code-agent--pending-control-requests))
             ;; A's owner is correct
-            (should (equal "req-A" (gethash "ctrl-A1" claude-agent--pending-control-requests)))
+            (should (equal "req-A" (gethash "ctrl-A1" code-agent--pending-control-requests)))
 
             ;; Clean up A
-            (claude-agent--untrack-control-request "ctrl-A1")
-            (should-not (claude-agent--has-pending-control-requests-p)))
+            (code-agent--untrack-control-request "ctrl-A1")
+            (should-not (code-agent--has-pending-control-requests-p)))
         (ignore-errors (delete-process process-a))
         (ignore-errors (delete-process process-b))))))
 

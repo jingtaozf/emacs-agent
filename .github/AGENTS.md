@@ -135,63 +135,63 @@ When editing .org files that use literate-elisp (have =#+PROPERTY: literate-load
 * Project Context
 ** Overview
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-overview
+:CUSTOM_ID: code-agent-dev-overview
 :END:
 Claude Agent SDK for Emacs - A direct client library for the Claude Code CLI.
 No backend server required - communicates directly with Claude Code CLI via subprocess.
 
 Primary Files:
-- =claude-agent.org= - Core SDK (process management, JSON protocol, query API)
+- =code-agent.org= - Core SDK (process management, JSON protocol, query API)
 - =code-agent-org.org= - Org-mode integration (AI blocks, sessions, streaming)
 
 ** Project Structure
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-project-structure
+:CUSTOM_ID: code-agent-dev-project-structure
 :END:
 #+begin_example
-claude-agent/
-├── claude-agent.org             # MAIN: Core SDK in literate programming format
-├── code-agent-org.org               # Org-mode integration (depends on claude-agent)
-├── claude-code.el               # Package entry point (requires above modules)
+code-agent/
+├── code-agent.org             # MAIN: Core SDK in literate programming format
+├── code-agent-org.org               # Org-mode integration (depends on code-agent)
+├── code-agent.el               # Package entry point (requires above modules)
 ├── emacs-mcp-server.org         # MCP server for Emacs tools
 ├── README.org                   # User documentation
 ├── Makefile                     # Build and test commands
 ├── tests/                       # All test files
-│   ├── test-claude-agent-*.el   # Core SDK tests
+│   ├── test-code-agent-*.el   # Core SDK tests
 │   ├── test-code-agent-org-*.el     # Org integration tests
 │   └── test-*.el                # Other tests (MCP, Docker, etc.)
 ├── reference/
-│   └── claude-agent-sdk-python/ # Official Python SDK (git submodule)
+│   └── code-agent-sdk-python/ # Official Python SDK (git submodule)
 ├── prompts/                     # Tag/behavior prompt files
 └── docs/                        # Additional documentation
 #+end_example
 
 ** Architecture
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-architecture
+:CUSTOM_ID: code-agent-dev-architecture
 :END:
 
 *** Direct CLI Communication
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-direct-cli-communication
+:CUSTOM_ID: code-agent-dev-direct-cli-communication
 :END:
 Unlike the old HTTP backend approach, this SDK communicates directly with
 Claude Code CLI via subprocess:
 
-1. =claude-agent-query= starts a subprocess running =claude --print --output-format stream-json=
+1. =code-agent-query= starts a subprocess running =claude --print --output-format stream-json=
 2. Responses stream as newline-delimited JSON
 3. Callbacks (=:on-message=, =:on-token=, =:on-complete=) handle each event
 
-*** Key Components in claude-agent.org
+*** Key Components in code-agent.org
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-key-components-in-claude-agent-org
+:CUSTOM_ID: code-agent-dev-key-components-in-code-agent-org
 :END:
 | Section | Purpose |
 |---------+---------|
 | Data Structures | Options, content blocks, message types |
 | Process Management | CLI discovery, process filter/sentinel |
 | JSON Protocol | Message parsing |
-| Core API | =claude-agent-query=, helper functions |
+| Core API | =code-agent-query=, helper functions |
 | Client API | Interactive client for bidirectional chat |
 | Permission System | Allow/deny patterns for tools |
 | IDE Context | Buffer info, selection context |
@@ -203,7 +203,7 @@ Claude Code CLI via subprocess:
 
 *** Key Components in code-agent-org.org
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-key-components-in-code-agent-org-org
+:CUSTOM_ID: code-agent-dev-key-components-in-code-agent-org-org
 :END:
 | Section | Purpose |
 |---------+---------|
@@ -216,35 +216,35 @@ Claude Code CLI via subprocess:
 
 ** Development Guidelines
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-development-guidelines
+:CUSTOM_ID: code-agent-dev-development-guidelines
 :END:
 *** Reference Implementation
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-reference-implementation
+:CUSTOM_ID: code-agent-dev-reference-implementation
 :END:
-When implementing new features for =claude-agent.org=, *always consult the official Python SDK* first:
-- Location: =reference/claude-agent-sdk-python/src/claude_agent_sdk/=
+When implementing new features for =code-agent.org=, *always consult the official Python SDK* first:
+- Location: =reference/code-agent-sdk-python/src/claude_agent_sdk/=
 - Key modules to reference:
   | Python Module | Purpose | Emacs Equivalent |
   |--------------+---------+------------------|
-  | =client.py= | Main client API | =claude-agent-query= |
-  | =session.py= | Session management | Session section in claude-agent.org |
+  | =client.py= | Main client API | =code-agent-query= |
+  | =session.py= | Session management | Session section in code-agent.org |
   | =tools.py= | Tool definitions | Permission System |
-  | =hooks.py= | Hook system | =claude-agent-*-hook= variables |
-  | =streaming.py= | Stream processing | Process filter in claude-agent.org |
+  | =hooks.py= | Hook system | =code-agent-*-hook= variables |
+  | =streaming.py= | Stream processing | Process filter in code-agent.org |
 
 *** Literate Programming
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-literate-programming
+:CUSTOM_ID: code-agent-dev-literate-programming
 :END:
 - All code in =.org= files using literate-elisp
-- Load with: =(literate-elisp-load \"claude-agent.org\")=
-- *After editing, ALWAYS reload in Emacs* — see [[#claude-agent-dev-mandatory-reload][Mandatory Reload]] rule
+- Load with: =(literate-elisp-load \"code-agent.org\")=
+- *After editing, ALWAYS reload in Emacs* — see [[#code-agent-dev-mandatory-reload][Mandatory Reload]] rule
 - *Tests go in =tests/= folder* - NOT in .org files (use =ert-deftest= in =.el= files)
 
 **** Lexical Variable Capture in Callbacks
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-lexical-capture
+:CUSTOM_ID: code-agent-dev-lexical-capture
 :END:
 
 *IMPORTANT*: =literate-elisp= does NOT recognize =lexical-binding: t= in org file headers.
@@ -276,7 +276,7 @@ This applies to:
 
 **** MANDATORY: Reload After Every Edit
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-mandatory-reload
+:CUSTOM_ID: code-agent-dev-mandatory-reload
 :END:
 
 *CRITICAL*: After editing =.org= or =.el= files containing Elisp code, you *MUST*
@@ -289,7 +289,7 @@ This is not optional — the user's live Emacs session runs the old code until y
 | =.el= files | =(load-file \"/path/to/file.el\")= |
 
 *When to reload*:
-- After *every* edit to =claude-agent.org= or =code-agent-org.org=
+- After *every* edit to =code-agent.org= or =code-agent-org.org=
 - After *every* edit to any =.el= file that's loaded in the session
 - *Before* telling the user the feature is ready to test
 
@@ -303,13 +303,13 @@ matching instead of =pcase= string patterns.
 
 *** Testing Guidelines
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-testing-guidelines
+:CUSTOM_ID: code-agent-dev-testing-guidelines
 :END:
 - All tests in =tests/*.el= files, NOT embedded in =.org= files
 - Test categories:
   | File Pattern | Purpose |
   |--------------+---------|
-  | =test-claude-agent-unit.el= | Core SDK unit tests |
+  | =test-code-agent-unit.el= | Core SDK unit tests |
   | =test-code-agent-org-unit.el= | Org integration unit tests |
   | =test-*-integration.el= | Integration tests (require Claude CLI) |
   | =test-behavior-prompts.el= | Tag/header behavior tests |
@@ -321,7 +321,7 @@ matching instead of =pcase= string patterns.
 
 *** CLAUDE.md Maintenance
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev-claude-md-maintenance
+:CUSTOM_ID: code-agent-dev-claude-md-maintenance
 :END:
 
 When making changes to the codebase that affect project conventions, commands,
@@ -354,7 +354,7 @@ Background / Future Design subsection — see =RATIONALE.md= for the
 project's "why" log and =CODEBASE-REVIEW.org= for the active backlog.
 
 References:
-- claude-code.el: /Users/jingtao/.emacs.d/straight/repos/claude-code.el/
+- code-agent.el: /Users/jingtao/.emacs.d/straight/repos/code-agent.el/
 
 * System Prompt
 The current workspace story is \"Emacs-claude dev2\"
@@ -368,4 +368,3 @@ in Emacs using evalElisp MCP tool so changes take effect:
 - For .org files with literate-elisp: (literate-elisp-load \"/path/to/file.org\")
 This applies in both host and Docker sandbox modes.
 <!-- END emacs-agent session instructions -->
-

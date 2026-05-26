@@ -1,0 +1,105 @@
+#+TITLE: Claude Agent — Prompt Refinement
+#+PROPERTY: literate-load yes
+
+* Overview
+
+AI-assisted refinement of the user's draft prompt: take the raw text
+of an AI block and a separate "refinement intent" string ("make it
+more specific about which bug"), and return a tightened version of
+the prompt. Used by =code-agent-org='s "refine current prompt"
+command.
+
+Thin wrapper around =code-agent-query-accumulate= with a hand-tuned
+system prompt; callers don't have to remember the right model /
+system-prompt / =:max-turns= / =:disallowed-tools= combo every time.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'code-agent-backend)
+#+END_SRC
+
+* Customization
+
+#+BEGIN_SRC elisp
+(defgroup code-agent-refine nil
+  "Prompt refinement with Claude."
+  :group 'code-agent
+  :prefix "code-agent-refine-")
+
+(defcustom code-agent-refine-model "opus"
+  "Model to use for prompt refinement.
+Uses short alias (opus, sonnet, haiku) or full model name."
+  :type 'string
+  :group 'code-agent-refine)
+
+(defcustom code-agent-refine-prompt-file
+  (expand-file-name "prompts/refine-prompt.org"
+                    (file-name-directory (or load-file-name buffer-file-name "")))
+  "Path to refinement system prompt file."
+  :type 'file
+  :group 'code-agent-refine)
+
+(defcustom code-agent-refine-default-system-prompt
+  "You are an expert at refining AI prompts. Your task is to improve the given
+prompt based on the user's refinement intent.
+
+RULES:
+1. Output ONLY the refined prompt text, no quotes or commentary
+2. Preserve the user's voice and original intent
+3. Make the prompt more specific, clear, and actionable
+4. Do not add unnecessary verbosity"
+  "Default system prompt when prompt file is not found."
+  :type 'string
+  :group 'code-agent-refine)
+#+END_SRC
+
+* Core API
+
+The system prompt is loaded from a file on every call so users can
+edit =prompts/refine-prompt.org= without reloading the package. If
+the file is missing or unset, =code-agent-refine-default-system-prompt=
+ships a sane fallback.
+
+#+BEGIN_SRC elisp
+(defun code-agent-refine--load-system-prompt ()
+  "Load system prompt from file or return default."
+  (if (and code-agent-refine-prompt-file
+           (file-exists-p code-agent-refine-prompt-file))
+      (with-temp-buffer
+        (insert-file-contents code-agent-refine-prompt-file)
+        (buffer-string))
+    code-agent-refine-default-system-prompt))
+
+(cl-defun code-agent-refine-prompt (original-prompt user-intent
+                                       &key on-result on-error)
+  "Refine ORIGINAL-PROMPT based on USER-INTENT.
+ON-RESULT receives the refined prompt string; ON-ERROR receives an error.
+Uses system prompt from `code-agent-refine-prompt-file' and a fresh
+session (no conversation continuity)."
+  (let* ((system-prompt (code-agent-refine--load-system-prompt))
+         (prompt (format "Refinement Intent: %s
+
+Original Prompt:
+%s
+
+Output the refined prompt:" user-intent original-prompt))
+         (options (code-agent-options
+                   :model code-agent-refine-model
+                   :system-prompt system-prompt
+                   :disallowed-tools '("*")  ; No tools needed
+                   :max-turns 1)))
+    (code-agent-query-accumulate
+     prompt
+     :options options
+     :on-error on-error
+     :on-result on-result)))
+#+END_SRC
+
+* Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-refine)
+;;; code-agent-refine.el ends here
+#+END_SRC

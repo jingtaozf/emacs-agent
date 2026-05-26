@@ -1,0 +1,100 @@
+#+TITLE: Claude Agent ACP — Gemini Profile
+#+PROPERTY: literate-load yes
+
+* Gemini ACP Profile
+
+Per-agent configuration for Google's Gemini CLI.  Gemini speaks ACP
+natively via the experimental flag =--experimental-acp=.  Three auth
+methods are supported (per the ACP spec):
+
+| Method         | How                                            |
+|----------------+------------------------------------------------|
+| gemini-api-key | Set GEMINI_API_KEY, sent via authenticate RPC  |
+| vertex-ai      | Uses ambient Google Cloud credentials          |
+| oauth-personal | Google OAuth (personal account)                |
+
+References:
+- https://github.com/google-gemini/gemini-cli
+- reference/agent-shell/agent-shell-google.el
+
+Note: =--experimental-acp= is explicitly experimental; if Gemini CLI
+changes the flag in a future release, update
+=code-agent-acp-gemini-command=.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'code-agent-acp)
+#+END_SRC
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defgroup code-agent-acp-gemini nil
+  "Gemini ACP profile."
+  :group 'code-agent-acp
+  :prefix "code-agent-acp-gemini-")
+
+(defcustom code-agent-acp-gemini-command '("gemini" "--experimental-acp")
+  "Command and args to launch Gemini CLI in ACP mode."
+  :type '(repeat string)
+  :group 'code-agent-acp-gemini)
+
+(defcustom code-agent-acp-gemini-auth-method 'gemini-api-key
+  "Which authenticate method to advertise during the ACP handshake.
+- `gemini-api-key': sends GEMINI_API_KEY (must be in environment)
+- `vertex-ai': uses ambient Google Cloud credentials
+- `oauth-personal': Google OAuth for a personal account"
+  :type '(choice (const gemini-api-key)
+                 (const vertex-ai)
+                 (const oauth-personal))
+  :group 'code-agent-acp-gemini)
+
+(defcustom code-agent-acp-gemini-environment nil
+  "Extra environment variables for the Gemini subprocess.
+List of \"NAME=VALUE\" strings.  Typical entries:
+  \"GEMINI_API_KEY=...\" when `code-agent-acp-gemini-auth-method' is
+  `gemini-api-key'.
+  \"GOOGLE_APPLICATION_CREDENTIALS=...\" for vertex-ai auth."
+  :type '(repeat string)
+  :group 'code-agent-acp-gemini)
+#+END_SRC
+
+** Class
+
+A dedicated subclass exists so future Gemini-specific methods
+(e.g. model-ID extraction, Gemini-only capability quirks) can
+dispatch on the type without string-matching =agent-name=.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (code-agent-gemini-backend
+               (:include code-agent-acp-backend (type :gemini))
+               (:constructor code-agent-gemini-backend--create)
+               (:copier nil))
+  "ACP backend specialised for Google Gemini CLI.")
+#+END_SRC
+
+** Constructor
+
+#+BEGIN_SRC elisp
+(defun code-agent-acp-gemini-create (&rest args)
+  "Create an ACP backend configured for Google Gemini CLI.
+ARGS are forwarded to `code-agent-gemini-backend--create' after the
+gemini-specific defaults.  Typical usage:
+
+  (code-agent-acp-gemini-create :cwd \"/path\" :session-key \"sdd-...\")"
+  (apply #'code-agent-acp--make-profile-backend
+         #'code-agent-gemini-backend--create
+         "gemini"
+         code-agent-acp-gemini-command
+         code-agent-acp-gemini-environment
+         'code-agent-acp-gemini-auth-method
+         args))
+#+END_SRC
+
+** Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-acp-gemini)
+;;; code-agent-acp-gemini.el ends here
+#+END_SRC

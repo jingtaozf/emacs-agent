@@ -379,10 +379,10 @@ were not inherited because org-get-tags was called with LOCAL=t."
   ;; Workspace section IDs with file-base (new format for cross-file uniqueness)
   (should (equal "my-notes-workflow-sdd-12345"
                  (code-agent-org--generate-custom-id "sdd-12345" "Workflow" "my-notes")))
-  (should (equal "claude-agent-dev-research-output-sdd-12345"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Research Output" "claude-agent-dev")))
-  (should (equal "claude-agent-dev-spec-sdd-12345"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Spec" "claude-agent-dev")))
+  (should (equal "code-agent-dev-research-output-sdd-12345"
+                 (code-agent-org--generate-custom-id "sdd-12345" "Research Output" "code-agent-dev")))
+  (should (equal "code-agent-dev-spec-sdd-12345"
+                 (code-agent-org--generate-custom-id "sdd-12345" "Spec" "code-agent-dev")))
   ;; Handle special characters
   (should (equal "sdd-12345-non-goals"
                  (code-agent-org--generate-custom-id "sdd-12345" "Non-Goals"))))

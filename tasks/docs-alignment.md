@@ -25,7 +25,7 @@ Stop conditions:
 
 ## Top-level docs
 
-- [X] docs/atomic-architecture.org — UPDATED: replaced `claude-org`/`claude-org-mode` references with `code-agent-org`. Document is a philosophy/inspiration piece (not architecture-of-record), so only stale-name fixes were needed.
+- [X] docs/atomic-architecture.org — UPDATED: replaced `claude-org`/`code-agent-org-mode` references with `code-agent-org`. Document is a philosophy/inspiration piece (not architecture-of-record), so only stale-name fixes were needed.
 - [X] docs/ralph-architecture.org — UPDATED: renamed all `claude-org` → `code-agent-org`. Doc explicitly self-flags as "future feature, not yet implemented", so no implementation-status edits needed.
 - [X] docs/literate-programming-principles.org — PASS: language-agnostic principles, no stale `claude-org` refs.
 - [X] docs/ELISP_IDIOMS.org — PASS: language-agnostic idioms, no stale `claude-org` refs.
@@ -70,7 +70,7 @@ Stop conditions:
 
 - [X] docs/research/INDEX.md — UPDATED: cleaned mixed table+bullet rows, added missing entries (vterm, sdd-enhancements, ghostty-features, workflow-redesign), added preamble noting research is point-in-time and pointing to design-docs for current state.
 - [X] docs/research/2026-a-slack-bot-for-ai-agant.org — PASS (point-in-time research; design-doc INDEX flags Slack bot as `not started`).
-- [X] docs/research/2026-cmux-codebase-study.org — PASS (historical study; refs to `claude-org-cmux` describe pre-rename state — left as-is).
+- [X] docs/research/2026-cmux-codebase-study.org — PASS (historical study; refs to `code-agent-org-cmux` describe pre-rename state — left as-is).
 - [X] docs/research/2026-cmux-ghostty-best-practices.org — PASS (no in-house symbol refs to update).
 - [X] docs/research/2026-cmux-sdd-enhancements.org — PASS (research note; symbol refs describe pre-rename state).
 - [X] docs/research/2026-ghostty-features-for-sdd.org — PASS.

@@ -16,7 +16,7 @@ build-command conventions from literate-agent:
 @~/projects/literate-agent/CLAUDE.md
 
 Override `LITERATE_AGENT_HOME` if cloned elsewhere. Project-specific
-overrides + claude-agent-only rules continue below.
+overrides + code-agent-only rules continue below.
 
 ## Commands
 
@@ -24,7 +24,7 @@ overrides + claude-agent-only rules continue below.
 make test-smoke         # Fast syntax check (< 2s) — run after every edit
 make test-unit          # Run all unit tests (~13s)
 make test-unit-parallel # Run unit tests in parallel (~4.5s)
-make test-agent-unit    # Run claude-agent unit tests only
+make test-agent-unit    # Run code-agent unit tests only
 make test-org-unit      # Run code-agent-org unit tests only
 make test-backend-unit  # Run backend protocol unit tests
 make test-mock          # Run mock CLI tests (no API, fast)
@@ -120,12 +120,12 @@ When investigating any issue:
 ## Design Principles (read before editing)
 
 LP doctrine + OOP protocol style live in `literate-agent` (imported
-at the top of this file). claude-agent-specific application:
+at the top of this file). code-agent-specific application:
 
-`claude-agent-backend.org` defines the canonical protocol
-(`claude-agent-backend-query`, `-cancel`, `-cleanup`,
-`-classify-error`, …); `claude-agent-acp-backend` and
-`claude-agent-claude-code-backend` each `cl-defmethod` those generics.
+`code-agent-backend.org` defines the canonical protocol
+(`code-agent-backend-query`, `-cancel`, `-cleanup`,
+`-classify-error`, …); `code-agent-acp-backend` and
+`code-agent-claude-code-backend` each `cl-defmethod` those generics.
 Callers in `code-agent-org.org` dispatch on the backend instance —
 never branch on a string or symbol discriminator. New modules MUST
 follow the same pattern.
@@ -134,7 +134,7 @@ follow the same pattern.
 three protocols — lifecycle, agent wire, multiplexer wire — plus
 org-integration; agent-family (Claude Code, OpenCode, Gemini, Codex)
 and multiplexer-family (cmux, tmux) are symmetric siblings. See
-`claude-agent-backend.org` § "Tri-Protocol Architecture" +
+`code-agent-backend.org` § "Tri-Protocol Architecture" +
 `ARCHITECTURE.org`. No `CLAUDE_BACKEND` string-match branches in the
 frontend.
 
@@ -148,16 +148,16 @@ LP source lives in `.org` files loaded via `literate-elisp`:
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| Core SDK | `claude-agent.org` | CLI subprocess, JSON stream parsing |
+| Core SDK | `code-agent.org` | CLI subprocess, JSON stream parsing |
 | Org Integration | `code-agent-org.org` | `#+begin_src ai` blocks, response sections |
 | MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude / Pi |
-| Pi (default-loaded; ext opt-in) | `claude-agent-pi-{backend,extension}.org` | pi.dev RPC backend (auto-load) + TS extension tangling to `~/.pi/agent/extensions/emacs-mcp.ts`; `:CLAUDE_BACKEND: pi` |
-| Entry Point | `claude-code.el` | Package requires, autoloads |
+| Pi (default-loaded; ext opt-in) | `code-agent-pi-{backend,extension}.org` | pi.dev RPC backend (auto-load) + TS extension tangling to `~/.pi/agent/extensions/emacs-mcp.ts`; `:CLAUDE_BACKEND: pi` |
+| Entry Point | `code-agent.el` | Package requires, autoloads |
 
-Load with: `(literate-elisp-load "claude-agent.org")`. Data flow:
+Load with: `(literate-elisp-load "code-agent.org")`. Data flow:
 user writes a query in `#+begin_src ai`, hits `C-c C-c` →
 `code-agent-org-execute` validates + creates a session →
-`claude-agent-query` spawns the CLI with `--output-format stream-json`
+`code-agent-query` spawns the CLI with `--output-format stream-json`
 → process filter parses newline-delimited JSON → tokens stream into
 the response section below the AI block.
 
@@ -193,8 +193,8 @@ See `~/projects/literate-agent/hints/elisp.org` — auto-activated by
 the `lp-hint-elisp` skill when editing `.el` files or `.org` files
 with Elisp src blocks. Project-specific addendum:
 
-- **Macro re-expansion** (claude-agent-specific): when a macro
-  defined in `claude-agent-trace.org` changes, ALL modules that USE
+- **Macro re-expansion** (code-agent-specific): when a macro
+  defined in `code-agent-trace.org` changes, ALL modules that USE
   that macro must also be reloaded — the old function bodies still
   carry the old macro expansion until each module reloads.
 
@@ -280,17 +280,17 @@ autonomous**; exploration → **L1-L2 inline**.
 | Architecture map | `ARCHITECTURE.org` |
 | Tech-debt backlog | `CODEBASE-REVIEW.org` |
 | Design rationale ("why") log | `RATIONALE.md` |
-| Tri-protocol refactor (shipped) | `claude-agent-backend.org` → "Tri-Protocol Architecture" |
+| Tri-protocol refactor (shipped) | `code-agent-backend.org` → "Tri-Protocol Architecture" |
 | Research findings | woven into the relevant code .org as Background / Research subsections (the LP migration emptied docs/research/; SDD workflow auto-recreates the dir per-story when needed) |
 | Elisp idioms | `ELISP-IDIOMS.org` |
 | Literate programming | `.claude/rules/literate-programming-document-first.md` |
-| Full API docs | `claude-agent.org` section headers |
+| Full API docs | `code-agent.org` section headers |
 | Org integration | `code-agent-org.org` section headers |
 | Test fixtures | `tests/fixtures/` |
 | Mock CLI | `tests/mock-claude-cli.sh` |
 | Docker sandbox | `.devcontainer/` |
 | Prompt tags | `prompts/tags/` |
-| Reference SDK | `reference/claude-agent-sdk-python/`; pi.dev source `reference/pi/` (submodule); Pi E2E `make test-e2e-pi` |
+| Reference SDK | `reference/code-agent-sdk-python/`; pi.dev source `reference/pi/` (submodule); Pi E2E `make test-e2e-pi` |
 
 ## Final Reminder
 

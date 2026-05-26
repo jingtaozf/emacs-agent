@@ -6,8 +6,8 @@ This directory contains the test suite for the Claude Agent SDK.
 
 ```
 tests/
-├── test-claude-agent-unit.el         # Unit tests for claude-agent.org
-├── test-claude-agent-integration.el  # Integration tests for claude-agent.org
+├── test-code-agent-unit.el         # Unit tests for code-agent.org
+├── test-code-agent-integration.el  # Integration tests for code-agent.org
 ├── test-code-agent-org-unit.el           # Unit tests for code-agent-org.org
 ├── test-code-agent-org-integration.el    # Integration tests for code-agent-org.org
 ├── fixtures/
@@ -37,7 +37,7 @@ make test-unit
 
 Or for specific components:
 ```bash
-make test-agent-unit    # claude-agent unit tests only
+make test-agent-unit    # code-agent unit tests only
 make test-org-unit      # code-agent-org unit tests only
 ```
 
@@ -76,8 +76,8 @@ make test
 # Run specific test file
 emacs -Q --batch -L . -L tests \
   --eval "(require 'literate-elisp)" \
-  --eval "(literate-elisp-load \"claude-agent.org\")" \
-  -l tests/test-claude-agent-unit.el \
+  --eval "(literate-elisp-load \"code-agent.org\")" \
+  -l tests/test-code-agent-unit.el \
   -f ert-run-tests-batch-and-exit
 ```
 
@@ -162,7 +162,7 @@ The `test-config.el` file provides:
 
 Current test coverage:
 
-### claude-agent.org
+### code-agent.org
 - [x] Data structures (options, blocks, messages)
 - [x] JSON protocol parsing
 - [x] Session management (keys, UUID mapping)
@@ -204,7 +204,7 @@ TODO: Add CI configuration for:
 # Run with verbose output
 EMACSLOADPATH=. emacs -Q --batch -L tests \
   --eval "(setq ert-batch-backtrace-right-margin 200)" \
-  -l tests/test-claude-agent-unit.el \
+  -l tests/test-code-agent-unit.el \
   -f ert-run-tests-batch-and-exit
 ```
 
@@ -216,8 +216,8 @@ M-x ert RET test-name RET
 
 ;; Or from command line
 emacs -Q --batch -L . -L tests \
-  -l tests/test-claude-agent-unit.el \
-  --eval "(ert-run-tests-batch-and-exit 'test-claude-agent-options-construction)"
+  -l tests/test-code-agent-unit.el \
+  --eval "(ert-run-tests-batch-and-exit 'test-code-agent-options-construction)"
 ```
 
 ### Debug Test Failures

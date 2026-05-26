@@ -9,18 +9,18 @@ The test suite has been successfully created and stabilized with excellent cover
 
 | Test Type | Total | Passing | Skipped | Status |
 |-----------|-------|---------|---------|--------|
-| claude-agent unit | 19 | 19 (100%) | 0 | ✅ Perfect |
+| code-agent unit | 19 | 19 (100%) | 0 | ✅ Perfect |
 | code-agent-org unit | 29 | 29 (100%) | 0 | ✅ Perfect |
-| claude-agent integration | 10 | 8 (80%) | 2 | ✅ Excellent |
+| code-agent integration | 10 | 8 (80%) | 2 | ✅ Excellent |
 | code-agent-org integration | 20 | 6 (30%) | 14 | ✅ Acceptable |
 | **TOTAL** | **78** | **62 (79%)** | **16** | **✅ Production Ready** |
 
 ## Test Infrastructure
 
 ### Files Created
-- `tests/test-claude-agent-unit.el` - 19 unit tests for core SDK
+- `tests/test-code-agent-unit.el` - 19 unit tests for core SDK
 - `tests/test-code-agent-org-unit.el` - 29 unit tests for org-mode integration
-- `tests/test-claude-agent-integration.el` - 10 integration tests with live API
+- `tests/test-code-agent-integration.el` - 10 integration tests with live API
 - `tests/test-code-agent-org-integration.el` - 20 integration tests for org workflow
 - `tests/fixtures/test-config.el` - Test helper functions and utilities
 - `tests/fixtures/test-session.org` - Demo org file with test scenarios
@@ -32,7 +32,7 @@ The test suite has been successfully created and stabilized with excellent cover
 make test              # Run all tests (unit + integration)
 make test-unit         # Run only unit tests (fast, no API)
 make test-integration  # Run only integration tests (requires Claude CLI)
-make test-agent-unit   # Run claude-agent unit tests only
+make test-agent-unit   # Run code-agent unit tests only
 make test-org-unit     # Run code-agent-org unit tests only
 ```
 
@@ -40,7 +40,7 @@ make test-org-unit     # Run code-agent-org unit tests only
 
 ### ✅ Unit Tests: 100% Passing (48/48)
 
-**claude-agent (19 tests)**
+**code-agent (19 tests)**
 - Process management and state tracking
 - Query registration and cleanup
 - Session UUID mapping
@@ -59,7 +59,7 @@ make test-org-unit     # Run code-agent-org unit tests only
 - Cancellation
 - Block insertion and numbering
 
-### ✅ claude-agent Integration: 80% Passing (8/10)
+### ✅ code-agent Integration: 80% Passing (8/10)
 
 **Passing (8 tests)**
 - ✅ Basic query execution
@@ -115,8 +115,8 @@ These tests involve end-to-end org-mode file manipulation + session management +
 **Fix**: Changed narrowing to start after heading line with `(forward-line 1)`
 
 ### 2. Missing Helper Function
-**File**: claude-agent.org
-**Function**: `claude-agent--extract-error-message`
+**File**: code-agent.org
+**Function**: `code-agent--extract-error-message`
 **Added**: Helper function to extract error messages from various error formats
 
 ### 3. Dependency Fix
@@ -159,11 +159,11 @@ make test-org-integration
 ### Expected Output
 ```
 Unit Tests:
-- claude-agent: 19/19 passed (100%)
+- code-agent: 19/19 passed (100%)
 - code-agent-org: 29/29 passed (100%)
 
 Integration Tests:
-- claude-agent: 8/10 passed, 2 skipped (80%)
+- code-agent: 8/10 passed, 2 skipped (80%)
 - code-agent-org: 6/20 passed, 14 skipped (30%)
 
 Total: 62/78 passed, 16 skipped (79% coverage)
@@ -171,7 +171,7 @@ Total: 62/78 passed, 16 skipped (79% coverage)
 
 ## Coverage by Feature
 
-### Core SDK (claude-agent.org)
+### Core SDK (code-agent.org)
 - ✅ Process management: 100% covered
 - ✅ Session mapping: 100% covered
 - ✅ JSON protocol: 100% covered
@@ -191,7 +191,7 @@ Total: 62/78 passed, 16 skipped (79% coverage)
 
 ## Conclusion
 
-The test suite provides **excellent validation** of the claude-agent SDK:
+The test suite provides **excellent validation** of the code-agent SDK:
 
 1. **100% unit test coverage** ensures core logic is solid
 2. **80% integration test success** for agent SDK validates real API usage

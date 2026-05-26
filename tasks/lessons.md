@@ -1,4 +1,4 @@
-# Lessons Learned — claude-agent
+# Lessons Learned — code-agent
 
 每条 lesson:date / mistake / context / rule。新条目放最上面(逆序)。
 ≥3 次同类后 promote 到 `CLAUDE.md`,本文件保留 backfill 历史。

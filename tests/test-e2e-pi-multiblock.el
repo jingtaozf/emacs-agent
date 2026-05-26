@@ -34,13 +34,13 @@
   (add-to-list 'load-path root)
   (add-to-list 'load-path (expand-file-name "tests/support" root))
   (require 'literate-elisp)
-  (unless (featurep 'claude-agent-backend)
-    (literate-elisp-load (expand-file-name "claude-agent-backend.org" root)))
-  (unless (featurep 'claude-agent-pi-backend)
-    (literate-elisp-load (expand-file-name "claude-agent-pi-backend.org" root)))
+  (unless (featurep 'code-agent-backend)
+    (literate-elisp-load (expand-file-name "code-agent-backend.org" root)))
+  (unless (featurep 'code-agent-pi-backend)
+    (literate-elisp-load (expand-file-name "code-agent-pi-backend.org" root)))
   ;; Need the full org-integration stack for the real execute path.
   (unless (featurep 'code-agent-org)
-    (load-file (expand-file-name "claude-code.el" root))))
+    (load-file (expand-file-name "code-agent.el" root))))
 
 (require 'pi-test-helpers)
 
@@ -50,11 +50,11 @@
 (setq code-agent-org-auto-start-mcp-server nil)
 
 ;; In batch mode there is no Phoenix collector / OTel bridge to talk to;
-;; `claude-agent-with-span''s synchronous span/start call would block for
+;; `code-agent-with-span''s synchronous span/start call would block for
 ;; 2 s on every traced step and swallow downstream messages.  Disable
 ;; tracing for the test.  (In an interactive Emacs with Phoenix running
 ;; the macro short-circuits via the running bridge — no impact.)
-(setq claude-agent-trace-enabled nil)
+(setq code-agent-trace-enabled nil)
 
 (defconst test-mb--fixture
   (expand-file-name "tests/e2e/org/pi-backend-multiblock-test.org"
@@ -127,21 +127,21 @@ TEST_MB_VERBOSE)."
       (let ((cleared (not (code-agent-org--session-get sk :busy))))
         (unless cleared
           (let* ((b (code-agent-org--session-get sk :backend))
-                 (proc (and (claude-agent-pi-backend-p b)
-                            (claude-agent-pi-backend-process b))))
+                 (proc (and (code-agent-pi-backend-p b)
+                            (code-agent-pi-backend-process b))))
             (princ (format "TIMEOUT DUMP: busy=%s query-handle=%s query-id=%s backend=%s process-status=%s handshake-done=%s active-prompt-id=%s pending=%s\n"
                            (code-agent-org--session-get sk :busy)
                            (code-agent-org--session-get sk :query-handle)
                            (code-agent-org--session-get sk :query-id)
                            (and b (type-of b))
                            (and proc (process-status proc))
-                           (and (claude-agent-pi-backend-p b)
-                                (claude-agent-pi-backend-handshake-done b))
-                           (and (claude-agent-pi-backend-p b)
-                                (claude-agent-pi-backend-active-prompt-id b))
-                           (and (claude-agent-pi-backend-p b)
+                           (and (code-agent-pi-backend-p b)
+                                (code-agent-pi-backend-handshake-done b))
+                           (and (code-agent-pi-backend-p b)
+                                (code-agent-pi-backend-active-prompt-id b))
+                           (and (code-agent-pi-backend-p b)
                                 (hash-table-count
-                                 (claude-agent-pi-backend-pending-by-id b)))))))
+                                 (code-agent-pi-backend-pending-by-id b)))))))
         cleared))))
 
 
@@ -178,8 +178,8 @@ return that subtree's body."
   "Return the PID of the Pi subprocess cached in SK's :backend, or nil."
   (with-current-buffer buf
     (when-let* ((b (code-agent-org--session-get sk :backend))
-                (p (and (claude-agent-pi-backend-p b)
-                        (claude-agent-pi-backend-process b))))
+                (p (and (code-agent-pi-backend-p b)
+                        (code-agent-pi-backend-process b))))
       (and (process-live-p p) (process-id p)))))
 
 
@@ -251,8 +251,8 @@ write :PI_SESSION_ID:, or didn't pass --session on respawn."
         ;; ---- Kill Pi between blocks ----
         (let* ((backend (code-agent-org--session-get sk :backend))
                (proc (and backend
-                          (claude-agent-pi-backend-p backend)
-                          (claude-agent-pi-backend-process backend))))
+                          (code-agent-pi-backend-p backend)
+                          (code-agent-pi-backend-process backend))))
           (should (process-live-p proc))
           (delete-process proc)
           ;; Give the sentinel time to fire + clear backend state.

@@ -32,8 +32,8 @@
          (repo (file-name-directory (directory-file-name tests-dir))))
     (add-to-list 'load-path (expand-file-name "../literate-elisp" repo))
     (require 'literate-elisp)
-    (dolist (mod '("claude-agent-trace.org"
-                   "claude-agent.org"
+    (dolist (mod '("code-agent-trace.org"
+                   "code-agent.org"
                    "code-agent-org.org"
                    "code-agent-org-terminal-base.org"
                    "code-agent-org-cmux.org"))
@@ -117,11 +117,11 @@ fresh temp .org file and bind VAR to the file-backed buffer."
 
 (defconst test-cmux-name--other-org
   "#+TITLE: other
-* claude-agent dev1
+* code-agent dev1
 :PROPERTIES:
-:CUSTOM_ID: claude-agent-dev1
+:CUSTOM_ID: code-agent-dev1
 :CLAUDE_SESSION_ID: sdd-claude-dev1
-:PROJECT_ROOT: /claude-agent
+:PROJECT_ROOT: /code-agent
 :END:
 ")
 
@@ -138,12 +138,12 @@ fresh temp .org file and bind VAR to the file-backed buffer."
       (should (string-suffix-p ".org" (plist-get r :org-file))))))
 
 (ert-deftest test-cmux-agent-name/lookup-finds-cross-file ()
-  "Slug \"claude-agent-dev1\" routes to the OTHER buffer, not the edo one."
+  "Slug \"code-agent-dev1\" routes to the OTHER buffer, not the edo one."
   :tags '(:cmux-name :fast)
   (test-cmux-name--with-buffers ((b1 test-cmux-name--edo-org)
                                   (b2 test-cmux-name--other-org))
     (let ((r (code-agent-org-cmux--lookup-session-by-agent-name
-              "claude-agent-dev1" nil)))
+              "code-agent-dev1" nil)))
       (should r)
       (should (equal (plist-get r :session-id) "sdd-claude-dev1")))))
 

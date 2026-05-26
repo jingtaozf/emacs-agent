@@ -47,7 +47,7 @@ from:
 | =--get-org-property= | =env-permission= |
 | =--find-instruction-number= | =block= |
 | =--normalize-headers-in-text=, =--auto-break-lines=, =--schedule-fontlock= | =response= |
-| Backend constructors (=claude-agent-claude-code-backend-create=, =claude-agent-cmux-backend-create=, ACP creates) | their own modules (already required at file top of main) |
+| Backend constructors (=code-agent-claude-code-backend-create=, =code-agent-cmux-backend-create=, ACP creates) | their own modules (already required at file top of main) |
 
 The main module reaches *back* into this one for
 =code-agent-org-cancel-all= / =code-agent-org--goto-block-by-custom-id=
@@ -85,7 +85,7 @@ plists so accessors are discoverable and refactors are compiler-checked.
                (:copier nil))
   "One persistent-client entry held by `code-agent-org-persistent-registry'."
   (client nil
-          :documentation "`claude-agent-client' struct — the live process handle.")
+          :documentation "`code-agent-client' struct — the live process handle.")
   (buffer nil
           :documentation "Source org buffer that owns this client (cleaned up on buffer-kill).")
   (heading-pos nil
@@ -153,7 +153,7 @@ client (the common read path); =alive-p= is a bool shortcut.
   "Return non-nil iff SESSION-KEY has a live client in REGISTRY."
   (when-let* ((client (code-agent-org-persistent-registry-get registry
                                                               session-key)))
-    (claude-agent-client-alive-p client)))
+    (code-agent-client-alive-p client)))
 #+END_SRC
 
 *** Registration + Activity
@@ -199,8 +199,8 @@ REASON (optional string) is shown in the user-facing message."
   (when-let* ((entry (code-agent-org-persistent-registry-get-entry
                       registry session-key)))
     (when-let* ((client (code-agent-org-persistent-entry-client entry)))
-      (when (claude-agent-client-alive-p client)
-        (claude-agent-client-disconnect client)))
+      (when (code-agent-client-alive-p client)
+        (code-agent-client-disconnect client)))
     (remhash session-key
              (code-agent-org-persistent-registry-entries registry))
     (message "Claude: Disconnected session %s%s"
@@ -320,44 +320,44 @@ Called from the file body to (re)initialize the global registry on
 every literate-elisp reload — this is what makes hot-edits to a
 factory lambda actually take effect."
   `(("claude-code"   . ,(lambda (session-key _options)
-                          (claude-agent-claude-code-backend--create
+                          (code-agent-claude-code-backend--create
                            :session-key session-key
                            :persistent-p code-agent-org-persistent-sessions)))
     ("opencode-acp"  . ,(lambda (session-key options)
                           (let ((persist (code-agent-org--acp-session-persistence)))
-                            (claude-agent-acp-opencode-create
+                            (code-agent-acp-opencode-create
                              :session-key session-key
                              :cwd (plist-get options :cwd)
                              :initial-session-id (car persist)
                              :save-session-id-fn (cdr persist)))))
     ("gemini-acp"    . ,(lambda (session-key options)
                           (let ((persist (code-agent-org--acp-session-persistence)))
-                            (claude-agent-acp-gemini-create
+                            (code-agent-acp-gemini-create
                              :session-key session-key
                              :cwd (plist-get options :cwd)
                              :initial-session-id (car persist)
                              :save-session-id-fn (cdr persist)))))
     ("codex-acp"     . ,(lambda (session-key options)
                           (let ((persist (code-agent-org--acp-session-persistence)))
-                            (claude-agent-acp-codex-create
+                            (code-agent-acp-codex-create
                              :session-key session-key
                              :cwd (plist-get options :cwd)
                              :initial-session-id (car persist)
                              :save-session-id-fn (cdr persist)))))
     ("cmux"          . ,(lambda (session-key _options)
-                          (claude-agent-cmux-backend-create
+                          (code-agent-cmux-backend-create
                            :session-key session-key)))
     ("tmux"          . ,(lambda (session-key _options)
-                          (claude-agent-tmux-backend-create
+                          (code-agent-tmux-backend-create
                            :session-key session-key)))
     ("pi"            . ,(lambda (session-key options)
-                          ;; Default-loaded by claude-code.el.  Reads
+                          ;; Default-loaded by code-agent.el.  Reads
                           ;; provider/model from ~/.pi/agent/settings.json
                           ;; and persists the Pi-side session id to
                           ;; :PI_SESSION_ID: so respawn after subprocess
                           ;; death continues the same conversation.
                           (let ((persist (code-agent-org--pi-session-persistence)))
-                            (claude-agent-pi-backend-create
+                            (code-agent-pi-backend-create
                              :session-key session-key
                              :cwd (plist-get options :cwd)
                              :session-id (car persist)
@@ -409,7 +409,7 @@ the user-reported 2026-05-25 bug.
 Mechanism: cache both the backend struct (slot =:backend=) and the
 =CLAUDE_BACKEND= string used to build it (slot =:backend-property=).
 On every resolve, compare current property against cached property —
-mismatch ⇒ `claude-agent-backend-cleanup' on the stale struct +
+mismatch ⇒ `code-agent-backend-cleanup' on the stale struct +
 rebuild via `code-agent-org--make-default-backend' + cache both new
 slots atomically.
 
@@ -426,7 +426,7 @@ OPTIONS is forwarded to the constructor (plist with :cwd etc.)."
       (when cached
         (message "code-agent-org: CLAUDE_BACKEND changed (%s → %s); rebuilding backend"
                  (or cached-prop "?") (or current-prop "?"))
-        (ignore-errors (claude-agent-backend-cleanup cached)))
+        (ignore-errors (code-agent-backend-cleanup cached)))
       (let ((fresh (code-agent-org--make-default-backend session-key options)))
         (code-agent-org--session-put session-key :backend fresh)
         (code-agent-org--session-put session-key :backend-property current-prop)
@@ -497,7 +497,7 @@ For recovery queries, PARENT-QUERY-ID and RECOVERY-REASON should be provided.
 LOOP-INFO is (ITERATION . MAX) for loop iterations, or nil.
 
 Returns the position where content should be inserted (after properties)."
-  (claude-agent-with-span "create-response-section"
+  (code-agent-with-span "create-response-section"
       (list :query-id query-id :query-type (symbol-name query-type)) nil
   (let* ((section-level (code-agent-org--effective-section-level session-key))
          ;; Response should be at SAME level as instruction (sibling), not child

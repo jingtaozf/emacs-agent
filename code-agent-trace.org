@@ -1,0 +1,1005 @@
+#+TITLE: Claude Agent Trace — OpenTelemetry Tracing for Emacs
+#+PROPERTY: literate-load yes
+
+* Overview
+
+This module owns the Emacs side of cross-process OpenTelemetry tracing for
+every AI-block execution. Two macros — =code-agent-with-trace= (root) and
+=code-agent-with-span= (child) — bracket Elisp work with span lifecycle
+events sent to a local Flask bridge, which forwards them to Phoenix.
+
+The single design invariant: *one root span per AI block, regardless of who
+initiated it.* Whether the user pressed =C-c C-c= in Emacs or sent a prompt
+through a Claude Code terminal directly, all downstream spans —
+Emacs orchestration, Python hook events, MCP callbacks — must hang off the
+same root. Without that invariant, Phoenix shows a forest of disconnected
+traces for what is logically one interaction, and the Python hook chain is
+unattributable to the Emacs work that triggered it.
+
+** Why This Module Exists
+
+When an AI block failed silently before tracing — response never appears,
+hook crashes mid-stream, MCP call times out — there was no way to trace
+across the three process boundaries because each layer logged to its own
+invisible sink:
+
+| Process | Pre-tracing logging |
+|---------+---------------------|
+| Emacs | =code-agent--debug-log= → =*Messages*= (only when debug=t) |
+| Workspace bridge (Python) | =logging.warning= → stderr (invisible from Emacs) |
+| Claude CLI | Internal hooks, no user access |
+
+OpenTelemetry-native tracing fixes that by giving every execution a
+single =trace-id= that follows the work across all three processes.
+
+** ID Landscape
+
+Before tracing, the system already had ten distinct ID namespaces, none
+correlated with each other:
+
+| ID | Scope | Created by | Example |
+|----+-------+------------+---------|
+| =session-key= | Emacs session | =code-agent--make-session-key= | =/path/file.org::sdd-20260212-135618= |
+| =request-id= | Single query | =code-agent--generate-request-id= | =req-42-1709299815= |
+| =sdd-session-id= | SDD story | org property | =sdd-20260212-135618= |
+| =CUSTOM_ID= | Org heading | =generate-instruction-custom-id= | =mega-code-dev-instr-5-sdd-...-141402= |
+| =block-id= | Block history | =record-block-execution= | =block-135618-141402-143025= |
+| =sdk-uuid= | Claude CLI | CLI =system= message | =abc123-uuid= |
+| =terminal-id= | Terminal tab | terminal CLI launch | =MOCK-UUID-1234-5678= |
+| =query-id= | Response section | =generate-query-id= | =20260204-103025-a7f3= |
+| =control-req-id= | Permission round-trip | CLI =control_request= | (integer from CLI) |
+| =cli-session= | CLI resume | org property | UUID from Claude CLI |
+
+The =trace-id= is the eleventh ID, but unlike the others it carries
+*every* span from every process for one execution. Span attributes embed
+the relevant scoped IDs (=session.id=, =custom.id=, =sdd.session.id=) so
+that a Phoenix query can pivot from any pre-existing handle into the
+trace tree.
+
+** Architecture
+
+Three processes, one shared trace:
+
+#+begin_example
+┌──────────────────────────────────────────────────┐
+│ Emacs                                            │
+│   (code-agent-with-trace "execute-ai-block"    │
+│       '(:session-id "sdd-..." :custom-id "..."   │
+│         :oi-kind "CHAIN")                        │
+│     (code-agent-with-span "register-query" ... │
+│       ...))                                      │
+│                                                  │
+│  Macros POST span/start, span/end via url.el to  │
+│  the local OTel bridge (no external Emacs deps). │
+└─────────────────┬────────────────────────────────┘
+                  │ HTTP POST localhost:7331
+                  ▼
+┌──────────────────────────────────────────────────┐
+│ python/claude_agent/otel_bridge.py (Flask :7331) │
+│                                                  │
+│   POST /otel/span/start — create OTel span       │
+│   POST /otel/span/end   — end span, auto-export  │
+│   GET  /otel/status     — health check           │
+│                                                  │
+│   SimpleSpanProcessor auto-exports on span.end() │
+└─────────────────┬────────────────────────────────┘
+                  │ OTLP HTTP exporter
+                  ▼
+┌──────────────────────────────────────────────────┐
+│ Arize Phoenix (default local collector)          │
+│   OTLP HTTP receiver on :6006/v1/traces          │
+│   Web UI at http://localhost:6006                │
+│   SQLite storage at ~/.phoenix/                  │
+│   MCP server for AI agent trace queries          │
+└──────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────┐
+│ python/claude_agent/workspace_bridge.py          │
+│   Uses opentelemetry-sdk directly (same exporter │
+│   via otel_setup.py). Reads trace-id from a      │
+│   .trace-context file written by Emacs and joins │
+│   the same trace tree.                           │
+└─────────────────┬────────────────────────────────┘
+                  │ same OTLP HTTP exporter
+                  ▼
+             (same Phoenix instance)
+#+end_example
+
+Component roles, including which library each piece reuses:
+
+| Component | Role | Reused library |
+|-----------+------+----------------|
+| Emacs macros | Lispy span creation, ID generation, context propagation | built-in =url= |
+| =otel_bridge.py= | HTTP → OTel span bridge (Flask, ~120 lines) | =opentelemetry-sdk=, =flask= |
+| =workspace_bridge.py= | Python-side spans for hook events | =opentelemetry-sdk= |
+| Arize Phoenix | Collector + UI + MCP query server | =arize-phoenix= |
+| =.trace-context= file | Cross-process trace-id propagation | W3C Trace Context format |
+
+** Shipped Wrapper
+
+The root span is created by =code-agent-with-trace "execute-ai-block"=
+wrapping =code-agent-org-execute= (see =code-agent-org.org=). Every
+=C-c C-c= produces one root span with child spans for =cmux-execute=,
+=send-text=, permission events, response handling, etc. The trace context
+is stored on the session under =:trace-ctx= so async cmux-bridge callbacks
+attach as children of the same root.
+
+** Two Execution Flows
+
+The same single-root invariant has two shapes depending on who starts the
+trace.
+
+*** Flow A — Emacs-initiated (=C-c C-c=)
+
+Emacs is the orchestrator. =with-trace= creates the root and writes the
+traceparent file. Python sdd_bridge reads it and creates child spans;
+when Python calls back into Emacs via MCP, the wrapped Elisp passes the
+Python span context, so the Emacs callbacks become grandchildren.
+
+#+begin_example
+execute-ai-block (ROOT, SERVER, CHAIN)              ← Emacs
+├── execute-core (INTERNAL, CHAIN)                   ← Emacs
+│   ├── build-system-prompt (INTERNAL, CHAIN)        ← Emacs
+│   ├── dispatch-query (INTERNAL, CHAIN)             ← Emacs
+│   │   └── send-request (CLIENT, CHAIN)             ← Emacs (spawns CLI)
+│   │       └── start-process (CLIENT, CHAIN)        ← Emacs
+│   └── ...
+├── sdd-bridge-prompt (CONSUMER, TOOL)               ← Python (reads traceparent → child)
+│   └── handle-prompt (INTERNAL, TOOL)               ← Python
+│       └── [MCP → Emacs: save-cli-session]          ← Emacs (child of Python span)
+├── sdd-bridge-response (CONSUMER, TOOL)             ← Python
+│   ├── extract-full-response (INTERNAL, TOOL)       ← Python
+│   └── handle-response (INTERNAL, TOOL)             ← Python
+│       └── [MCP → Emacs: insert-response]           ← Emacs (child of Python span)
+├── sdd-bridge-permission (CONSUMER, TOOL)           ← Python
+│   └── handle-permission (INTERNAL, TOOL)           ← Python
+│       └── [MCP → Emacs: notify-permission]         ← Emacs (child of Python span)
+└── handle-complete (INTERNAL, CHAIN)                ← Emacs
+    └── auto-title-complete (INTERNAL, CHAIN)        ← Emacs (async, captured ctx)
+#+end_example
+
+*** Flow B — Claude Code direct (terminal)
+
+Python sdd_bridge is the entry point. The first hook event (=prompt=) finds
+no existing traceparent, so it creates the root span itself and writes the
+traceparent file. Subsequent Python events and Emacs MCP callbacks all
+become children of that Python root.
+
+#+begin_example
+sdd-bridge-prompt (ROOT, SERVER, CHAIN)              ← Python (no traceparent → creates root, WRITES traceparent)
+├── handle-prompt (INTERNAL, TOOL)                   ← Python
+│   └── [MCP → Emacs: save-cli-session]              ← Emacs (child of Python span)
+│       └── sdd-insert-prompt (INTERNAL, CHAIN)      ← Emacs
+├── sdd-bridge-tool (CONSUMER, TOOL)                 ← Python (reads traceparent → child)
+│   └── handle-tool (INTERNAL, TOOL)                 ← Python
+├── sdd-bridge-response (CONSUMER, TOOL)             ← Python
+│   ├── extract-full-response (INTERNAL, TOOL)       ← Python
+│   └── handle-response (INTERNAL, TOOL)             ← Python
+│       └── [MCP → Emacs: insert-response]           ← Emacs (child of Python span)
+│           └── sdd-insert-response (INTERNAL, CHAIN)← Emacs
+├── sdd-bridge-permission (CONSUMER, TOOL)           ← Python
+│   └── handle-permission (INTERNAL, TOOL)           ← Python
+│       └── [MCP → Emacs: notify-permission]         ← Emacs (child of Python span)
+└── sdd-bridge-permission-clear (CONSUMER, TOOL)     ← Python
+    └── handle-permission-clear (INTERNAL, TOOL)     ← Python
+#+end_example
+
+The =OI Kind Convention= subsection under =* Macros= explains which span
+kind to pair with which role.
+
+* Dependencies
+
+#+BEGIN_SRC elisp
+;;; code-agent-trace.el --- OpenTelemetry tracing for code-agent -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024-2025 Jingtao Xu
+
+;;; Commentary:
+
+;; Provides OpenTelemetry tracing primitives for the code-agent SDK.
+;; Spans are sent to a local Flask bridge via async HTTP POST.
+;; No external Emacs packages required — uses built-in url-retrieve.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'url)
+(require 'json)
+#+END_SRC
+
+* Variables and Customization
+
+#+BEGIN_SRC elisp
+(defvar code-agent-trace-enabled t
+  "When non-nil, tracing is active and spans are sent to the bridge.")
+
+(defvar code-agent-trace--current-context nil
+  "Dynamic binding for the current trace context.
+A cons cell (TRACE-ID . SPAN-ID) representing the active span.")
+
+(defcustom code-agent-trace-bridge-url "http://localhost:7331/"
+  "Base URL of the OTel bridge Flask server."
+  :type 'string
+  :group 'code-agent)
+
+(defcustom code-agent-trace-phoenix-url "http://localhost:6006"
+  "URL of the Arize Phoenix collector UI."
+  :type 'string
+  :group 'code-agent)
+
+(defcustom code-agent-trace-context-dir
+  "/tmp/code-agent-status/"
+  "Directory where traceparent context files are written.
+Must match STATUS_DIR in Python otel_setup.py for cross-process propagation."
+  :type 'directory
+  :group 'code-agent)
+#+END_SRC
+
+The downstream exporter is *not* configured here — it is configured by the
+Python =otel_bridge.py= via the =CLAUDE_OTEL_ENDPOINT= environment variable.
+Both =otel_bridge.py= and =workspace_bridge.py= read it from =otel_setup.py= so
+they share one collector destination:
+
+| Scenario | =CLAUDE_OTEL_ENDPOINT= | What happens |
+|----------+------------------------+--------------|
+| Default (Phoenix local) | =http://localhost:6006/v1/traces= | Spans go to local Phoenix |
+| Remote collector | e.g. =https://otel.example.com/v1/traces= | Spans go to a remote OTLP receiver |
+| Phoenix not running | (default, but nothing listening) | Export fails silently; SimpleSpanProcessor drops the span; the application is unaffected |
+
+* ID Generation
+
+#+BEGIN_SRC elisp
+(defun code-agent-trace--generate-trace-id ()
+  "Generate a 32-character hex trace ID."
+  (format "%08x%08x%08x%08x"
+          (random (expt 2 32))
+          (random (expt 2 32))
+          (random (expt 2 32))
+          (random (expt 2 32))))
+
+(defun code-agent-trace--generate-span-id ()
+  "Generate a 16-character hex span ID."
+  (format "%08x%08x"
+          (random (expt 2 32))
+          (random (expt 2 32))))
+#+END_SRC
+
+* Context
+
+#+BEGIN_SRC elisp
+(defun code-agent-trace-context ()
+  "Capture and return the current trace context as (TRACE-ID . SPAN-ID).
+Use this to pass context across async boundaries."
+  (when code-agent-trace--current-context
+    (cons (car code-agent-trace--current-context)
+          (cdr code-agent-trace--current-context))))
+#+END_SRC
+
+* HTTP Communication
+
+The Emacs side talks to =otel_bridge.py= over a tiny three-endpoint HTTP
+contract. The bridge registers each span in an in-memory map keyed by the
+hex span-id Emacs supplies, so =span/end= only needs the id back.
+
+| Method | Path | Request body | Response |
+|--------+------+--------------+----------|
+| =POST= | =/otel/span/start= | ={trace_id, span_id, parent_span_id?, name, attrs?, start_time_ns}= | ={"status":"ok"}= |
+| =POST= | =/otel/span/end= | ={span_id, status, error_message?, end_time_ns}= | ={"status":"ok"}= |
+| =GET= | =/otel/status= | — | ={"status":"ok"}= |
+
+=span/start= must be synchronous so the span is registered before any
+=span/end= can race ahead — without that ordering the bridge returns 404.
+=span/end= is fire-and-forget; once a span exists, ending it is racy-safe.
+Both calls swallow errors so tracing failures never break the user's
+workflow.
+
+#+BEGIN_SRC elisp
+(defun code-agent-trace--request (path data)
+  "Send HTTP POST to OTel bridge at PATH with DATA.
+Auto-starts the bridge if needed.
+span/start is synchronous (ensures bridge registers the span before body runs).
+span/end is async (fire-and-forget, no ordering risk since span already exists).
+Errors are silently ignored — tracing must never break user workflows."
+  (when code-agent-trace-enabled
+    (code-agent-trace--ensure-bridge)
+    (let ((url-request-method "POST")
+          (url-request-extra-headers '(("Content-Type" . "application/json")))
+          (url-request-data (encode-coding-string (json-serialize data) 'utf-8 t))
+          (url (concat code-agent-trace-bridge-url "otel/" path)))
+      (if (string= path "span/start")
+          ;; Synchronous: span must be registered before body runs,
+          ;; otherwise span/end can arrive first (async race) → 404
+          (condition-case nil
+              (let ((buf (url-retrieve-synchronously url t nil 2)))
+                (when (buffer-live-p buf) (kill-buffer buf)))
+            (error nil))
+        ;; Async for span/end and other paths
+        (url-retrieve url
+         (lambda (_status) (kill-buffer (current-buffer)))
+         nil t)))))
+
+(defun code-agent-trace-connect ()
+  "Check connectivity to the OTel bridge (synchronous health check)."
+  (interactive)
+  (let ((url-request-method "GET"))
+    (with-current-buffer
+        (url-retrieve-synchronously
+         (concat code-agent-trace-bridge-url "health"))
+      (goto-char (point-min))
+      (if (re-search-forward "^HTTP/.* 200" nil t)
+          (message "OTel bridge is reachable at %s" code-agent-trace-bridge-url)
+        (message "OTel bridge NOT reachable at %s" code-agent-trace-bridge-url))
+      (kill-buffer (current-buffer)))))
+#+END_SRC
+
+* Span Data Builders
+
+#+BEGIN_SRC elisp
+(defun code-agent-trace--build-start-data (base-alist attrs default-kind)
+  "Build span/start request data from BASE-ALIST and ATTRS plist.
+DEFAULT-KIND is used when :span-kind is not in ATTRS.
+Extracts :span-kind, :oi-kind, :input from ATTRS."
+  (let ((data (append base-alist
+                      (list (cons 'kind (or (plist-get attrs :span-kind) default-kind))
+                            (cons 'attrs attrs)))))
+    (when (plist-get attrs :oi-kind)
+      (setq data (append data (list (cons 'openinference_kind (plist-get attrs :oi-kind))))))
+    (when (plist-get attrs :input)
+      (setq data (append data (list (cons 'input (plist-get attrs :input))))))
+    data))
+
+(defun code-agent-trace--build-end-data (span-id status error-msg attrs &optional result)
+  "Build span/end request data.
+SPAN-ID identifies the span. STATUS is \"ok\" or \"error\".
+ERROR-MSG is the error message (when status is \"error\").
+ATTRS plist may contain :output for Phoenix display.
+RESULT is the body's return value, used as output when :output is not set."
+  (let ((data (list (cons 'span_id span-id)
+                    (cons 'status status)
+                    (cons 'end_time_ns (truncate (* (float-time) 1e9))))))
+    (when error-msg
+      (setq data (append data (list (cons 'error_message error-msg)))))
+    (let ((output (or (plist-get attrs :output)
+                      (and (stringp result) result))))
+      (when output
+        (setq data (append data (list (cons 'output output))))))
+    data))
+#+END_SRC
+
+* Macros
+
+** OI Kind Convention
+
+Both =with-trace= and =with-span= accept two orthogonal kinds in =attrs=:
+the OTel =:span-kind= (=SERVER= / =CLIENT= / =INTERNAL= / =CONSUMER=) and the
+OpenInference =:oi-kind= (=CHAIN= / =TOOL=) consumed by Phoenix to render
+the trace UI. Use this table to decide which pair to pass.
+
+| Side   | Role                       | =:span-kind= | =:oi-kind= | Rationale |
+|--------+----------------------------+--------------+------------+-----------|
+| Emacs  | Root orchestrator          | =SERVER=     | =CHAIN=    | Entry point, orchestrates the AI workflow |
+| Emacs  | Internal processing        | =INTERNAL=   | =CHAIN=    | Sub-steps within Emacs orchestration |
+| Emacs  | Calls CLI / external proc  | =CLIENT=     | =CHAIN=    | Outbound call to an external process |
+| Python | Root in direct mode        | =SERVER=     | =CHAIN=    | First hook event when no Emacs parent |
+| Python | Hook event dispatched from Emacs | =CONSUMER= | =TOOL=  | Processing work dispatched from Emacs |
+| Python | Internal processing        | =INTERNAL=   | =TOOL=     | Sub-work within a hook handler |
+
+The mnemonic: Emacs spans are =CHAIN= (they orchestrate); Python spans are
+=TOOL= (they execute) — *except* when Python is itself the root (Flow B),
+in which case the root span is =CHAIN= because it is now the orchestrator.
+
+** Root Trace Span
+
+#+BEGIN_SRC elisp
+(defmacro code-agent-with-trace (name attrs &rest body)
+  "Execute BODY within a new trace root span named NAME.
+ATTRS is a plist of span attributes. Creates a new trace-id.
+Special attrs keys:
+  :span-kind   - OTel SpanKind (default \"SERVER\")
+  :oi-kind     - OpenInference kind for Phoenix (e.g. \"CHAIN\", \"TOOL\")
+  :input       - Input value shown in Phoenix UI"
+  (declare (indent 2) (debug t))
+  (let ((trace-id-sym (make-symbol "trace-id"))
+        (span-id-sym (make-symbol "span-id"))
+        (attrs-sym (make-symbol "attrs"))
+        (result-sym (make-symbol "result"))
+        (start-sym (make-symbol "start-ns")))
+    `(if (not code-agent-trace-enabled)
+         (progn ,@body)
+       (let* ((,attrs-sym ,attrs)
+              (,trace-id-sym (code-agent-trace--generate-trace-id))
+              (,span-id-sym (code-agent-trace--generate-span-id))
+              (,start-sym (truncate (* (float-time) 1e9)))
+              (code-agent-trace--current-context
+               (cons ,trace-id-sym ,span-id-sym)))
+         (code-agent-trace--write-context
+          ,trace-id-sym ,span-id-sym
+          (plist-get ,attrs-sym :session-id)
+          (plist-get ,attrs-sym :custom-id))
+         (code-agent-trace--request
+          "span/start"
+          (code-agent-trace--build-start-data
+           (list (cons 'trace_id ,trace-id-sym)
+                 (cons 'span_id ,span-id-sym)
+                 (cons 'name ,name)
+                 (cons 'start_time_ns ,start-sym))
+           ,attrs-sym "SERVER"))
+         (let ((,result-sym nil)
+               (trace-err-flag nil))
+           (unwind-protect
+               (condition-case err
+                   (setq ,result-sym (progn ,@body))
+                 (error
+                  (setq trace-err-flag err)
+                  (signal (car err) (cdr err))))
+             ;; Always send span/end, even on non-local exit (cl-return-from, throw)
+             (code-agent-trace--request
+              "span/end"
+              (code-agent-trace--build-end-data
+               ,span-id-sym
+               (if trace-err-flag "error" "ok")
+               (when trace-err-flag (error-message-string trace-err-flag))
+               ,attrs-sym ,result-sym)))
+           ,result-sym)))))
+#+END_SRC
+
+** Child Span
+
+#+BEGIN_SRC elisp
+(defmacro code-agent-with-span (name attrs &optional trace-ctx &rest body)
+  "Execute BODY within a child span under the current trace.
+NAME is the span name, ATTRS is a plist of attributes.
+Special attrs keys:
+  :span-kind   - OTel SpanKind (default \"INTERNAL\")
+  :oi-kind     - OpenInference kind for Phoenix (e.g. \"CHAIN\", \"TOOL\")
+  :input       - Input value shown in Phoenix UI
+  :output      - Output value shown in Phoenix UI (set before body runs)
+TRACE-CTX is an optional explicit context (TRACE-ID . SPAN-ID) for async use.
+If nil, uses the dynamically bound `code-agent-trace--current-context'.
+If no context exists at all, BODY runs untraced (no span created).
+Use `code-agent-with-trace' to create explicit root spans."
+  (declare (indent 2) (debug t))
+  (let ((span-id-sym (make-symbol "span-id"))
+        (ctx-sym (make-symbol "ctx"))
+        (attrs-sym (make-symbol "attrs"))
+        (result-sym (make-symbol "result"))
+        (start-sym (make-symbol "start-ns")))
+    `(if (not code-agent-trace-enabled)
+         (progn ,@body)
+       (let ((,ctx-sym (or ,trace-ctx code-agent-trace--current-context)))
+         (if (not ,ctx-sym)
+             ;; No trace context — run body untraced (avoids noisy root spans
+             ;; from timers, MCP callbacks, and other async code paths)
+             (progn ,@body)
+           (let* ((,attrs-sym ,attrs)
+                  (,span-id-sym (code-agent-trace--generate-span-id))
+                  (,start-sym (truncate (* (float-time) 1e9)))
+                  (code-agent-trace--current-context
+                   (cons (car ,ctx-sym) ,span-id-sym)))
+             (code-agent-trace--request
+              "span/start"
+              (code-agent-trace--build-start-data
+               (list (cons 'trace_id (car ,ctx-sym))
+                     (cons 'span_id ,span-id-sym)
+                     (cons 'parent_span_id (cdr ,ctx-sym))
+                     (cons 'name ,name)
+                     (cons 'start_time_ns ,start-sym))
+               ,attrs-sym "INTERNAL"))
+             (let ((,result-sym nil)
+                   (span-err-flag nil))
+               (unwind-protect
+                   (condition-case err
+                       (setq ,result-sym (progn ,@body))
+                     (error
+                      (setq span-err-flag err)
+                      (signal (car err) (cdr err))))
+                 (code-agent-trace--request
+                  "span/end"
+                  (code-agent-trace--build-end-data
+                   ,span-id-sym
+                   (if span-err-flag "error" "ok")
+                   (when span-err-flag (error-message-string span-err-flag))
+                   ,attrs-sym ,result-sym)))
+               ,result-sym)))))))
+#+END_SRC
+
+* Cross-Process Context
+
+Context propagation is *bidirectional*: Emacs → Python via the traceparent
+file (W3C format) on disk, and Python → Emacs via trace context passed
+inside the wrapped Elisp of every =mcp.eval_elisp()= call. The disk file is
+what lets sdd_bridge attach Python spans to the Emacs root; the wrapped
+Elisp is what lets MCP callbacks attach to whichever Python span triggered
+them.
+
+The on-disk format is the standard W3C =traceparent= header serialized to
+a file:
+
+#+begin_example
+traceparent: 00-{trace-id}-{span-id}-{flags}
+
+trace-id:  32-char lowercase hex (16 bytes)
+span-id:   16-char lowercase hex (8 bytes)
+flags:     "01" = sampled
+
+Example: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+#+end_example
+
+The Python side wraps Elisp so it sets =code-agent-trace--current-context=
+before running the body:
+
+#+begin_example
+(let ((code-agent-trace--current-context (cons "<trace-id>" "<span-id>")))
+  <original elisp>)
+#+end_example
+
+That means every existing =code-agent-with-span= call inside an MCP
+handler picks up the Python span as its parent automatically — no per-handler
+plumbing is needed.
+
+#+begin_example
+Flow A (Emacs-initiated):
+
+  Emacs                          Python sdd_bridge
+  ─────                          ─────────────────
+  with-trace creates root
+  │
+  ├─ writes traceparent file ──→ reads traceparent
+  │                              │
+  │                              ├─ creates child span
+  │                              │
+  │                              ├─ MCP call ──→ Emacs MCP handler
+  │                              │   (passes traceparent   │
+  │                              │    in wrapped elisp)    ├─ with-span (child of Python)
+  │                              │                         │
+  │                              │               ←─────────┘
+  │                              │
+  └──────────────────────────────┘
+
+
+Flow B (Claude Code direct):
+
+  Python sdd_bridge              Emacs
+  ─────────────────              ─────
+  prompt event: no traceparent
+  │
+  ├─ creates ROOT span
+  │
+  ├─ writes traceparent file
+  │
+  ├─ MCP call ──────────────────→ Emacs MCP handler
+  │   (passes traceparent          │
+  │    in wrapped elisp)           ├─ with-span (child of Python)
+  │                                │
+  │               ←────────────────┘
+  │
+  response event: reads traceparent
+  │
+  ├─ creates child span
+  │
+  ├─ MCP call ──────────────────→ Emacs MCP handler
+  │   (passes traceparent          │
+  │    in wrapped elisp)           ├─ with-span (child of Python)
+  │                                │
+  └───────────────←────────────────┘
+#+end_example
+
+A single traceparent write fans out to every ancestor =CLAUDE_SESSION_ID=
+because downstream tools may key on any of them.
+
+#+BEGIN_SRC elisp
+(defun code-agent-trace--collect-ancestor-session-ids ()
+  "Collect all distinct CLAUDE_SESSION_ID values up the heading tree.
+Returns a list of session-id strings, from current heading upward."
+  (ignore-errors
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let ((ids '())
+              (seen (make-hash-table :test 'equal)))
+          ;; First: current heading's own property (no inheritance)
+          (condition-case nil
+              (progn
+                (org-back-to-heading t)
+                (let ((id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+                  (when (and id (not (gethash id seen)))
+                    (puthash id t seen)
+                    (push id ids))))
+            (error nil))
+          ;; Walk up parent headings
+          (condition-case nil
+              (while (org-up-heading-safe)
+                (let ((id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+                  (when (and id (not (gethash id seen)))
+                    (puthash id t seen)
+                    (push id ids))))
+            (error nil))
+          ;; Also check file-level #+PROPERTY
+          (goto-char (point-min))
+          (let ((file-id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
+            (when (and file-id (not (gethash file-id seen)))
+              (push file-id ids)))
+          (nreverse ids))))))
+
+(defun code-agent-trace--write-context (trace-id span-id &optional session-id custom-id)
+  "Write W3C traceparent file for cross-process propagation.
+TRACE-ID and SPAN-ID form the traceparent header value.
+Writes to ALL ancestor CLAUDE_SESSION_ID keys so that Python hooks
+(which use the terminal's WORKSPACE_SESSION_ID) can always find the context."
+  (when code-agent-trace-enabled
+    (let ((dir code-agent-trace-context-dir))
+      (unless (file-directory-p dir)
+        (make-directory dir t))
+      (let ((traceparent (format "00-%s-%s-01" trace-id span-id)))
+        ;; Write per-session file
+        (when session-id
+          (with-temp-file (expand-file-name
+                           (concat session-id ".trace-context") dir)
+            (insert traceparent)))
+        ;; Write per-block file for custom-id based trace lookup
+        (when custom-id
+          (with-temp-file (expand-file-name
+                           (concat custom-id ".trace-context") dir)
+            (insert traceparent)))
+        ;; Write to ALL ancestor session IDs for cross-process correlation
+        ;; This ensures the terminal's WORKSPACE_SESSION_ID (from any ancestor heading)
+        ;; has a matching traceparent file
+        (dolist (ancestor-id (code-agent-trace--collect-ancestor-session-ids))
+          (unless (equal ancestor-id session-id)  ; avoid duplicate write
+            (with-temp-file (expand-file-name
+                             (concat ancestor-id ".trace-context") dir)
+              (insert traceparent))))))))
+#+END_SRC
+
+* Server Lifecycle
+
+** Service Class
+
+Two external processes need the same "auto-start + stop + alive?"
+contract: the OTel bridge and Phoenix itself.  Promoting the pattern
+to a =cl-defstruct= (per
+the imported `oop-smalltalk-protocols` rule) replaces four free
+functions and two pairs of =defvar= process handles with a single
+class carrying name, buffer, command, and current process, plus two
+generics for the lifecycle verbs.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (code-agent-trace-service
+               (:constructor code-agent-trace-service--create)
+               (:copier nil))
+  "A managed Python subprocess providing tracing infrastructure.
+Two instances exist as module-level singletons: the OTel bridge and
+the Phoenix collector.  The class captures the shape they share so
+the start/stop verbs can be defined once."
+  (name nil
+        :documentation "Short name — surfaces in `start-process' and user-visible messages.")
+  (buffer-name nil
+               :documentation "Name of the buffer that receives stdout/stderr.")
+  (command nil
+           :documentation "List passed to `start-process' after name + buffer-name.")
+  (process nil
+           :documentation "The running process object, or nil when stopped."))
+
+(defun code-agent-trace-service-ensure (service cwd)
+  "Ensure SERVICE is running, starting it in CWD if needed.
+Returns non-nil on success, nil on failure (silently logged)."
+  (let ((proc (code-agent-trace-service-process service)))
+    (if (and proc (process-live-p proc))
+        t
+      (condition-case err
+          (let ((default-directory cwd))
+            (setf (code-agent-trace-service-process service)
+                  (apply #'start-process
+                         (code-agent-trace-service-name service)
+                         (code-agent-trace-service-buffer-name service)
+                         (code-agent-trace-service-command service)))
+            t)
+        (error
+         (message "%s failed to start: %s"
+                  (code-agent-trace-service-name service)
+                  (error-message-string err))
+         nil)))))
+
+(defun code-agent-trace-service-stop (service)
+  "Kill SERVICE's process if alive; clear the slot either way."
+  (let ((proc (code-agent-trace-service-process service)))
+    (when (and proc (process-live-p proc))
+      (kill-process proc)))
+  (setf (code-agent-trace-service-process service) nil))
+#+END_SRC
+
+** Singletons + Path Helper
+
+The two services are module-level singletons — there is ever only
+one bridge and one Phoenix per Emacs.  =code-agent-trace--python-dir=
+is extracted because both singletons need the same CWD to find the
+Python package.
+
+#+BEGIN_SRC elisp
+(defun code-agent-trace--python-dir ()
+  "Return the python/ directory under the code-agent project root.
+Uses `claude-code-directory' (set at package load time) as primary
+source; falls back to locating this file on disk."
+  (expand-file-name "python" (or (bound-and-true-p claude-code-directory)
+                                 (file-name-directory
+                                  (or load-file-name
+                                      (locate-library "code-agent-trace")
+                                      (car (cl-find-if
+                                            (lambda (entry)
+                                              (member '(provide . code-agent-trace)
+                                                      (cdr entry)))
+                                            load-history))
+                                      default-directory)))))
+
+(defvar code-agent-trace--bridge-service
+  (code-agent-trace-service--create
+   :name "otel-bridge"
+   :buffer-name "*otel-bridge*"
+   :command '("uv" "run"
+              "python" "-m" "claude_agent.otel_bridge"))
+  "Singleton controlling the OTel bridge Flask server.
+
+Previously launched via `uv run --extra tracing'.  The `tracing'
+optional-dependencies group was promoted to required deps in
+commit c6a1297, so passing `--extra tracing' now fails with
+`Extra `tracing' is not defined in the project's
+optional-dependencies table' and the bridge never starts.")
+
+(defvar code-agent-trace--phoenix-service
+  (code-agent-trace-service--create
+   :name "phoenix"
+   :buffer-name "*phoenix*"
+   :command '("uv" "run" "--extra" "phoenix"
+              "python" "-m" "phoenix.server.main" "serve"))
+  "Singleton controlling the Phoenix collector process.")
+#+END_SRC
+
+** Thin Wrappers
+
+The module's published API is procedural (auto-start here, stop
+there) — the wrappers below dispatch into the singletons so external
+callers need no awareness of the class shape.
+
+#+BEGIN_SRC elisp
+(defun code-agent-trace--ensure-bridge ()
+  "Ensure the OTel bridge is running (respects `code-agent-trace-enabled')."
+  (when code-agent-trace-enabled
+    (code-agent-trace-service-ensure
+     code-agent-trace--bridge-service
+     (code-agent-trace--python-dir))))
+
+(defun code-agent-trace--ensure-phoenix ()
+  "Ensure the Phoenix collector is running."
+  (code-agent-trace-service-ensure
+   code-agent-trace--phoenix-service
+   (code-agent-trace--python-dir)))
+
+(defun code-agent-trace-stop-bridge ()
+  "Stop the OTel bridge server."
+  (interactive)
+  (code-agent-trace-service-stop code-agent-trace--bridge-service))
+
+(defun code-agent-trace-stop-phoenix ()
+  "Stop the Phoenix collector."
+  (interactive)
+  (code-agent-trace-service-stop code-agent-trace--phoenix-service))
+
+(defun code-agent-trace--wait-for-url (url callback &optional max-retries)
+  "Poll URL until it returns HTTP 200, then call CALLBACK.
+Retries up to MAX-RETRIES times (default 30) with 1-second intervals.
+On timeout, reports error via `message'.
+Uses named functions with timer args to avoid closure issues."
+  (let ((timer (timer-create)))
+    (timer-set-time timer (current-time) 1)
+    (timer-set-function
+     timer
+     #'code-agent-trace--wait-for-url-tick
+     (list timer url callback (or max-retries 30)))
+    (timer-activate timer)))
+
+(defun code-agent-trace--wait-for-url-tick (timer url callback retries-left)
+  "Timer tick for `code-agent-trace--wait-for-url'.
+TIMER is the timer object. URL is polled. CALLBACK called on success.
+RETRIES-LEFT counts remaining attempts."
+  (if (<= retries-left 0)
+      (progn
+        (cancel-timer timer)
+        (message "Timed out waiting for %s" url))
+    ;; Update retries for next tick
+    (timer-set-function timer #'code-agent-trace--wait-for-url-tick
+                        (list timer url callback (1- retries-left)))
+    (condition-case nil
+        (let ((url-request-method "GET"))
+          (url-retrieve
+           url
+           (apply-partially #'code-agent-trace--wait-for-url-handler timer callback)
+           nil t))
+      (error nil))))
+
+(defun code-agent-trace--wait-for-url-handler (timer callback status)
+  "Handle HTTP response for URL readiness check.
+TIMER is cancelled on success. CALLBACK is called on success.
+STATUS is the url-retrieve status plist."
+  (if (plist-get status :error)
+      (kill-buffer (current-buffer))
+    (cancel-timer timer)
+    (kill-buffer (current-buffer))
+    (funcall callback)))
+
+(defun code-agent-trace-open-phoenix ()
+  "Open Phoenix UI in browser. Auto-starts Phoenix and bridge if needed.
+Waits for Phoenix to be ready before opening the browser."
+  (interactive)
+  (code-agent-trace--ensure-phoenix)
+  (code-agent-trace--ensure-bridge)
+  (message "Starting trace services...")
+  (code-agent-trace--wait-for-url
+   (concat code-agent-trace-phoenix-url "/")
+   (lambda ()
+     (message "Phoenix is ready.")
+     (browse-url code-agent-trace-phoenix-url))
+   60))
+#+END_SRC
+
+** External Setup
+
+The Service Class above only manages the *processes*. The Python deps and
+the Phoenix MCP server need a one-time install before any of this works:
+
+#+begin_src shell
+pip install arize-phoenix opentelemetry-sdk \
+            opentelemetry-exporter-otlp-proto-http
+#+end_src
+
+Phoenix exposes three things on its default port:
+
+| Endpoint | Purpose |
+|----------+---------|
+| =http://localhost:6006= | Web UI — trace waterfall, span details, search |
+| =http://localhost:6006/v1/traces= | OTLP HTTP receiver (this is what =CLAUDE_OTEL_ENDPOINT= points at) |
+| gRPC =:4317= | OTLP gRPC receiver (unused by this project) |
+
+Storage is SQLite under =~/.phoenix/= and persists across restarts.
+
+Phoenix also ships a separate MCP server for AI agent trace queries —
+register it in =~/.claude/mcp.json= so an agent can ask Phoenix questions
+like "show me all error spans for session sdd-..." directly:
+
+#+begin_src json
+{
+  "mcpServers": {
+    "phoenix": {
+      "command": "python",
+      "args": ["-m", "phoenix.server.mcp"]
+    }
+  }
+}
+#+end_src
+
+* Verifying Trace Trees
+
+After implementing or debugging the single-root invariant, the cheapest
+check is to query Phoenix directly and look at parent IDs:
+
+#+begin_src shell
+# After executing one AI block (Flow A or Flow B), list recent spans
+curl -s 'http://localhost:6006/v1/projects/emacs-agent/spans?limit=50' | \
+  python3 -c "import sys,json; d=json.load(sys.stdin)
+for s in d['data']:
+    parent = s.get('parent_id') or 'ROOT'
+    print(f\"{s['span_kind']:6} {s['name']:30} parent={parent}\")"
+#+end_src
+
+Expectations:
+
+- A single trace tree (all spans share one =trace_id=).
+- Exactly one row with =parent=ROOT=.
+- In Flow A, that ROOT is the Emacs =execute-ai-block= span and its kind
+  is =SERVER= / =CHAIN=.
+- In Flow B, that ROOT is the Python =sdd-bridge-prompt= span and its kind
+  is also =SERVER= / =CHAIN= (Python is the orchestrator in this mode).
+- Emacs spans carry =oi-kind=CHAIN=; Python spans carry =oi-kind=TOOL=
+  (except the Flow-B root, which is =CHAIN=).
+
+The =.claude/rules/e2e-trace-verification.md= rule has a fuller live-Emacs
+runbook (fixture file, =C-c C-c=, GraphQL query) for end-to-end debugging.
+
+** Programmatic Trace Verification — Future Design
+
+The curl + jq recipe above is fine for one-off debugging; turning the
+*same* checks into automated post-test assertions is the next step,
+*not yet built*. Anthropic's "Harness Design for Long-Running
+Application Development" essay frames the motivation: dedicated
+evaluators outperform self-evaluation, and an evaluator that uses
+trace data is using the real system, not a mock.
+
+The intended shape:
+
+- A reusable assertion library at =tests/e2e/trace-assertions.el=
+  wrapping the Phoenix GraphQL endpoint with the usual primitives
+  (query / recent-spans / spans-by-session / find-span / assert-parent-
+  child / assert-no-errors / assert-latency-within / assert-span-tree).
+
+- A *declarative tree spec* format so tests assert on tree shape, not
+  on individual span lookups:
+
+  #+begin_example
+  '(("execute-ai-block" :kind "SERVER"
+     :children (("cmux-ensure-session" :kind "INTERNAL")
+                ("cmux-execute" :kind "INTERNAL"
+                 :children (("cmux-send-text" :kind "INTERNAL"))))))
+  #+end_example
+
+- *Per-test assertions* added beneath each E2E behavioural test as a
+  =,*** Trace Assertions= subsection — a small =evalElisp= block sleeps
+  long enough for Phoenix ingestion, then makes targeted assertions
+  about the trace produced by the just-finished test.
+
+- A *standalone health check* (=make test-trace-health=) that queries
+  Phoenix for the last N traces and flags four anomaly classes
+  independent of any specific test: ERROR spans, orphan roots (no
+  children), orphan children (=parent_id= not in trace), and latency
+  outliers (> 60 s). The target exits non-zero on any anomaly so CI
+  can gate on it.
+
+Timing matters because Phoenix ingestion is async even when the
+exporter is =SimpleSpanProcessor=. Existing E2E tests use a 3 s sleep
+successfully; the evaluator should default to 5 s plus a one-retry
+fallback to absorb the long tail.
+
+Risks that would shape the implementation:
+
+- *Phoenix API churn* — pin the version and route every query through
+  one wrapper so an API change is a one-file patch.
+- *Timing flakiness* — the 5 s + retry-once budget; only escalate if
+  Phoenix gets significantly slower.
+- *Span-name coupling* — span names map 1:1 to functions, but a rename
+  silently breaks assertions. The declarative tree spec localises the
+  breakage to one fixture per test.
+
+* Open Questions
+
+Carried over from the original single-root-span design — none are
+blockers, but each is worth revisiting when the relevant pain shows up.
+
+1. *Traceparent file cleanup.* Files under =code-agent-trace-context-dir=
+   persist across sessions. A startup sweep or short-TTL cron job could
+   remove files older than ~24h. Today the dir just grows; not yet
+   measured as a real problem.
+
+2. *Wrap-with-trace for every MCP call?* The current strategy wraps
+   =mcp.eval_elisp()= with =_mcp_eval_with_trace()= only for handlers that
+   contain a =with-span= form. Wrapping every call would be safer but
+   adds latency to MCP traffic that does not need attribution.
+
+3. *Async response lifetime.* In Flow A, the Emacs root span currently
+   ends when =execute-ai-block= returns, but the response continues to
+   arrive asynchronously via Python hooks. The Python hooks /do/ attach
+   to the same trace (via traceparent file), but they fire after the
+   root span is closed — Phoenix shows this as a "ghost child" pattern.
+   Resolving it requires either keeping the root span open until
+   =handle-complete= fires, or marking the root span as a "trace anchor"
+   that allows post-close children.
+
+4. *Trace MCP server requests too?* =emacs-mcp-server.org= currently emits
+   no spans of its own — every =evalElisp= call is invisible to Phoenix
+   unless the elisp body itself uses =with-span=. Wrapping the MCP server
+   would give a uniform top-level view, but adds latency to every call
+   (and Emacs's main thread is the resource we are trying to protect).
+
+5. *Auto-start the bridge with Emacs?* Today =--ensure-bridge= fires lazily
+   when the first span is recorded. An Emacs-startup option would remove
+   the cold-start latency on the first AI-block of a session, at the cost
+   of always paying the bridge process cost.
+
+6. *=code-agent-trace-setup= one-shot installer?* A single command that
+   runs =pip install arize-phoenix=, writes the Phoenix MCP config into
+   =~/.claude/mcp.json=, and verifies =OTel ↔ Phoenix= connectivity would
+   shorten the first-time setup from a checklist to one =M-x=.
+
+* Package Footer
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-trace)
+;;; code-agent-trace.el ends here
+#+END_SRC

@@ -28,8 +28,8 @@
 
 (defun test-harness-v2-mock-options (scenario &rest args)
   "Create options using mock CLI v2 with explicit SCENARIO.
-ARGS are additional options passed to `claude-agent-options'."
-  (apply #'claude-agent-options
+ARGS are additional options passed to `code-agent-options'."
+  (apply #'code-agent-options
          :cli-path test-harness-mock-cli-v2-path
          :setting-sources test-claude-default-setting-sources
          :env (list (cons "MOCK_SCENARIO" scenario))
@@ -57,18 +57,18 @@ Verifies:
     ;; Install permission function AND keep binding active through wait-until.
     ;; The process filter fires asynchronously during accept-process-output,
     ;; so the dynamic binding must still be active when permission runs.
-    (let ((claude-agent-permission-functions
+    (let ((code-agent-permission-functions
            (list (lambda (tool-name _tool-input _context)
                    (setq permission-tool tool-name)
                    '(:behavior "allow")))))
-      (claude-agent-query
+      (code-agent-query
        "Read a file for me"
        :options (test-harness-v2-mock-options "permission-prompt")
        :session-key "test-ctrl-roundtrip"
        :on-token (lambda (text)
                    (push text tokens))
        :on-message (lambda (msg)
-                     (when (claude-agent-result-message-p msg)
+                     (when (code-agent-result-message-p msg)
                        (setq result-received msg)))
        :on-error (lambda (err)
                    (setq error-received err))
@@ -97,7 +97,7 @@ Verifies:
 ;;; ================================================================
 
 (ert-deftest test-harness-json-buffer-overflow-fires-error ()
-  "Buffer exceeding `claude-agent-max-json-buffer-size' triggers error callback.
+  "Buffer exceeding `code-agent-max-json-buffer-size' triggers error callback.
 The process filter should:
 1. Clear the json buffer
 2. Invoke the error callback with overflow message
@@ -105,8 +105,8 @@ The process filter should:
   :tags '(:unit :harness :protocol :overflow)
   (let ((error-received nil)
         (small-limit 200))  ; 200 bytes is tiny
-    (let ((claude-agent-max-json-buffer-size small-limit))
-      (let* ((state (claude-agent--make-process-state
+    (let ((code-agent-max-json-buffer-size small-limit))
+      (let* ((state (code-agent--make-process-state
                      :json-buffer ""
                      :ready t
                      :error-callback (lambda (err)
@@ -114,10 +114,10 @@ The process filter should:
              (process (start-process "test-overflow" nil "true")))
         (unwind-protect
             (progn
-              (process-put process 'claude-agent-state state)
+              (process-put process 'code-agent-state state)
               ;; Feed data that exceeds the limit via the process filter
               (let ((big-data (make-string (+ small-limit 50) ?x)))
-                (claude-agent--process-filter process big-data))
+                (code-agent--process-filter process big-data))
               ;; Error callback should have fired
               (should error-received)
               ;; Error should mention overflow
@@ -125,7 +125,7 @@ The process filter should:
               (should (string-match-p "overflow"
                                       (plist-get error-received :error)))
               ;; JSON buffer should be cleared after overflow
-              (should (equal "" (claude-agent--process-state-json-buffer state))))
+              (should (equal "" (code-agent--process-state-json-buffer state))))
           (when (process-live-p process)
             (delete-process process)))))))
 
@@ -134,25 +134,25 @@ The process filter should:
   :tags '(:unit :harness :protocol :overflow)
   (let ((error-received nil)
         (received-types '()))
-    (let ((claude-agent-max-json-buffer-size (* 10 1024)))  ; 10KB
-      (let* ((state (claude-agent--make-process-state
+    (let ((code-agent-max-json-buffer-size (* 10 1024)))  ; 10KB
+      (let* ((state (code-agent--make-process-state
                      :json-buffer ""
                      :ready t
                      :error-callback (lambda (err) (setq error-received err))))
              (process (start-process "test-no-overflow" nil "true")))
         (unwind-protect
             (progn
-              (process-put process 'claude-agent-state state)
+              (process-put process 'code-agent-state state)
               ;; Feed valid JSON under the limit
-              (cl-letf (((symbol-function 'claude-agent-handle-message)
+              (cl-letf (((symbol-function 'code-agent-handle-message)
                          (lambda (_type parsed _state)
                            (push (plist-get parsed :type) received-types)))
-                        ((symbol-function 'claude-agent--handle-control-request)
+                        ((symbol-function 'code-agent--handle-control-request)
                          #'ignore))
                 (let ((data (concat
                              (json-encode '(:type "system" :subtype "init")) "\n"
                              (json-encode '(:type "assistant" :message (:content "hi"))) "\n")))
-                  (claude-agent--process-filter process data)))
+                  (code-agent--process-filter process data)))
               ;; Messages should arrive
               (should (= 2 (length received-types)))
               ;; No error
@@ -169,19 +169,19 @@ The process filter should:
 The parser must handle Emacs multibyte strings without corruption."
   :tags '(:unit :harness :protocol :utf8)
   (let ((received-texts '()))
-    (let* ((state (claude-agent--make-process-state
+    (let* ((state (code-agent--make-process-state
                    :json-buffer ""
                    :ready t))
            (process (start-process "test-utf8" nil "true")))
       (unwind-protect
           (progn
-            (process-put process 'claude-agent-state state)
-            (cl-letf (((symbol-function 'claude-agent-handle-message)
+            (process-put process 'code-agent-state state)
+            (cl-letf (((symbol-function 'code-agent-handle-message)
                        (lambda (_type parsed _state)
                          (when-let* ((msg (plist-get parsed :message))
                                      (content (plist-get msg :content)))
                            (push content received-texts))))
-                      ((symbol-function 'claude-agent--handle-control-request)
+                      ((symbol-function 'code-agent--handle-control-request)
                        #'ignore))
               ;; Feed JSON with multi-byte characters
               (let ((data (concat
@@ -190,7 +190,7 @@ The parser must handle Emacs multibyte strings without corruption."
                                           :message (:content "你好世界 🌍"))) "\n"
                            (json-encode `(:type "assistant"
                                           :message (:content "日本語テスト"))) "\n")))
-                (claude-agent--process-filter process data)))
+                (code-agent--process-filter process data)))
             ;; Both CJK messages should arrive intact
             (should (= 2 (length received-texts)))
             (should (member "你好世界 🌍" received-texts))
@@ -213,20 +213,20 @@ at different positions. The parser should reassemble correctly."
       ;; Try multiple split positions
       (dotimes (i (1- (length json-line)))
         (setq received-texts nil errors nil)
-        (let* ((state (claude-agent--make-process-state
+        (let* ((state (code-agent--make-process-state
                        :json-buffer ""
                        :ready t
                        :error-callback (lambda (err) (push err errors))))
                (process (start-process "test-utf8-split" nil "true")))
           (unwind-protect
               (progn
-                (process-put process 'claude-agent-state state)
-                (cl-letf (((symbol-function 'claude-agent-handle-message)
+                (process-put process 'code-agent-state state)
+                (cl-letf (((symbol-function 'code-agent-handle-message)
                            (lambda (_type parsed _state)
                              (when-let* ((msg (plist-get parsed :message))
                                          (content (plist-get msg :content)))
                                (push content received-texts))))
-                          ((symbol-function 'claude-agent--handle-control-request)
+                          ((symbol-function 'code-agent--handle-control-request)
                            #'ignore))
                   ;; Split at position i
                   (let ((chunk1 (substring json-line 0 (1+ i)))

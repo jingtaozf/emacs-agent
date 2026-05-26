@@ -22,7 +22,7 @@
 ;;; F1 Test 1: Public API functions have docstrings
 
 (ert-deftest test-structural-public-api-documented ()
-  "All public API functions (claude-agent-* and code-agent-org-*) have docstrings.
+  "All public API functions (code-agent-* and code-agent-org-*) have docstrings.
 FIX: Add a docstring as the first form after the argument list."
   :tags '(:unit :fast :stable :structural)
   ;; Only check interactively-defined functions, skip autoloads and internal
@@ -32,7 +32,7 @@ FIX: Add a docstring as the first form after the argument list."
        (when (and (fboundp sym)
                   (not (subrp (symbol-function sym)))
                   (let ((name (symbol-name sym)))
-                    (or (string-prefix-p "claude-agent-" name)
+                    (or (string-prefix-p "code-agent-" name)
                         (string-prefix-p "code-agent-org-" name)))
                   ;; Skip internal functions (double-dash)
                   (not (string-match-p "--" (symbol-name sym)))
@@ -275,21 +275,21 @@ See the Extension Points section for where new modules belong."
 ;;; F8: Dependency direction enforcement
 
 (ert-deftest test-structural-no-reverse-dependency ()
-  "claude-agent.org must not require code-agent-org (lower layer cannot depend on upper).
-FIX: Remove (require 'code-agent-org...) from claude-agent.org.
+  "code-agent.org must not require code-agent-org (lower layer cannot depend on upper).
+FIX: Remove (require 'code-agent-org...) from code-agent.org.
 See ARCHITECTURE.org Module Boundary Diagram for allowed dependency directions."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let ((agent-file (expand-file-name "claude-agent.org" test-structural--project-root)))
+    (let ((agent-file (expand-file-name "code-agent.org" test-structural--project-root)))
       (when (file-exists-p agent-file)
         (let ((content (with-temp-buffer
                          (insert-file-contents agent-file)
                          (buffer-string))))
           (should (or (not (string-match-p "(require 'code-agent-org" content))
-                      (error "claude-agent.org requires code-agent-org!\nFIX: Remove (require 'code-agent-org...) — lower layer cannot depend on upper.\nSee ARCHITECTURE.org."))))))))
+                      (error "code-agent.org requires code-agent-org!\nFIX: Remove (require 'code-agent-org...) — lower layer cannot depend on upper.\nSee ARCHITECTURE.org."))))))))
 
 (ert-deftest test-structural-mcp-server-independent ()
-  "emacs-mcp-server.org must not depend on claude-agent or code-agent-org.
+  "emacs-mcp-server.org must not depend on code-agent or code-agent-org.
 FIX: Remove the (require 'claude-...) from emacs-mcp-server.org.
 The MCP server is an independent module. See ARCHITECTURE.org."
   :tags '(:unit :fast :stable :structural)
@@ -305,7 +305,7 @@ The MCP server is an independent module. See ARCHITECTURE.org."
 ;;; F8: Agent-mistake structural tests
 
 (ert-deftest test-structural-defcustom-has-type ()
-  "All defcustom variables in claude-agent/code-agent-org have :type keyword.
+  "All defcustom variables in code-agent/code-agent-org have :type keyword.
 FIX: Add :type to the defcustom form. Example: :type 'boolean or :type 'string"
   :tags '(:unit :fast :stable :structural)
   (let ((missing-type '()))
@@ -314,7 +314,7 @@ FIX: Add :type to the defcustom form. Example: :type 'boolean or :type 'string"
        (when (and (boundp sym)
                   (custom-variable-p sym)
                   (let ((name (symbol-name sym)))
-                    (or (string-prefix-p "claude-agent-" name)
+                    (or (string-prefix-p "code-agent-" name)
                         (string-prefix-p "code-agent-org-" name)
                         (string-prefix-p "emacs-mcp-server-" name)))
                   ;; Check if :type is specified
@@ -390,146 +390,146 @@ or add it to test-structural--known-public-api if it's intentionally public."
                 (mapconcat #'identity (sort violations #'string<) "\n"))))))
 
 (defvar test-structural--known-public-api
-  '(;; claude-agent: core query API
-    "claude-agent-query"
-    "claude-agent-query-async"
-    "claude-agent-query-accumulate"
-    "claude-agent-query-interrupt"
-    "claude-agent-query-kill"
-    "claude-agent-query-request-id"
-    "claude-agent-query-context-format-id"
-    "claude-agent-query-context-format-label"
-    "claude-agent-cancel"
-    "claude-agent-cancel-all"
-    "claude-agent-cancel-all-queries"
-    "claude-agent-cancel-query"
-    "claude-agent-version"
-    "claude-agent-active-query-count"
-    "claude-agent-list-queries"
-    "claude-agent-options"
-    ;; claude-agent: message extraction
-    "claude-agent-extract-text"
-    "claude-agent-extract-thinking"
-    "claude-agent-extract-tool-uses"
-    "claude-agent-message-type"
-    ;; claude-agent: client API (bidirectional chat)
-    "claude-agent-client-create"
-    "claude-agent-client-connect"
-    "claude-agent-client-disconnect"
-    "claude-agent-client-send"
-    "claude-agent-client-send-message"
-    "claude-agent-client-interrupt"
-    "claude-agent-get-session-id"
-    ;; claude-agent: chat mode (comint-based)
-    "claude-agent-chat"
-    "claude-agent-chat-mode"
-    "claude-agent-chat-send"
-    "claude-agent-chat-interrupt"
-    "claude-agent-chat-quit"
-    "claude-agent-chat-clear"
-    "claude-agent-chat-new-session"
-    "claude-agent-chat-font-lock-keywords"
-    ;; claude-agent: session & state management
-    "claude-agent-make-session-key"
-    "claude-agent-get-effective-permissions"
-    "claude-agent-close-process-state"
-    "claude-agent-cleanup"
-    "claude-agent-kill-all-processes"
-    "claude-agent-registry-cleanup-process"
-    "claude-agent-update-state-callbacks"
-    ;; claude-agent: permission system
-    "claude-agent-check-permission"
-    "claude-agent-permission-check-patterns"
-    "claude-agent-permission-prompt"
-    "claude-agent-permission-auto-allow"
-    "claude-agent-permission-ask-user-question"
-    ;; claude-agent: IDE context
-    "claude-agent-collect-ide-context"
-    "claude-agent-get-system-reminder"
-    "claude-agent-build-system-reminder"
-    ;; claude-agent: alerts (mode-line)
-    "claude-agent-add-alert"
-    "claude-agent-remove-alert"
-    ;; claude-agent: rate-limit mode-line ([C:5h|7d|sonnet]) public commands
-    "claude-agent-rate-limit-mode-line-start"
-    "claude-agent-rate-limit-mode-line-stop"
-    "claude-agent-rate-limit-refresh"
-    ;; claude-agent: verbose/debug
-    "claude-agent-get-verbose-buffer"
-    "claude-agent-show-session-verbose"
-    "claude-agent-list-session-verbose-buffers"
-    ;; claude-agent: elapsed time helper
-    "claude-agent-format-elapsed-time"
-    ;; claude-agent: title generation
-    "claude-agent-generate-title"
-    "claude-agent-generate-title-from-text"
-    ;; claude-agent: refine & translate
-    "claude-agent-refine-prompt"
-    "claude-agent-translate"
-    "claude-agent-translate-buffer"
-    "claude-agent-translate-cancel"
-    "claude-agent-translate-dwim"
-    "claude-agent-translate-region"
-    "claude-agent-translate-to-chinese"
-    "claude-agent-translate-to-english"
-    ;; claude-agent: query management buffer
-    "claude-agent-queries-cancel-at-point"
-    "claude-agent-queries-goto-source"
-    "claude-agent-queries-show-verbose"
-    ;; claude-agent-jsonrpc (transport public API)
-    "claude-agent-jsonrpc-make-client"
-    "claude-agent-jsonrpc-send-request"
-    "claude-agent-jsonrpc-send-response"
-    "claude-agent-jsonrpc-send-notification"
-    "claude-agent-jsonrpc-add-notification-handler"
-    "claude-agent-jsonrpc-add-request-handler"
-    "claude-agent-jsonrpc-shutdown"
-    ;; claude-agent-acp (per-agent constructors)
-    "claude-agent-acp-opencode-create"
-    "claude-agent-acp-gemini-create"
-    "claude-agent-acp-codex-create"
-    ;; claude-agent-cmux-backend (Phase 3 multiplexer factory)
-    "claude-agent-cmux-backend-create"
-    ;; claude-agent-tmux-backend (Phase 4 multiplexer factory)
-    "claude-agent-tmux-backend-create"
-    ;; claude-agent-pi-backend (pi.dev RPC factory)
-    "claude-agent-pi-backend-create"
-    ;; claude-agent-pi-ui (Phase 1 control panel — all interactive commands)
-    "claude-agent-pi-ui-menu"
-    "claude-agent-pi-ui-new-session"
-    "claude-agent-pi-ui-set-session-name"
-    "claude-agent-pi-ui-cycle-model"
-    "claude-agent-pi-ui-pick-model"
-    "claude-agent-pi-ui-cycle-thinking"
-    "claude-agent-pi-ui-set-thinking"
-    "claude-agent-pi-ui-steer"
-    "claude-agent-pi-ui-follow-up"
-    "claude-agent-pi-ui-abort"
-    "claude-agent-pi-ui-compact"
-    "claude-agent-pi-ui-stats"
-    "claude-agent-pi-ui-export-html"
-    "claude-agent-pi-ui-login"
-    "claude-agent-pi-ui-resume-session"
-    "claude-agent-pi-ui-session-tree"
+  '(;; code-agent: core query API
+    "code-agent-query"
+    "code-agent-query-async"
+    "code-agent-query-accumulate"
+    "code-agent-query-interrupt"
+    "code-agent-query-kill"
+    "code-agent-query-request-id"
+    "code-agent-query-context-format-id"
+    "code-agent-query-context-format-label"
+    "code-agent-cancel"
+    "code-agent-cancel-all"
+    "code-agent-cancel-all-queries"
+    "code-agent-cancel-query"
+    "code-agent-version"
+    "code-agent-active-query-count"
+    "code-agent-list-queries"
+    "code-agent-options"
+    ;; code-agent: message extraction
+    "code-agent-extract-text"
+    "code-agent-extract-thinking"
+    "code-agent-extract-tool-uses"
+    "code-agent-message-type"
+    ;; code-agent: client API (bidirectional chat)
+    "code-agent-client-create"
+    "code-agent-client-connect"
+    "code-agent-client-disconnect"
+    "code-agent-client-send"
+    "code-agent-client-send-message"
+    "code-agent-client-interrupt"
+    "code-agent-get-session-id"
+    ;; code-agent: chat mode (comint-based)
+    "code-agent-chat"
+    "code-agent-chat-mode"
+    "code-agent-chat-send"
+    "code-agent-chat-interrupt"
+    "code-agent-chat-quit"
+    "code-agent-chat-clear"
+    "code-agent-chat-new-session"
+    "code-agent-chat-font-lock-keywords"
+    ;; code-agent: session & state management
+    "code-agent-make-session-key"
+    "code-agent-get-effective-permissions"
+    "code-agent-close-process-state"
+    "code-agent-cleanup"
+    "code-agent-kill-all-processes"
+    "code-agent-registry-cleanup-process"
+    "code-agent-update-state-callbacks"
+    ;; code-agent: permission system
+    "code-agent-check-permission"
+    "code-agent-permission-check-patterns"
+    "code-agent-permission-prompt"
+    "code-agent-permission-auto-allow"
+    "code-agent-permission-ask-user-question"
+    ;; code-agent: IDE context
+    "code-agent-collect-ide-context"
+    "code-agent-get-system-reminder"
+    "code-agent-build-system-reminder"
+    ;; code-agent: alerts (mode-line)
+    "code-agent-add-alert"
+    "code-agent-remove-alert"
+    ;; code-agent: rate-limit mode-line ([C:5h|7d|sonnet]) public commands
+    "code-agent-rate-limit-mode-line-start"
+    "code-agent-rate-limit-mode-line-stop"
+    "code-agent-rate-limit-refresh"
+    ;; code-agent: verbose/debug
+    "code-agent-get-verbose-buffer"
+    "code-agent-show-session-verbose"
+    "code-agent-list-session-verbose-buffers"
+    ;; code-agent: elapsed time helper
+    "code-agent-format-elapsed-time"
+    ;; code-agent: title generation
+    "code-agent-generate-title"
+    "code-agent-generate-title-from-text"
+    ;; code-agent: refine & translate
+    "code-agent-refine-prompt"
+    "code-agent-translate"
+    "code-agent-translate-buffer"
+    "code-agent-translate-cancel"
+    "code-agent-translate-dwim"
+    "code-agent-translate-region"
+    "code-agent-translate-to-chinese"
+    "code-agent-translate-to-english"
+    ;; code-agent: query management buffer
+    "code-agent-queries-cancel-at-point"
+    "code-agent-queries-goto-source"
+    "code-agent-queries-show-verbose"
+    ;; code-agent-jsonrpc (transport public API)
+    "code-agent-jsonrpc-make-client"
+    "code-agent-jsonrpc-send-request"
+    "code-agent-jsonrpc-send-response"
+    "code-agent-jsonrpc-send-notification"
+    "code-agent-jsonrpc-add-notification-handler"
+    "code-agent-jsonrpc-add-request-handler"
+    "code-agent-jsonrpc-shutdown"
+    ;; code-agent-acp (per-agent constructors)
+    "code-agent-acp-opencode-create"
+    "code-agent-acp-gemini-create"
+    "code-agent-acp-codex-create"
+    ;; code-agent-cmux-backend (Phase 3 multiplexer factory)
+    "code-agent-cmux-backend-create"
+    ;; code-agent-tmux-backend (Phase 4 multiplexer factory)
+    "code-agent-tmux-backend-create"
+    ;; code-agent-pi-backend (pi.dev RPC factory)
+    "code-agent-pi-backend-create"
+    ;; code-agent-pi-ui (Phase 1 control panel — all interactive commands)
+    "code-agent-pi-ui-menu"
+    "code-agent-pi-ui-new-session"
+    "code-agent-pi-ui-set-session-name"
+    "code-agent-pi-ui-cycle-model"
+    "code-agent-pi-ui-pick-model"
+    "code-agent-pi-ui-cycle-thinking"
+    "code-agent-pi-ui-set-thinking"
+    "code-agent-pi-ui-steer"
+    "code-agent-pi-ui-follow-up"
+    "code-agent-pi-ui-abort"
+    "code-agent-pi-ui-compact"
+    "code-agent-pi-ui-stats"
+    "code-agent-pi-ui-export-html"
+    "code-agent-pi-ui-login"
+    "code-agent-pi-ui-resume-session"
+    "code-agent-pi-ui-session-tree"
     ;; Phase 3 session-tree interactive commands (bound under the
     ;; *Pi Sessions: <cwd>* buffer's keymap; user-invocable)
-    "claude-agent-pi-ui-session-tree-resume-at-point"
-    "claude-agent-pi-ui-session-tree-fork-at-point"
-    "claude-agent-pi-ui-session-tree-refresh"
+    "code-agent-pi-ui-session-tree-resume-at-point"
+    "code-agent-pi-ui-session-tree-fork-at-point"
+    "code-agent-pi-ui-session-tree-refresh"
     ;; Phase 4 widget store interactive commands
-    "claude-agent-pi-ui-show-widgets"
-    "claude-agent-pi-ui-clear-all-widgets"
+    "code-agent-pi-ui-show-widgets"
+    "code-agent-pi-ui-clear-all-widgets"
     ;; Phase 4 custom message renderer registration (extension API)
-    "claude-agent-pi-register-renderer"
-    ;; claude-agent-backend public API
-    "claude-agent-backend-register"
-    "claude-agent-backend-get"
-    "claude-agent-backend-list"
-    "claude-agent-backend-start"
-    "claude-agent-backend-stop"
-    "claude-agent-backend-send"
-    "claude-agent-backend-cancel"
-    "claude-agent-backend-filter-callbacks"
+    "code-agent-pi-register-renderer"
+    ;; code-agent-backend public API
+    "code-agent-backend-register"
+    "code-agent-backend-get"
+    "code-agent-backend-list"
+    "code-agent-backend-start"
+    "code-agent-backend-stop"
+    "code-agent-backend-send"
+    "code-agent-backend-cancel"
+    "code-agent-backend-filter-callbacks"
     ;; code-agent-org: core execution
     "code-agent-org-execute"
     "code-agent-org-cancel"
@@ -660,16 +660,16 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "claude-ide-start-server-in-directory"
     "claude-ide-stop-all-servers"
     "claude-ide-stop-server"
-    ;; claude-agent-trace: OTel tracing
-    "claude-agent-trace-context"
-    "claude-agent-trace-connect"
-    "claude-agent-trace-stop-bridge"
-    "claude-agent-trace-stop-phoenix"
-    "claude-agent-trace-open-phoenix"
-    "claude-agent-trace-service-ensure"
-    "claude-agent-trace-service-stop"
-    "claude-agent-with-trace"
-    "claude-agent-with-span"
+    ;; code-agent-trace: OTel tracing
+    "code-agent-trace-context"
+    "code-agent-trace-connect"
+    "code-agent-trace-stop-bridge"
+    "code-agent-trace-stop-phoenix"
+    "code-agent-trace-open-phoenix"
+    "code-agent-trace-service-ensure"
+    "code-agent-trace-service-stop"
+    "code-agent-with-trace"
+    "code-agent-with-span"
     ;; emacs-mcp-server public API
     "emacs-mcp-server-start"
     "emacs-mcp-server-stop"
@@ -724,10 +724,10 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
 
 (defvar test-structural--module-layers
   '(("emacs-mcp-server"       . 0)   ; independent
-    ("claude-agent-backend"    . 1)   ; bottom layer
-    ("claude-agent-permission" . 1)
-    ("claude-agent-ide"        . 1)
-    ("claude-agent"            . 2)   ; core
+    ("code-agent-backend"    . 1)   ; bottom layer
+    ("code-agent-permission" . 1)
+    ("code-agent-ide"        . 1)
+    ("code-agent"            . 2)   ; core
     ("code-agent-org-session"      . 3)   ; org sub-modules
     ("code-agent-org-queue"        . 3)
     ("code-agent-org-response"     . 3)
@@ -825,8 +825,8 @@ FIX: Remove the upward dependency. See ARCHITECTURE.org Module Boundary Diagram.
                                   (insert-file-contents file)
                                   (buffer-string))
                                 "\n")))))
-    ;; Also check claude-code.el entry point
-    (let ((entry (expand-file-name "claude-code.el" test-structural--project-root)))
+    ;; Also check code-agent.el entry point
+    (let ((entry (expand-file-name "code-agent.el" test-structural--project-root)))
       (when (file-exists-p entry)
         (setq content (concat content
                               (with-temp-buffer
@@ -919,9 +919,9 @@ FIX: Wrap the function body in (condition-case err ... (error (message ...)))."
 ;;; F35: No hardcoded status paths in backends
 
 (ert-deftest test-structural-no-hardcoded-status-dir ()
-  "Backend .org files must not hardcode /tmp/claude-agent-status.
+  "Backend .org files must not hardcode /tmp/code-agent-status.
 Use `code-agent-org-terminal-status-dir' from code-agent-org-terminal-base instead.
-FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `code-agent-org-terminal-status-dir'."
+FIX: Replace hardcoded \"/tmp/code-agent-status\" with `code-agent-org-terminal-status-dir'."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
     (let ((violations nil))
@@ -934,11 +934,11 @@ FIX: Replace hardcoded \"/tmp/claude-agent-status\" with `code-agent-org-termina
                   (line-num 0))
               (dolist (line (split-string content "\n"))
                 (cl-incf line-num)
-                (when (string-match-p "/tmp/claude-agent-status" line)
+                (when (string-match-p "/tmp/code-agent-status" line)
                   (push (format "%s:%d: %s" file line-num (string-trim line))
                         violations)))))))
       (should-with-fix (null violations)
-        (format "Hardcoded /tmp/claude-agent-status found in backend files:\n%s\nFIX: Use `code-agent-org-terminal-status-dir' constant from code-agent-org-terminal-base.org."
+        (format "Hardcoded /tmp/code-agent-status found in backend files:\n%s\nFIX: Use `code-agent-org-terminal-status-dir' constant from code-agent-org-terminal-base.org."
                 (mapconcat #'identity (nreverse violations) "\n"))))))
 
 ;;; F37: No stale iTerm2 references in source .org files
@@ -975,13 +975,13 @@ FIX: Replace the iTerm2 reference with a generic term (e.g., 'terminal backend')
 ;;; F38: No standalone active-states alias variable
 
 (ert-deftest test-structural-no-active-states-alias ()
-  "Source .org files must not define or setq `claude-agent--active-states'.
-Active states are owned exclusively by the unified `claude-agent--registry'
+  "Source .org files must not define or setq `code-agent--active-states'.
+Active states are owned exclusively by the unified `code-agent--registry'
 struct. The standalone defvar alias was removed in the A1 consolidation.
-Any read must go through `claude-agent-registry-active-states' accessor or
-the struct accessor `claude-agent--registry-active-states'.
-FIX: Use (claude-agent-registry-active-states) for reads and
-     (setf (claude-agent--registry-active-states claude-agent--registry) ...)
+Any read must go through `code-agent-registry-active-states' accessor or
+the struct accessor `code-agent--registry-active-states'.
+FIX: Use (code-agent-registry-active-states) for reads and
+     (setf (code-agent--registry-active-states code-agent--registry) ...)
      for writes."
   :tags '(:unit :fast :stable :structural)
   (let ((violations '())
@@ -998,7 +998,7 @@ FIX: Use (claude-agent-registry-active-states) for reads and
             (let ((line (buffer-substring-no-properties
                          (line-beginning-position) (line-end-position))))
               ;; Match defvar or setq of the standalone alias in elisp code
-              (when (and (string-match-p "claude-agent--active-states\\b" line)
+              (when (and (string-match-p "code-agent--active-states\\b" line)
                          ;; Only flag lines inside code blocks, not prose
                          (not (string-match-p "^[ \t]*[#*|]" line))
                          ;; Allow references in comments/docstrings that explain the removal
@@ -1009,7 +1009,7 @@ FIX: Use (claude-agent-registry-active-states) for reads and
                       violations)))
             (forward-line 1)))))
     (should-with-fix (null violations)
-      (format "Standalone `claude-agent--active-states' alias found in source files.\n%s\nFIX: Use (claude-agent-registry-active-states) accessor instead. Active states live exclusively in claude-agent--registry."
+      (format "Standalone `code-agent--active-states' alias found in source files.\n%s\nFIX: Use (code-agent-registry-active-states) accessor instead. Active states live exclusively in code-agent--registry."
               (mapconcat #'identity (nreverse violations) "\n")))))
 
 ;;; F39: JSON parser guards against non-plist parsed values
@@ -1024,7 +1024,7 @@ FIX: Add (and parsed (listp parsed)) guard in process-json-buffer and
      the sentinel remaining-JSON handler."
   :tags '(:unit :fast :stable :structural)
   (let ((violations '())
-        (backend-file (expand-file-name "claude-agent-backend.org"
+        (backend-file (expand-file-name "code-agent-backend.org"
                                         test-structural--project-root)))
     (with-temp-buffer
       (insert-file-contents backend-file)
@@ -1039,7 +1039,7 @@ FIX: Add (and parsed (listp parsed)) guard in process-json-buffer and
           (when (and (not (string-match-p "listp" line))
                      ;; Only flag lines inside code blocks
                      (not (string-match-p "^[ \t]*[#*|;]" line)))
-            (push (format "claude-agent-backend.org:%d: %s"
+            (push (format "code-agent-backend.org:%d: %s"
                           line-num (string-trim line))
                   violations)))))
     (should-with-fix (null violations)
@@ -1049,9 +1049,9 @@ FIX: Add (and parsed (listp parsed)) guard in process-json-buffer and
 ;;; F40: No hardcoded /tmp paths in test files
 
 (ert-deftest test-structural-no-hardcoded-tmp-in-tests ()
-  "Test files must not hardcode /tmp/claude-agent-status paths.
+  "Test files must not hardcode /tmp/code-agent-status paths.
 Use `code-agent-org-terminal-status-dir' constant instead.
-FIX: Replace \"/tmp/claude-agent-status\" with `code-agent-org-terminal-status-dir'."
+FIX: Replace \"/tmp/code-agent-status\" with `code-agent-org-terminal-status-dir'."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
     (let ((violations nil)
@@ -1068,12 +1068,12 @@ FIX: Replace \"/tmp/claude-agent-status\" with `code-agent-org-terminal-status-d
                   (cl-incf line-num)
                   (let ((line (buffer-substring-no-properties
                                (line-beginning-position) (line-end-position))))
-                    (when (string-match-p "\"/tmp/claude-agent-status\"" line)
+                    (when (string-match-p "\"/tmp/code-agent-status\"" line)
                       (push (format "%s:%d: %s" filename line-num (string-trim line))
                             violations)))
                   (forward-line 1)))))))
       (should-with-fix (null violations)
-        (format "Hardcoded /tmp/claude-agent-status in test files:\n%s\nFIX: Use `code-agent-org-terminal-status-dir' constant."
+        (format "Hardcoded /tmp/code-agent-status in test files:\n%s\nFIX: Use `code-agent-org-terminal-status-dir' constant."
                 (mapconcat #'identity (nreverse violations) "\n"))))))
 
 ;;; F41: No commented-out test files in Makefile
@@ -1132,7 +1132,7 @@ FIX: Remove any claude-cli or eat-backend references from the flagged file."
                              (line-beginning-position) (line-end-position))))
                   ;; Match claude-cli backend references in elisp code
                   ;; (not in comments/docs about the removal itself)
-                  (when (and (or (string-match-p "claude-agent-claude-backend" line)
+                  (when (and (or (string-match-p "code-agent-claude-backend" line)
                                  (string-match-p ":claude-cli" line)
                                  (string-match-p "'claude-cli" line))
                              ;; Allow in comments explaining the removal
@@ -1150,20 +1150,20 @@ FIX: Remove any claude-cli or eat-backend references from the flagged file."
 ;;; F43: Verbose format dispatcher stays thin
 
 (ert-deftest test-structural-verbose-format-dispatcher-thin ()
-  "claude-agent--verbose-format-message should be a thin dispatcher (<15 lines).
+  "code-agent--verbose-format-message should be a thin dispatcher (<15 lines).
 The type-specific formatting logic belongs in dedicated helpers
 \(--verbose-format-assistant-msg, --verbose-format-user-msg, etc.).
 FIX: Extract formatting logic into type-specific helpers."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let* ((file (expand-file-name "claude-agent-backend.org"
+    (let* ((file (expand-file-name "code-agent-backend.org"
                                     test-structural--project-root))
            (line-count 0)
            (found nil))
       (with-temp-buffer
         (insert-file-contents file)
         (goto-char (point-min))
-        (when (search-forward "(defun claude-agent--verbose-format-message " nil t)
+        (when (search-forward "(defun code-agent--verbose-format-message " nil t)
           (setq found t)
           (let ((start (line-number-at-pos)))
             ;; Find matching closing paren
@@ -1172,26 +1172,26 @@ FIX: Extract formatting logic into type-specific helpers."
             (setq line-count (1+ (- (line-number-at-pos) start))))))
       (when found
         (should-with-fix (<= line-count 15)
-          (format "claude-agent--verbose-format-message is %d lines (max 15).\nFIX: Extract type-specific logic into --verbose-format-*-msg helpers."
+          (format "code-agent--verbose-format-message is %d lines (max 15).\nFIX: Extract type-specific logic into --verbose-format-*-msg helpers."
                   line-count))))))
 
 ;;; F44: Activity string dispatcher must stay thin
 
 (ert-deftest test-structural-activity-string-dispatcher-thin ()
-  "claude-agent--update-activity-string should be a thin dispatcher (<20 lines).
+  "code-agent--update-activity-string should be a thin dispatcher (<20 lines).
 The alert and query-spinner rendering logic belongs in dedicated helpers
 \(--activity-alert-string, --activity-queries-string).
 FIX: Extract rendering logic into helper functions."
   :tags '(:unit :fast :stable :structural)
   (when test-structural--project-root
-    (let* ((file (expand-file-name "claude-agent.org"
+    (let* ((file (expand-file-name "code-agent.org"
                                     test-structural--project-root))
            (line-count 0)
            (found nil))
       (with-temp-buffer
         (insert-file-contents file)
         (goto-char (point-min))
-        (when (search-forward "(defun claude-agent--update-activity-string " nil t)
+        (when (search-forward "(defun code-agent--update-activity-string " nil t)
           (setq found t)
           (let ((start (line-number-at-pos)))
             (goto-char (match-beginning 0))
@@ -1199,7 +1199,7 @@ FIX: Extract rendering logic into helper functions."
             (setq line-count (1+ (- (line-number-at-pos) start))))))
       (when found
         (should-with-fix (<= line-count 20)
-          (format "claude-agent--update-activity-string is %d lines (max 20).\nFIX: Extract rendering logic into --activity-alert-string and --activity-queries-string helpers."
+          (format "code-agent--update-activity-string is %d lines (max 20).\nFIX: Extract rendering logic into --activity-alert-string and --activity-queries-string helpers."
                   line-count))))))
 
 ;;; F45: launch-workspace orchestrator must stay thin
@@ -1586,9 +1586,9 @@ body itself changes — forces re-audit before unrelated commits land."
   ;; FINGERPRINT is the first 12 hex chars of SHA-1(pcase-line + 3 lines below).
   ;; Run `M-x ert RUN test-structural-pcase-string-detect' to see the
   ;; fingerprint printed in the failure message.
-  '(("claude-agent-backend.org"
-     . ("6235e571eaad"        ; pcase type @ ~L2279
-        "a32472b973e4"))      ; pcase type @ ~L2311
+  '(("code-agent-backend.org"
+     . ("e41e25bd8bd2"        ; pcase type @ ~L2279 (refreshed after claude-agent→code-agent rename)
+        "df71ad58e575"))      ; pcase type @ ~L2311 (refreshed after claude-agent→code-agent rename)
     ("claude-ide.org"
      . ("321b189430ab"        ; pcase @ ~L415
         "9bd00db90951"        ; pcase @ ~L641

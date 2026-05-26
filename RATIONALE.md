@@ -85,7 +85,7 @@ the *third* time, write a new entry here.
   cl-defmethods made the "I want to add a new agent on cmux" flow a
   one-file change. Smalltalk-flavoured OOP (cl-defstruct + cl-defgeneric)
   per the imported `oop-smalltalk-protocols` rule (literate-agent).
-- followup: see `claude-agent-backend.org` → "Tri-Protocol
+- followup: see `code-agent-backend.org` → "Tri-Protocol
   Architecture" for the authoritative description. New backends
   must NOT add `CLAUDE_BACKEND`-string branches in code-agent-org.org;
   extend the protocol method on the backend receiver instead.

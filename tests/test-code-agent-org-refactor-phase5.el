@@ -4,7 +4,7 @@
 
 (require 'cl-lib)
 (require 'ert)
-(require 'claude-agent)
+(require 'code-agent)
 (require 'code-agent-org)
 (require 'org-fixtures)
 

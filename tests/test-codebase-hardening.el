@@ -31,7 +31,7 @@ FIX: Wrap process-send-eof in timer callbacks with (when (process-live-p proc) .
 See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    (let* ((file (expand-file-name "claude-agent-backend.org" test-hardening--project-root))
+    (let* ((file (expand-file-name "code-agent-backend.org" test-hardening--project-root))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string))))
@@ -47,16 +47,16 @@ See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
 ;;; Bug #3 regression: JSON parser has condition-case
 
 (ert-deftest test-hardening-json-parser-handles-errors ()
-  "claude-agent--try-parse-json wraps json-read-from-string in condition-case.
+  "code-agent--try-parse-json wraps json-read-from-string in condition-case.
 FIX: Add (condition-case nil (json-read-from-string ...) (error nil)) to
 prevent JSON parse errors from propagating through process filter."
   :tags '(:unit :fast :stable :hardening)
   ;; Test the actual function behavior
-  (should (null (claude-agent--try-parse-json "not json at all")))
-  (should (null (claude-agent--try-parse-json "")))
-  (should (null (claude-agent--try-parse-json "{")))
+  (should (null (code-agent--try-parse-json "not json at all")))
+  (should (null (code-agent--try-parse-json "")))
+  (should (null (code-agent--try-parse-json "{")))
   ;; Valid JSON should parse
-  (let ((result (claude-agent--try-parse-json "{\"type\":\"test\"}")))
+  (let ((result (code-agent--try-parse-json "{\"type\":\"test\"}")))
     (should result)
     (should (equal (plist-get result :type) "test"))))
 
@@ -85,9 +85,9 @@ FIX: Wrap timer body with (when (process-live-p ...) ...) or
 See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    ;; Check claude-agent.org and claude-agent-backend.org: any process-send-eof
+    ;; Check code-agent.org and code-agent-backend.org: any process-send-eof
     ;; near run-at-time should have process-live-p nearby
-    (dolist (org-file '("claude-agent.org" "claude-agent-backend.org"))
+    (dolist (org-file '("code-agent.org" "code-agent-backend.org"))
       (let* ((file (expand-file-name org-file test-hardening--project-root))
              (content (with-temp-buffer
                         (insert-file-contents file)

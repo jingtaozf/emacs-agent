@@ -104,7 +104,7 @@ Verify by checking that :recovering is cleared (which only reset-session-state d
       (code-agent-org--session-put sk :query-id "qid-f19-3")
       (code-agent-org--session-put sk :marker (copy-marker (point-min)))
       ;; Mock backend-cancel and other side-effect functions
-      (cl-letf (((symbol-function 'claude-agent-backend-cancel) #'ignore)
+      (cl-letf (((symbol-function 'code-agent-backend-cancel) #'ignore)
                 ((symbol-function 'code-agent-org--start-spinner) #'ignore)
                 ((symbol-function 'code-agent-org--stop-spinner) #'ignore)
                 ((symbol-function 'code-agent-org--refresh-header-line) #'ignore)

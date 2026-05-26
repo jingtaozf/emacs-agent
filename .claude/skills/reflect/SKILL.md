@@ -236,7 +236,7 @@ Claude's response:
 (re-search-forward "Research Output :research_output:" nil t)
 
 ;; CORRECT - use the CUSTOM_ID
-(re-search-forward ":CUSTOM_ID: claude-agent-dev-research-output-sdd-20251229" nil t)
+(re-search-forward ":CUSTOM_ID: code-agent-dev-research-output-sdd-20251229" nil t)
 ```
 
 **Session**: sdd-20251229-172814

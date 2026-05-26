@@ -85,7 +85,7 @@ translation occurs:
 | `~/.ssh` | `/root/.ssh` | ro | Git SSH keys |
 | `~/.gitconfig` | `/root/.gitconfig` | ro | Git identity |
 | `$PROJECT_DIR` or `..` | `/workspace` | rw | Project files |
-| Docker volume `claude-agent-history` | `/root/.bash_history` | rw | Command history |
+| Docker volume `code-agent-history` | `/root/.bash_history` | rw | Command history |
 
 ## Makefile Commands
 

@@ -7,7 +7,7 @@
 
 ;;; Commentary:
 
-;; Tests for code-agent-org-refine-prompt and claude-agent-refine-prompt.
+;; Tests for code-agent-org-refine-prompt and code-agent-refine-prompt.
 ;; Ensures async callbacks properly capture buffer/marker variables
 ;; (regression test for lexical-let vs let in dynamic-binding context).
 ;; These tests do NOT make actual API calls.
@@ -23,11 +23,11 @@
 ;; ═══════════════════════════════════════════════════
 
 (defvar test-refine--captured-callbacks nil
-  "Alist of callbacks captured from the last mocked claude-agent-query call.
+  "Alist of callbacks captured from the last mocked code-agent-query call.
 Keys: :on-message, :on-error, :on-complete.")
 
 (defun test-refine--mock-query (prompt &rest args)
-  "Mock `claude-agent-query' that captures callbacks without spawning a process.
+  "Mock `code-agent-query' that captures callbacks without spawning a process.
 PROMPT and ARGS match the real signature."
   (ignore prompt)
   (setq test-refine--captured-callbacks
@@ -51,25 +51,25 @@ PROMPT and ARGS match the real signature."
     (when cb (funcall cb err))))
 
 ;; ═══════════════════════════════════════════════════
-;; Tests: claude-agent-refine-prompt (core SDK layer)
+;; Tests: code-agent-refine-prompt (core SDK layer)
 ;; ═══════════════════════════════════════════════════
 
 (ert-deftest test-refine-prompt-on-result-callback-receives-text ()
   "Test that on-result callback receives the collected refined text."
   :tags '(:unit :fast :stable :isolated :refine)
   (let ((result-text nil))
-    (cl-letf (((symbol-function 'claude-agent-query)
+    (cl-letf (((symbol-function 'code-agent-query)
                #'test-refine--mock-query))
-      (claude-agent-refine-prompt
+      (code-agent-refine-prompt
        "original prompt" "make it better"
        :on-result (lambda (refined) (setq result-text refined)))
       ;; Simulate assistant messages arriving
       (test-refine--fire-on-message
-       (claude-agent-make-assistant-message
-        :content (list (claude-agent-make-text-block :text "improved "))))
+       (code-agent-make-assistant-message
+        :content (list (code-agent-make-text-block :text "improved "))))
       (test-refine--fire-on-message
-       (claude-agent-make-assistant-message
-        :content (list (claude-agent-make-text-block :text "prompt here"))))
+       (code-agent-make-assistant-message
+        :content (list (code-agent-make-text-block :text "prompt here"))))
       ;; Simulate completion
       (test-refine--fire-on-complete nil)
       (should (equal "improved prompt here" result-text)))))
@@ -78,24 +78,24 @@ PROMPT and ARGS match the real signature."
   "Test that on-result callback trims leading/trailing whitespace."
   :tags '(:unit :fast :stable :isolated :refine)
   (let ((result-text nil))
-    (cl-letf (((symbol-function 'claude-agent-query)
+    (cl-letf (((symbol-function 'code-agent-query)
                #'test-refine--mock-query))
-      (claude-agent-refine-prompt
+      (code-agent-refine-prompt
        "original" "intent"
        :on-result (lambda (refined) (setq result-text refined)))
       (test-refine--fire-on-message
-       (claude-agent-make-assistant-message
-        :content (list (claude-agent-make-text-block :text "  trimmed  \n"))))
+       (code-agent-make-assistant-message
+        :content (list (code-agent-make-text-block :text "  trimmed  \n"))))
       (test-refine--fire-on-complete nil)
       (should (equal "trimmed" result-text)))))
 
 (ert-deftest test-refine-prompt-on-error-callback ()
-  "Test that on-error callback is passed through to claude-agent-query."
+  "Test that on-error callback is passed through to code-agent-query."
   :tags '(:unit :fast :stable :isolated :refine)
   (let ((error-received nil))
-    (cl-letf (((symbol-function 'claude-agent-query)
+    (cl-letf (((symbol-function 'code-agent-query)
                #'test-refine--mock-query))
-      (claude-agent-refine-prompt
+      (code-agent-refine-prompt
        "prompt" "intent"
        :on-error (lambda (err) (setq error-received err)))
       (test-refine--fire-on-error "something went wrong")
@@ -113,8 +113,8 @@ The callback must work even though it fires after the let scope exits."
   :tags '(:unit :fast :stable :isolated :refine :regression)
   (let ((refine-on-result nil)
         (refine-on-error nil))
-    ;; Mock claude-agent-refine-prompt to capture callbacks without network
-    (cl-letf (((symbol-function 'claude-agent-refine-prompt)
+    ;; Mock code-agent-refine-prompt to capture callbacks without network
+    (cl-letf (((symbol-function 'code-agent-refine-prompt)
                (lambda (content intent &rest args)
                  (ignore content intent)
                  (setq refine-on-result (plist-get args :on-result)
@@ -149,7 +149,7 @@ The callback must work even though it fires after the let scope exits."
   :tags '(:unit :fast :stable :isolated :refine :regression)
   (let ((refine-on-result nil)
         (message-logged nil))
-    (cl-letf (((symbol-function 'claude-agent-refine-prompt)
+    (cl-letf (((symbol-function 'code-agent-refine-prompt)
                (lambda (_content _intent &rest args)
                  (setq refine-on-result (plist-get args :on-result))))
               ((symbol-function 'read-string)
@@ -172,7 +172,7 @@ The callback must work even though it fires after the let scope exits."
         (should (equal "Source buffer no longer exists" message-logged))))))
 
 ;; ═══════════════════════════════════════════════════
-;; Tests: claude-agent-chat--send-input (chat layer)
+;; Tests: code-agent-chat--send-input (chat layer)
 ;; Regression: lexical-let must capture chat-buf
 ;; ═══════════════════════════════════════════════════
 
@@ -184,39 +184,39 @@ Regression test for void-variable chat-buf bug."
         (captured-on-complete nil)
         (message-handler-called nil)
         (complete-handler-called nil))
-    ;; Mock claude-agent-query to capture the callbacks
-    (cl-letf (((symbol-function 'claude-agent-query)
+    ;; Mock code-agent-query to capture the callbacks
+    (cl-letf (((symbol-function 'code-agent-query)
                (lambda (_prompt &rest args)
                  (setq captured-on-message  (plist-get args :on-message)
                        captured-on-complete (plist-get args :on-complete))))
               ;; Mock the chat helper functions to avoid needing full chat setup
-              ((symbol-function 'claude-agent-chat--insert-response-start)
+              ((symbol-function 'code-agent-chat--insert-response-start)
                #'ignore)
-              ((symbol-function 'claude-agent-chat--insert)
+              ((symbol-function 'code-agent-chat--insert)
                (lambda (&rest _) nil))
-              ((symbol-function 'claude-agent-chat--handle-message)
+              ((symbol-function 'code-agent-chat--handle-message)
                (lambda (_msg) (setq message-handler-called t)))
-              ((symbol-function 'claude-agent-chat--handle-complete)
+              ((symbol-function 'code-agent-chat--handle-complete)
                (lambda (_result) (setq complete-handler-called t))))
       (with-temp-buffer
         ;; Set up minimal chat buffer state
-        (setq-local claude-agent-chat--waiting nil)
-        (setq-local claude-agent-chat--current-response "")
-        (setq-local claude-agent-chat--session-id nil)
-        (setq-local claude-agent-chat--options nil)
-        (setq-local claude-agent-chat--system-prompt nil)
-        (setq-local claude-agent-chat--mcp-config nil)
-        (setq-local claude-agent-chat-include-ide-context nil)
+        (setq-local code-agent-chat--waiting nil)
+        (setq-local code-agent-chat--current-response "")
+        (setq-local code-agent-chat--session-id nil)
+        (setq-local code-agent-chat--options nil)
+        (setq-local code-agent-chat--system-prompt nil)
+        (setq-local code-agent-chat--mcp-config nil)
+        (setq-local code-agent-chat-include-ide-context nil)
         ;; Send input - this binds chat-buf with lexical-let
-        (claude-agent-chat--send-input "hello")
+        (code-agent-chat--send-input "hello")
         ;; The let* in chat--send-input has exited by now.
         ;; With plain let + dynamic binding, chat-buf would be void.
         (should captured-on-message)
         (should captured-on-complete)
         ;; Fire callbacks — these must not error
         (funcall captured-on-message
-                 (claude-agent-make-assistant-message
-                  :content (list (claude-agent-make-text-block :text "hi"))))
+                 (code-agent-make-assistant-message
+                  :content (list (code-agent-make-text-block :text "hi"))))
         (should message-handler-called)
         (funcall captured-on-complete nil)
         (should complete-handler-called)))))
@@ -226,24 +226,24 @@ Regression test for void-variable chat-buf bug."
   :tags '(:unit :fast :stable :isolated :chat :regression)
   (let ((captured-on-message nil)
         (captured-on-complete nil))
-    (cl-letf (((symbol-function 'claude-agent-query)
+    (cl-letf (((symbol-function 'code-agent-query)
                (lambda (_prompt &rest args)
                  (setq captured-on-message  (plist-get args :on-message)
                        captured-on-complete (plist-get args :on-complete))))
-              ((symbol-function 'claude-agent-chat--insert-response-start)
+              ((symbol-function 'code-agent-chat--insert-response-start)
                #'ignore)
-              ((symbol-function 'claude-agent-chat--insert)
+              ((symbol-function 'code-agent-chat--insert)
                (lambda (&rest _) nil)))
       (let ((buf (generate-new-buffer " *test-chat-killed*")))
         (with-current-buffer buf
-          (setq-local claude-agent-chat--waiting nil)
-          (setq-local claude-agent-chat--current-response "")
-          (setq-local claude-agent-chat--session-id nil)
-          (setq-local claude-agent-chat--options nil)
-          (setq-local claude-agent-chat--system-prompt nil)
-          (setq-local claude-agent-chat--mcp-config nil)
-          (setq-local claude-agent-chat-include-ide-context nil)
-          (claude-agent-chat--send-input "hello"))
+          (setq-local code-agent-chat--waiting nil)
+          (setq-local code-agent-chat--current-response "")
+          (setq-local code-agent-chat--session-id nil)
+          (setq-local code-agent-chat--options nil)
+          (setq-local code-agent-chat--system-prompt nil)
+          (setq-local code-agent-chat--mcp-config nil)
+          (setq-local code-agent-chat-include-ide-context nil)
+          (code-agent-chat--send-input "hello"))
         ;; Kill the buffer before callbacks fire
         (kill-buffer buf)
         ;; Fire callbacks — should silently skip, not error
@@ -252,8 +252,8 @@ Regression test for void-variable chat-buf bug."
          (condition-case err
              (progn
                (funcall captured-on-message
-                        (claude-agent-make-assistant-message
-                         :content (list (claude-agent-make-text-block :text "hi"))))
+                        (code-agent-make-assistant-message
+                         :content (list (code-agent-make-text-block :text "hi"))))
                nil)  ; no error
            (error err)))
         (should-not

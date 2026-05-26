@@ -111,7 +111,7 @@ Returns list of (TYPE . SYMBOL) for constructor, predicate, accessors, etc."
   (let* ((symbols nil)
          (name-and-options (cadr struct-def))
          ;; Options are keyword-value pairs in the list after struct name
-         ;; e.g., (claude-agent-text-block (:constructor foo) (:copier nil))
+         ;; e.g., (code-agent-text-block (:constructor foo) (:copier nil))
          (options-list (when (listp name-and-options) (cdr name-and-options)))
          (slots (if (listp name-and-options)
                     (cddr struct-def)
@@ -206,12 +206,12 @@ ELISP-STRING is the source for re-parsing struct definitions."
 
 (defun test-static--find-project-root ()
   "Find the project root directory."
-  (or (locate-dominating-file default-directory "claude-agent.org")
+  (or (locate-dominating-file default-directory "code-agent.org")
       (locate-dominating-file default-directory ".git")
       default-directory))
 
 (defvar test-static--source-files
-  '("claude-agent-trace.org" "claude-agent.org" "code-agent-org.org"
+  '("code-agent-trace.org" "code-agent.org" "code-agent-org.org"
     "code-agent-org-workspace-bridge.org" "code-agent-org-terminal-base.org"
     "code-agent-org-cmux.org" "emacs-mcp-server.org")
   "List of .org source files to analyze.

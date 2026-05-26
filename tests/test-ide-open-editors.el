@@ -17,9 +17,9 @@
                       (file-name-directory
                        (or load-file-name buffer-file-name))))))
   (require 'literate-elisp)
-  (literate-elisp-load (expand-file-name "claude-agent-trace.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
-  (literate-elisp-load (expand-file-name "claude-agent-backend.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent-trace.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent-backend.org" project-root))
   (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))
   (literate-elisp-load (expand-file-name "claude-ide.org" project-root)))
 

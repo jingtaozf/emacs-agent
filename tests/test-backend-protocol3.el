@@ -8,27 +8,27 @@
 
 (require 'ert)
 (require 'cl-lib)
-(require 'claude-agent-backend)
-(require 'claude-agent-multiplexer)
-(require 'claude-agent-cmux-backend)
-(require 'claude-agent-tmux-backend)
+(require 'code-agent-backend)
+(require 'code-agent-multiplexer)
+(require 'code-agent-cmux-backend)
+(require 'code-agent-tmux-backend)
 
 ;;; Test fixture — a minimal concrete agent backend for dispatch testing.
-;;; `claude-agent-backend' is the Protocol 1 base (`:constructor nil',
+;;; `code-agent-backend' is the Protocol 1 base (`:constructor nil',
 ;;; abstract).  Concrete agents inherit from it directly; we instantiate
-;;; `claude-agent-claude-code-backend' for dispatch tests.
+;;; `code-agent-claude-code-backend' for dispatch tests.
 
 (defun test-p3--fresh-claude-code-backend ()
-  "Return a fresh `claude-agent-claude-code-backend' for Protocol 3 dispatch tests."
-  (claude-agent-claude-code-backend--create))
+  "Return a fresh `code-agent-claude-code-backend' for Protocol 3 dispatch tests."
+  (code-agent-claude-code-backend--create))
 
 (defun test-p3--fresh-cmux-backend ()
-  "Return a fresh `claude-agent-cmux-backend' instance."
-  (claude-agent-cmux-backend-create :session-key "test::fixture"))
+  "Return a fresh `code-agent-cmux-backend' instance."
+  (code-agent-cmux-backend-create :session-key "test::fixture"))
 
 (defun test-p3--fresh-tmux-backend ()
-  "Return a fresh `claude-agent-tmux-backend' instance."
-  (claude-agent-tmux-backend-create :session-key "test::fixture"))
+  "Return a fresh `code-agent-tmux-backend' instance."
+  (code-agent-tmux-backend-create :session-key "test::fixture"))
 
 ;;; Protocol 3 — Smoke tests for default methods
 
@@ -36,13 +36,13 @@
   "Default `insert-prompt' method returns nil without side effects."
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-insert-prompt backend '(:prompt "hi")))))
+    (should-not (code-agent-org-backend-insert-prompt backend '(:prompt "hi")))))
 
 (ert-deftest test-p3-open-response-section-default-returns-nil ()
   "Default `open-response-section' returns nil (frontend must override)."
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-open-response-section backend
+    (should-not (code-agent-org-backend-open-response-section backend
                                                           '(:prompt "hi")))))
 
 (ert-deftest test-p3-append-response-default-inserts-at-marker ()
@@ -51,8 +51,8 @@
   (let ((backend (test-p3--fresh-claude-code-backend)))
     (with-temp-buffer
       (let ((marker (point-marker)))
-        (claude-org-backend-append-response backend marker "hello ")
-        (claude-org-backend-append-response backend marker "world")
+        (code-agent-org-backend-append-response backend marker "hello ")
+        (code-agent-org-backend-append-response backend marker "world")
         (should (equal (buffer-string) "hello world"))
         (should (= (marker-position marker) (point-max)))))))
 
@@ -63,86 +63,86 @@
         (dead-marker
          (let ((buf (generate-new-buffer " *test-dead*")))
            (with-current-buffer buf (prog1 (point-marker) (kill-buffer buf))))))
-    (should-not (claude-org-backend-append-response backend dead-marker "x"))))
+    (should-not (code-agent-org-backend-append-response backend dead-marker "x"))))
 
 (ert-deftest test-p3-finalize-response-default-is-noop ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-finalize-response backend nil nil))))
+    (should-not (code-agent-org-backend-finalize-response backend nil nil))))
 
 (ert-deftest test-p3-query-completed-default-is-noop ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-query-completed backend "sk"))))
+    (should-not (code-agent-org-backend-query-completed backend "sk"))))
 
 (ert-deftest test-p3-on-story-changed-default-is-noop ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-on-story-changed backend "old" "new"))))
+    (should-not (code-agent-org-backend-on-story-changed backend "old" "new"))))
 
 (ert-deftest test-p3-recover-session-default-is-noop ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-recover-session backend))))
+    (should-not (code-agent-org-backend-recover-session backend))))
 
 (ert-deftest test-p3-status-badge-default-returns-nil ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-status-badge backend "sk"))))
+    (should-not (code-agent-org-backend-status-badge backend "sk"))))
 
 (ert-deftest test-p3-todos-update-default-is-noop ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (claude-org-backend-todos-update backend '() nil))))
+    (should-not (code-agent-org-backend-todos-update backend '() nil))))
 
 (ert-deftest test-p3-open-terminal-tab-default-errors-for-agent ()
   "Agent-family default signals `user-error' — no terminal to open."
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-error (claude-org-backend-open-terminal-tab backend)
+    (should-error (code-agent-org-backend-open-terminal-tab backend)
                   :type 'user-error)))
 
 ;;; Multiplexer backend structural checks
 
 (ert-deftest test-p3-cmux-backend-inherits-session-key-slot ()
-  "`claude-agent-cmux-backend' carries the `session-key' slot from the
+  "`code-agent-cmux-backend' carries the `session-key' slot from the
 multiplexer base — the registry constructor passes :session-key."
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-cmux-backend)))
-    (should (claude-agent-cmux-backend-p backend))
-    (should (claude-agent-multiplexer-backend-p backend))
+    (should (code-agent-cmux-backend-p backend))
+    (should (code-agent-multiplexer-backend-p backend))
     (should (equal "test::fixture"
-                   (claude-agent-multiplexer-backend-session-key backend)))))
+                   (code-agent-multiplexer-backend-session-key backend)))))
 
 (ert-deftest test-p3-tmux-backend-inherits-session-key-slot ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-tmux-backend)))
-    (should (claude-agent-tmux-backend-p backend))
-    (should (claude-agent-multiplexer-backend-p backend))
+    (should (code-agent-tmux-backend-p backend))
+    (should (code-agent-multiplexer-backend-p backend))
     (should (equal "test::fixture"
-                   (claude-agent-multiplexer-backend-session-key backend)))))
+                   (code-agent-multiplexer-backend-session-key backend)))))
 
 ;;; tmux backend — Protocol 2b smoke tests (mocked tmux CLI)
 
 (ert-deftest test-p3-tmux-shell-quote-embeds-single-quotes ()
-  "`claude-agent-tmux--shell-quote' correctly escapes embedded quotes."
+  "`code-agent-tmux--shell-quote' correctly escapes embedded quotes."
   :tags '(:unit :fast :stable :protocol-3 :tmux)
-  (should (equal "'/tmp/x'" (claude-agent-tmux--shell-quote "/tmp/x")))
-  (should (equal "'/tmp/a b'" (claude-agent-tmux--shell-quote "/tmp/a b")))
+  (should (equal "'/tmp/x'" (code-agent-tmux--shell-quote "/tmp/x")))
+  (should (equal "'/tmp/a b'" (code-agent-tmux--shell-quote "/tmp/a b")))
   (should (equal "'/tmp/a'\\''b'"
-                 (claude-agent-tmux--shell-quote "/tmp/a'b"))))
+                 (code-agent-tmux--shell-quote "/tmp/a'b"))))
 
 (ert-deftest test-p3-tmux-send-text-invokes-tmux-send-keys-dashl ()
   "`send-text' calls `tmux send-keys -l' against the backend's pane target."
   :tags '(:unit :fast :stable :protocol-3 :tmux)
   (let* ((backend (test-p3--fresh-tmux-backend))
          (calls '()))
-    (setf (claude-agent-multiplexer-backend-pane-id backend) "sess:0.0")
-    (cl-letf (((symbol-function 'claude-agent-tmux--call)
+    (setf (code-agent-multiplexer-backend-pane-id backend) "sess:0.0")
+    (cl-letf (((symbol-function 'code-agent-tmux--call)
                (lambda (_b &rest args)
                  (push args calls)
                  "ok")))
-      (claude-agent-mux-send-text backend "hello"))
+      (code-agent-mux-send-text backend "hello"))
     (should (= (length calls) 1))
     (should (equal (car calls)
                    '("send-keys" "-t" "sess:0.0" "-l" "hello")))))
@@ -151,11 +151,11 @@ multiplexer base — the registry constructor passes :session-key."
   :tags '(:unit :fast :stable :protocol-3 :tmux)
   (let* ((backend (test-p3--fresh-tmux-backend))
          (calls '()))
-    (setf (claude-agent-multiplexer-backend-pane-id backend) "sess:0.0")
-    (cl-letf (((symbol-function 'claude-agent-tmux--call)
+    (setf (code-agent-multiplexer-backend-pane-id backend) "sess:0.0")
+    (cl-letf (((symbol-function 'code-agent-tmux--call)
                (lambda (_b &rest args) (push args calls) "ok")))
-      (claude-agent-mux-send-key backend :enter)
-      (claude-agent-mux-send-key backend :ctrl-c))
+      (code-agent-mux-send-key backend :enter)
+      (code-agent-mux-send-key backend :ctrl-c))
     (should (equal (cadr (nth 1 calls)) "-t")) ; enter call
     (should (member "Enter" (car (last calls))))
     (should (member "C-c" (car calls)))))
@@ -165,40 +165,40 @@ multiplexer base — the registry constructor passes :session-key."
   :tags '(:unit :fast :stable :protocol-3 :tmux)
   (let* ((backend (test-p3--fresh-tmux-backend))
          (calls '()))
-    (setf (claude-agent-multiplexer-backend-pane-id backend) "sess:0.0")
-    (cl-letf (((symbol-function 'claude-agent-tmux--call)
+    (setf (code-agent-multiplexer-backend-pane-id backend) "sess:0.0")
+    (cl-letf (((symbol-function 'code-agent-tmux--call)
                (lambda (_b &rest args) (push args calls) "ok")))
-      (claude-agent-mux-start-follower backend "/tmp/sink.log"))
+      (code-agent-mux-start-follower backend "/tmp/sink.log"))
     (let ((args (car calls)))
       (should (equal (car args) "pipe-pane"))
       ;; Final arg should be "cat >> '/tmp/sink.log'"
       (should (string-match "cat >> '/tmp/sink\\.log'"
                             (car (last args)))))
     (should (eq :active
-                (claude-agent-multiplexer-backend-follower-proc backend)))))
+                (code-agent-multiplexer-backend-follower-proc backend)))))
 
 (ert-deftest test-p3-tmux-stop-follower-is-noop-when-inactive ()
   "`stop-follower' does not call tmux when no follower is active."
   :tags '(:unit :fast :stable :protocol-3 :tmux)
   (let* ((backend (test-p3--fresh-tmux-backend))
          (called nil))
-    (cl-letf (((symbol-function 'claude-agent-tmux--call)
+    (cl-letf (((symbol-function 'code-agent-tmux--call)
                (lambda (&rest _) (setq called t) "ok")))
-      (claude-agent-mux-stop-follower backend))
+      (code-agent-mux-stop-follower backend))
     (should-not called)))
 
 (ert-deftest test-p3-tmux-session-status-missing-when-sid-nil ()
   :tags '(:unit :fast :stable :protocol-3 :tmux)
   (let ((backend (test-p3--fresh-tmux-backend)))
-    (should (eq :missing (claude-agent-mux-session-status backend)))))
+    (should (eq :missing (code-agent-mux-session-status backend)))))
 
 (ert-deftest test-p3-tmux-session-status-unset-when-pane-nil ()
   "Session status distinguishes :missing (no session) from :unset (pane absent)."
   :tags '(:unit :fast :stable :protocol-3 :tmux)
   (let ((backend (test-p3--fresh-tmux-backend)))
-    (setf (claude-agent-multiplexer-backend-multiplexer-session-id backend)
+    (setf (code-agent-multiplexer-backend-multiplexer-session-id backend)
           "claude-test")
-    (should (eq :unset (claude-agent-mux-session-status backend)))))
+    (should (eq :unset (code-agent-mux-session-status backend)))))
 
 (provide 'test-backend-protocol3)
 ;;; test-backend-protocol3.el ends here

@@ -36,15 +36,15 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
 (ert-deftest test-acp-backend-create ()
   "Test that the ACP backend struct can be created."
   :tags '(:local-e2e :acp)
-  (let ((backend (claude-agent-acp-opencode-create
+  (let ((backend (code-agent-acp-opencode-create
                   :session-key "test-key"
                   :cwd "/tmp")))
-    (should (claude-agent-acp-backend-p backend))
-    (should (equal (claude-agent-acp-backend-session-key backend) "test-key"))
-    (should (equal (claude-agent-acp-backend-cwd backend) "/tmp"))
-    (should (equal (claude-agent-acp-backend-agent-name backend) "opencode"))
-    (should-not (claude-agent-acp-backend-initialized backend))
-    (should-not (claude-agent-acp-backend-active-query backend))))
+    (should (code-agent-acp-backend-p backend))
+    (should (equal (code-agent-acp-backend-session-key backend) "test-key"))
+    (should (equal (code-agent-acp-backend-cwd backend) "/tmp"))
+    (should (equal (code-agent-acp-backend-agent-name backend) "opencode"))
+    (should-not (code-agent-acp-backend-initialized backend))
+    (should-not (code-agent-acp-backend-active-query backend))))
 
 ;;; Test: Full handshake and prompt
 
@@ -56,11 +56,11 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
   (let ((tokens nil)
         (completed nil)
         (error-msg nil)
-        (backend (claude-agent-acp-opencode-create
+        (backend (code-agent-acp-opencode-create
                   :cwd (expand-file-name "."))))
     (unwind-protect
         (progn
-          (claude-agent-backend-query
+          (code-agent-backend-query
            backend
            "What is 1+1? Reply with ONLY the number."
            (list :on-token (lambda (tok) (push tok tokens))
@@ -78,11 +78,11 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
             (should (string-match-p "2" full-text)))
 
           ;; Verify backend state
-          (should (claude-agent-acp-backend-initialized backend))
-          (should (claude-agent-acp-backend-session-id backend))
-          (should-not (claude-agent-acp-backend-active-query backend)))
+          (should (code-agent-acp-backend-initialized backend))
+          (should (code-agent-acp-backend-session-id backend))
+          (should-not (code-agent-acp-backend-active-query backend)))
       ;; Cleanup
-      (ignore-errors (claude-agent-backend-cleanup backend)))))
+      (ignore-errors (code-agent-backend-cleanup backend)))))
 
 ;;; Test: Backend reuse (second prompt on same session)
 
@@ -96,12 +96,12 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
         (error-msg nil)
         (tokens-1 nil)
         (tokens-2 nil)
-        (backend (claude-agent-acp-opencode-create
+        (backend (code-agent-acp-opencode-create
                   :cwd (expand-file-name "."))))
     (unwind-protect
         (progn
           ;; First prompt
-          (claude-agent-backend-query
+          (code-agent-backend-query
            backend
            "Say only: first"
            (list :on-token (lambda (tok) (push tok tokens-1))
@@ -112,11 +112,11 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
           (should-not error-msg)
           (should completed-1)
 
-          (let ((session-id (claude-agent-acp-backend-session-id backend)))
+          (let ((session-id (code-agent-acp-backend-session-id backend)))
             (should session-id)
 
             ;; Second prompt -- should reuse session
-            (claude-agent-backend-query
+            (code-agent-backend-query
              backend
              "Say only: second"
              (list :on-token (lambda (tok) (push tok tokens-2))
@@ -129,9 +129,9 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
 
             ;; Same session ID
             (should (equal session-id
-                          (claude-agent-acp-backend-session-id backend)))))
+                          (code-agent-acp-backend-session-id backend)))))
       ;; Cleanup
-      (ignore-errors (claude-agent-backend-cleanup backend)))))
+      (ignore-errors (code-agent-backend-cleanup backend)))))
 
 ;;; Test: Cleanup releases resources
 
@@ -141,10 +141,10 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
   (test-acp-skip-unless-opencode)
 
   (let ((completed nil)
-        (backend (claude-agent-acp-opencode-create
+        (backend (code-agent-acp-opencode-create
                   :cwd (expand-file-name "."))))
     ;; Connect by sending a prompt
-    (claude-agent-backend-query
+    (code-agent-backend-query
      backend
      "Say only: cleanup-test"
      (list :on-complete (lambda (_) (setq completed t))))
@@ -152,17 +152,17 @@ TIMEOUT defaults to 30 seconds.  Returns non-nil if PRED succeeded."
     (test-acp-wait-until (lambda () completed) 30)
 
     ;; Verify process is alive
-    (let ((client (claude-agent-acp-backend-client backend)))
+    (let ((client (code-agent-acp-backend-client backend)))
       (should client)
-      (should (process-live-p (claude-agent-jsonrpc-client-process client)))
+      (should (process-live-p (code-agent-jsonrpc-client-process client)))
 
       ;; Cleanup
-      (claude-agent-backend-cleanup backend)
+      (code-agent-backend-cleanup backend)
 
       ;; All state should be cleared
-      (should-not (claude-agent-acp-backend-client backend))
-      (should-not (claude-agent-acp-backend-session-id backend))
-      (should-not (claude-agent-acp-backend-initialized backend)))))
+      (should-not (code-agent-acp-backend-client backend))
+      (should-not (code-agent-acp-backend-session-id backend))
+      (should-not (code-agent-acp-backend-initialized backend)))))
 
 (provide 'test-acp-integration)
 ;;; test-acp-integration.el ends here

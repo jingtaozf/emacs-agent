@@ -1,0 +1,437 @@
+#+TITLE: Claude Agent — Interactive Chat Mode
+#+PROPERTY: literate-load yes
+
+* Overview
+
+A comint-based REPL for talking to Claude in a free-form chat
+buffer — =M-x code-agent-chat=. The buffer is its own
+self-contained loop: user input goes through =comint-input-sender=,
+prompts are sent to a backend instance, response tokens stream
+back through the standard callback set
+(=:on-token= / =:on-message= / =:on-error= / =:on-complete=) and
+land in the buffer with a face per role.
+
+Three key bindings keep the loop usable:
+
+  C-c C-k   interrupt the current request (cancel-query on backend)
+  C-c C-l   clear buffer + start a fresh session
+  C-c C-n   keep history, just reset the session-id
+
+State (session-id, waiting flag, accumulator, total cost, options,
+backend, query-handle) lives buffer-local, so multiple chat buffers
+can run side-by-side without colliding.  =kill-buffer-hook= cleans
+up the backend instance.
+
+* Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'comint)
+(require 'code-agent-backend)
+(require 'code-agent-ide)
+#+END_SRC
+
+* Chat Mode Variables
+
+#+BEGIN_SRC elisp
+(defgroup code-agent-chat nil
+  "Interactive chat interface for Claude Agent."
+  :group 'code-agent
+  :prefix "code-agent-chat-")
+
+(defcustom code-agent-chat-prompt "You> "
+  "Prompt string for user input in chat mode."
+  :type 'string
+  :group 'code-agent-chat)
+
+(defcustom code-agent-chat-buffer-name "*Claude Chat*"
+  "Name of the Claude chat buffer."
+  :type 'string
+  :group 'code-agent-chat)
+
+(defcustom code-agent-chat-show-system-messages nil
+  "Whether to display system messages in the chat buffer."
+  :type 'boolean
+  :group 'code-agent-chat)
+
+(defcustom code-agent-chat-backend-type 'code-agent
+  "Backend type for Claude chat communication."
+  :type '(radio (const :tag "JSON stream (default)" claude-code))
+  :group 'code-agent-chat)
+
+(defcustom code-agent-chat-show-cost t
+  "Whether to display cost information after each response."
+  :type 'boolean
+  :group 'code-agent-chat)
+
+(defcustom code-agent-chat-include-ide-context t
+  "Whether to include IDE context (current file, open files, selection) in prompts.
+When non-nil, a <system-reminder> tag with context is prepended to each message."
+  :type 'boolean
+  :group 'code-agent-chat)
+
+(defvar-local code-agent-chat--session-id nil
+  "Current session ID for conversation continuity.")
+
+(defvar-local code-agent-chat--waiting nil
+  "Non-nil when waiting for Claude's response.")
+
+(defvar-local code-agent-chat--current-response ""
+  "Accumulator for the current streaming response.")
+
+(defvar-local code-agent-chat--response-start-marker nil
+  "Marker for the start of the current response.")
+
+(defvar-local code-agent-chat--total-cost 0.0
+  "Total cost accumulated in this chat session.")
+
+(defvar-local code-agent-chat--system-prompt nil
+  "Buffer-local system prompt. If nil, uses default.")
+
+(defvar-local code-agent-chat--mcp-config nil
+  "Buffer-local MCP config file path. If nil, uses global config.")
+
+(defvar-local code-agent-chat--options nil
+  "Buffer-local options plist for code-agent-query.")
+
+(defvar-local code-agent-chat--backend nil
+  "Backend instance for this chat buffer.")
+
+(defvar-local code-agent-chat--query-handle nil
+  "Handle for the current active query.")
+#+END_SRC
+
+* Chat Mode Faces
+
+#+BEGIN_SRC elisp
+(defface code-agent-chat-prompt-face
+  '((t :inherit comint-highlight-prompt))
+  "Face for the user prompt in Claude chat."
+  :group 'code-agent-chat)
+
+(defface code-agent-chat-response-face
+  '((t :inherit default))
+  "Face for Claude's responses."
+  :group 'code-agent-chat)
+
+(defface code-agent-chat-thinking-face
+  '((t :inherit font-lock-comment-face :slant italic))
+  "Face for thinking indicators."
+  :group 'code-agent-chat)
+
+(defface code-agent-chat-tool-face
+  '((t :inherit font-lock-function-name-face))
+  "Face for tool use indicators."
+  :group 'code-agent-chat)
+
+(defface code-agent-chat-error-face
+  '((t :inherit error))
+  "Face for error messages."
+  :group 'code-agent-chat)
+
+(defface code-agent-chat-info-face
+  '((t :inherit font-lock-comment-face))
+  "Face for informational messages like cost."
+  :group 'code-agent-chat)
+#+END_SRC
+
+* Chat Mode Functions
+
+Streaming is accumulator-driven: =--handle-token= appends to a
+buffer-local string and =--update-response= rewrites the response
+region from it.  The extra =delete-region= per token buys idempotency
+against backend reorder / re-send.
+
+#+BEGIN_SRC elisp
+(defun code-agent-chat--make-backend ()
+  "Create a backend based on `code-agent-chat-backend-type'."
+  (code-agent-claude-code-backend--create
+   :persistent-p nil))
+
+(defun code-agent-chat--kill-buffer-cleanup ()
+  "Clean up backend when chat buffer is killed."
+  (when code-agent-chat--backend
+    (code-agent-backend-cleanup code-agent-chat--backend)
+    (setq code-agent-chat--backend nil)
+    (setq code-agent-chat--query-handle nil)))
+
+(defun code-agent-chat--insert (text &optional face)
+  "Insert TEXT at the end of the chat buffer with optional FACE."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-max))
+      (let ((start (point)))
+        (insert text)
+        (when face
+          (add-text-properties start (point) (list 'face face)))))))
+
+(defun code-agent-chat--insert-response-start ()
+  "Insert the response header and set up markers."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-max))
+      (insert "\nClaude> ")
+      (add-text-properties (- (point) 8) (point)
+                           '(face code-agent-chat-response-face
+                             font-lock-face code-agent-chat-response-face))
+      (setq code-agent-chat--response-start-marker (point-marker)))))
+
+(defun code-agent-chat--update-response (text)
+  "Update the current response with TEXT (streaming update)."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char code-agent-chat--response-start-marker)
+      (delete-region (point) (point-max))
+      (insert text))))
+
+(defun code-agent-chat--handle-token (token)
+  "Handle a streaming TOKEN string from the backend.
+Appends the token text to the current response display."
+  (setq code-agent-chat--current-response
+        (concat code-agent-chat--current-response token))
+  (code-agent-chat--update-response code-agent-chat--current-response))
+
+(defun code-agent-chat--handle-message (msg)
+  "Handle incoming MSG from Claude in current buffer."
+  (let ((type (code-agent-message-type msg)))
+    (pcase type
+      ('system
+       (when code-agent-chat-show-system-messages
+         (let ((subtype (code-agent-system-message-subtype msg)))
+           (code-agent-chat--insert
+            (format "\n[System: %s]\n" subtype)
+            'code-agent-chat-info-face))))
+
+      ('assistant
+       (let ((text (code-agent-extract-text msg)))
+         (when text
+           (setq code-agent-chat--current-response text)
+           (code-agent-chat--update-response text)))
+       (let ((content (code-agent-assistant-message-content msg)))
+         (dolist (block content)
+           (when (code-agent-tool-use-block-p block)
+             (code-agent-chat--insert
+              (format "\n[Tool: %s]\n"
+                      (code-agent-tool-use-block-name block))
+              'code-agent-chat-tool-face)))))
+
+      ('result
+       (setq code-agent-chat--session-id
+             (code-agent-result-message-session-id msg))
+       (let ((cost (code-agent-result-message-total-cost-usd msg)))
+         (when cost
+           (setq code-agent-chat--total-cost
+                 (+ code-agent-chat--total-cost cost))
+           (when code-agent-chat-show-cost
+             (code-agent-chat--insert
+              (format "\n[Cost: $%.4f | Session total: $%.4f]\n"
+                      cost code-agent-chat--total-cost)
+              'code-agent-chat-info-face))))))))
+
+(defun code-agent-chat--handle-error (err)
+  "Handle error ERR from Claude in current buffer."
+  (code-agent-chat--insert
+   (format "\n[Error: %s]\n" err)
+   'code-agent-chat-error-face)
+  (setq code-agent-chat--waiting nil)
+  (code-agent-chat--show-prompt))
+
+(defun code-agent-chat--handle-complete (_result)
+  "Handle completion of Claude's response in current buffer."
+  (setq code-agent-chat--waiting nil)
+  (setq code-agent-chat--current-response "")
+  (code-agent-chat--insert "\n")
+  (code-agent-chat--show-prompt))
+
+(defun code-agent-chat--show-prompt ()
+  "Show the input prompt using comint."
+  (let ((inhibit-read-only t)
+        (proc (get-buffer-process (current-buffer))))
+    (goto-char (point-max))
+    (let ((start (point)))
+      (insert code-agent-chat-prompt)
+      (add-text-properties start (point)
+                           '(face code-agent-chat-prompt-face
+                             font-lock-face code-agent-chat-prompt-face
+                             front-sticky (face font-lock-face read-only)
+                             rear-nonsticky t
+                             read-only t)))
+    (when proc
+      (set-marker (process-mark proc) (point)))))
+
+(defun code-agent-chat--send-input (input)
+  "Send INPUT to Claude via the backend."
+  (when (and input (not (string-empty-p (string-trim input))))
+    (if code-agent-chat--waiting
+        (message "Still waiting for Claude's response...")
+      (setq code-agent-chat--waiting t)
+      (setq code-agent-chat--current-response "")
+      (code-agent-chat--insert-response-start)
+      (code-agent-chat--insert "[Waiting...]" 'code-agent-chat-thinking-face)
+      (unless code-agent-chat--backend
+        (setq code-agent-chat--backend (code-agent-chat--make-backend)))
+      ;; Build options, layering session continuation / system prompt / mcp
+      (let* ((base-opts (or code-agent-chat--options (code-agent-options)))
+             (opts (if code-agent-chat--session-id
+                       (plist-put (plist-put (copy-sequence base-opts)
+                                             :continue-conversation t)
+                                  :resume code-agent-chat--session-id)
+                     base-opts))
+             (opts (if code-agent-chat--system-prompt
+                       (plist-put (copy-sequence opts)
+                                  :system-prompt code-agent-chat--system-prompt)
+                     opts))
+             (opts (if code-agent-chat--mcp-config
+                       (plist-put (copy-sequence opts)
+                                  :mcp-config code-agent-chat--mcp-config)
+                     opts))
+             (system-reminder (when code-agent-chat-include-ide-context
+                                (code-agent-get-system-reminder)))
+             (actual-prompt (if (and system-reminder
+                                     (not (string-empty-p system-reminder)))
+                                (concat system-reminder "\n" input)
+                              input)))
+        (lexical-let ((chat-buf (current-buffer)))
+          (let ((callbacks
+                 (list
+                  :on-token (lambda (token)
+                              (when (buffer-live-p chat-buf)
+                                (with-current-buffer chat-buf
+                                  (code-agent-chat--handle-token token))))
+                  :on-message (lambda (msg)
+                                (when (buffer-live-p chat-buf)
+                                  (with-current-buffer chat-buf
+                                    (code-agent-chat--handle-message msg))))
+                  :on-error (lambda (err)
+                              (when (buffer-live-p chat-buf)
+                                (with-current-buffer chat-buf
+                                  (code-agent-chat--handle-error err))))
+                  :on-complete (lambda (result)
+                                 (when (buffer-live-p chat-buf)
+                                   (with-current-buffer chat-buf
+                                     (code-agent-chat--handle-complete result)))))))
+            (setq code-agent-chat--query-handle
+                  (code-agent-backend-query
+                   code-agent-chat--backend
+                   actual-prompt
+                   callbacks
+                   :options opts))))))))
+
+(defun code-agent-chat-interrupt ()
+  "Interrupt the current Claude request via the backend."
+  (interactive)
+  (when code-agent-chat--backend
+    (code-agent-backend-cancel code-agent-chat--backend
+                                 code-agent-chat--query-handle))
+  (setq code-agent-chat--query-handle nil)
+  (setq code-agent-chat--waiting nil)
+  (code-agent-chat--insert "\n[Interrupted]\n" 'code-agent-chat-error-face)
+  (code-agent-chat--show-prompt))
+
+(defun code-agent-chat-clear ()
+  "Clear the chat buffer and reset the session."
+  (interactive)
+  (when (yes-or-no-p "Clear chat history and start new session? ")
+    (when code-agent-chat--backend
+      (code-agent-backend-cleanup code-agent-chat--backend)
+      (setq code-agent-chat--backend nil)
+      (setq code-agent-chat--query-handle nil))
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (setq code-agent-chat--session-id nil)
+      (setq code-agent-chat--total-cost 0.0)
+      (setq code-agent-chat--waiting nil)
+      (code-agent-chat--initialize-buffer))))
+
+(defun code-agent-chat-new-session ()
+  "Start a new conversation session without clearing history.
+Resets session-id for a fresh conversation."
+  (interactive)
+  (setq code-agent-chat--session-id nil)
+  (code-agent-chat--insert "\n--- New Session ---\n" 'code-agent-chat-info-face)
+  (message "Started new session"))
+#+END_SRC
+
+* Chat Mode Definition
+
+#+BEGIN_SRC elisp
+(defvar code-agent-chat-mode-map
+  (let ((map (nconc (make-sparse-keymap) comint-mode-map)))
+    (define-key map (kbd "C-c C-k") #'code-agent-chat-interrupt)
+    (define-key map (kbd "C-c C-l") #'code-agent-chat-clear)
+    (define-key map (kbd "C-c C-n") #'code-agent-chat-new-session)
+    map)
+  "Keymap for `code-agent-chat-mode'.")
+
+(defun code-agent-chat--input-sender (_proc input)
+  "Send INPUT to Claude (comint input sender).
+_PROC is ignored since we don't use a real process."
+  (code-agent-chat--send-input input))
+
+(define-derived-mode code-agent-chat-mode comint-mode "Claude-Chat"
+  "Major mode for interactive chat with Claude.
+Based on comint-mode for proper input handling.
+
+\\{code-agent-chat-mode-map}"
+  :group 'code-agent-chat
+  ;; Set up local variables
+  (setq-local code-agent-chat--session-id nil)
+  (setq-local code-agent-chat--waiting nil)
+  (setq-local code-agent-chat--current-response "")
+  (setq-local code-agent-chat--total-cost 0.0)
+  (setq-local code-agent-chat--response-start-marker nil)
+  ;; Comint configuration
+  (setq-local comint-prompt-regexp (concat "^" (regexp-quote code-agent-chat-prompt)))
+  (setq-local comint-input-sender #'code-agent-chat--input-sender)
+  (setq-local comint-process-echoes nil)
+  ;; Backend cleanup on buffer kill
+  (add-hook 'kill-buffer-hook #'code-agent-chat--kill-buffer-cleanup nil t))
+
+(defun code-agent-chat--initialize-buffer ()
+  "Initialize the chat buffer with header and prompt."
+  (let ((inhibit-read-only t))
+    (insert "Claude Agent Chat\n")
+    (insert "================\n")
+    (insert (format "CLI: %s\n" (code-agent--find-cli)))
+    (insert "Type your message and press RET to send.\n")
+    (insert "Commands: C-c C-k (interrupt), C-c C-l (clear), C-c C-n (new session)\n\n")
+    ;; Set the prompt using comint's mechanism
+    (setq-local comint-prompt-read-only t)
+    (insert code-agent-chat-prompt)
+    ;; Set process mark if process exists (guards against nil dereference)
+    (when-let* ((proc (get-buffer-process (current-buffer))))
+      (set-marker (process-mark proc) (point)))))
+#+END_SRC
+
+* Main Entry Point
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun code-agent-chat ()
+  "Start or switch to the Claude chat buffer."
+  (interactive)
+  (unless (code-agent--find-cli)
+    (user-error "Claude CLI not found. Set `code-agent-cli-path' or install Claude Code CLI"))
+  (let ((buf (get-buffer-create code-agent-chat-buffer-name)))
+    (with-current-buffer buf
+      (unless (eq major-mode 'code-agent-chat-mode)
+        (code-agent-chat-mode)
+        ;; Dummy `cat' process so comint has a process-mark to track
+        (let ((proc (start-process "claude-chat" buf "cat")))
+          (set-process-query-on-exit-flag proc nil)
+          (set-process-filter proc #'code-agent-chat--comint-filter))
+        (code-agent-chat--initialize-buffer)))
+    (pop-to-buffer buf)
+    (goto-char (point-max))))
+
+(defun code-agent-chat--comint-filter (_proc _output)
+  "Filter for the dummy comint process; ignored — we drive output ourselves."
+  nil)
+#+END_SRC
+
+* Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-chat)
+;;; code-agent-chat.el ends here
+#+END_SRC

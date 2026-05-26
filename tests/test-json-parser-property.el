@@ -7,7 +7,7 @@
 
 ;;; Commentary:
 
-;; Property-based (fuzzer) tests for `claude-agent--process-json-buffer'.
+;; Property-based (fuzzer) tests for `code-agent--process-json-buffer'.
 ;; These tests verify that the JSON streaming parser handles arbitrary
 ;; split positions, whitespace noise, unicode content, and unknown message
 ;; types without data loss or errors.
@@ -27,7 +27,7 @@ Returns (process . state)."
          (msg-cb (plist-get callbacks :callback))
          (token-cb (plist-get callbacks :token-callback))
          (complete-cb (plist-get callbacks :complete-callback))
-         (state (claude-agent--make-process-state
+         (state (code-agent--make-process-state
                  :json-buffer ""
                  :ready t
                  :callback msg-cb
@@ -35,7 +35,7 @@ Returns (process . state)."
                  :error-callback error-cb
                  :complete-callback complete-cb))
          (process (start-process "test-fuzzer" nil "true")))
-    (process-put process 'claude-agent-state state)
+    (process-put process 'code-agent-state state)
     (cons process state)))
 
 (defun test-json-fuzzer--cleanup (process)
@@ -46,12 +46,12 @@ Returns (process . state)."
 (defun test-json-fuzzer--feed-chunks (process state chunks)
   "Feed CHUNKS (list of strings) into PROCESS/STATE one at a time.
 Simulates incremental data arrival by appending to the json-buffer
-and calling `claude-agent--process-json-buffer' after each chunk."
+and calling `code-agent--process-json-buffer' after each chunk."
   (dolist (chunk chunks)
-    (let ((buf (or (claude-agent--process-state-json-buffer state) "")))
-      (setf (claude-agent--process-state-json-buffer state)
+    (let ((buf (or (code-agent--process-state-json-buffer state) "")))
+      (setf (code-agent--process-state-json-buffer state)
             (concat buf chunk))
-      (claude-agent--process-json-buffer process))))
+      (code-agent--process-json-buffer process))))
 
 (defun test-json-fuzzer--split-string-randomly (str n-splits)
   "Split STR at N-SPLITS random positions into a list of substrings.
@@ -96,10 +96,10 @@ Verify all messages arrive exactly once regardless of split positions."
              (process (car pair))
              (state (cdr pair)))
         ;; Intercept message dispatch
-        (cl-letf (((symbol-function 'claude-agent-handle-message)
+        (cl-letf (((symbol-function 'code-agent-handle-message)
                    (lambda (_type parsed _state)
                      (push (plist-get parsed :type) received-types)))
-                  ((symbol-function 'claude-agent--handle-control-request)
+                  ((symbol-function 'code-agent--handle-control-request)
                    #'ignore))
           (unwind-protect
               (let* ((n-splits (+ 2 (random 8)))
@@ -128,10 +128,10 @@ Verify no errors and all messages still arrive."
                     (list :error-callback (lambda (err) (push err errors)))))
              (process (car pair))
              (state (cdr pair)))
-        (cl-letf (((symbol-function 'claude-agent-handle-message)
+        (cl-letf (((symbol-function 'code-agent-handle-message)
                    (lambda (_type parsed _state)
                      (push (plist-get parsed :type) received-types)))
-                  ((symbol-function 'claude-agent--handle-control-request)
+                  ((symbol-function 'code-agent--handle-control-request)
                    #'ignore))
           (unwind-protect
               (let* (;; Build JSONL with random whitespace lines injected
@@ -146,8 +146,8 @@ Verify no errors and all messages still arrive."
                               (mapconcat #'identity (cdr ws-lines) "\n") "\n"
                               json2 "\n"
                               "   \n\n  \t  \n")))
-                (setf (claude-agent--process-state-json-buffer state) stream)
-                (claude-agent--process-json-buffer process)
+                (setf (code-agent--process-state-json-buffer state) stream)
+                (code-agent--process-json-buffer process)
                 ;; Both messages should arrive
                 (should (= 2 (length received-types)))
                 ;; No errors from whitespace lines
@@ -170,19 +170,19 @@ Verify no errors and all messages still arrive."
       (let* ((pair (test-json-fuzzer--make-process-with-state nil))
              (process (car pair))
              (state (cdr pair)))
-        (cl-letf (((symbol-function 'claude-agent-handle-message)
+        (cl-letf (((symbol-function 'code-agent-handle-message)
                    (lambda (_type parsed _state)
                      (push (plist-get (plist-get parsed :message) :content)
                            received-texts)))
-                  ((symbol-function 'claude-agent--handle-control-request)
+                  ((symbol-function 'code-agent--handle-control-request)
                    #'ignore))
           (unwind-protect
               (let ((stream (concat
                              (json-encode `(:type "assistant"
                                            :message (:content ,text)))
                              "\n")))
-                (setf (claude-agent--process-state-json-buffer state) stream)
-                (claude-agent--process-json-buffer process)
+                (setf (code-agent--process-state-json-buffer state) stream)
+                (code-agent--process-json-buffer process)
                 (should (= 1 (length received-texts)))
                 (should (equal text (car received-texts))))
             (test-json-fuzzer--cleanup process)))))))
@@ -191,7 +191,7 @@ Verify no errors and all messages still arrive."
 
 (ert-deftest test-json-unknown-types-pass-through ()
   "Unknown message types don't cause errors.
-The parser dispatches them via `claude-agent-handle-message' with
+The parser dispatches them via `code-agent-handle-message' with
 the unknown type symbol — the caller decides what to do."
   :tags '(:unit :fuzzer)
   (let ((dispatched-types '())
@@ -204,17 +204,17 @@ the unknown type symbol — the caller decides what to do."
                     (list :error-callback (lambda (err) (push err errors)))))
              (process (car pair))
              (state (cdr pair)))
-        (cl-letf (((symbol-function 'claude-agent-handle-message)
+        (cl-letf (((symbol-function 'code-agent-handle-message)
                    (lambda (type _parsed _state)
                      (push type dispatched-types)))
-                  ((symbol-function 'claude-agent--handle-control-request)
+                  ((symbol-function 'code-agent--handle-control-request)
                    #'ignore))
           (unwind-protect
               (let ((stream (concat
                              (json-encode `(:type ,utype :data "payload"))
                              "\n")))
-                (setf (claude-agent--process-state-json-buffer state) stream)
-                (claude-agent--process-json-buffer process)
+                (setf (code-agent--process-state-json-buffer state) stream)
+                (code-agent--process-json-buffer process)
                 ;; Should have been dispatched (interned as symbol)
                 (should (= 1 (length dispatched-types)))
                 (should (eq (intern utype) (car dispatched-types)))
@@ -255,16 +255,16 @@ Real-world protocols may send messages in unexpected sequences."
                       (list :error-callback (lambda (err) (push err errors)))))
                (process (car pair))
                (state (cdr pair)))
-          (cl-letf (((symbol-function 'claude-agent-handle-message)
+          (cl-letf (((symbol-function 'code-agent-handle-message)
                      (lambda (_type parsed _state)
                        (push (plist-get parsed :type) received-types)))
-                    ((symbol-function 'claude-agent--handle-control-request)
+                    ((symbol-function 'code-agent--handle-control-request)
                      #'ignore))
             (unwind-protect
                 (let ((stream (mapconcat #'json-encode msgs "\n")))
-                  (setf (claude-agent--process-state-json-buffer state)
+                  (setf (code-agent--process-state-json-buffer state)
                         (concat stream "\n"))
-                  (claude-agent--process-json-buffer process)
+                  (code-agent--process-json-buffer process)
                   ;; All messages should arrive, regardless of order
                   (should (= (length msgs) (length received-types)))
                   ;; No errors from unexpected ordering
@@ -285,10 +285,10 @@ The parser should skip bad lines and continue processing."
                                             error-lines)))))
            (process (car pair))
            (state (cdr pair)))
-      (cl-letf (((symbol-function 'claude-agent-handle-message)
+      (cl-letf (((symbol-function 'code-agent-handle-message)
                  (lambda (_type parsed _state)
                    (push (plist-get parsed :type) received-types)))
-                ((symbol-function 'claude-agent--handle-control-request)
+                ((symbol-function 'code-agent--handle-control-request)
                  #'ignore))
         (unwind-protect
             (let ((stream (concat
@@ -297,8 +297,8 @@ The parser should skip bad lines and continue processing."
                            "totally not json at all\n"
                            "{\"truncated\n"
                            (json-encode '(:type "result" :result "after")) "\n")))
-              (setf (claude-agent--process-state-json-buffer state) stream)
-              (claude-agent--process-json-buffer process)
+              (setf (code-agent--process-state-json-buffer state) stream)
+              (code-agent--process-json-buffer process)
               ;; Both valid messages should arrive
               (should (= 2 (length received-types)))
               (should (member "assistant" received-types))
@@ -317,10 +317,10 @@ When the rest arrives in the next chunk, the complete message parses."
     (let* ((pair (test-json-fuzzer--make-process-with-state nil))
            (process (car pair))
            (state (cdr pair)))
-      (cl-letf (((symbol-function 'claude-agent-handle-message)
+      (cl-letf (((symbol-function 'code-agent-handle-message)
                  (lambda (_type parsed _state)
                    (push (plist-get parsed :type) received-types)))
-                ((symbol-function 'claude-agent--handle-control-request)
+                ((symbol-function 'code-agent--handle-control-request)
                  #'ignore))
         (unwind-protect
             (let* ((full-json (json-encode '(:type "assistant"
@@ -333,7 +333,7 @@ When the rest arrives in the next chunk, the complete message parses."
               (test-json-fuzzer--feed-chunks process state (list chunk1))
               (should (= 0 (length received-types)))
               ;; Buffer should still hold the incomplete JSON
-              (should (string= (claude-agent--process-state-json-buffer state) chunk1))
+              (should (string= (code-agent--process-state-json-buffer state) chunk1))
               ;; Feed second chunk — completes the line
               (test-json-fuzzer--feed-chunks process state (list chunk2))
               ;; Now the message should have arrived
@@ -350,11 +350,11 @@ When the rest arrives in the next chunk, the complete message parses."
     (let* ((pair (test-json-fuzzer--make-process-with-state nil))
            (process (car pair))
            (state (cdr pair)))
-      (cl-letf (((symbol-function 'claude-agent-handle-message)
+      (cl-letf (((symbol-function 'code-agent-handle-message)
                  (lambda (_type parsed _state)
                    (push (plist-get (plist-get parsed :message) :content)
                          received-contents)))
-                ((symbol-function 'claude-agent--handle-control-request)
+                ((symbol-function 'code-agent--handle-control-request)
                  #'ignore))
         (unwind-protect
             (let* (;; 100KB payload — typical large tool output
@@ -363,8 +363,8 @@ When the rest arrives in the next chunk, the complete message parses."
                               (json-encode `(:type "assistant"
                                             :message (:content ,large-content)))
                               "\n")))
-              (setf (claude-agent--process-state-json-buffer state) json-str)
-              (claude-agent--process-json-buffer process)
+              (setf (code-agent--process-state-json-buffer state) json-str)
+              (code-agent--process-json-buffer process)
               ;; Message should arrive with full content
               (should (= 1 (length received-contents)))
               (should (= (* 100 1024) (length (car received-contents)))))
@@ -380,10 +380,10 @@ reassembles correctly."
     (let* ((pair (test-json-fuzzer--make-process-with-state nil))
            (process (car pair))
            (state (cdr pair)))
-      (cl-letf (((symbol-function 'claude-agent-handle-message)
+      (cl-letf (((symbol-function 'code-agent-handle-message)
                  (lambda (_type parsed _state)
                    (push (plist-get parsed :type) received-types)))
-                ((symbol-function 'claude-agent--handle-control-request)
+                ((symbol-function 'code-agent--handle-control-request)
                  #'ignore))
         (unwind-protect
             (let* ((json-str (concat
@@ -419,12 +419,12 @@ No errors, no state corruption."
           (progn
             ;; Call 50 times with empty buffer
             (dotimes (_ 50)
-              (setf (claude-agent--process-state-json-buffer state) "")
-              (claude-agent--process-json-buffer process))
+              (setf (code-agent--process-state-json-buffer state) "")
+              (code-agent--process-json-buffer process))
             ;; No errors should have occurred
             (should (null errors))
             ;; Buffer should still be empty
-            (should (string= "" (claude-agent--process-state-json-buffer state))))
+            (should (string= "" (code-agent--process-state-json-buffer state))))
         (test-json-fuzzer--cleanup process)))))
 
 ;;; Test: Deeply nested JSON structures
@@ -436,10 +436,10 @@ No errors, no state corruption."
     (let* ((pair (test-json-fuzzer--make-process-with-state nil))
            (process (car pair))
            (state (cdr pair)))
-      (cl-letf (((symbol-function 'claude-agent-handle-message)
+      (cl-letf (((symbol-function 'code-agent-handle-message)
                  (lambda (_type parsed _state)
                    (push parsed received)))
-                ((symbol-function 'claude-agent--handle-control-request)
+                ((symbol-function 'code-agent--handle-control-request)
                  #'ignore))
         (unwind-protect
             (let* (;; Build a 10-level deep structure
@@ -449,8 +449,8 @@ No errors, no state corruption."
                    (msg `(:type "assistant" :message (:content "ok")
                           :tool_result ,nested))
                    (json-str (concat (json-encode msg) "\n")))
-              (setf (claude-agent--process-state-json-buffer state) json-str)
-              (claude-agent--process-json-buffer process)
+              (setf (code-agent--process-state-json-buffer state) json-str)
+              (code-agent--process-json-buffer process)
               ;; Message should arrive intact
               (should (= 1 (length received)))
               ;; Verify the deep nesting survived
@@ -469,22 +469,22 @@ No errors, no state corruption."
 and error callback fires."
   :tags '(:unit :fuzzer)
   (let ((error-received nil))
-    (let* ((state (claude-agent--make-process-state
+    (let* ((state (code-agent--make-process-state
                    :json-buffer ""
                    :ready t
                    :error-callback (lambda (err) (setq error-received err))))
            (process (start-process "test-overflow" nil "sleep" "10")))
       (unwind-protect
           (progn
-            (process-put process 'claude-agent-state state)
+            (process-put process 'code-agent-state state)
             ;; Use a tiny limit for testing
-            (let ((claude-agent-max-json-buffer-size 100))
+            (let ((code-agent-max-json-buffer-size 100))
               ;; Feed data that exceeds the limit (no newlines = no parsing)
-              (claude-agent--process-filter process (make-string 200 ?x))
+              (code-agent--process-filter process (make-string 200 ?x))
               ;; Error callback should have fired
               (should error-received)
               ;; Buffer should have been cleared
-              (should (string= "" (claude-agent--process-state-json-buffer state)))
+              (should (string= "" (code-agent--process-state-json-buffer state)))
               ;; Process should be dead
               (should-not (process-live-p process))))
         (when (process-live-p process)
@@ -493,18 +493,18 @@ and error callback fires."
 ;;; Test: control_request messages dispatch correctly
 
 (ert-deftest test-json-control-request-dispatch ()
-  "control_request messages bypass claude-agent-handle-message and go to
-claude-agent--handle-control-request directly."
+  "control_request messages bypass code-agent-handle-message and go to
+code-agent--handle-control-request directly."
   :tags '(:unit :fuzzer)
   (let ((control-requests '())
         (normal-messages '()))
     (let* ((pair (test-json-fuzzer--make-process-with-state nil))
            (process (car pair))
            (state (cdr pair)))
-      (cl-letf (((symbol-function 'claude-agent-handle-message)
+      (cl-letf (((symbol-function 'code-agent-handle-message)
                  (lambda (_type parsed _state)
                    (push (plist-get parsed :type) normal-messages)))
-                ((symbol-function 'claude-agent--handle-control-request)
+                ((symbol-function 'code-agent--handle-control-request)
                  (lambda (_proc parsed)
                    (push parsed control-requests))))
         (unwind-protect
@@ -519,8 +519,8 @@ claude-agent--handle-control-request directly."
                                           :request_id "req-2"
                                           :tool (:name "Read"))) "\n"
                            (json-encode '(:type "result" :result "done")) "\n")))
-              (setf (claude-agent--process-state-json-buffer state) stream)
-              (claude-agent--process-json-buffer process)
+              (setf (code-agent--process-state-json-buffer state) stream)
+              (code-agent--process-json-buffer process)
               ;; Normal messages: system, assistant, result = 3
               (should (= 3 (length normal-messages)))
               ;; Control requests dispatched separately: 2
@@ -545,10 +545,10 @@ positions. Valid messages should all arrive despite the bad lines."
                     (list :error-callback (lambda (err) (push err errors)))))
              (process (car pair))
              (state (cdr pair)))
-        (cl-letf (((symbol-function 'claude-agent-handle-message)
+        (cl-letf (((symbol-function 'code-agent-handle-message)
                    (lambda (_type parsed _state)
                      (push (plist-get parsed :type) received-types)))
-                  ((symbol-function 'claude-agent--handle-control-request)
+                  ((symbol-function 'code-agent--handle-control-request)
                    #'ignore))
           (unwind-protect
               (let* ((stream (concat

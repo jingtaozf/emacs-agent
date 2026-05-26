@@ -18,9 +18,9 @@ hook events. Part of code-agent-org, loaded after code-agent-org.org.
 ** Overview
 
 This file is the operational body of the cmux multiplexer backend.
-The matching =claude-agent-cmux-backend.org= holds the Protocol 2b
+The matching =code-agent-cmux-backend.org= holds the Protocol 2b
 class + dispatch shell; everything cmux-specific that doesn't fit
-into the abstract =claude-agent-multiplexer-backend= base lives here.
+into the abstract =code-agent-multiplexer-backend= base lives here.
 
 The reading order that matches the C-c C-c lifecycle:
 
@@ -48,10 +48,10 @@ Read it before any of the launch-path code.
 (require 'json)
 (require 'code-agent-org-workspace-bridge)
 (require 'code-agent-org-terminal-base)
-;; cl-defstruct's auto-generated `claude-agent-cmux-backend-create' is
+;; cl-defstruct's auto-generated `code-agent-cmux-backend-create' is
 ;; built when the backend module loads — declare the require so the
 ;; byte-compiler can see the symbol.
-(require 'claude-agent-cmux-backend)
+(require 'code-agent-cmux-backend)
 
 #+END_SRC
 
@@ -98,7 +98,7 @@ Cross-language enum protocol: these three symbols (`claude' /
 `copilot' / `opencode') round-trip through the AGENT_TYPE env var
 as their lowercase string form to the Python side's
 `AgentKind' enum.  When adding a fourth agent, add it BOTH here
-and to `AgentKind' in claude-agent-python.org (the enum's
+and to `AgentKind' in code-agent-python.org (the enum's
 `from_string' tolerates unknown values by defaulting to CLAUDE,
 so a one-sided change degrades gracefully but loses the per-agent
 CLI-session-property dispatch)."
@@ -243,12 +243,12 @@ elisp; everything else is data.
 
 The profile system shipped before the tri-protocol refactor (2026-04-24)
 and is now structurally subsumed by it: agent identity has moved into
-the agent-family classes (=claude-agent-acp-*=, the Protocol-1 lifecycle
+the agent-family classes (=code-agent-acp-*=, the Protocol-1 lifecycle
 layer), and the cmux backend sees agents through the agent-profile
 slot rather than dispatching on agent type directly. The profile struct
 here remains the operational data — patterns, cancel keys, capability
 flags — that the agent-family layer hands down to the multiplexer for
-its concrete behaviour. See =claude-agent-backend.org= → "Tri-Protocol
+its concrete behaviour. See =code-agent-backend.org= → "Tri-Protocol
 Architecture" for the upper layers.
 
 OpenCode is the clearest example of the dual-path shape this enables.
@@ -256,7 +256,7 @@ The =opencode= cmux profile here runs OpenCode's TUI inside a cmux pane
 and uses screen-scraping + filesystem injection (=opencode.jsonc= +
 =AGENTS.md=, restored on exit) — fine for interactive use, but a
 crash-window leaves the project repo in a partially modified state.
-=claude-agent-acp-opencode.org= is the same agent reached via a
+=code-agent-acp-opencode.org= is the same agent reached via a
 different wire (=opencode acp= over stdio, ACP/JSON-RPC) — no terminal,
 no file injection, structured token stream, multi-turn session via
 =session/load=. Both paths are shipped; the ACP path is preferred for
@@ -375,7 +375,7 @@ Returns nil if ICON-STR is nil."
 
 (defun code-agent-org-cmux--apply-color (workspace-ref &optional icon)
   "Set sidebar status pill on WORKSPACE-REF using WORKSPACE_COLOR and WORKSPACE_ICON.
-Label is derived from the org file name (e.g. \"claude-agent-dev\").
+Label is derived from the org file name (e.g. \"code-agent-dev\").
 ICON is the default icon, overridden by WORKSPACE_ICON if set.
 No-op if WORKSPACE_COLOR is not set."
   (let* ((color-raw (code-agent-org-terminal--find-session-property "WORKSPACE_COLOR"))
@@ -533,7 +533,7 @@ Three phases under one ``cmux-call'' span:
 3. Assemble flat argv and exec — when a custom socket is in use
    we clear ``CMUX_WORKSPACE_ID'' from the environment so the CLI
    doesn't resolve workspaces from the production instance."
-  (claude-agent-with-span "cmux-call"
+  (code-agent-with-span "cmux-call"
       (list :span-kind "CLIENT" :subcommand subcommand) nil
     (let* ((split (code-agent-org-cmux--split-stdin-arg args))
            (stdin-text (car split))
@@ -568,7 +568,7 @@ Three phases under one ``cmux-call'' span:
   "Wait for Claude Code TUI to be ready in SURFACE-ID.
 Uses cmux wait-for signal from SessionStart hook (50ms polling).
 Falls back to capture-pane polling if signal times out."
-  (claude-agent-with-span "cmux-wait-for-ready"
+  (code-agent-with-span "cmux-wait-for-ready"
       (list :surface-id surface-id :timeout code-agent-org-cmux-ready-timeout) nil
   (let ((workspace-session-id
          (condition-case nil
@@ -663,7 +663,7 @@ For agents with vi-mode TUI (Claude Code), ensures INSERT mode first.
 For non-vi-mode agents (OpenCode, Copilot), multi-line text is sent line
 by line with shift-enter between lines, so newlines appear as literal
 characters in the TUI input box rather than submitting each line separately."
-  (claude-agent-with-span "cmux-send-text"
+  (code-agent-with-span "cmux-send-text"
       (list :surface-id surface-id
             :text-length (length text)
             :input (truncate-string-to-width (or text "") 2000)) nil
@@ -1450,7 +1450,7 @@ to become ready, and returns the surface ref."
 Returns the cmux surface ref (e.g. \"surface:1\").
 Launches if needed, reuses by saved ref.
 Auto-starts the Emacs MCP server if not running."
-  (claude-agent-with-span "cmux-ensure-session"
+  (code-agent-with-span "cmux-ensure-session"
     (list :session-id (condition-case nil
                           (code-agent-org-terminal--find-session-property "CLAUDE_SESSION_ID")
                         (error nil))) nil
@@ -1537,7 +1537,7 @@ Uses ready/busy patterns from the active agent profile."
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux--query-completed (workspace-session-id)
   "Mark the cmux query for WORKSPACE-SESSION-ID as completed.
-Unregisters from `claude-agent--active-queries'.
+Unregisters from `code-agent--active-queries'.
 When loop state is active, schedules the next iteration.
 Wrapped in condition-case: called from Python via MCP evalElisp,
 so an unhandled error would leave the session permanently :busy t."
@@ -1545,14 +1545,14 @@ so an unhandled error would leave the session permanently :busy t."
       (let* ((session-key (gethash workspace-session-id code-agent-org-terminal--workspace-to-session-key))
              (trace-ctx (when session-key
                           (code-agent-org--session-get session-key :trace-ctx))))
-        (claude-agent-with-span "cmux-query-completed"
+        (code-agent-with-span "cmux-query-completed"
             (list :session-id workspace-session-id) trace-ctx
         (let ((req-id (code-agent-org-terminal--read-request-id workspace-session-id)))
           (when req-id
-            (let ((state (claude-agent--get-active-query req-id)))
+            (let ((state (code-agent--get-active-query req-id)))
               (when state
-                (setf (claude-agent--process-state-closed state) t)
-                (claude-agent--unregister-query req-id)))))
+                (setf (code-agent--process-state-closed state) t)
+                (code-agent--unregister-query req-id)))))
         ;; Check loop continuation
         (let ((surface-id (gethash workspace-session-id code-agent-org-cmux--workspace-to-surface)))
           ;; Workspace mappings persist across queries (workspace outlives stories)
@@ -1593,7 +1593,7 @@ so an unhandled error would leave the session permanently :busy t."
 (defun code-agent-org-cmux--loop-send (workspace-session-id surface-id prompt session-key)
   "Send next loop iteration PROMPT to cmux.
 WORKSPACE-SESSION-ID and SURFACE-ID identify the session."
-  (claude-agent-with-span "cmux-loop-send"
+  (code-agent-with-span "cmux-loop-send"
       (list :session-id workspace-session-id) nil
   (let ((org-buf (code-agent-org--session-get session-key :loop-org-buffer))
         (marker (code-agent-org--session-get session-key :loop-block-marker)))
@@ -1638,7 +1638,7 @@ Eleven OTel spans cover this flow: =cmux-call=, =cmux-ensure-session=,
 =cmux-execute=, =cmux-query-completed=, =cmux-loop-send=,
 =cmux-wait-for-ready=, =cmux-send-text=, =cmux-cancel=,
 =cmux-permission-needed=, =cmux-permission-resolved=,
-=cmux-recover-session=. See =claude-agent-trace.org= for how those
+=cmux-recover-session=. See =code-agent-trace.org= for how those
 spans roll up into the per-AI-block root span.
 
 #+BEGIN_SRC elisp
@@ -1665,7 +1665,7 @@ advances past iteration 1."
   (code-agent-org--session-put sk :loop-org-buffer (current-buffer))
   (code-agent-org--session-put sk :loop-block-marker (copy-marker (point)))
   (code-agent-org--session-put sk :backend
-                               (claude-agent-cmux-backend-create :session-key sk))
+                               (code-agent-cmux-backend-create :session-key sk))
   ;; Keep `:backend-property' in sync so `code-agent-org--resolve-backend'
   ;; treats this manual install as a fresh cache entry rather than a
   ;; property-change miss on the next dispatch.
@@ -1721,8 +1721,8 @@ Five phases:
     ;; Root trace context: cache BEFORE entering the child span so async
     ;; callbacks join at the root, not under the cmux-execute span itself.
     (when sk
-      (code-agent-org--session-put sk :trace-ctx (claude-agent-trace-context)))
-    (claude-agent-with-span "cmux-execute"
+      (code-agent-org--session-put sk :trace-ctx (code-agent-trace-context)))
+    (code-agent-with-span "cmux-execute"
         (list :session-id workspace-session-id
               :input prompt
               :surface-id surface-id) nil
@@ -1943,10 +1943,10 @@ buffers."
       (lexical-let ((sk session-key))
         (add-hook 'kill-buffer-hook
                   (lambda ()
-                    (remhash sk claude-agent--session-verbose-buffers))
+                    (remhash sk code-agent--session-verbose-buffers))
                   nil t)))
     ;; Register so code-agent-org-show-verbose finds it
-    (puthash session-key buf claude-agent--session-verbose-buffers)
+    (puthash session-key buf code-agent--session-verbose-buffers)
     buf))
 
 (defun code-agent-org-cmux--verbose-workspace-uuid (session-key)
@@ -1981,7 +1981,7 @@ default 256 KB ≈ hundreds of scrolled screens — plenty for
 debugging, cheap to hold.
 
 The ANSI strip + ceiling defcustom both live in
-=claude-agent-multiplexer.org= (shared with tmux); this filter
+=code-agent-multiplexer.org= (shared with tmux); this filter
 reads from there directly — no cmux-private copies.
 
 #+BEGIN_SRC elisp
@@ -1989,7 +1989,7 @@ reads from there directly — no cmux-private copies.
   "Append CHUNK (scrubbed) from `cmux capture-pane --follow' to the verbose buffer.
 
 Trims whole lines from the start when the buffer exceeds
-`claude-agent-multiplexer-verbose-buffer-max-size' so long-running
+`code-agent-multiplexer-verbose-buffer-max-size' so long-running
 sessions don't accumulate unbounded memory.
 
 Auto-scrolls only windows that were already at `point-max' — a user
@@ -1997,7 +1997,7 @@ reading an earlier page keeps their scroll position as new content
 lands after the visible window."
   (let ((vbuf (process-get proc 'verbose-buffer)))
     (when (buffer-live-p vbuf)
-      (let ((scrubbed (claude-agent-multiplexer--strip-ansi chunk)))
+      (let ((scrubbed (code-agent-multiplexer--strip-ansi chunk)))
         (when (> (length scrubbed) 0)
           (with-current-buffer vbuf
             (let ((win-states nil))
@@ -2008,12 +2008,12 @@ lands after the visible window."
                   (goto-char (point-max))
                   (insert scrubbed))
                 ;; Trim whole lines from the start when over cap.
-                (when (and claude-agent-multiplexer-verbose-buffer-max-size
+                (when (and code-agent-multiplexer-verbose-buffer-max-size
                            (> (buffer-size)
-                              claude-agent-multiplexer-verbose-buffer-max-size))
+                              code-agent-multiplexer-verbose-buffer-max-size))
                   (save-excursion
                     (goto-char (- (point-max)
-                                  claude-agent-multiplexer-verbose-buffer-max-size))
+                                  code-agent-multiplexer-verbose-buffer-max-size))
                     (forward-line 1)
                     (delete-region (point-min) (point)))))
               (dolist (state win-states)
@@ -2432,7 +2432,7 @@ foreground (vim, less, …) this may be a no-op."
 Uses cancel keys from the active agent profile (Escape for Claude Code,
 C-c for GitHub Copilot CLI)."
   (interactive)
-  (claude-agent-with-span "cmux-cancel" nil nil
+  (code-agent-with-span "cmux-cancel" nil nil
   (let* ((surface-id (code-agent-org-terminal--find-session-property "CMUX_SURFACE_ID"))
          (profile (code-agent-org-cmux--get-agent-profile))
          (cancel-keys (if profile
@@ -2538,11 +2538,11 @@ Claude Code raises a permission event through the =PreToolUse= hook for
 =.claude/rules/minimize-emacs-mcp-calls.md= for why everything else is
 filtered out at the matcher). The Python =sdd-bridge= side returns
 =ask= and calls back into Emacs via MCP; the handlers below register a
-mode-line alert through =claude-agent-add-alert=, focus the cmux
+mode-line alert through =code-agent-add-alert=, focus the cmux
 workspace, activate the cmux app, and post a macOS notification.
 =PostToolUse= clears the alert.
 
-The dispatch is keyed by backend: =claude-org--terminal-permission-needed=
+The dispatch is keyed by backend: =code-agent-org--terminal-permission-needed=
 in =code-agent-org.org= routes to either cmux or another terminal based
 on =CLAUDE_BACKEND=; the cmux variant lives below.
 
@@ -2582,7 +2582,7 @@ The =permissionDecision= flow is untouched — the handler still returns
 Registers a mode-line alert, focuses the cmux workspace, and notifies user.
 Also ensures the session is marked busy (self-healing: if the Prompt hook
 was skipped, the permission event proves a query is active)."
-  (claude-agent-with-span "cmux-permission-needed"
+  (code-agent-with-span "cmux-permission-needed"
       (list :session-id workspace-session-id :tool-name tool-name) nil
   ;; Self-healing: ensure session is marked busy if not already.
   ;; The Prompt hook may have been skipped (e.g., retry/continue in Claude Code).
@@ -2601,14 +2601,14 @@ was skipped, the permission event proves a query is active)."
                   (code-agent-org-terminal--register-query workspace-session-id nil))))
           (error nil)))))
   ;; Register mode-line alert
-  (claude-agent-add-alert
+  (code-agent-add-alert
    (intern workspace-session-id)
-   :label (claude-agent--permission-label workspace-session-id)
+   :label (code-agent--permission-label workspace-session-id)
    :tooltip (format "Permission needed: %s\nClick to focus cmux workspace" tool-name)
    :face '(:foreground "orange" :weight bold)
    :action (lexical-let ((sid workspace-session-id))
              (lambda ()
-               (claude-agent-remove-alert (intern sid))
+               (code-agent-remove-alert (intern sid))
                (code-agent-org-cmux--focus-workspace-by-session sid))))
   ;; Focus cmux workspace (best-effort)
   (code-agent-org-cmux--focus-workspace-by-session workspace-session-id)
@@ -2617,15 +2617,15 @@ was skipped, the permission event proves a query is active)."
   ;; macOS notification
   (code-agent-org--notify "Claude: Permission Needed"
                       (format "%s needs approval for %s"
-                              (claude-agent--permission-label workspace-session-id)
+                              (code-agent--permission-label workspace-session-id)
                               tool-name))
   "ok"))
 
 (defun code-agent-org-cmux--permission-resolved (workspace-session-id)
   "Clear pending permission for a cmux session."
-  (claude-agent-with-span "cmux-permission-resolved"
+  (code-agent-with-span "cmux-permission-resolved"
       (list :session-id workspace-session-id) nil
-  (claude-agent-remove-alert (intern workspace-session-id))
+  (code-agent-remove-alert (intern workspace-session-id))
   "ok"))
 
 (defun code-agent-org-cmux--focus-workspace-by-session (workspace-session-id)
@@ -2646,7 +2646,7 @@ Emacs restart.  Finds the heading via `CLAUDE_SESSION_ID' property,
 resolves the current cmux workspace ref by heading name (the stable
 cmux/emacs identity), and repopulates hash tables.  Returns the
 session-key if found, nil otherwise."
-  (claude-agent-with-span "cmux-recover-session"
+  (code-agent-with-span "cmux-recover-session"
       (list :session-id workspace-session-id) nil
   (cl-block recover
     (dolist (buf (buffer-list))

@@ -19,7 +19,7 @@
                        (or load-file-name buffer-file-name))))))
   (load (expand-file-name "tests/support/test-helpers.el" project-root) nil t)
   (require 'literate-elisp)
-  (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent.org" project-root))
   (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))
   (literate-elisp-load (expand-file-name "code-agent-org-cmux.org" project-root)))
 
@@ -397,14 +397,14 @@ Returns values from BODY. Cleans up buffer afterwards."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (let ((initial-count (hash-table-count claude-agent--active-queries)))
+      (let ((initial-count (hash-table-count code-agent--active-queries)))
         (code-agent-org-cmux--execute-ai-block)
         ;; Should have registered one new query
-        (should (> (hash-table-count claude-agent--active-queries) initial-count))
+        (should (> (hash-table-count code-agent--active-queries) initial-count))
         ;; Clean up: unregister
         (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
-            (claude-agent--unregister-query req-id)))))))
+            (code-agent--unregister-query req-id)))))))
 
 (ert-deftest test-cmux-execute-writes-from-emacs-flag ()
   "Execute writes from-emacs flag file."
@@ -421,7 +421,7 @@ Returns values from BODY. Cleans up buffer afterwards."
         (delete-file flag-path)
         (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
-            (claude-agent--unregister-query req-id)
+            (code-agent--unregister-query req-id)
             (delete-file (expand-file-name
                           "test-cmux-session-001.request-id"
                           code-agent-org-terminal-status-dir)
@@ -461,7 +461,7 @@ Returns values from BODY. Cleans up buffer afterwards."
       ;; Clean up active query
       (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-002")))
         (when req-id
-          (claude-agent--unregister-query req-id)
+          (code-agent--unregister-query req-id)
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-002.request-id"
@@ -484,11 +484,11 @@ Returns values from BODY. Cleans up buffer afterwards."
       (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
         (should req-id)
         ;; Verify query is registered
-        (should (claude-agent--get-active-query req-id))
+        (should (code-agent--get-active-query req-id))
         ;; Complete the query
         (code-agent-org-cmux--query-completed "test-cmux-session-001")
         ;; Should be unregistered
-        (should-not (claude-agent--get-active-query req-id))
+        (should-not (code-agent--get-active-query req-id))
         ;; Clean up files
         (ignore-errors
           (delete-file (expand-file-name
@@ -564,11 +564,11 @@ do not continue past iteration 1."
       (code-agent-org-cmux--execute-ai-block)
       (let* ((session-key (code-agent-org--current-session-key))
              (backend (code-agent-org--session-get session-key :backend)))
-        (should (claude-agent-cmux-backend-p backend))
+        (should (code-agent-cmux-backend-p backend))
         ;; Clean up
         (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
           (when req-id
-            (claude-agent--unregister-query req-id)))))))
+            (code-agent--unregister-query req-id)))))))
 
 (ert-deftest test-cmux-cancel-during-active-query ()
   "E06: Cancel during active query sends escape and clears state.
@@ -584,7 +584,7 @@ query-completed clears busy and unregisters query."
             (req-id (code-agent-org-terminal--read-request-id "test-cmux-session-003")))
         ;; Query should be registered
         (should req-id)
-        (should (claude-agent--get-active-query req-id))
+        (should (code-agent--get-active-query req-id))
         ;; 2. Simulate bridge setting busy (as hook would)
         (code-agent-org--session-put session-key :busy t)
         (should (code-agent-org--session-get session-key :busy))
@@ -597,7 +597,7 @@ query-completed clears busy and unregisters query."
         (code-agent-org-cmux--query-completed "test-cmux-session-003")
         ;; 5. Verify clean state: not busy, query unregistered
         (should-not (code-agent-org--session-get session-key :busy))
-        (should-not (claude-agent--get-active-query req-id))
+        (should-not (code-agent--get-active-query req-id))
         ;; Clean up files
         (ignore-errors
           (delete-file (expand-file-name
@@ -616,7 +616,7 @@ query-completed clears busy and unregisters query."
       (test-cmux--goto-ai-block)
       ;; Set up session state as if execute had run
       (let ((session-key (code-agent-org--current-session-key)))
-        (code-agent-org--session-put session-key :backend (claude-agent-cmux-backend-create :session-key session-key))
+        (code-agent-org--session-put session-key :backend (code-agent-cmux-backend-create :session-key session-key))
         (code-agent-org--session-put session-key :busy t)
         ;; Mock cleanup functions
         (cl-letf (((symbol-function 'code-agent-org--cleanup-session) #'ignore)
@@ -634,7 +634,7 @@ query-completed clears busy and unregisters query."
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
       (let ((session-key (code-agent-org--current-session-key)))
-        (code-agent-org--session-put session-key :backend (claude-agent-cmux-backend-create :session-key session-key))
+        (code-agent-org--session-put session-key :backend (code-agent-cmux-backend-create :session-key session-key))
         ;; :busy is NOT set -- cancel should be a no-op message, not an error
         (code-agent-org-cancel)
         ;; No send-key calls should have been made
@@ -885,7 +885,7 @@ First query.
              code-agent-org-terminal--workspace-to-session-key)
     (puthash "sdd-perm-test" "mock-ws-id"
              code-agent-org-cmux--workspace-to-cmux-id)
-    (let ((saved-alerts claude-agent-pending-alerts))
+    (let ((saved-alerts code-agent-pending-alerts))
       (unwind-protect
           (progn
             (code-agent-org-cmux--permission-needed "sdd-perm-test" "Bash")
@@ -894,23 +894,23 @@ First query.
               (should calls)
               (should (member "mock-ws-id" (cdar calls))))
             ;; Should be registered as a mode-line alert
-            (should (assq (intern "sdd-perm-test") claude-agent-pending-alerts)))
+            (should (assq (intern "sdd-perm-test") code-agent-pending-alerts)))
         ;; Cleanup
-        (setq claude-agent-pending-alerts saved-alerts)
+        (setq code-agent-pending-alerts saved-alerts)
         (remhash "sdd-perm-test" code-agent-org-terminal--workspace-to-session-key)
         (remhash "sdd-perm-test" code-agent-org-cmux--workspace-to-cmux-id)))))
 
 (ert-deftest test-cmux-permission-resolved-clears-state ()
   "code-agent-org-cmux--permission-resolved clears pending alert."
   :tags '(:unit :stable)
-  (let ((saved-alerts claude-agent-pending-alerts))
+  (let ((saved-alerts code-agent-pending-alerts))
     ;; Add a pending alert
-    (claude-agent-add-alert (intern "sdd-resolve-test") :label "test")
+    (code-agent-add-alert (intern "sdd-resolve-test") :label "test")
     (unwind-protect
         (progn
           (code-agent-org-cmux--permission-resolved "sdd-resolve-test")
-          (should-not (assq (intern "sdd-resolve-test") claude-agent-pending-alerts)))
-      (setq claude-agent-pending-alerts saved-alerts))))
+          (should-not (assq (intern "sdd-resolve-test") code-agent-pending-alerts)))
+      (setq code-agent-pending-alerts saved-alerts))))
 
 (ert-deftest test-cmux-terminal-permission-routes-to-cmux ()
   "Terminal permission dispatcher routes cmux sessions to cmux handler."
@@ -920,15 +920,15 @@ First query.
              code-agent-org-terminal--workspace-to-session-key)
     (puthash "sdd-route-test" "mock-ws"
              code-agent-org-cmux--workspace-to-cmux-id)
-    (let ((saved-alerts claude-agent-pending-alerts))
+    (let ((saved-alerts code-agent-pending-alerts))
       (unwind-protect
           (progn
             (code-agent-org--terminal-permission-needed "sdd-route-test" "Edit")
             ;; Should have used cmux path (select-workspace called)
             (should (test-cmux--mock-calls-for "select-workspace"))
             ;; Should have registered alert via cmux handler
-            (should (assq (intern "sdd-route-test") claude-agent-pending-alerts)))
-        (setq claude-agent-pending-alerts saved-alerts)
+            (should (assq (intern "sdd-route-test") code-agent-pending-alerts)))
+        (setq code-agent-pending-alerts saved-alerts)
         (remhash "sdd-route-test" code-agent-org-terminal--workspace-to-session-key)
         (remhash "sdd-route-test" code-agent-org-cmux--workspace-to-cmux-id)))))
 
@@ -1029,7 +1029,7 @@ file-level #+PROPERTY must also dispatch correctly."
       ;; Clean up
       (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-file-backend")))
         (when req-id
-          (claude-agent--unregister-query req-id)
+          (code-agent--unregister-query req-id)
           (ignore-errors
             (delete-file (expand-file-name
                           "test-cmux-session-file-backend.request-id"
@@ -1049,11 +1049,11 @@ T52b: Ensures generic cancel works for file-level backend dispatch."
       (code-agent-org-execute)
       (let* ((session-key (code-agent-org--current-session-key))
              (backend (code-agent-org--session-get session-key :backend)))
-        (should (claude-agent-cmux-backend-p backend))
+        (should (code-agent-cmux-backend-p backend))
         ;; Clean up
         (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-file-backend")))
           (when req-id
-            (claude-agent--unregister-query req-id)
+            (code-agent--unregister-query req-id)
             (ignore-errors
               (delete-file (expand-file-name
                             "test-cmux-session-file-backend.request-id"
@@ -1979,6 +1979,297 @@ launch command sent, verbose timer restarted."
       (delete-file file))))
 
 ;;; ============================================================================
+;;; Restart helpers — pure-function tests (no cmux)
+;;; ============================================================================
+
+(ert-deftest test-cmux-shell-prompt-p-recognises-common-prompts ()
+  "Regression: the original restart code used `\\s*$` (bare backslash-s)
+which never matches anything in elisp regex.  The fix uses `\\s-*$`
+(syntax-class whitespace).  Without this, every restart silently
+skipped the `at-shell` shortcut and always went through send /exit."
+  :tags '(:unit :stable)
+  (should (code-agent-org-cmux--shell-prompt-p "stuff\n$ "))
+  (should (code-agent-org-cmux--shell-prompt-p "stuff\n$"))
+  (should (code-agent-org-cmux--shell-prompt-p "stuff\n❯ "))
+  (should (code-agent-org-cmux--shell-prompt-p "stuff\n% "))
+  (should-not (code-agent-org-cmux--shell-prompt-p "stuff\n> "))
+  (should-not (code-agent-org-cmux--shell-prompt-p "Claude Code running"))
+  (should-not (code-agent-org-cmux--shell-prompt-p nil))
+  (should-not (code-agent-org-cmux--shell-prompt-p "")))
+
+(ert-deftest test-cmux-surface-state-classifies-three-cases ()
+  "`--surface-state' returns 'claude / 'shell / 'unknown based on screen
+markers — the restart command relies on this to decide whether to
+send /exit before launching a fresh agent."
+  :tags '(:unit :stable)
+  ;; Claude TUI in foreground — any of the three markers wins.
+  (should (eq (code-agent-org-cmux--surface-state
+               "Some output\n-- INSERT --\n? for shortcuts")
+              'claude))
+  (should (eq (code-agent-org-cmux--surface-state
+               "Some output\nbypass permissions on")
+              'claude))
+  (should (eq (code-agent-org-cmux--surface-state
+               "✻ Welcome to Claude Code")
+              'claude))
+  ;; Shell prompt at end of screen.
+  (should (eq (code-agent-org-cmux--surface-state
+               "jingtao@mac ~/p $ ")
+              'shell))
+  (should (eq (code-agent-org-cmux--surface-state
+               "stuff\n❯ ")
+              'shell))
+  ;; Claude markers WIN over a trailing shell-looking line — important
+  ;; for the freshly-launched-on-top-of-old-prompt edge case where
+  ;; both markers might appear on the same captured screen.
+  (should (eq (code-agent-org-cmux--surface-state
+               "old shell $\n-- INSERT --\nclaude is here")
+              'claude))
+  ;; Neither — fall back to unknown so restart picks the safe path.
+  (should (eq (code-agent-org-cmux--surface-state
+               "")
+              'unknown))
+  (should (eq (code-agent-org-cmux--surface-state
+               "running vim or something")
+              'unknown)))
+
+(ert-deftest test-cmux-launch-cmd-without-resume-strips-flag-and-value ()
+  "`--launch-cmd-without-resume' removes `--resume <id>' but preserves
+everything else, including env prefix, plugin dirs, and trailing args."
+  :tags '(:unit :stable)
+  (should (equal
+           (code-agent-org-cmux--launch-cmd-without-resume
+            "env A=1 claude --plugin-dir /p --resume 12d9 -- --foo bar")
+           "env A=1 claude --plugin-dir /p -- --foo bar"))
+  ;; No --resume present → no-op.
+  (should (equal
+           (code-agent-org-cmux--launch-cmd-without-resume
+            "env A=1 claude --plugin-dir /p -- --foo")
+           "env A=1 claude --plugin-dir /p -- --foo"))
+  ;; --resume with shell-quoted UUID containing dashes still stripped.
+  (should (equal
+           (code-agent-org-cmux--launch-cmd-without-resume
+            "claude --resume 12d99ebd-8976-41bc -- --x")
+           "claude -- --x")))
+
+;;; ============================================================================
+;;; E04b: Restart — resume-failure fallback
+;;; ============================================================================
+
+(ert-deftest test-cmux-restart-recovers-from-stale-cli-session ()
+  "When --resume <id> fails (Claude prints `No conversation found'),
+restart MUST: drop the stale :CLAUDE_CLI_SESSION: property and
+re-send a fresh launch command without --resume.  This closes the
+2026-05-21 bug where the user was stranded at a bare shell after
+pressing R on a workspace whose CLAUDE_CLI_SESSION had drifted."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-restart-resume-" nil ".org"))
+        (calls nil)
+        (capture-count 0)
+        (org-content
+         "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-resume-001
+:CMUX_SURFACE_ID: surface:existing-456
+:CMUX_WORKSPACE_ID: mock-workspace-uuid-456
+:CUSTOM_ID: test-cmux-story-resume
+:CLAUDE_CLI_SESSION: stale-uuid-deadbeef
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-resume-instr-1
+:END:
+
+,#+begin_src ai
+Test
+,#+end_src
+"))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
+                  (erase-buffer)
+                  ;; The string literal above used `,#+begin_src' to
+                  ;; escape the comma-protected form; strip those
+                  ;; commas so the actual buffer has the bare form
+                  ;; the test fixtures use.
+                  (insert (replace-regexp-in-string "^,#" "#" org-content))
+                  (save-buffer))
+                ;; capture-pane returns:
+                ;;   1st call  — Claude Code running (forces /exit path)
+                ;;   2nd call  — shell prompt after /exit
+                ;;   3rd call  — "No conversation found" after launch (triggers fallback)
+                ;;   4th+ call — shell prompt during fallback wait
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
+                           (lambda (subcmd &rest args)
+                             (push (cons subcmd args) calls)
+                             (cond
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane")
+                               (setq capture-count (1+ capture-count))
+                               (cond
+                                ((= capture-count 1) "  Claude Code\n  -- INSERT --")
+                                ((= capture-count 2) "jingtao@mac ~/p $ ")
+                                ((= capture-count 3)
+                                 "No conversation found with session ID: stale-uuid-deadbeef\njingtao@mac ~/p $ ")
+                                (t "jingtao@mac ~/p $ ")))
+                              (t "ok"))))
+                          ((symbol-function 'sleep-for) (lambda (&rest _) nil))
+                          ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (code-agent-org-cmux-restart)
+                    ;; The send calls in order:
+                    ;;   1. "/exit"
+                    ;;   2. launch-cmd (contains --resume stale-uuid-deadbeef)
+                    ;;   3. fresh launch-cmd (no --resume)
+                    (let* ((send-calls (cl-remove-if-not
+                                        (lambda (c) (string= (car c) "send"))
+                                        (reverse calls)))
+                           (send-texts (mapcar (lambda (c)
+                                                 ;; last positional arg = sent text
+                                                 (car (last (cdr c))))
+                                               send-calls)))
+                      ;; 1. /exit was sent
+                      (should (member "/exit" send-texts))
+                      ;; 2. The first launch command carried --resume
+                      (let ((with-resume
+                             (cl-find-if (lambda (s)
+                                           (string-match-p
+                                            "--resume[ ]+stale-uuid-deadbeef" s))
+                                         send-texts)))
+                        (should with-resume))
+                      ;; 3. A SECOND launch command was sent WITHOUT --resume
+                      ;;    after the resume-failure was detected.  The launch
+                      ;;    text comes from the active agent profile builder
+                      ;;    (claude-workspace by default) which produces
+                      ;;    ``uv run … claude-workspace …'' — match the script
+                      ;;    name rather than the bare ``claude'' binary.
+                      (let ((without-resume
+                             (cl-find-if
+                              (lambda (s)
+                                (and (string-match-p "claude-workspace\\|claude " s)
+                                     (not (string-match-p "--resume" s))
+                                     (string-match-p "\n\\'" s)))
+                              send-texts)))
+                        (should without-resume)))
+                    ;; 4. Stale CLAUDE_CLI_SESSION property dropped.
+                    (save-excursion
+                      (goto-char (point-min))
+                      (re-search-forward "test-cmux-story-resume")
+                      (org-back-to-heading t)
+                      (should-not (org-entry-get nil "CLAUDE_CLI_SESSION"))))))
+            ;; Cleanup
+            (let ((sk (with-current-buffer buf
+                        (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-resume-001"
+                     code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-resume-001"
+                     code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-resume-001"
+                     code-agent-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
+(ert-deftest test-cmux-restart-skips-fallback-when-resume-succeeds ()
+  "Symmetric guard: when capture-pane shows a normal Claude TUI
+(no `No conversation found' banner) the restart MUST NOT clear
+:CLAUDE_CLI_SESSION: nor send a second launch command."
+  :tags '(:unit :stable :e2e)
+  (let ((file (make-temp-file "test-cmux-restart-good-" nil ".org"))
+        (calls nil)
+        (capture-count 0)
+        (org-content
+         "* Test Story
+:PROPERTIES:
+:CLAUDE_SESSION_ID: test-cmux-session-good-001
+:CMUX_SURFACE_ID: surface:existing-789
+:CMUX_WORKSPACE_ID: mock-workspace-uuid-789
+:CUSTOM_ID: test-cmux-story-good
+:CLAUDE_CLI_SESSION: healthy-uuid-cafebabe
+:END:
+
+** Instruction 1
+:PROPERTIES:
+:CUSTOM_ID: test-cmux-good-instr-1
+:END:
+
+,#+begin_src ai
+Test
+,#+end_src
+"))
+    (unwind-protect
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (org-mode)
+                  (let ((code-agent-org-auto-start-mcp-server nil))
+                    (code-agent-org-mode 1))
+                  (erase-buffer)
+                  (insert (replace-regexp-in-string "^,#" "#" org-content))
+                  (save-buffer))
+                (cl-letf (((symbol-function 'code-agent-org-cmux--call)
+                           (lambda (subcmd &rest args)
+                             (push (cons subcmd args) calls)
+                             (cond
+                              ((string= subcmd "tree")
+                               "workspace workspace:mock-1 \"Test\"")
+                              ((string= subcmd "capture-pane")
+                               (setq capture-count (1+ capture-count))
+                               (cond
+                                ((= capture-count 1) "  Claude Code\n  -- INSERT --")
+                                ((= capture-count 2) "jingtao@mac ~/p $ ")
+                                ;; 3rd = post-launch — healthy TUI, no
+                                ;; "No conversation found" banner.
+                                (t "  Claude Code\n  -- INSERT -- bypass permissions on")))
+                              (t "ok"))))
+                          ((symbol-function 'sleep-for) (lambda (&rest _) nil))
+                          ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
+                  (with-current-buffer buf
+                    (test-cmux--goto-ai-block)
+                    (code-agent-org-cmux-restart)
+                    ;; Only ONE launch command sent (the original with --resume).
+                    ;; No second send without --resume.
+                    (let* ((send-calls (cl-remove-if-not
+                                        (lambda (c) (string= (car c) "send"))
+                                        calls))
+                           (launch-calls (cl-remove-if-not
+                                          (lambda (c)
+                                            (let ((txt (car (last (cdr c)))))
+                                              (and (stringp txt)
+                                                   (string-match-p
+                                                    "claude-workspace\\|claude "
+                                                    txt))))
+                                          send-calls)))
+                      (should (= (length launch-calls) 1)))
+                    ;; :CLAUDE_CLI_SESSION: still present.
+                    (save-excursion
+                      (goto-char (point-min))
+                      (re-search-forward "test-cmux-story-good")
+                      (org-back-to-heading t)
+                      (should (equal (org-entry-get nil "CLAUDE_CLI_SESSION")
+                                     "healthy-uuid-cafebabe"))))))
+            (let ((sk (with-current-buffer buf
+                        (code-agent-org--current-session-key))))
+              (when sk (code-agent-org-cmux--stop-verbose sk)))
+            (remhash "test-cmux-session-good-001"
+                     code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-good-001"
+                     code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-good-001"
+                     code-agent-org-cmux--workspace-to-cmux-id)
+            (kill-buffer buf)))
+      (delete-file file))))
+
+;;; ============================================================================
 ;;; E09: Verbose buffer created on session start
 ;;; ============================================================================
 
@@ -2015,7 +2306,7 @@ with header-line containing the session ID and keybinding hints."
                     (test-cmux--goto-ai-block)
                     (code-agent-org-cmux--ensure-session)
                     (let* ((sk (code-agent-org--current-session-key))
-                           (vbuf (gethash sk claude-agent--session-verbose-buffers)))
+                           (vbuf (gethash sk code-agent--session-verbose-buffers)))
                       ;; Buffer exists and is live
                       (should vbuf)
                       (should (buffer-live-p vbuf))
@@ -2031,7 +2322,7 @@ with header-line containing the session ID and keybinding hints."
             (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
               (when sk
                 (code-agent-org-cmux--stop-verbose sk)
-                (let ((vbuf (gethash sk claude-agent--session-verbose-buffers)))
+                (let ((vbuf (gethash sk code-agent--session-verbose-buffers)))
                   (when (and vbuf (buffer-live-p vbuf))
                     (kill-buffer vbuf)))))
             (remhash "test-cmux-session-003"
@@ -2307,11 +2598,11 @@ of the code (restart paths, recovery) depends on."
           (should buf2)
           (should (buffer-live-p buf2))
           (should-not (eq buf1 buf2))
-          (should (eq buf2 (gethash sk claude-agent--session-verbose-buffers)))
+          (should (eq buf2 (gethash sk code-agent--session-verbose-buffers)))
           (kill-buffer buf2)))
     (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
     (remhash "/tmp/test-vheal.org::test-cmux-session-003"
-             claude-agent--session-verbose-buffers)))
+             code-agent--session-verbose-buffers)))
 
 ;;; ============================================================================
 ;;; E13b: Verbose buffer memory cap (regression for 1f016b8 leak)
@@ -2324,10 +2615,10 @@ of the code (restart paths, recovery) depends on."
 
 (ert-deftest test-cmux-verbose-filter-caps-buffer-size ()
   "Filter bounds the verbose buffer at
-`claude-agent-multiplexer-verbose-buffer-max-size'.  Regression test: the
+`code-agent-multiplexer-verbose-buffer-max-size'.  Regression test: the
 --follow stream filter (introduced in 1f016b8) appended forever."
   :tags '(:unit :stable :e2e)
-  (let* ((claude-agent-multiplexer-verbose-buffer-max-size 1024)
+  (let* ((code-agent-multiplexer-verbose-buffer-max-size 1024)
          (buf (get-buffer-create " *test-cmux-verbose-cap*"))
          (proc-buf (generate-new-buffer " *test-proc*"))
          (proc (start-process "test-cmux-cap" proc-buf "sleep" "60")))
@@ -2338,7 +2629,7 @@ of the code (restart paths, recovery) depends on."
           (dotimes (i 10)
             (let ((chunk (concat (make-string 499 (+ ?a i)) "\n")))
               (code-agent-org-cmux--verbose-follow-filter proc chunk)))
-          (should (<= (buffer-size buf) claude-agent-multiplexer-verbose-buffer-max-size))
+          (should (<= (buffer-size buf) code-agent-multiplexer-verbose-buffer-max-size))
           ;; Most recent content is retained.
           (should (with-current-buffer buf
                     (goto-char (point-max))
@@ -2351,7 +2642,7 @@ of the code (restart paths, recovery) depends on."
   "Filter trims whole lines from the start — no half-truncated
 line at `point-min' after the cap triggers."
   :tags '(:unit :stable :e2e)
-  (let* ((claude-agent-multiplexer-verbose-buffer-max-size 100)
+  (let* ((code-agent-multiplexer-verbose-buffer-max-size 100)
          (buf (get-buffer-create " *test-cmux-whole-lines*"))
          (proc-buf (generate-new-buffer " *test-proc2*"))
          (proc (start-process "test-cmux-whole" proc-buf "sleep" "60")))
@@ -2362,7 +2653,7 @@ line at `point-min' after the cap triggers."
             (code-agent-org-cmux--verbose-follow-filter
              proc (format "line-%02d-content\n" i)))
           (with-current-buffer buf
-            (should (<= (buffer-size) claude-agent-multiplexer-verbose-buffer-max-size))
+            (should (<= (buffer-size) code-agent-multiplexer-verbose-buffer-max-size))
             (goto-char (point-min))
             (should (looking-at "^line-"))))
       (when (process-live-p proc) (delete-process proc))
@@ -2398,7 +2689,7 @@ nothing, wasting ~34 MB RSS and a pipe per killed buffer."
                     (let ((sk (code-agent-org--current-session-key)))
                       (code-agent-org-cmux--start-verbose "surface:test" sk)
                       (let ((proc (code-agent-org--session-get sk :verbose-follow-process))
-                            (vbuf (gethash sk claude-agent--session-verbose-buffers)))
+                            (vbuf (gethash sk code-agent--session-verbose-buffers)))
                         (should (process-live-p proc))
                         (should (buffer-live-p vbuf))
                         (kill-buffer vbuf)

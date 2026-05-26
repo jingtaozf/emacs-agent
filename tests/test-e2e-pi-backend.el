@@ -12,7 +12,7 @@
 ;;
 ;; The runner does NOT invoke `code-agent-org-execute' (that path is
 ;; A3 — frontend dispatch wiring).  Instead it calls
-;; `claude-agent-backend-query' directly on a backend struct, so the
+;; `code-agent-backend-query' directly on a backend struct, so the
 ;; fixture exercises the *transport* layer end-to-end without needing
 ;; the org-mode dispatch infrastructure.
 
@@ -30,14 +30,14 @@
   (add-to-list 'load-path root)
   (add-to-list 'load-path (expand-file-name "tests/support" root))
   (require 'literate-elisp)
-  (unless (featurep 'claude-agent-backend)
-    (literate-elisp-load (expand-file-name "claude-agent-backend.org" root)))
-  (unless (featurep 'claude-agent-pi-backend)
+  (unless (featurep 'code-agent-backend)
+    (literate-elisp-load (expand-file-name "code-agent-backend.org" root)))
+  (unless (featurep 'code-agent-pi-backend)
     (literate-elisp-load
-     (expand-file-name "claude-agent-pi-backend.org" root))))
+     (expand-file-name "code-agent-pi-backend.org" root))))
 
-(require 'claude-agent-backend)
-(require 'claude-agent-pi-backend)
+(require 'code-agent-backend)
+(require 'code-agent-pi-backend)
 (require 'pi-test-helpers)
 
 
@@ -131,11 +131,11 @@ Returns a plist with :collected (string), :complete (bool),
       (error "Story %s has no `ai' src block" custom-id))
     (test-pi--with-backend b
       ;; Allow emacs_eval for stories that may need it.
-      (setf (claude-agent-pi-backend-environment b)
+      (setf (code-agent-pi-backend-environment b)
             '("EMACS_MCP_ALLOW_EVAL=1"))
-      (setf (claude-agent-pi-backend-show-thinking b) show-thinking)
+      (setf (code-agent-pi-backend-show-thinking b) show-thinking)
       (let ((handle
-             (claude-agent-backend-query
+             (code-agent-backend-query
               b prompt
               (list
                :on-token (lambda (delta)
@@ -148,7 +148,7 @@ Returns a plist with :collected (string), :complete (bool),
             (run-at-time delay nil
                          (lambda ()
                            (ignore-errors
-                             (claude-agent-backend-cancel b handle))))))
+                             (code-agent-backend-cancel b handle))))))
         (test-pi--wait-until
          (lambda () (or complete errored))
          timeout)))

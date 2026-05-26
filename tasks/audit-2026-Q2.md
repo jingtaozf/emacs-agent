@@ -1,7 +1,7 @@
 # Q2 2026 LP Audit — First Execution of `lp-agent-long-horizon-audit-cadence`
 
 > *Date*: 2026-05-21
-> *Scope*: `claude-agent` + `mind-ai/edo-literate` + `literate-agent`
+> *Scope*: `code-agent` + `mind-ai/edo-literate` + `literate-agent`
 > *Rule operationalised*: `rules/lp-agent-long-horizon-audit-cadence.md`
 > *Audit commands run*: `/lp-research-audit` C1-C6 + `/lp-cowork-review` K1-K5
 > *Method*: Mechanical scans via Bash; no manual sampling beyond calibration cases.
@@ -11,10 +11,10 @@
 | Finding | Severity | Action |
 |---------|----------|--------|
 | **Risk: declaration adoption = 0%** across all three repos | high | Eat own dog food; start declaring on every new commit |
-| **`:CUSTOM_ID:` coverage** real metric (≥2-ref sections): claude-agent 100% ✓ / edo-literate **35.7% → 100%** (backfilled) | resolved | Backfill applied via literate-agent/scripts/backfill_anchors.py; edo-literate commit ca01c8c (45 sections, 41 files) |
-| C3 prose-before-src violations (concept-level): 225 claude-agent / 1298 edo-literate | medium | Sample top-10 worst files, fix opportunistically |
+| **`:CUSTOM_ID:` coverage** real metric (≥2-ref sections): code-agent 100% ✓ / edo-literate **35.7% → 100%** (backfilled) | resolved | Backfill applied via literate-agent/scripts/backfill_anchors.py; edo-literate commit ca01c8c (45 sections, 41 files) |
+| C3 prose-before-src violations (concept-level): 225 code-agent / 1298 edo-literate | medium | Sample top-10 worst files, fix opportunistically |
 | K3 false positives — heuristic flagged the LP-rule-migration as "incident strip" | low | Refine heuristic to know migration patterns are benign |
-| Phase-name headings minimal (2 in claude-agent, 6 in edo-literate) | low | Spot-fix the ~8 known cases |
+| Phase-name headings minimal (2 in code-agent, 6 in edo-literate) | low | Spot-fix the ~8 known cases |
 
 The audit succeeded as a *baseline measurement*. The Q2 audit-cadence rule's
 process IS executable: the commands run in ~5 minutes; the report takes ~20
@@ -25,7 +25,7 @@ benign patterns) is where human attention goes.
 
 | Repo | .org files | Total headings | Commits last 30 days |
 |------+------------+----------------+----------------------|
-| claude-agent (root .org) | 46 | 1018 | 152 |
+| code-agent (root .org) | 46 | 1018 | 152 |
 | edo-literate (lp/) | 169 | 13435 | 203 |
 | literate-agent | (rules .md, not .org) | n/a | 8 |
 
@@ -36,7 +36,7 @@ Searched for canonical bad patterns: `Functions`, `Helpers`, `Utilities`,
 
 | Repo | Violations | Detail |
 |------|------------|--------|
-| claude-agent | 2 | `CODEBASE-REVIEW.org:192` (`* Implementation Priority`) + `prompts/README.org:307` (`** Implementation with TDD`) |
+| code-agent | 2 | `CODEBASE-REVIEW.org:192` (`* Implementation Priority`) + `prompts/README.org:307` (`** Implementation with TDD`) |
 | edo-literate | 6 | 1 × `Functions`, 4 × `Helpers`, 1 × `Utilities` (file paths in raw audit output) |
 
 *Assessment*: minimal. Most ostensible matches are legitimate concept-named
@@ -52,7 +52,7 @@ Initial raw metric (misleading):
 
 | Repo | Total headings | With `:CUSTOM_ID:` | % missing |
 |------|----------------|---------------------|-----------|
-| claude-agent root | 1018 | 79 | 93% |
+| code-agent root | 1018 | 79 | 93% |
 | edo-literate lp/ | 13435 | 357 | 98% |
 
 The rule `lp-stable-anchors-for-multi-referenced-sections.md` only requires
@@ -65,10 +65,10 @@ audit cycle)**:
 
 | Repo | Concept-level headings | Multi-ref sections | With anchor | Coverage % |
 |------+-----------------------+--------------------|-------------+------------|
-| claude-agent | 1629 (depth ≤ 2) | 67 | 67 | **100%** ✓ |
+| code-agent | 1629 (depth ≤ 2) | 67 | 67 | **100%** ✓ |
 | edo-literate | 3538 (depth ≤ 2) | 70 | 25 | **35.7%** ← backfill |
 
-The corrected numbers: claude-agent is **healthy** above the 95% threshold;
+The corrected numbers: code-agent is **healthy** above the 95% threshold;
 edo-literate has **45 specific sections** that need anchor backfill. Most
 violations are the `* Why this subpackage exists` pattern repeated across
 ~14 `_project.org` files — each linked from CLAUDE.md aggregator + a
@@ -88,7 +88,7 @@ sibling README.
 
 | Repo | Concept-level violations |
 |------|---------------------------|
-| claude-agent | 225 |
+| code-agent | 225 |
 | edo-literate | 1298 |
 
 *Important nuance*: at deeper levels (depth ≥ 3), edo-literate has ~9500
@@ -139,7 +139,7 @@ Same as K1 — requires prose diff analysis, not just diff line counts.
 
 | Repo | Strip lines (last 30 days) |
 |------|----------------------------|
-| claude-agent | 0 |
+| code-agent | 0 |
 | edo-literate | 31 |
 | literate-agent | 0 |
 
@@ -160,7 +160,7 @@ deletion from in-place strip.
 
 | Repo | Citation lines added last 30 days |
 |------|-----------------------------------|
-| claude-agent | 23 |
+| code-agent | 23 |
 | edo-literate | 73 |
 | literate-agent | 62 |
 
@@ -179,7 +179,7 @@ research; it'll drop to baseline as new commits don't add citations.
 
 | Repo | Commits last 60 days | With `Risk:` declaration | % |
 |------|---------------------|--------------------------|---|
-| claude-agent | 244 | 0 | 0% |
+| code-agent | 244 | 0 | 0% |
 | edo-literate | 203 | 0 | 0% |
 | literate-agent | 8 | 0 | 0% |
 

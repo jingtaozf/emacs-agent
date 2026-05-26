@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Helpers shared between `test-claude-agent-pi-backend.el' (unit-level
+;; Helpers shared between `test-code-agent-pi-backend.el' (unit-level
 ;; smoke + live tests) and `test-e2e-pi-backend.el' (fixture-driven
 ;; story tests).  All helpers gracefully skip when Pi is absent.
 
@@ -34,11 +34,11 @@
 Pumps the event loop for ~1 s after cleanup so the graceful-shutdown
 timers fire before the next test's spawn (otherwise port races appear)."
   (declare (indent 1) (debug t))
-  `(let ((,varname (claude-agent-pi-backend-create
+  `(let ((,varname (code-agent-pi-backend-create
                     :session-key (format "live-%d" (random 100000)))))
      (unwind-protect
          (progn ,@body)
-       (ignore-errors (claude-agent-backend-cleanup ,varname))
+       (ignore-errors (code-agent-backend-cleanup ,varname))
        (let ((t0 (float-time)))
          (while (< (- (float-time) t0) 1.0)
            (accept-process-output nil 0.05))))))

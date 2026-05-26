@@ -7,7 +7,7 @@
 
 ;;; Commentary:
 
-;; Unit tests for Docker container integration in claude-agent.
+;; Unit tests for Docker container integration in code-agent.
 ;; Tests path translation functions in emacs-mcp-server.org.
 ;;
 ;; Run these tests with:
@@ -204,44 +204,44 @@ E.g., /workspacefoo should NOT match /workspace prefix."
 
 ;;; Claude-agent Docker Support Tests
 
-(ert-deftest test-claude-agent-docker-command-detection ()
+(ert-deftest test-code-agent-docker-command-detection ()
   "Test Docker command detection function."
   :tags '(:unit :fast :stable :isolated :docker)
-  (skip-unless (fboundp 'claude-agent--docker-command-p))
+  (skip-unless (fboundp 'code-agent--docker-command-p))
   ;; Docker compose command
-  (should (claude-agent--docker-command-p "docker compose exec claude claude"))
+  (should (code-agent--docker-command-p "docker compose exec claude claude"))
   ;; Docker run command
-  (should (claude-agent--docker-command-p "docker run -it claude"))
+  (should (code-agent--docker-command-p "docker run -it claude"))
   ;; Regular claude command
-  (should-not (claude-agent--docker-command-p "claude"))
-  (should-not (claude-agent--docker-command-p "/usr/local/bin/claude")))
+  (should-not (code-agent--docker-command-p "claude"))
+  (should-not (code-agent--docker-command-p "/usr/local/bin/claude")))
 
-(ert-deftest test-claude-agent-extract-compose-file ()
+(ert-deftest test-code-agent-extract-compose-file ()
   "Test extraction of compose file from Docker command."
   :tags '(:unit :fast :stable :isolated :docker)
-  (skip-unless (fboundp 'claude-agent--extract-compose-file-from-command))
+  (skip-unless (fboundp 'code-agent--extract-compose-file-from-command))
   ;; With -f flag
   (should (equal "/path/to/docker-compose.yml"
-                 (claude-agent--extract-compose-file-from-command
+                 (code-agent--extract-compose-file-from-command
                   "docker compose -f /path/to/docker-compose.yml exec claude claude")))
   ;; With --file flag
   (should (equal "/other/path/compose.yml"
-                 (claude-agent--extract-compose-file-from-command
+                 (code-agent--extract-compose-file-from-command
                   "docker compose --file /other/path/compose.yml exec claude claude")))
   ;; Relative path
   (should (equal ".devcontainer/docker-compose.yml"
-                 (claude-agent--extract-compose-file-from-command
+                 (code-agent--extract-compose-file-from-command
                   "docker compose -f .devcontainer/docker-compose.yml exec claude claude")))
   ;; No -f flag
-  (should-not (claude-agent--extract-compose-file-from-command
+  (should-not (code-agent--extract-compose-file-from-command
                "docker compose exec claude claude"))
   ;; nil input
-  (should-not (claude-agent--extract-compose-file-from-command nil)))
+  (should-not (code-agent--extract-compose-file-from-command nil)))
 
-(ert-deftest test-claude-agent-find-compose-dir ()
+(ert-deftest test-code-agent-find-compose-dir ()
   "Test finding compose directory from CLI path and project root."
   :tags '(:unit :fast :stable :isolated :docker)
-  (skip-unless (fboundp 'claude-agent--find-compose-dir))
+  (skip-unless (fboundp 'code-agent--find-compose-dir))
   ;; Use test-docker-project-dir which is defined earlier in the file
   (let* ((project-dir test-docker-project-dir)
          (devcontainer-dir (expand-file-name ".devcontainer" project-dir))
@@ -250,21 +250,21 @@ E.g., /workspacefoo should NOT match /workspace prefix."
     (skip-unless (file-exists-p compose-file))
     ;; With absolute path in -f flag
     (let* ((cli-path (format "docker compose -f %s exec claude claude" compose-file))
-           (result (claude-agent--find-compose-dir cli-path nil)))
+           (result (code-agent--find-compose-dir cli-path nil)))
       ;; Compare without trailing slash differences
       (should (equal (directory-file-name devcontainer-dir)
                      (directory-file-name result))))
     ;; With relative path in -f flag + project-root
     (let* ((cli-path "docker compose -f .devcontainer/docker-compose.yml exec claude claude")
-           (result (claude-agent--find-compose-dir cli-path project-dir)))
+           (result (code-agent--find-compose-dir cli-path project-dir)))
       (should (equal (directory-file-name devcontainer-dir)
                      (directory-file-name result))))
     ;; With project-root only (no -f flag), should find .devcontainer
-    (let ((result (claude-agent--find-compose-dir nil project-dir)))
+    (let ((result (code-agent--find-compose-dir nil project-dir)))
       (should (equal (directory-file-name devcontainer-dir)
                      (directory-file-name result))))
     ;; With neither - should return nil for non-existent path
-    (should-not (claude-agent--find-compose-dir nil "/nonexistent/path"))))
+    (should-not (code-agent--find-compose-dir nil "/nonexistent/path"))))
 
 ;;; Docker Sandbox Integration Tests
 ;;
@@ -298,7 +298,7 @@ E.g., /workspacefoo should NOT match /workspace prefix."
   :tags '(:integration :docker :sandbox)
   (test-docker-skip-unless-container-ready)
   ;; Container should be detected as running
-  (should (claude-agent--docker-container-running-p)))
+  (should (code-agent--docker-container-running-p)))
 
 (ert-deftest test-docker-sandbox-simple-query ()
   "Test simple query via Docker sandbox."
@@ -308,12 +308,12 @@ E.g., /workspacefoo should NOT match /workspace prefix."
   (let ((response nil)
         (completed nil)
         (error-msg nil))
-    (claude-agent-query
+    (code-agent-query
      "What is 2+2? Answer with just the number."
      :cli-path test-docker-cli-command
      :on-message (lambda (msg)
-                   (when (claude-agent-assistant-message-p msg)
-                     (setq response (claude-agent-extract-text msg))))
+                   (when (code-agent-assistant-message-p msg)
+                     (setq response (code-agent-extract-text msg))))
      :on-error (lambda (err)
                  (setq error-msg (format "%S" err)))
      :on-complete (lambda (_result)
@@ -347,14 +347,14 @@ E.g., /workspacefoo should NOT match /workspace prefix."
         (error-msg nil))
 
     ;; First query - establish session
-    (claude-agent-query
+    (code-agent-query
      "Remember this: the secret word is ELEPHANT. Just confirm."
      :cli-path test-docker-cli-command
      :on-message (lambda (msg)
-                   (when (claude-agent-result-message-p msg)
-                     (setq sdk-uuid (claude-agent-result-message-session-id msg)))
-                   (when (claude-agent-assistant-message-p msg)
-                     (setq first-response (claude-agent-extract-text msg))))
+                   (when (code-agent-result-message-p msg)
+                     (setq sdk-uuid (code-agent-result-message-session-id msg)))
+                   (when (code-agent-assistant-message-p msg)
+                     (setq first-response (code-agent-extract-text msg))))
      :on-error (lambda (err) (setq error-msg (format "%S" err)))
      :on-complete (lambda (_result) (setq completed1 t)))
 
@@ -373,13 +373,13 @@ E.g., /workspacefoo should NOT match /workspace prefix."
 
     ;; Second query - continue session
     (setq error-msg nil)
-    (claude-agent-query
+    (code-agent-query
      "What was the secret word I told you to remember?"
      :cli-path test-docker-cli-command
-     :options (claude-agent-options :resume sdk-uuid)
+     :options (code-agent-options :resume sdk-uuid)
      :on-message (lambda (msg)
-                   (when (claude-agent-assistant-message-p msg)
-                     (setq second-response (claude-agent-extract-text msg))))
+                   (when (code-agent-assistant-message-p msg)
+                     (setq second-response (code-agent-extract-text msg))))
      :on-error (lambda (err) (setq error-msg (format "%S" err)))
      :on-complete (lambda (_result) (setq completed2 t)))
 
@@ -410,14 +410,14 @@ E.g., /workspacefoo should NOT match /workspace prefix."
         (container-path "/workspace"))
 
     ;; Query asking about a file that exists in both locations
-    (claude-agent-query
+    (code-agent-query
      "List the files in /workspace using ls. Just show the output."
      :cli-path test-docker-cli-command
      :path-mappings `((,host-path . ,container-path))
-     :options (claude-agent-options :permission-mode "acceptEdits")
+     :options (code-agent-options :permission-mode "acceptEdits")
      :on-message (lambda (msg)
-                   (when (claude-agent-assistant-message-p msg)
-                     (setq response (claude-agent-extract-text msg))))
+                   (when (code-agent-assistant-message-p msg)
+                     (setq response (code-agent-extract-text msg))))
      :on-error (lambda (err) (setq error-msg (format "%S" err)))
      :on-complete (lambda (_result) (setq completed t)))
 
@@ -434,7 +434,7 @@ E.g., /workspacefoo should NOT match /workspace prefix."
     (should response)
     ;; Should see project files (README.md should exist)
     (should (or (string-match-p "README" response)
-                (string-match-p "claude-agent" response)
+                (string-match-p "code-agent" response)
                 (string-match-p "Makefile" response)))))
 
 (ert-deftest test-docker-sandbox-elisp-reload ()
@@ -462,17 +462,17 @@ This tests the system prompt rule that Claude must reload code after editing."
 
     ;; Ask Claude to edit the file AND reload it
     ;; The system prompt instructs Claude to reload after editing
-    (claude-agent-query
+    (code-agent-query
      (format "Please edit the file /workspace/tests/fixtures/test-reload.el to change the value from 1 to 42.
 After editing, reload the file in Emacs using evalElisp with (load-file \"%s\").
 Confirm the value was changed by evaluating test-docker-reload-value."
              test-file)
      :cli-path test-docker-cli-command
      :path-mappings `((,host-path . ,container-path))
-     :options (claude-agent-options :permission-mode "acceptEdits")
+     :options (code-agent-options :permission-mode "acceptEdits")
      :on-message (lambda (msg)
-                   (when (claude-agent-assistant-message-p msg)
-                     (setq response (claude-agent-extract-text msg))))
+                   (when (code-agent-assistant-message-p msg)
+                     (setq response (code-agent-extract-text msg))))
      :on-error (lambda (err) (setq error-msg (format "%S" err)))
      :on-complete (lambda (_result) (setq completed t)))
 

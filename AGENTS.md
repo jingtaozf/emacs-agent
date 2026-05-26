@@ -8,7 +8,7 @@
      in tasks/lessons.md → "AGENTS.md 被错误 commit". Until fixed, treat
      anything between BEGIN/END markers as transient noise. -->
 
-# claude-agent — AGENTS.md (base)
+# code-agent — AGENTS.md (base)
 
 A Claude Agent SDK for Emacs: org-mode-driven AI workflows backed by Claude Code,
 ACP-compatible agents (Codex, Gemini, OpenCode), and a tri-protocol backend.

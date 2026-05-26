@@ -11,8 +11,8 @@
 :END:
 
 Shared utilities for terminal backends — status file I/O in
-=/tmp/claude-agent-status=, session heading navigation, query
-registration in =claude-agent--active-queries=, shared hash tables,
+=/tmp/code-agent-status=, session heading navigation, query
+registration in =code-agent--active-queries=, shared hash tables,
 and tab-title generation. Extracted with a =code-agent-org-terminal--=
 prefix so both cmux and tmux backends reuse the same logic.
 
@@ -21,11 +21,11 @@ prefix so both cmux and tmux backends reuse the same logic.
 #+BEGIN_SRC elisp
 (require 'cl-lib)
 
-;; Forward declarations — defined in claude-agent-backend.org
-(declare-function claude-agent--generate-request-id "claude-agent-backend" ())
-(declare-function claude-agent-make-query-context "claude-agent-backend" (&rest args))
-(declare-function claude-agent--make-process-state "claude-agent-backend" (&rest args))
-(declare-function claude-agent--register-query "claude-agent-backend" (request-id state))
+;; Forward declarations — defined in code-agent-backend.org
+(declare-function code-agent--generate-request-id "code-agent-backend" ())
+(declare-function code-agent-make-query-context "code-agent-backend" (&rest args))
+(declare-function code-agent--make-process-state "code-agent-backend" (&rest args))
+(declare-function code-agent--register-query "code-agent-backend" (request-id state))
 
 ;; Forward declarations — defined in code-agent-org.org
 (declare-function code-agent-org-goto-custom-id "code-agent-org" (custom-id))
@@ -34,7 +34,7 @@ prefix so both cmux and tmux backends reuse the same logic.
 ** Status Directory
 
 #+BEGIN_SRC elisp
-(defconst code-agent-org-terminal-status-dir "/tmp/claude-agent-status"
+(defconst code-agent-org-terminal-status-dir "/tmp/code-agent-status"
   "Directory for terminal backend status files.
 Used by hooks, status polling, request-id tracking, and from-emacs flags.")
 #+END_SRC
@@ -152,7 +152,7 @@ workspace-bridge.sh checks this to skip duplicate instruction insertion."
 
 ** Query Registration
 
-Register an AI block execution as an active query in =claude-agent--active-queries=.
+Register an AI block execution as an active query in =code-agent--active-queries=.
 Both backends create identical process-state structs and save the request-id
 to a status file for the Python response hook.
 
@@ -160,25 +160,25 @@ to a status file for the Python response hook.
 (defun code-agent-org-terminal--register-query (workspace-session-id _terminal-id)
   "Register the current AI block as an active query.
 WORKSPACE-SESSION-ID is the workspace session, _TERMINAL-ID is the backend-specific ID (ignored).
-Creates a process-state, registers in `claude-agent--active-queries',
+Creates a process-state, registers in `code-agent--active-queries',
 and saves the request-id to a status file for the Python hook."
   (let* ((custom-id (org-entry-get nil "CUSTOM_ID"))
          (heading (org-get-heading t t t t))
          (instr-num (when (and heading
                                (string-match "\\bInstruction \\([0-9]+\\)" heading))
                       (string-to-number (match-string 1 heading))))
-         (req-id (claude-agent--generate-request-id))
-         (ctx (claude-agent-make-query-context
+         (req-id (code-agent--generate-request-id))
+         (ctx (code-agent-make-query-context
                :instruction-num instr-num
                :custom-id custom-id))
-         (state (claude-agent--make-process-state
+         (state (code-agent--make-process-state
                  :request-id req-id
                  :start-time (float-time)
                  :source-buffer (current-buffer)
                  :query-context ctx
                  :source-location-fn (when custom-id #'code-agent-org-goto-custom-id)
                  :source-location-args (when custom-id (list custom-id)))))
-    (claude-agent--register-query req-id state)
+    (code-agent--register-query req-id state)
     (code-agent-org-terminal--save-request-id workspace-session-id req-id)))
 #+END_SRC
 

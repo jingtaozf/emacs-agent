@@ -1,0 +1,594 @@
+#+TITLE: Claude Agent — tmux Backend
+#+PROPERTY: literate-load yes
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA e0b759f81409817c05a816ba9a68498f34c8c6e5
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
+#+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
+
+* Claude Agent — tmux Backend
+:PROPERTIES:
+:LITERATE_ORG_BLOCK_KIND: atomic
+:header-args:elisp: :tangle yes
+:END:
+
+Concrete multiplexer backend for tmux, the cross-platform terminal
+multiplexer.  Subclass of =code-agent-multiplexer-backend=
+implementing Protocol 2b (multiplexer wire) with =tmux send-keys= /
+=capture-pane= / =pipe-pane= primitives.
+
+tmux is the Linux-friendly sibling of cmux — the =cmux-backend= module
+targets macOS and the cmux-ai.app ecosystem; =tmux-backend= works
+anywhere tmux runs.  Both subclass =code-agent-multiplexer-backend=
+and implement the same Protocol 2b generics, so the frontend
+dispatches identically.
+
+*Scope for Phase 4*: the core loop — launch session, send text, send
+key, capture screen, start a =pipe-pane= follower, query session
+status, wait for ready.  cmux-specific niceties (workspace colour,
+sidebar feedback) stay no-op by default inheritance from
+=code-agent-multiplexer-backend=.  The Python =workspace-bridge=
+adapter is unchanged; tmux status files live in the same
+=/tmp/code-agent-status= directory as cmux's.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'code-agent-backend)
+(require 'code-agent-multiplexer)
+#+END_SRC
+
+** Customization
+
+#+BEGIN_SRC elisp
+(defgroup code-agent-tmux nil
+  "tmux multiplexer backend."
+  :group 'code-agent)
+
+(defcustom code-agent-tmux-cli-path "tmux"
+  "Path to the tmux executable.  Override if tmux is in a non-standard
+location."
+  :type 'string
+  :group 'code-agent-tmux)
+
+(defcustom code-agent-tmux-default-pane-size '(220 . 50)
+  "Default pane size (columns . rows) for new tmux sessions.
+Sessions launched by the backend start detached with this geometry;
+the user's own tmux client attaches later."
+  :type '(cons integer integer)
+  :group 'code-agent-tmux)
+#+END_SRC
+
+** Class
+
+#+BEGIN_SRC elisp
+(cl-defstruct (code-agent-tmux-backend
+               (:include code-agent-multiplexer-backend (type :tmux))
+               (:constructor code-agent-tmux-backend--create)
+               (:copier nil))
+  "Concrete tmux-driven terminal backend.
+Slots in addition to those inherited from
+`code-agent-multiplexer-backend':
+- `tmux-cmd': executable path (defaults to the defcustom)."
+  (tmux-cmd nil))
+#+END_SRC
+
+** Factory
+
+#+BEGIN_SRC elisp
+(defun code-agent-tmux-backend-create (&rest args)
+  "Create a tmux backend.
+ARGS are forwarded to `code-agent-tmux-backend--create'.  Defaults
+`:tmux-cmd' to `code-agent-tmux-cli-path' if not specified."
+  (let ((cmd (or (plist-get args :tmux-cmd)
+                 code-agent-tmux-cli-path)))
+    (apply #'code-agent-tmux-backend--create :tmux-cmd cmd args)))
+#+END_SRC
+
+** Internal Helper — Run tmux
+
+All the Protocol 2b methods shell out to tmux via =call-process=
+(one-shot commands) or =start-process= (long-running like
+=pipe-pane='s downstream).  This helper centralises the dispatch so
+we can swap it for an async version later.
+
+#+BEGIN_SRC elisp
+(defun code-agent-tmux--call (backend &rest args)
+  "Invoke tmux synchronously with ARGS.  Returns stdout as string, or
+nil if the process exits non-zero.  BACKEND supplies the cli path."
+  (let ((cli (or (code-agent-tmux-backend-tmux-cmd backend)
+                 code-agent-tmux-cli-path)))
+    (with-temp-buffer
+      (let ((rc (apply #'call-process cli nil (current-buffer) nil args)))
+        (when (zerop rc)
+          (buffer-string))))))
+#+END_SRC
+
+** Protocol 2b — CLI Path
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-cli-path ((backend code-agent-tmux-backend))
+  (or (code-agent-tmux-backend-tmux-cmd backend)
+      code-agent-tmux-cli-path))
+#+END_SRC
+
+** Protocol 2b — Launch Session
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-launch-session
+  ((backend code-agent-tmux-backend) launch-cmd)
+  "Launch a detached tmux session running LAUNCH-CMD.
+LAUNCH-CMD is a list (executable + args).  The session name is
+derived from BACKEND's `session-key' slot; the pane target is
+`SESSION:0.0'.
+
+tmux session names cannot contain `:' or `.' (it parses those as
+window/pane separators), and slashes confuse `has-session -t' on
+some platforms — sanitize them to `_' before forming the name.
+The original session-key remains the dispatch key in
+`code-agent-org--sessions'.
+
+Working directory: passes `-c default-directory' to tmux's
+`new-session' so the spawned shell starts in the caller's CWD —
+without this, `cd PATH && cmd' inside `bash -c' caused the
+detached session to die instantly when launched from Elisp's
+`call-process' (a tmux/bash interaction we did not fully trace)."
+  (let* ((sk-raw (code-agent-multiplexer-backend-session-key backend))
+         (sk (if sk-raw
+                 (replace-regexp-in-string "[/:.]" "_" sk-raw)
+               (format "%08x" (random (expt 2 32)))))
+         (session-name (format "claude-%s" sk))
+         (geom code-agent-tmux-default-pane-size)
+         (cwd (and default-directory (expand-file-name default-directory)))
+         (rc (apply #'code-agent-tmux--call backend
+                    "new-session" "-d"
+                    "-s" session-name
+                    "-x" (number-to-string (car geom))
+                    "-y" (number-to-string (cdr geom))
+                    (append
+                     (when (and cwd (file-directory-p cwd))
+                       (list "-c" cwd))
+                     launch-cmd))))
+    (when rc
+      ;; Resolve the actual first pane via tmux's own report, not by
+      ;; assuming `:0.0' — many users set `base-index 1' /
+      ;; `pane-base-index 1' in ~/.tmux.conf, in which case the
+      ;; first pane is `:1.1' and our hardcoded `:0.0' refers to a
+      ;; non-existent target.  display-message prints the canonical
+      ;; window:pane string for the active pane in the new session.
+      (let* ((resolved
+              (code-agent-tmux--call
+               backend "display-message" "-p" "-t" session-name
+               "#{session_name}:#{window_index}.#{pane_index}"))
+             (resolved-trim (and (stringp resolved) (string-trim resolved)))
+             (pane-id (if (and resolved-trim (not (string-empty-p resolved-trim)))
+                          resolved-trim
+                        (format "%s:0.0" session-name))))
+        (setf (code-agent-multiplexer-backend-multiplexer-session-id backend)
+              session-name
+              (code-agent-multiplexer-backend-pane-id backend)
+              pane-id))
+      session-name)))
+#+END_SRC
+
+** Protocol 2b — Ensure Session
+
+=ensure-session= returns the existing tmux session id if it's still
+live (the =session-id= slot is set and =tmux has-session -t= confirms
+it), and returns nil if either the slot is empty or the saved session
+has died — in which case the slot is cleared so a subsequent
+=launch-session= can re-create it. Because this backend doesn't own
+the choice of launch command, callers feed it in via =launch-cmd= /
+=launch-session= directly.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-ensure-session
+  ((backend code-agent-tmux-backend))
+  "Return the existing tmux session id for BACKEND, or nil if none.
+For the first launch, callers invoke `code-agent-mux-launch-session'
+directly with the agent CLI command."
+  (let ((sid (code-agent-multiplexer-backend-multiplexer-session-id backend)))
+    (when sid
+      ;; Confirm the session is still alive.
+      (if (code-agent-tmux--call backend "has-session" "-t" sid)
+          sid
+        ;; Session died; clear the slot so a launch can re-create it.
+        (setf (code-agent-multiplexer-backend-multiplexer-session-id backend) nil
+              (code-agent-multiplexer-backend-pane-id backend) nil)
+        nil))))
+#+END_SRC
+
+** Protocol 2b — Send Text
+
+tmux's =send-keys -l= sends literal text without key-name expansion.
+We append =Enter= as a separate arg so users can distinguish "typed
+the text" from "typed text + hit enter" via the =send-key= pairing.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-send-text
+  ((backend code-agent-tmux-backend) text)
+  "Type TEXT into BACKEND's pane literally (no key-name expansion)."
+  (when-let* ((target (code-agent-multiplexer-backend-pane-id backend)))
+    (code-agent-tmux--call backend "send-keys" "-t" target "-l" text)))
+#+END_SRC
+
+** Protocol 2b — Send Key
+
+Maps our keyword vocabulary (=:enter=, =:escape=, =:ctrl-c=, =:ctrl-b=)
+onto tmux's =send-keys= key-name grammar.  The mapping is
+deliberately minimal — it covers the keys the current agent profiles
+(Claude, Copilot, OpenCode) use for start/cancel/interrupt flows.
+Add further keys (=:tab=, =:up=, =:down=, =:backspace=, =:ctrl-a=,
+=:space=, …) here as agent profiles require them.  Unknown keys
+fall through with a log message.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-send-key
+  ((backend code-agent-tmux-backend) key)
+  "Send named KEY (keyword) to BACKEND's pane."
+  (when-let* ((target (code-agent-multiplexer-backend-pane-id backend))
+              (name (pcase key
+                      (:enter  "Enter")
+                      (:escape "Escape")
+                      (:ctrl-c "C-c")
+                      (:ctrl-b "C-b")
+                      (:ctrl-o "C-o")
+                      (:ctrl-e "C-e")
+                      (_ nil))))
+    (if name
+        (code-agent-tmux--call backend "send-keys" "-t" target name)
+      (message "code-agent-mux-send-key: unknown key %S" key)
+      nil)))
+#+END_SRC
+
+** Protocol 2b — Capture Screen
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-capture-screen
+  ((backend code-agent-tmux-backend))
+  "Return current pane text for BACKEND as a string."
+  (or (when-let* ((target (code-agent-multiplexer-backend-pane-id backend)))
+        (code-agent-tmux--call backend "capture-pane" "-p" "-t" target))
+      ""))
+#+END_SRC
+
+** Protocol 2b — Start / Stop Follower
+
+tmux's =pipe-pane "cat >> FILE"= redirects the pane's output to a
+shell command.  The =-o= flag means "only pipe if no pipe is already
+active" — idempotent start.  A subsequent =pipe-pane= with no command
+argument toggles the pipe off.  We track the expected status via the
+=follower-proc= slot as a sentinel (not an actual process object —
+tmux owns the pipe).  The shared =stop-follower= method on the
+abstract base handles takedown via =delete-process= on
+=follower-proc=, but since we don't have a process here, we override.
+
+#+BEGIN_SRC elisp
+(defun code-agent-tmux--shell-quote (s)
+  "Quote S for inclusion in a single-quoted shell string.
+tmux passes the =pipe-pane= command through =sh -c=, so the sink
+path must be safely embeddable.  Wraps in single quotes and escapes
+any single quotes inside.  Prefer this to `shell-quote-argument'
+which produces shell-token quoting rather than in-string quoting."
+  (concat "'" (replace-regexp-in-string "'" "'\\\\''" s) "'"))
+
+(cl-defmethod code-agent-mux-start-follower
+  ((backend code-agent-tmux-backend) sink)
+  "Begin piping BACKEND's pane output to SINK (a file path).
+SINK is embedded inside a single-quoted shell string — the helper
+`code-agent-tmux--shell-quote' escapes any single quotes in the
+path, so sink paths with spaces or unusual characters work safely."
+  (when-let* ((target (code-agent-multiplexer-backend-pane-id backend)))
+    (code-agent-tmux--call
+     backend "pipe-pane" "-o" "-t" target
+     (format "cat >> %s" (code-agent-tmux--shell-quote sink)))
+    (setf (code-agent-multiplexer-backend-stream-sink backend) sink
+          ;; Sentinel non-nil so stop-follower knows a pipe is active.
+          (code-agent-multiplexer-backend-follower-proc backend) :active)))
+
+(cl-defmethod code-agent-mux-stop-follower
+  ((backend code-agent-tmux-backend))
+  "Toggle tmux's pipe-pane off for BACKEND."
+  (when-let* ((target (code-agent-multiplexer-backend-pane-id backend))
+              ((eq (code-agent-multiplexer-backend-follower-proc backend) :active)))
+    (code-agent-tmux--call backend "pipe-pane" "-t" target)
+    (setf (code-agent-multiplexer-backend-follower-proc backend) nil
+          (code-agent-multiplexer-backend-stream-sink backend) nil)))
+#+END_SRC
+
+** Protocol 2b — Session Status
+
+Reads =pane_current_command= via =display-message -p=.  When the
+agent CLI is running, the value is =claude= / =opencode= / etc.;
+when the shell has returned to the prompt, it's =zsh= / =bash=.  The
+current mapping treats any non-shell command as =:busy= — concrete
+agent profiles can refine later.
+
+Distinct return values encode distinct failure modes:
+- =:missing= — the tmux session id slot is unset (backend never
+  launched, or =ensure-session= detected the session died and
+  cleared the slots).
+- =:unset=  — session id present but =pane-id= slot is nil.  This
+  is a setup bug: the backend recorded a session but never recorded
+  its pane target.  Callers should surface this rather than treat
+  it as =:missing=, which papers over the bug.
+- =:ready=  — pane's foreground command is a shell (=zsh= / =bash=
+  / =fish= / =sh=).
+- =:busy=   — pane's foreground command is anything else (agent
+  running).
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-session-status
+  ((backend code-agent-tmux-backend))
+  "Return :ready / :busy / :missing / :unset for BACKEND's session."
+  (let ((sid (code-agent-multiplexer-backend-multiplexer-session-id backend))
+        (target (code-agent-multiplexer-backend-pane-id backend)))
+    (cond
+     ((not sid) :missing)
+     ((not target) :unset)
+     (t (let ((cmd (code-agent-tmux--call
+                    backend "display-message" "-p" "-t" target
+                    "#{pane_current_command}")))
+          (if (and cmd
+                   (member (string-trim cmd) '("zsh" "bash" "fish" "sh")))
+              :ready
+            :busy))))))
+#+END_SRC
+
+** Protocol 2b — Rename
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-rename
+  ((backend code-agent-tmux-backend) workspace-name &optional _tab-name)
+  "Rename BACKEND's tmux session to WORKSPACE-NAME.
+TAB-NAME is ignored (tmux sessions don't have tabs distinct from
+windows)."
+  (when-let* ((sid (code-agent-multiplexer-backend-multiplexer-session-id backend)))
+    (when (code-agent-tmux--call backend "rename-session"
+                                   "-t" sid workspace-name)
+      ;; Update our recorded id if the rename succeeded.
+      (setf (code-agent-multiplexer-backend-multiplexer-session-id backend)
+            workspace-name
+            (code-agent-multiplexer-backend-pane-id backend)
+            (format "%s:0.0" workspace-name)))))
+#+END_SRC
+
+** Protocol 2b — Focus
+
+tmux has no notion of "focus" in the OS-window sense; the closest
+action is =switch-client -t= which switches the attached client.  If
+no client is attached, this is a no-op.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-focus ((backend code-agent-tmux-backend))
+  "Switch any attached tmux client to BACKEND's session."
+  (when-let* ((sid (code-agent-multiplexer-backend-multiplexer-session-id backend)))
+    (code-agent-tmux--call backend "switch-client" "-t" sid)))
+#+END_SRC
+
+** Protocol 3 — Execute Block
+
+Launch Claude Code in a detached tmux session (or reuse an existing
+one), then type the user's prompt into the pane.  The Stop hook
+delivery path is the same as cmux's: Claude Code's settings invoke
+=workspace_bridge.py= which calls back to Emacs via MCP, regardless
+of the multiplexer underneath.  All this method needs to do is:
+
+1. Resolve the launch command — reuses the cmux launch builder so a
+   tmux pane runs the same =claude-workspace= or =claude= invocation
+   the cmux pane would run.  Project-root and CLAUDE_CLI_SESSION
+   inheritance are picked up identically.
+2. =ensure-session= — if a tmux session is already alive, reuse;
+   otherwise =launch-session= with the assembled command.
+3. =send-text= the prompt + =send-key :enter= to fire it.
+
+Session-state population (=:busy=, =:query-id=, =:marker=, etc.) is
+handled by the frontend wrapper in =code-agent-org.org= before
+dispatch — same convention as cmux's execute-block.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-org-backend-execute-block
+  ((backend code-agent-tmux-backend) block-info)
+  "Execute the AI BLOCK-INFO via this tmux backend.
+Launches Claude Code in a detached tmux session if not already
+alive, sends the prompt, and returns nil (no opaque cancel handle —
+cancellation goes through Protocol 3 `cancel-from-org' which sends
+the agent profile's cancel keys)."
+  (let* ((sk (or (code-agent-multiplexer-backend-session-key backend)
+                 (plist-get block-info :session-key)))
+         (prompt (plist-get block-info :prompt))
+         (org-file (or (and sk
+                            (let* ((src (code-agent-org--session-get sk :loop-org-buffer))
+                                   (buf (or src (current-buffer))))
+                              (when (buffer-live-p buf)
+                                (buffer-file-name buf))))
+                       (buffer-file-name)))
+         (workspace-session-id
+          (or (code-agent-org-terminal--find-session-property "CLAUDE_SESSION_ID")
+              (when sk
+                (and (string-match "::\\(.+\\)\\'" sk) (match-string 1 sk)))))
+         (project-root (or (code-agent-org--get-project-root)
+                           default-directory))
+         (claude-cmd
+          (or (when (fboundp 'code-agent-org-cmux--build-launch-command)
+                (condition-case nil
+                    (code-agent-org-cmux--build-launch-command
+                     org-file workspace-session-id project-root)
+                  (error nil)))
+              "claude")))
+    ;; Populate slots needed by Protocol 2b methods if launch is fresh.
+    (unless (code-agent-multiplexer-backend-session-key backend)
+      (setf (code-agent-multiplexer-backend-session-key backend) sk))
+    ;; Launch or reuse tmux session running claude.
+    ;;
+    ;; The launch command runs in a `bash -c' wrapper so the
+    ;; multi-token claude-cmd (which may be `uv run --project …
+    ;; claude-workspace …') executes as a single string.  Working
+    ;; directory is set via `default-directory' before `call-process',
+    ;; which tmux's `new-session' inherits — using `cd PATH && CMD'
+    ;; inside `bash -c' caused the session to die when launched from
+    ;; Elisp (the cd somehow trips up bash's job-control state when
+    ;; invoked from tmux's detached new-session in this build).
+    (let ((freshly-launched
+           (unless (code-agent-mux-ensure-session backend)
+             (let ((default-directory (file-name-as-directory project-root)))
+               (code-agent-mux-launch-session
+                backend
+                ;; Pin the claude binary the wrapper uses.  cmux's
+                ;; `/Applications/cmux.app/Contents/Resources/bin/claude'
+                ;; is a shell wrapper that searches PATH for the "real"
+                ;; claude binary, *skipping its own dir*.  Under
+                ;; Emacs's `process-environment' that lookup lands on
+                ;; nvm's older 2.0.69, which doesn't recognise
+                ;; `--name'.  Honouring `CMUX_CUSTOM_CLAUDE_PATH' is
+                ;; the wrapper's own escape hatch — pin to the user's
+                ;; ~/.local/bin claude (current TUI version), with a
+                ;; PATH prepend as belt-and-suspenders.
+                (let* ((custom (or (getenv "CMUX_CUSTOM_CLAUDE_PATH")
+                                   (when (file-executable-p (expand-file-name "~/.local/bin/claude"))
+                                     (expand-file-name "~/.local/bin/claude"))))
+                       (env-prefix
+                        (concat
+                         (when custom
+                           (format "export CMUX_CUSTOM_CLAUDE_PATH=%s; "
+                                   (shell-quote-argument custom)))
+                         "export PATH=/Applications/cmux.app/Contents/Resources/bin:\"$PATH\"; ")))
+                  (list "/bin/bash" "-c"
+                        (concat env-prefix claude-cmd)))))
+             t)))
+      ;; Send the prompt.  When freshly launched, defer the send until
+      ;; the agent's TUI has actually grabbed the PTY (claude takes
+      ;; 4–8 s to boot from `bash -c "uv run claude-workspace"').
+      ;; `code-agent-mux-session-status' returns `:ready' for *any*
+      ;; foreground shell, including the bash that's about to `exec
+      ;; uv', so it cannot drive this wait — instead we poll
+      ;; capture-pane for the agent's banner regex via async
+      ;; run-at-time so Emacs stays responsive.
+      ;;
+      ;; `lexical-let' is mandatory: literate-elisp ignores the
+      ;; `lexical-binding' header, so a plain `let' here leaves the
+      ;; closure's references as free variables and the timer fires
+      ;; with `void-variable' errors.
+      (when prompt
+        (lexical-let* ((b backend)
+                       (p prompt)
+                       (dispatch
+                        (lambda ()
+                          (condition-case nil
+                              (progn
+                                (code-agent-mux-send-text b p)
+                                (code-agent-mux-send-key b :enter))
+                            (error nil)))))
+          (if freshly-launched
+              (code-agent-tmux--send-when-agent-ready
+               backend dispatch 12.0)
+            (funcall dispatch)))))
+    ;; Register the query so the bridge's Stop hook can find a request-id.
+    (when workspace-session-id
+      (condition-case nil
+          (code-agent-org-terminal--register-query workspace-session-id nil)
+        (error nil))
+      (condition-case nil
+          (code-agent-org-terminal--write-from-emacs-flag workspace-session-id)
+        (error nil)))
+    nil))
+#+END_SRC
+
+** Protocol 3 — Wait Helper
+
+Async polling helper used by =execute-block= to fire the user's
+prompt only after the agent's TUI has taken the pane.  Polls
+=tmux display-message #{pane_current_command}= every second; once
+the foreground command is no longer a plain shell (which means the
+=bash -c= wrapper has exec'd into =uv= / =claude= / etc.), invokes
+=dispatch=.  Bails out after =timeout-secs= and dispatches anyway
+— better to lose a keystroke than hang forever.
+
+#+BEGIN_SRC elisp
+(defcustom code-agent-tmux-ready-banner-regex
+  "Welcome\\|Claude Code\\|claude>\\|❯[[:space:]]*$\\|/effort"
+  "Regex matched against `tmux capture-pane' output to detect agent TUI ready.
+Defaults match the Claude Code TUI's banner / prompt; override for
+other agents (gemini-cli, codex, opencode) that have different
+welcome text."
+  :type 'regexp
+  :group 'code-agent-tmux)
+
+(defun code-agent-tmux--send-when-agent-ready (backend dispatch timeout-secs)
+  "Wait until BACKEND's pane has the agent's TUI banner up, then call
+DISPATCH (zero-arg lambda).  Polls `tmux capture-pane' once a second
+and matches against `code-agent-tmux-ready-banner-regex' — more
+reliable than pane_current_command because `uv run' acts as a parent
+process that never exec's its child, so the foreground command stays
+\"uv\" while claude renders inside.  Times out after TIMEOUT-SECS
+and dispatches anyway (better lose a keystroke than hang).
+
+literate-elisp ignores `lexical-binding' headers, so we use
+`lexical-let' to make sure the timer closures capture BACKEND /
+DISPATCH / DEADLINE / TARGET — otherwise they resolve as free
+variables and the timer fires with `void-variable' errors."
+  (lexical-let* ((deadline (+ (float-time) (or timeout-secs 12.0)))
+                 (target (code-agent-multiplexer-backend-pane-id backend))
+                 (b backend)
+                 (d dispatch)
+                 (poll-fn nil))
+    (setq poll-fn
+          (lambda ()
+            (let* ((screen (when target
+                             (condition-case nil
+                                 (code-agent-tmux--call
+                                  b "capture-pane" "-p" "-t" target)
+                               (error nil))))
+                   (banner (and screen
+                                (string-match-p
+                                 code-agent-tmux-ready-banner-regex
+                                 screen)))
+                   (timed-out (> (float-time) deadline)))
+              (cond
+               ((or banner timed-out)
+                (funcall d))
+               (t
+                (run-at-time 1.0 nil poll-fn))))))
+    (run-at-time 1.0 nil poll-fn)))
+#+END_SRC
+
+** Protocol 3 — Cancel From Org
+
+Send the agent's cancel key (Escape for Claude) into the tmux pane.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-org-backend-cancel-from-org
+  ((backend code-agent-tmux-backend) _session-key)
+  "Cancel an in-flight tmux query by sending Escape to the pane.
+Mirrors the cmux backend's cancel semantics for the Claude Code TUI."
+  (condition-case nil
+      (code-agent-mux-send-key backend :escape)
+    (error nil)))
+#+END_SRC
+
+** Protocol 1 — Supports-P capabilities
+
+tmux backends lack cmux's workspace-style / sidebar-feedback / IDE
+server hooks.  Verbose follower and session resume are supported
+via the shared parent base.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-backend-supports-p
+  ((_backend code-agent-tmux-backend) capability)
+  "Capability reply for tmux backends."
+  (pcase capability
+    (:session-resume   t)         ;; heading-based resolution
+    (:interactive-input t)
+    (:verbose-follower t)
+    (:ide-server       nil)       ;; cmux-only
+    (:workspace-style  nil)       ;; cmux-only
+    (:sidebar-feedback nil)       ;; cmux-only
+    (:streaming-tokens nil)       ;; async via bridge
+    (:structured-messages nil)
+    (_ nil)))
+#+END_SRC
+
+** Provide
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-tmux-backend)
+#+END_SRC

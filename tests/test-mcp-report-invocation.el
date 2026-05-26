@@ -30,9 +30,9 @@
   (should (fboundp 'emacs-mcp-server--handler-report-invocation)))
 
 (ert-deftest test-mcp-report-invocation-hook-defined ()
-  "Test that claude-agent-invocation-hook is defined."
+  "Test that code-agent-invocation-hook is defined."
   :tags '(:unit :fast :stable :mcp-invocation)
-  (should (boundp 'claude-agent-invocation-hook)))
+  (should (boundp 'code-agent-invocation-hook)))
 
 (ert-deftest test-mcp-report-invocation-in-builtin-tools ()
   "Test that report_invocation is in the builtin tools list."
@@ -81,7 +81,7 @@
   :tags '(:unit :fast :stable :mcp-invocation)
   (let ((hook-called nil)
         (captured-args nil))
-    (cl-letf (((symbol-value 'claude-agent-invocation-hook)
+    (cl-letf (((symbol-value 'code-agent-invocation-hook)
                (list (lambda (type name reason)
                        (setq hook-called t
                              captured-args (list type name reason))))))
@@ -98,7 +98,7 @@
   :tags '(:unit :fast :stable :mcp-invocation)
   (let ((hook-called nil)
         (captured-args nil))
-    (cl-letf (((symbol-value 'claude-agent-invocation-hook)
+    (cl-letf (((symbol-value 'code-agent-invocation-hook)
                (list (lambda (type name reason)
                        (setq hook-called t
                              captured-args (list type name reason))))))
@@ -115,7 +115,7 @@
 (ert-deftest test-mcp-report-invocation-returns-correct-format ()
   "Test that handler returns MCP-compatible response format."
   :tags '(:unit :fast :stable :mcp-invocation)
-  (let ((claude-agent-invocation-hook nil))  ; Disable hook
+  (let ((code-agent-invocation-hook nil))  ; Disable hook
     (let ((result (emacs-mcp-server--handler-report-invocation
                    '((type . "skill") (name . "commit"))
                    nil)))

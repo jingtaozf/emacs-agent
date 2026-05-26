@@ -5,10 +5,10 @@
 ;; did NOT remove the query from the active queries hash table.
 ;;
 ;; Cancel bug scenario:
-;; 1. User starts an AI block query (registered in claude-agent--active-queries)
+;; 1. User starts an AI block query (registered in code-agent--active-queries)
 ;; 2. User cancels via code-agent-org-menu (C-c C-k or "k" in transient menu)
-;; 3. code-agent-org-cancel calls claude-agent-query-interrupt (SIGINT only)
-;; 4. BUT it does NOT call claude-agent--unregister-query or set closed=t
+;; 3. code-agent-org-cancel calls code-agent-query-interrupt (SIGINT only)
+;; 4. BUT it does NOT call code-agent--unregister-query or set closed=t
 ;; 5. The query remains in active-queries hash table
 ;; 6. Mode line still shows active query spinner
 ;; 7. Active Queries buffer still shows the query
@@ -21,7 +21,7 @@
 ;; 4. Sentinel never fires, query stays in hash table indefinitely
 ;;
 ;; Expected: After any terminal state (cancel, complete, error), the query
-;; should be immediately removed from claude-agent--active-queries.
+;; should be immediately removed from code-agent--active-queries.
 
 ;;; Code:
 
@@ -56,34 +56,34 @@ and should not appear in mode line or Active Queries buffer."
          (should (test-claude-wait-until
                   (lambda ()
                     (let ((ps (code-agent-org--session-get session-key :process-state)))
-                      (and ps (claude-agent--process-state-request-id ps))))
+                      (and ps (code-agent--process-state-request-id ps))))
                   10))
          (sleep-for 0.5)
          (accept-process-output nil 0.3)
 
          (let* ((process-state (code-agent-org--session-get session-key :process-state))
-                (request-id (claude-agent--process-state-request-id process-state)))
+                (request-id (code-agent--process-state-request-id process-state)))
            (should request-id)
            ;; Before cancel: this specific request-id should be in the hash table
-           (should (gethash request-id claude-agent--active-queries))
+           (should (gethash request-id code-agent--active-queries))
            ;; And query-active-p should return t for this state
-           (should (claude-agent--query-active-p process-state))
+           (should (code-agent--query-active-p process-state))
 
            ;; Cancel via code-agent-org-cancel (same as menu "k" or C-c C-k)
            (goto-char block-pos)
            (code-agent-org-cancel)
 
            ;; The critical assertion: this request-id should be gone from hash table
-           (let ((entry-after (gethash request-id claude-agent--active-queries)))
+           (let ((entry-after (gethash request-id code-agent--active-queries)))
              (message "DEBUG: active-queries entry after cancel = %S" entry-after)
              (should-not entry-after))
 
            ;; Also query-active-p should return nil (closed=t)
-           (should-not (claude-agent--query-active-p process-state))))))))
+           (should-not (code-agent--query-active-p process-state))))))))
 
 (ert-deftest test-org-cancel-marks-process-state-closed ()
   "Test that code-agent-org-cancel marks the process state as closed.
-This ensures `claude-agent--query-active-p' returns nil for the cancelled query."
+This ensures `code-agent--query-active-p' returns nil for the cancelled query."
   :tags '(:integration :slow :api :org :cancel :active-queries)
   (test-claude-skip-unless-cli-available)
 
@@ -112,18 +112,18 @@ This ensures `claude-agent--query-active-p' returns nil for the cancelled query.
          (let ((process-state (code-agent-org--session-get session-key :process-state)))
            (should process-state)
            ;; Before cancel: process state should NOT be closed
-           (should-not (claude-agent--process-state-closed process-state))
+           (should-not (code-agent--process-state-closed process-state))
 
            ;; Cancel
            (goto-char block-pos)
            (code-agent-org-cancel)
 
            ;; After cancel: process state SHOULD be marked closed
-           (should (claude-agent--process-state-closed process-state))))))))
+           (should (code-agent--process-state-closed process-state))))))))
 
 (ert-deftest test-org-cancel-unregisters-request-id ()
   "Test that code-agent-org-cancel unregisters the request-id from active queries.
-The request-id should no longer be in `claude-agent--active-queries' hash table."
+The request-id should no longer be in `code-agent--active-queries' hash table."
   :tags '(:integration :slow :api :org :cancel :active-queries)
   (test-claude-skip-unless-cli-available)
 
@@ -145,23 +145,23 @@ The request-id should no longer be in `claude-agent--active-queries' hash table.
          (should (test-claude-wait-until
                   (lambda ()
                     (let ((ps (code-agent-org--session-get session-key :process-state)))
-                      (and ps (claude-agent--process-state-request-id ps))))
+                      (and ps (code-agent--process-state-request-id ps))))
                   10))
          (sleep-for 0.5)
          (accept-process-output nil 0.3)
 
          (let* ((process-state (code-agent-org--session-get session-key :process-state))
-                (request-id (claude-agent--process-state-request-id process-state)))
+                (request-id (code-agent--process-state-request-id process-state)))
            (should request-id)
            ;; Before cancel: request-id should be in hash table
-           (should (gethash request-id claude-agent--active-queries))
+           (should (gethash request-id code-agent--active-queries))
 
            ;; Cancel
            (goto-char block-pos)
            (code-agent-org-cancel)
 
            ;; After cancel: request-id should be removed from hash table
-           (let ((entry-after (gethash request-id claude-agent--active-queries)))
+           (let ((entry-after (gethash request-id code-agent--active-queries)))
              (message "DEBUG: active-queries entry after cancel = %S" entry-after)
              (should-not entry-after))))))))
 
@@ -192,25 +192,25 @@ even if the CLI process hasn't exited yet."
          (should (test-claude-wait-until
                   (lambda ()
                     (let ((ps (code-agent-org--session-get session-key :process-state)))
-                      (and ps (claude-agent--process-state-request-id ps))))
+                      (and ps (code-agent--process-state-request-id ps))))
                   10))
 
          (let* ((process-state (code-agent-org--session-get session-key :process-state))
-                (request-id (claude-agent--process-state-request-id process-state)))
+                (request-id (code-agent--process-state-request-id process-state)))
            (should request-id)
            ;; Before completion: request-id should be registered
-           (should (gethash request-id claude-agent--active-queries))
+           (should (gethash request-id code-agent--active-queries))
 
            ;; Wait for query to complete normally
            (should (test-claude-wait-for-completion session-key 30))
 
            ;; After completion: request-id should be removed from hash table
-           (let ((entry-after (gethash request-id claude-agent--active-queries)))
+           (let ((entry-after (gethash request-id code-agent--active-queries)))
              (message "DEBUG: active-queries entry after complete = %S" entry-after)
              (should-not entry-after))
 
            ;; Process state should be marked closed
-           (should (claude-agent--process-state-closed process-state))))))))
+           (should (code-agent--process-state-closed process-state))))))))
 
 (provide 'test-code-agent-org-cancel-active-queries)
 ;;; test-code-agent-org-cancel-active-queries.el ends here

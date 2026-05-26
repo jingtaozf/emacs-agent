@@ -125,16 +125,16 @@
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--bridge-url))
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--phoenix-url))
   ;; Send a test root span
-  (let* ((trace-id (claude-agent-trace--generate-trace-id))
-         (span-id (claude-agent-trace--generate-span-id))
+  (let* ((trace-id (code-agent-trace--generate-trace-id))
+         (span-id (code-agent-trace--generate-span-id))
          (start-ns (truncate (* (float-time) 1e9))))
-    (claude-agent-trace--request
+    (code-agent-trace--request
      "span/start"
      (list (cons 'trace_id trace-id)
            (cons 'span_id span-id)
            (cons 'name "e2e-root-span-test")
            (cons 'start_time_ns start-ns)))
-    (claude-agent-trace--request
+    (code-agent-trace--request
      "span/end"
      (list (cons 'span_id span-id)
            (cons 'end_time_ns (truncate (* (float-time) 1e9)))
@@ -150,23 +150,23 @@
       (should (eq (alist-get 'parentId test-span) :null)))))
 
 (ert-deftest test-e2e-local-with-span-no-context-untraced ()
-  "`claude-agent-with-span' returns its body value but exports no span
+  "`code-agent-with-span' returns its body value but exports no span
 when no trace context is active.
 
 This locks in the current design (commit 775cecd, 2026-03-20): without
 an explicit TRACE-CTX or a dynamically bound
-`claude-agent-trace--current-context', the macro skips span export.
+`code-agent-trace--current-context', the macro skips span export.
 Auto-promoting to root in that case produced noisy stray roots from
 timers and MCP callbacks (cmux-call, cmux-permission-resolved,
 auto-title-complete)."
   :tags '(:local-e2e)
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--bridge-url))
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--phoenix-url))
-  (let* ((claude-agent-trace-enabled t)
-         (claude-agent-trace--current-context nil)
+  (let* ((code-agent-trace-enabled t)
+         (code-agent-trace--current-context nil)
          ;; Unique name so stale spans from earlier runs can't satisfy the assertion.
          (probe-name (make-temp-name "e2e-no-context-probe-"))
-         (result (claude-agent-with-span probe-name
+         (result (code-agent-with-span probe-name
                      (list :input "no-context verification") nil
                    "done")))
     (should (equal result "done"))
@@ -179,9 +179,9 @@ auto-title-complete)."
   :tags '(:local-e2e)
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--bridge-url))
   (skip-unless (test-e2e-local--service-alive-p test-e2e-local--phoenix-url))
-  (let ((claude-agent-trace-enabled t))
-    (claude-agent-with-trace "e2e-parent-test" nil
-      (claude-agent-with-span "e2e-child-test" nil nil
+  (let ((code-agent-trace-enabled t))
+    (code-agent-with-trace "e2e-parent-test" nil
+      (code-agent-with-span "e2e-child-test" nil nil
         "child-result"))
     (sleep-for 3)
     (let* ((spans (test-e2e-local--recent-spans 30))

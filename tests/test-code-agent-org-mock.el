@@ -11,7 +11,7 @@
 ;; Exercises the full pipeline: org-mode buffer → code-agent-org-execute →
 ;; backend → subprocess → JSON protocol → response insertion.
 ;;
-;; To switch to real CLI: replace `claude-agent-cli-path' binding with
+;; To switch to real CLI: replace `code-agent-cli-path' binding with
 ;; the real path and add `test-claude-skip-unless-cli-available'.
 
 ;;; Code:
@@ -30,7 +30,7 @@ TIMEOUT defaults to 10 seconds.
 Uses a temp file so `buffer-file-name' is non-nil (required for session keys)."
   (let* ((timeout (or timeout 10))
          (temp-file (make-temp-file "test-org-mock-" nil ".org"))
-         (claude-agent-cli-path test-claude-mock-cli-path)
+         (code-agent-cli-path test-claude-mock-cli-path)
          (code-agent-org-auto-start-mcp-server nil)
          test-buffer)
     (unwind-protect
@@ -114,7 +114,7 @@ Verifies the full pipeline: execute → subprocess → JSON parse → response i
   "Test that a Response section heading is created with proper tags."
   :tags '(:mock :fast :stable :org :response)
   (let* ((temp-file (make-temp-file "test-org-mock-resp-" nil ".org"))
-         (claude-agent-cli-path test-claude-mock-cli-path)
+         (code-agent-cli-path test-claude-mock-cli-path)
          (code-agent-org-auto-start-mcp-server nil)
          test-buffer)
     (unwind-protect
@@ -162,7 +162,7 @@ Equivalent to test-org-cancel-removes-from-active-queries but with mock CLI."
 Write a very long story about numbers...
 #+end_src
 ")
-         (claude-agent-cli-path test-claude-mock-cli-path)
+         (code-agent-cli-path test-claude-mock-cli-path)
          (code-agent-org-auto-start-mcp-server nil)
          test-buffer)
     (unwind-protect
@@ -188,16 +188,16 @@ Write a very long story about numbers...
                 (should (test-claude-wait-until
                          (lambda ()
                            (let ((qh (code-agent-org--session-get session-key :query-handle)))
-                             (and qh (claude-agent--process-state-request-id qh))))
+                             (and qh (code-agent--process-state-request-id qh))))
                          5))
                 (sleep-for 0.2)
                 (accept-process-output nil 0.1)
 
                 (let* ((query-handle (code-agent-org--session-get session-key :query-handle))
-                       (request-id (claude-agent--process-state-request-id query-handle)))
+                       (request-id (code-agent--process-state-request-id query-handle)))
                   (should request-id)
                   ;; Before cancel: should be in hash table
-                  (should (gethash request-id claude-agent--active-queries))
+                  (should (gethash request-id code-agent--active-queries))
 
                   ;; Cancel
                   (goto-char block-pos)
@@ -205,15 +205,15 @@ Write a very long story about numbers...
 
                   ;; Immediately after cancel: busy cleared, cancelled flag set
                   (should-not (code-agent-org--session-get session-key :busy))
-                  (should (claude-agent--process-state-cancelled query-handle))
+                  (should (code-agent--process-state-cancelled query-handle))
 
                   ;; Wait for process to die and sentinel to unregister
                   (should (test-claude-wait-until
                            (lambda ()
-                             (not (gethash request-id claude-agent--active-queries)))
+                             (not (gethash request-id code-agent--active-queries)))
                            5))
                   ;; Now should be gone from active-queries
-                  (should-not (gethash request-id claude-agent--active-queries)))))))
+                  (should-not (gethash request-id code-agent--active-queries)))))))
       (when (and test-buffer (buffer-live-p test-buffer))
         (with-current-buffer test-buffer
           (ignore-errors (code-agent-org-cancel-all))
@@ -238,7 +238,7 @@ Race condition: handle-complete from sentinel must not re-set :busy to t."
 Write a very long story about numbers...
 #+end_src
 ")
-         (claude-agent-cli-path test-claude-mock-cli-path)
+         (code-agent-cli-path test-claude-mock-cli-path)
          (code-agent-org-auto-start-mcp-server nil)
          test-buffer)
     (unwind-protect
@@ -272,7 +272,7 @@ Write a very long story about numbers...
 
                   ;; Immediately: busy should be nil, cancelled flag set
                   (should-not (code-agent-org--session-get session-key :busy))
-                  (should (claude-agent--process-state-cancelled query-handle))
+                  (should (code-agent--process-state-cancelled query-handle))
 
                   ;; Wait for process to fully exit (sentinel fires)
                   (sleep-for 1.0)
@@ -280,7 +280,7 @@ Write a very long story about numbers...
 
                   ;; After sentinel: busy must STILL be nil, cancelled must persist
                   (should-not (code-agent-org--session-get session-key :busy))
-                  (should (claude-agent--process-state-cancelled query-handle)))))))
+                  (should (code-agent--process-state-cancelled query-handle)))))))
       (when (and test-buffer (buffer-live-p test-buffer))
         (with-current-buffer test-buffer
           (ignore-errors (code-agent-org-cancel-all))
@@ -295,7 +295,7 @@ Write a very long story about numbers...
   "Test that session UUID is captured and stored from mock CLI output."
   :tags '(:mock :fast :stable :org :session)
   (let* ((temp-file (make-temp-file "test-org-mock-uuid-" nil ".org"))
-         (claude-agent-cli-path test-claude-mock-cli-path)
+         (code-agent-cli-path test-claude-mock-cli-path)
          (code-agent-org-auto-start-mcp-server nil)
          test-buffer)
     (unwind-protect
@@ -408,7 +408,7 @@ What number did I ask you to remember? Just the number.
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             ;; Execute instruction 1
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
@@ -463,7 +463,7 @@ What is 2+2? Answer with just the number.
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             ;; Execute in Session A
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
@@ -493,7 +493,7 @@ What is 2+2? Answer with just the number.
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path)
+          (let ((code-agent-cli-path test-claude-mock-cli-path)
                 (process-environment
                  (cons "MOCK_SCENARIO=slow-response" process-environment)))
             (goto-char (point-min))
@@ -524,10 +524,10 @@ What is 2+2? Answer with just the number.
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path)
+          (let ((code-agent-cli-path test-claude-mock-cli-path)
                 (process-environment
                  (cons "MOCK_SCENARIO=slow-response" process-environment)))
-            (clrhash claude-agent--active-queries)
+            (clrhash code-agent--active-queries)
             (goto-char (point-min))
             (re-search-forward "#\\+begin_src ai" nil t)
             (let ((session-key (code-agent-org--current-session-key)))
@@ -539,16 +539,16 @@ What is 2+2? Answer with just the number.
                 (maphash
                  (lambda (_id state)
                    (when (and state
-                              (claude-agent--process-state-p state)
-                              (not (claude-agent--process-state-closed state))
-                              (claude-agent--process-state-source-buffer state))
+                              (code-agent--process-state-p state)
+                              (not (code-agent--process-state-closed state))
+                              (code-agent--process-state-source-buffer state))
                      (setq found-state state)))
-                 claude-agent--active-queries)
+                 code-agent--active-queries)
                 (should found-state)
                 ;; Source buffer should be our buffer
-                (should (eq (claude-agent--process-state-source-buffer found-state) buf))
+                (should (eq (code-agent--process-state-source-buffer found-state) buf))
                 ;; Format identity should be a non-empty string
-                (let ((identity (claude-agent--format-query-identity found-state)))
+                (let ((identity (code-agent--format-query-identity found-state)))
                   (should (stringp identity))
                   (should (> (length identity) 0))))
               (test-claude-wait-for-completion session-key 10))))
@@ -563,10 +563,10 @@ What is 2+2? Answer with just the number.
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path)
+          (let ((code-agent-cli-path test-claude-mock-cli-path)
                 (process-environment
                  (cons "MOCK_SCENARIO=slow-response" process-environment)))
-            (clrhash claude-agent--active-queries)
+            (clrhash code-agent--active-queries)
             (goto-char (point-min))
             (re-search-forward "#\\+begin_src ai" nil t)
             (let ((session-key (code-agent-org--current-session-key)))
@@ -574,12 +574,12 @@ What is 2+2? Answer with just the number.
               (sleep-for 0.5)
               (accept-process-output nil 0.2)
               ;; Trigger mode-line update
-              (claude-agent--update-activity-string)
-              (should (stringp claude-agent-activity-string))
+              (code-agent--update-activity-string)
+              (should (stringp code-agent-activity-string))
               ;; If there's an active query, verify format
-              (when (and (> (length claude-agent-activity-string) 0)
-                         (claude-agent-active-p))
-                (should (string-match-p "\\[C:" claude-agent-activity-string)))
+              (when (and (> (length code-agent-activity-string) 0)
+                         (code-agent-active-p))
+                (should (string-match-p "\\[C:" code-agent-activity-string)))
               (test-claude-wait-for-completion session-key 10))))
       (test-code-agent-org-mock--cleanup buf temp-file))))
 
@@ -595,7 +595,7 @@ Execute Block A (slow), then Block B — B should be queued."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             ;; Execute Block A (slow-response via auto-detect)
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
@@ -631,7 +631,7 @@ Execute Block A (slow), then Block B — B should be queued."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             ;; Execute Block A
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
@@ -671,7 +671,7 @@ Execute Block A (slow), then Block B — B should be queued."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
@@ -701,7 +701,7 @@ Execute Block A (slow), then Block B — B should be queued."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
@@ -733,7 +733,7 @@ Verifies Block B's response is present when Block A completes first."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
@@ -767,7 +767,7 @@ Verifies Block B's response is present when Block A completes first."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
@@ -801,7 +801,7 @@ Verifies Block B's response is present when Block A completes first."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
@@ -829,7 +829,7 @@ Verifies Block B's response is present when Block A completes first."
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
@@ -887,7 +887,7 @@ This should not run.
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             ;; Navigate to past-due block
             (goto-char (point-min))
             (re-search-forward ":CUSTOM_ID: mock-scheduled-past-due" nil t)
@@ -940,7 +940,7 @@ Say daily-repeater-executed
          (temp-file (cdr setup)))
     (unwind-protect
         (with-current-buffer buf
-          (let ((claude-agent-cli-path test-claude-mock-cli-path))
+          (let ((code-agent-cli-path test-claude-mock-cli-path))
             (goto-char (point-min))
             (re-search-forward ":CUSTOM_ID: mock-scheduled-repeater" nil t)
             (org-back-to-heading t)
@@ -1035,7 +1035,7 @@ BODY runs after cancel, with point in the test buffer."
          (with-current-buffer buf
            (let ((process-environment
                   (cons "MOCK_SCENARIO=cancel-test" process-environment))
-                 (claude-agent-cli-path test-claude-mock-cli-path))
+                 (code-agent-cli-path test-claude-mock-cli-path))
              (test-code-agent-org-mock--goto-ai-block)
              (let ((session-key (code-agent-org--current-session-key)))
                (code-agent-org-execute)
@@ -1047,7 +1047,7 @@ BODY runs after cancel, with point in the test buffer."
                        (code-agent-org--session-get session-key :query-handle))
                       (cancel-process
                        (when query-handle
-                         (claude-agent--process-state-process query-handle))))
+                         (code-agent--process-state-process query-handle))))
                  ;; Guard: query-handle and process must exist if token arrived
                  (should query-handle)
                  (should cancel-process)
@@ -1099,15 +1099,15 @@ after cancel, the user sees a new query start unexpectedly."
   ;; contamination (a prior test's SIGKILL sentinel could fire here).
   (sleep-for 0.5)
   (accept-process-output nil 0.3)
-  (let ((claude-agent-auto-recovery t)
+  (let ((code-agent-auto-recovery t)
         (recovery-triggered nil))
-    (cl-letf (((symbol-function 'claude-agent--resume-session)
+    (cl-letf (((symbol-function 'code-agent--resume-session)
                (lambda (&rest _args)
                  (setq recovery-triggered t))))
       (test-code-agent-org-mock--with-cancel-fixture
         ;; query-handle and cancel-process captured BEFORE cancel by macro
         ;; Verify cancelled flag was set on the process-state
-        (should (claude-agent--process-state-cancelled query-handle))
+        (should (code-agent--process-state-cancelled query-handle))
         ;; Wait for process to fully exit and sentinel to fire
         (should (test-claude-wait-until
                  (lambda () (not (process-live-p cancel-process)))

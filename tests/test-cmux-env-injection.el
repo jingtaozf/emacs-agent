@@ -42,8 +42,8 @@
          (repo (file-name-directory (directory-file-name tests-dir))))
     (add-to-list 'load-path (expand-file-name "../literate-elisp" repo))
     (require 'literate-elisp)
-    (dolist (mod '("claude-agent-trace.org"
-                   "claude-agent.org"
+    (dolist (mod '("code-agent-trace.org"
+                   "code-agent.org"
                    "code-agent-org.org"
                    "code-agent-org-terminal-base.org"
                    "code-agent-org-cmux.org"))

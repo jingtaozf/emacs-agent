@@ -52,7 +52,7 @@ This replaces the repeated pattern:
 - Eliminated 30 lines of dead code
 - Created reusable wait helper for integration tests
 
-### 2. test-claude-agent-integration.el - Reduced Duplication
+### 2. test-code-agent-integration.el - Reduced Duplication
 
 **Simplified All Wait Loops**:
 
@@ -83,7 +83,7 @@ Replaced 8 instances of manual wait loops with `test-claude-wait-until` helper:
 - `test-integration-query-cancellation`: 6 lines → 2 lines
 
 **Impact**:
-- Reduced test-claude-agent-integration.el from 360 to 280 lines (-22%)
+- Reduced test-code-agent-integration.el from 360 to 280 lines (-22%)
 - Eliminated ~54 lines of duplicated wait logic
 - Tests now more readable and maintainable
 
@@ -115,7 +115,7 @@ Combined multiple insert statements into single calls:
 - Improved readability with fewer but clearer insert calls
 - Note: Attempted macro approach but reverted to maintain simplicity
 
-### 4. test-claude-agent-unit.el - No Changes
+### 4. test-code-agent-unit.el - No Changes
 
 **Analysis**: Already well-structured with minimal redundancy
 - Clean test isolation
@@ -153,9 +153,9 @@ All simplifications preserve 100% test coverage:
 
 | Suite | Tests | Passing | Status |
 |-------|-------|---------|--------|
-| claude-agent-unit | 19 | 19 (100%) | ✅ |
+| code-agent-unit | 19 | 19 (100%) | ✅ |
 | code-agent-org-unit | 29 | 29 (100%) | ✅ |
-| claude-agent-integration | 10 | 8 (80%, 2 skipped) | ✅ |
+| code-agent-integration | 10 | 8 (80%, 2 skipped) | ✅ |
 | code-agent-org-integration | 20 | 6 (30%, 14 skipped) | ✅ |
 | **Total** | **78** | **62 (79%)** | **✅** |
 

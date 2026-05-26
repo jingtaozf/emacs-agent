@@ -5,13 +5,13 @@ EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch
 
 # Source files
-SOURCES = claude-agent.org code-agent-org.org claude-agent-trace.org
+SOURCES = code-agent.org code-agent-org.org code-agent-trace.org
 
 # Test files
 # Note: actual test loading is in target recipes below, not this variable
-UNIT_TESTS = tests/test-claude-agent-unit.el tests/test-code-agent-org-unit.el tests/test-claude-agent-json-protocol.el tests/test-claude-agent-backend.el tests/test-claude-agent-backend-protocol.el
-MOCK_TESTS = tests/test-claude-agent-mock.el tests/test-code-agent-org-mock.el
-INTEGRATION_TESTS = tests/test-claude-agent-integration.el tests/test-code-agent-org-integration.el tests/test-claude-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
+UNIT_TESTS = tests/test-code-agent-unit.el tests/test-code-agent-org-unit.el tests/test-code-agent-json-protocol.el tests/test-code-agent-backend.el tests/test-code-agent-backend-protocol.el
+MOCK_TESTS = tests/test-code-agent-mock.el tests/test-code-agent-org-mock.el
+INTEGRATION_TESTS = tests/test-code-agent-integration.el tests/test-code-agent-org-integration.el tests/test-code-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
@@ -26,22 +26,22 @@ LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COM
 # Common literate-elisp load sequences (DRY — used by all test targets)
 # Load order: trace → agent (includes backend) → mcp → org
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
-LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
-LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/claude-agent.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/claude-agent-chat.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/claude-agent-translate.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/claude-agent-title.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/claude-agent-refine.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/claude-agent-multiplexer.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/claude-agent-cmux-backend.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/claude-agent-tmux-backend.org\")"
-LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/claude-agent-jsonrpc.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-opencode.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-gemini.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/claude-agent-acp-codex.org\")"
-LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/claude-agent-pi-backend.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/claude-agent-pi-ui.org\")"
+LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/code-agent-trace.org\")"
+LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/code-agent.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/code-agent-chat.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/code-agent-translate.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/code-agent-title.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/code-agent-refine.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/code-agent-multiplexer.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/code-agent-cmux-backend.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/code-agent-tmux-backend.org\")"
+LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/code-agent-jsonrpc.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp-opencode.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp-gemini.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/code-agent-acp-codex.org\")"
+LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/code-agent-pi-backend.org\")" \
+           --eval "(literate-elisp-load \"$(PWD)/code-agent-pi-ui.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/code-agent-org.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/code-agent-org-header-line.org\")"
@@ -71,7 +71,7 @@ help:
 	@echo "  make test-integration - Run integration tests in parallel (6 jobs, default)"
 	@echo "  make test-integration-seq     - Run integration tests sequentially"
 	@echo "  make test-integration PARALLEL_JOBS=N  - Custom parallelism"
-	@echo "  make test-agent-unit  - Run claude-agent unit tests"
+	@echo "  make test-agent-unit  - Run code-agent unit tests"
 	@echo "  make test-org-unit    - Run code-agent-org unit tests"
 	@echo "  make test-permissions - Run permission functions tests"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
@@ -113,15 +113,15 @@ compile:
 	@echo "Compiling literate org files..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_LITERATE) \
-		--eval "(literate-elisp-tangle-file \"claude-agent.org\")" \
+		--eval "(literate-elisp-tangle-file \"code-agent.org\")" \
 		--eval "(literate-elisp-tangle-file \"code-agent-org.org\")" \
-		--eval "(byte-compile-file \"claude-code.el\")" \
+		--eval "(byte-compile-file \"code-agent.el\")" \
 		--eval "(byte-compile-file \"code-agent-org.el\")"
 
 .PHONY: clean
 clean:
 	@echo "Cleaning compiled files..."
-	rm -f claude-code.elc
+	rm -f code-agent.elc
 	rm -f code-agent-org.el code-agent-org.elc
 	rm -f tests/*.elc
 
@@ -130,8 +130,8 @@ reload:
 	@echo "Reloading org files requires running Emacs session"
 	@echo "In Emacs, run: M-x eval-expression RET"
 	@echo "  (progn"
-	@echo "    (literate-elisp-load \"$(PWD)/claude-agent-trace.org\")"
-	@echo "    (literate-elisp-load \"$(PWD)/claude-agent.org\")"
+	@echo "    (literate-elisp-load \"$(PWD)/code-agent-trace.org\")"
+	@echo "    (literate-elisp-load \"$(PWD)/code-agent.org\")"
 	@echo "    (literate-elisp-load \"$(PWD)/code-agent-org.org\"))"
 
 .PHONY: install-hooks
@@ -226,7 +226,7 @@ _run-sharded-tests-parallel:
 			$(LOAD_ALL) \
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
-			-l tests/test-claude-agent-integration.el \
+			-l tests/test-code-agent-integration.el \
 			-l tests/test-code-agent-org-integration.el \
 			-l tests/test-code-agent-org-cancel-active-queries.el \
 			-l tests/test-code-agent-org-cancel-race.el \
@@ -244,7 +244,7 @@ _run-sharded-tests-bash:
 			$(LOAD_ALL) \
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
-			-l tests/test-claude-agent-integration.el \
+			-l tests/test-code-agent-integration.el \
 			-l tests/test-code-agent-org-integration.el \
 			-l tests/test-code-agent-org-cancel-active-queries.el \
 			-l tests/test-code-agent-org-cancel-race.el \
@@ -295,18 +295,18 @@ test-logs:
 
 .PHONY: test-agent-unit
 test-agent-unit:
-	@echo "Running claude-agent unit tests..."
+	@echo "Running code-agent unit tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
 		-l tests/fixtures/test-config.el \
-		-l tests/test-claude-agent-unit.el \
-		-l tests/test-claude-agent-refactor-phase3.el \
-		-l tests/test-claude-agent-json-protocol.el \
-		-l tests/test-claude-agent-state-management.el \
-		-l tests/test-claude-agent-background-tasks.el \
-		-l tests/test-claude-agent-chat.el \
-		-l tests/test-claude-agent-error-injection.el \
-		-l tests/test-claude-agent-sentinel.el \
+		-l tests/test-code-agent-unit.el \
+		-l tests/test-code-agent-refactor-phase3.el \
+		-l tests/test-code-agent-json-protocol.el \
+		-l tests/test-code-agent-state-management.el \
+		-l tests/test-code-agent-background-tasks.el \
+		-l tests/test-code-agent-chat.el \
+		-l tests/test-code-agent-error-injection.el \
+		-l tests/test-code-agent-sentinel.el \
 		-l tests/test-json-parser-property.el \
 		-l tests/test-harness-phase2.el \
 		-l tests/test-permission-round-trip.el \
@@ -318,9 +318,9 @@ test-backend-unit:
 	@echo "Running backend protocol unit tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
-		-l tests/test-claude-agent-backend.el \
-		-l tests/test-claude-agent-backend-protocol.el \
-		-l tests/test-claude-agent-chat-backend.el \
+		-l tests/test-code-agent-backend.el \
+		-l tests/test-code-agent-backend-protocol.el \
+		-l tests/test-code-agent-chat-backend.el \
 		-l tests/test-backend-protocol3.el \
 		-f ert-run-tests-batch-and-exit
 
@@ -330,7 +330,7 @@ test-acp-unit:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
 		$(LOAD_ACP) \
-		-l tests/test-claude-agent-acp.el \
+		-l tests/test-code-agent-acp.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-pi-backend
@@ -339,7 +339,7 @@ test-pi-backend:
 	$(BATCH) $(LOAD_PATH) -L tests/support \
 		$(LOAD_AGENT_ONLY) \
 		$(LOAD_PI) \
-		-l tests/test-claude-agent-pi-backend.el \
+		-l tests/test-code-agent-pi-backend.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :pi-backend))"
 
 # Live tests spawn `pi --mode rpc' for real and exercise the full
@@ -352,7 +352,7 @@ test-pi-backend-live:
 	$(BATCH) $(LOAD_PATH) -L tests/support \
 		$(LOAD_AGENT_ONLY) \
 		$(LOAD_PI) \
-		-l tests/test-claude-agent-pi-backend.el \
+		-l tests/test-code-agent-pi-backend.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :pi-backend-live))"
 
 # Pi UI Phase 1 — smoke (no spawn) + live (real pi RPC commands).
@@ -362,7 +362,7 @@ test-pi-ui:
 	$(BATCH) $(LOAD_PATH) -L tests/support \
 		$(LOAD_AGENT_ONLY) \
 		$(LOAD_PI) \
-		-l tests/test-claude-agent-pi-ui.el \
+		-l tests/test-code-agent-pi-ui.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :pi-ui))"
 
 .PHONY: test-pi-ui-live
@@ -371,7 +371,7 @@ test-pi-ui-live:
 	$(BATCH) $(LOAD_PATH) -L tests/support \
 		$(LOAD_AGENT_ONLY) \
 		$(LOAD_PI) \
-		-l tests/test-claude-agent-pi-ui.el \
+		-l tests/test-code-agent-pi-ui.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :pi-ui-live))"
 
 # Fixture-driven E2E stories — runs each :pi-e2e: heading in
@@ -389,7 +389,7 @@ test-e2e-pi:
 # Multi-block same-workspace E2E.  Drives `code-agent-org-execute'
 # (the real C-c C-c path) against a 3-block fixture, asserting one Pi
 # PID across blocks 1+2 and Pi respawn after block-3 kill.  Requires
-# the full org integration stack (loaded via claude-code.el).
+# the full org integration stack (loaded via code-agent.el).
 .PHONY: test-e2e-pi-multiblock
 test-e2e-pi-multiblock:
 	@echo "Running Pi multi-block same-workspace E2E..."
@@ -403,9 +403,9 @@ test-e2e-pi-multiblock:
 PI_EXTENSION_OUT = $(HOME)/.pi/agent/extensions/emacs-mcp.ts
 .PHONY: tangle-pi-extension
 tangle-pi-extension:
-	@echo "Tangling claude-agent-pi-extension.org → $(PI_EXTENSION_OUT)..."
+	@echo "Tangling code-agent-pi-extension.org → $(PI_EXTENSION_OUT)..."
 	$(BATCH) -l org \
-		--eval "(let ((org-confirm-babel-evaluate nil)) (org-babel-tangle-file \"$(PWD)/claude-agent-pi-extension.org\"))"
+		--eval "(let ((org-confirm-babel-evaluate nil)) (org-babel-tangle-file \"$(PWD)/code-agent-pi-extension.org\"))"
 	@test -f $(PI_EXTENSION_OUT) || (echo "tangle failed: $(PI_EXTENSION_OUT) not created" && exit 1)
 	@echo "Tangled $$(wc -l < $(PI_EXTENSION_OUT)) lines to $(PI_EXTENSION_OUT)"
 
@@ -462,7 +462,7 @@ test-org-unit:
 		--eval "(literate-elisp-load \"$(PWD)/code-agent-org-terminal-base.org\")" \
 		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
-		-l tests/test-claude-agent-input-validation.el \
+		-l tests/test-code-agent-input-validation.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"
 
 .PHONY: test-mcp-unit
@@ -482,11 +482,11 @@ test-mock: test-agent-mock test-org-mock
 
 .PHONY: test-agent-mock
 test-agent-mock:
-	@echo "Running claude-agent mock CLI tests..."
+	@echo "Running code-agent mock CLI tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
 		-l tests/fixtures/test-config.el \
-		-l tests/test-claude-agent-mock.el \
+		-l tests/test-code-agent-mock.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-org-mock
@@ -500,11 +500,11 @@ test-org-mock:
 
 .PHONY: test-agent-integration
 test-agent-integration:
-	@echo "Running claude-agent integration tests (requires API key)..."
+	@echo "Running code-agent integration tests (requires API key)..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
 		-l tests/fixtures/test-config.el \
-		-l tests/test-claude-agent-integration.el \
+		-l tests/test-code-agent-integration.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-org-integration
@@ -526,7 +526,7 @@ test-permissions:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
 		$(LOAD_ORG) \
-		-l tests/test-claude-agent-permissions.el \
+		-l tests/test-code-agent-permissions.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :permissions))"
 
 .PHONY: test-org-permissions
@@ -535,7 +535,7 @@ test-org-permissions:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
 		$(LOAD_ORG) \
-		-l tests/test-claude-agent-permissions.el \
+		-l tests/test-code-agent-permissions.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
 
 # NOTE: test-extraction and test-mcp-ide targets removed — source files were deleted.
@@ -633,7 +633,7 @@ test-interactive:
 	@echo "Opening test runner in Emacs..."
 	$(EMACS) -Q $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		-l tests/test-claude-agent-unit.el \
+		-l tests/test-code-agent-unit.el \
 		-l tests/test-code-agent-org-unit.el \
 		--eval "(ert t)"
 
@@ -718,7 +718,7 @@ readme:
 watch:
 	@echo "Watching for changes (requires fswatch)..."
 	@which fswatch > /dev/null || (echo "fswatch not found. Install with: brew install fswatch" && exit 1)
-	fswatch -o claude-agent.org code-agent-org.org | while read; do \
+	fswatch -o code-agent.org code-agent-org.org | while read; do \
 		echo "Files changed, reloading..."; \
 		$(MAKE) test-unit; \
 	done
@@ -815,7 +815,7 @@ config:
 	@for file in $(ALL_TESTS); do echo "  - $$file"; done
 
 # Literate programming — tangle Python sources
-PYTHON_LP_ORG := claude-agent-python.org
+PYTHON_LP_ORG := code-agent-python.org
 
 .PHONY: tangle-python
 tangle-python:
@@ -832,7 +832,7 @@ tangle-python:
 # Override LITERATE_AGENT_HOME if the repo lives elsewhere.
 LITERATE_AGENT_HOME ?= $(HOME)/projects/literate-agent
 
-# Each LP-script target sources `.claude/hooks/_env.sh` so claude-agent's
+# Each LP-script target sources `.claude/hooks/_env.sh` so code-agent's
 # project-specific overrides (LITERATE_AGENT_LP_ROOT="" — single-repo
 # layout with .org at root, LITERATE_AGENT_TANGLE_MAKE_TARGET=tangle-python)
 # reach the plugin scripts. Without this, the scripts fall back to
@@ -855,7 +855,7 @@ build-python-index:
 # build-tangle-map populates .cache/tangle-map.tsv used by the
 # block-tangled-edit.sh PreToolUse hook to print section-precise
 # navigation hints (the .org file is 6770 lines, so generic "edit
-# claude-agent-python.org" is unhelpful). The hook self-heals on
+# code-agent-python.org" is unhelpful). The hook self-heals on
 # cache miss; run manually after large reorgs.
 .PHONY: build-tangle-map
 build-tangle-map:

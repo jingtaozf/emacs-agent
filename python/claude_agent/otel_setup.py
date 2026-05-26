@@ -136,7 +136,7 @@ def _ensure_phoenix() -> None:
     _default_phoenix.ensure()
 
 
-STATUS_DIR = "/tmp/claude-agent-status"
+STATUS_DIR = "/tmp/code-agent-status"
 
 # ======================================================================
 # Exporter + tracer factories

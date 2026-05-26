@@ -42,14 +42,14 @@
   (let* ((tokens nil)
          (completed nil)
          (error-msg nil)
-         (claude-agent-acp-gemini-auth-method 'gemini-api-key)
-         (claude-agent-acp-gemini-environment
+         (code-agent-acp-gemini-auth-method 'gemini-api-key)
+         (code-agent-acp-gemini-environment
           (list (format "GEMINI_API_KEY=%s" (getenv "GEMINI_API_KEY"))))
-         (backend (claude-agent-acp-gemini-create
+         (backend (code-agent-acp-gemini-create
                    :cwd (expand-file-name "."))))
     (unwind-protect
         (progn
-          (claude-agent-backend-query
+          (code-agent-backend-query
            backend
            "Reply with exactly the single word: hello"
            (list :on-token (lambda (tok) (push tok tokens))
@@ -62,7 +62,7 @@
           (let ((full-text (downcase (string-join (nreverse tokens) ""))))
             (should (> (length full-text) 0))
             (should (string-match-p "hello" full-text))))
-      (ignore-errors (claude-agent-backend-cleanup backend)))))
+      (ignore-errors (code-agent-backend-cleanup backend)))))
 
 ;;; Codex E2E
 
@@ -74,14 +74,14 @@
   (let* ((tokens nil)
          (completed nil)
          (error-msg nil)
-         (claude-agent-acp-codex-auth-method 'openai-api-key)
-         (claude-agent-acp-codex-environment
+         (code-agent-acp-codex-auth-method 'openai-api-key)
+         (code-agent-acp-codex-environment
           (list (format "OPENAI_API_KEY=%s" (getenv "OPENAI_API_KEY"))))
-         (backend (claude-agent-acp-codex-create
+         (backend (code-agent-acp-codex-create
                    :cwd (expand-file-name "."))))
     (unwind-protect
         (progn
-          (claude-agent-backend-query
+          (code-agent-backend-query
            backend
            "Reply with exactly the single word: hello"
            (list :on-token (lambda (tok) (push tok tokens))
@@ -93,7 +93,7 @@
           (should completed)
           (let ((full-text (downcase (string-join (nreverse tokens) ""))))
             (should (string-match-p "hello" full-text))))
-      (ignore-errors (claude-agent-backend-cleanup backend)))))
+      (ignore-errors (code-agent-backend-cleanup backend)))))
 
 (provide 'test-acp-integration-multi)
 ;;; test-acp-integration-multi.el ends here

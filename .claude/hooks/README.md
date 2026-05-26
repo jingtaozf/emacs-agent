@@ -1,4 +1,4 @@
-# claude-agent hooks — loaded via literate-agent plugin
+# code-agent hooks — loaded via literate-agent plugin
 
 This project's LP hooks (block edits to tangled `.py`, auto-tangle on
 `.org` save, bare-`*` rejection, etc.) are not stored here — they
@@ -24,7 +24,7 @@ the plugin's hook scripts.
 
 - `_env.sh` — project-specific environment overrides for the
   plugin hooks. Sourced by the literate-agent hooks before they run.
-  Tune for claude-agent's single-repo Python LP layout (`.org` at
+  Tune for code-agent's single-repo Python LP layout (`.org` at
   root, `make tangle-python` target).
 - `README.md` — this file.
 

@@ -27,7 +27,7 @@
                        (or load-file-name buffer-file-name))))))
   (load (expand-file-name "tests/support/test-helpers.el" project-root) nil t)
   (require 'literate-elisp)
-  (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent.org" project-root))
   (literate-elisp-load (expand-file-name "code-agent-org.org" project-root))
   (literate-elisp-load (expand-file-name "code-agent-org-cmux.org" project-root)))
 

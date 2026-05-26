@@ -1,0 +1,250 @@
+#+TITLE: Claude Agent — Translation
+#+PROPERTY: literate-load yes
+
+* Overview
+
+Translation utilities with streaming display.  =M-x
+code-agent-translate-region=, =-buffer=, =-dwim= (region-or-buffer)
+and two language-specific shortcuts (=-to-chinese=, =-to-english=).
+Each call opens a *fresh* output buffer named after the target
+language so repeated runs do not overwrite each other; the most
+recent buffer is exposed via =code-agent-translate--last-buffer=
+for tests and jump-to-latest commands.
+
+Tokens stream into the buffer as Claude emits them; only one
+translation can run at a time (a second start raises
+=user-error=).  =M-x code-agent-translate-cancel= interrupts the
+active query.
+
+** Dependencies
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'code-agent-backend)
+#+END_SRC
+
+* Customization
+
+#+BEGIN_SRC elisp
+(defcustom code-agent-translate-default-language "Chinese"
+  "Default target language for translation."
+  :type 'string
+  :group 'code-agent)
+
+(defcustom code-agent-translate-languages
+  '("Chinese" "English" "Japanese" "Korean" "French" "German" "Spanish")
+  "List of languages available for translation."
+  :type '(repeat string)
+  :group 'code-agent)
+
+(defcustom code-agent-translate-buffer-name "*code-agent-translate*"
+  "Template for translation output buffer names.
+The target language is injected (e.g. \"*code-agent-translate: Chinese*\")
+and `generate-new-buffer-name' appends \"<2>\" etc. for collisions."
+  :type 'string
+  :group 'code-agent)
+
+(defcustom code-agent-translate-model "haiku"
+  "Model to use for translation. Haiku is fastest and cheapest."
+  :type 'string
+  :group 'code-agent)
+#+END_SRC
+
+* Translation Buffer
+
+Insert points always go to =point-max= so the user can scroll
+freely while the translation is in flight.
+
+#+BEGIN_SRC elisp
+(defvar code-agent-translate--active-state nil
+  "Currently active translation process state.")
+
+(defvar code-agent-translate--last-buffer nil
+  "Most recently created translation output buffer, or nil.
+Tests and jump-to-latest commands read this instead of scanning buffers.")
+
+(defun code-agent-translate--make-buffer-name (language)
+  "Build a unique buffer name for a translation into LANGUAGE."
+  (let* ((template code-agent-translate-buffer-name)
+         (trimmed (if (and (string-prefix-p "*" template)
+                           (string-suffix-p "*" template)
+                           (> (length template) 2))
+                      (substring template 1 -1)
+                    template))
+         (base (format "*%s: %s*" trimmed language)))
+    (generate-new-buffer-name base)))
+
+(defun code-agent-translate--setup-buffer (language text-preview)
+  "Create and return a fresh translation buffer for LANGUAGE.
+TEXT-PREVIEW is shown as a source snippet in the header.
+Also stashes the new buffer in `code-agent-translate--last-buffer'."
+  (let ((buf (get-buffer-create
+              (code-agent-translate--make-buffer-name language))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Translating to %s...\n" language))
+        (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        (insert (format "Source: %s...\n\n"
+                        (truncate-string-to-width text-preview 60 nil nil "...")))
+        (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+        (goto-char (point-max))))
+    (setq code-agent-translate--last-buffer buf)
+    (display-buffer buf)
+    buf))
+
+(defun code-agent-translate--insert-token (buf text)
+  "Insert TEXT token into translation BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert text)))))
+
+(defun code-agent-translate--complete (buf result)
+  "Handle translation completion in BUF with optional RESULT error string.
+RESULT is nil on success, or an error description on failure."
+  (setq code-agent-translate--active-state nil)
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        (if result
+            (insert (format "[Error: %s]\n" result))
+          (insert "[Translation complete]\n")))))
+  (message "Translation %s" (if result "failed" "complete")))
+#+END_SRC
+
+* Core Translation Function
+
+The prompt is intentionally short — "preserve formatting, output only
+the translation".  Anything richer invites the model to comment on the
+source, the exact behaviour the Haiku default + ban on tools avoid.
+=lexical-let= is required because literate-elisp evaluates this file
+with dynamic binding (see =ELISP-IDIOMS.org=).
+
+#+BEGIN_SRC elisp
+(defun code-agent-translate (text language &optional extra-options)
+  "Translate TEXT to LANGUAGE with streaming output.
+EXTRA-OPTIONS is an optional plist to merge with default options.
+Each call opens a fresh output buffer named after LANGUAGE so
+repeated translations do not overwrite each other."
+  (when code-agent-translate--active-state
+    (user-error "Translation already in progress"))
+  (let* ((prompt (format "Translate the following text to %s. \
+Preserve all formatting, structure, code blocks, and markup. \
+Output only the translation without any explanation:\n\n%s"
+                         language text))
+         (buf (code-agent-translate--setup-buffer language text))
+         (base-options (code-agent-options :model code-agent-translate-model))
+         (options (if extra-options
+                      (apply #'code-agent-options
+                             :model code-agent-translate-model
+                             extra-options)
+                    base-options)))
+    (setq code-agent-translate--active-state
+          (lexical-let ((out-buf buf))
+            (code-agent-query
+             prompt
+             :options options
+             :on-token (lambda (tok)
+                         (code-agent-translate--insert-token out-buf tok))
+             :on-error (lambda (err)
+                         (code-agent-translate--complete
+                          out-buf (format "%s" err)))
+             :on-complete (lambda (res)
+                            (code-agent-translate--complete out-buf res)))))))
+
+(defun code-agent-translate--select-language ()
+  "Prompt user to select target language."
+  (completing-read "Target language: "
+                   code-agent-translate-languages
+                   nil t nil nil
+                   code-agent-translate-default-language))
+#+END_SRC
+
+* Interactive Commands
+
+| Command                            | Source         | Target language       |
+|------------------------------------+----------------+-----------------------|
+| =code-agent-translate-region=    | active region  | default or =C-u= ask  |
+| =code-agent-translate-buffer=    | whole buffer   | default or =C-u= ask  |
+| =code-agent-translate-dwim=      | region-or-buf  | default or =C-u= ask  |
+| =code-agent-translate-to-chinese=| region-or-buf  | "Chinese" (hardcoded) |
+| =code-agent-translate-to-english=| region-or-buf  | "English" (hardcoded) |
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun code-agent-translate-region (start end &optional language)
+  "Translate region from START to END to LANGUAGE.
+With \\[universal-argument] prefix, prompt for target language.
+Otherwise use `code-agent-translate-default-language'."
+  (interactive "r\nP")
+  (let ((text (buffer-substring-no-properties start end))
+        (lang (if language
+                  (code-agent-translate--select-language)
+                code-agent-translate-default-language)))
+    (code-agent-translate text lang)))
+
+;;;###autoload
+(defun code-agent-translate-buffer (&optional language)
+  "Translate entire buffer content.
+With \\[universal-argument] prefix, prompt for target language.
+Otherwise use `code-agent-translate-default-language'."
+  (interactive "P")
+  (let ((text (buffer-string))
+        (lang (if language
+                  (code-agent-translate--select-language)
+                code-agent-translate-default-language)))
+    (code-agent-translate text lang)))
+
+;;;###autoload
+(defun code-agent-translate-dwim (&optional language)
+  "Translate region if active, otherwise translate buffer.
+With \\[universal-argument] prefix, prompt for target language.
+Otherwise use `code-agent-translate-default-language'."
+  (interactive "P")
+  (if (use-region-p)
+      (code-agent-translate-region (region-beginning) (region-end) language)
+    (code-agent-translate-buffer language)))
+
+;;;###autoload
+(defun code-agent-translate-to-chinese ()
+  "Translate region or buffer to Chinese.
+Shortcut for `code-agent-translate-dwim' with Chinese as target."
+  (interactive)
+  (let ((code-agent-translate-default-language "Chinese"))
+    (code-agent-translate-dwim)))
+
+;;;###autoload
+(defun code-agent-translate-to-english ()
+  "Translate region or buffer to English.
+Shortcut for `code-agent-translate-dwim' with English as target."
+  (interactive)
+  (let ((code-agent-translate-default-language "English"))
+    (code-agent-translate-dwim)))
+#+END_SRC
+
+* Cancel Translation
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun code-agent-translate-cancel ()
+  "Cancel active translation."
+  (interactive)
+  (when code-agent-translate--active-state
+    (let ((req-id (code-agent--process-state-request-id
+                   code-agent-translate--active-state)))
+      (when req-id
+        (code-agent-cancel-query req-id)))
+    (setq code-agent-translate--active-state nil)
+    (message "Translation cancelled")))
+#+END_SRC
+
+* Provide Feature
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-translate)
+;;; code-agent-translate.el ends here
+#+END_SRC

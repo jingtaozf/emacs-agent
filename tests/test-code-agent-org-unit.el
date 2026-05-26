@@ -765,7 +765,7 @@ Counts :claude_chat: tagged headings within session scope."
   "Test that send-request uses session-key-override when provided.
 This is critical for loop iterations where cursor may have moved."
   :tags '(:unit :fast :stable :isolated :org :loop)
-  ;; We can't easily test the full send-request without mocking claude-agent-query,
+  ;; We can't easily test the full send-request without mocking code-agent-query,
   ;; but we can verify the function signature accepts session-key-override
   (should (equal '(prompt &optional query-context session-key-override)
                  (help-function-arglist 'code-agent-org--send-request))))
@@ -1050,7 +1050,7 @@ buffer point."
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
-    (let ((mock-client (claude-agent--make-client
+    (let ((mock-client (code-agent--make-client
                         :session-key "/tmp/test.org::test-session"
                         :connected-p nil)))
       (code-agent-org-persistent-registry-register
@@ -1078,7 +1078,7 @@ buffer point."
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
-    (let ((mock-client (claude-agent--make-client
+    (let ((mock-client (code-agent--make-client
                         :session-key "/tmp/test.org::test-session"
                         :connected-p nil)))
       (code-agent-org-persistent-registry-register
@@ -1102,10 +1102,10 @@ buffer point."
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
     (let ((buf (current-buffer))
-          (mock-client-1 (claude-agent--make-client
+          (mock-client-1 (code-agent--make-client
                           :session-key "/tmp/test.org::session-1"
                           :connected-p nil))
-          (mock-client-2 (claude-agent--make-client
+          (mock-client-2 (code-agent--make-client
                           :session-key "/tmp/test.org::session-2"
                           :connected-p nil)))
       (code-agent-org-persistent-registry-register
@@ -1128,7 +1128,7 @@ buffer point."
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
-    (let ((mock-client (claude-agent--make-client
+    (let ((mock-client (code-agent--make-client
                         :session-key "/tmp/test.org::test-session"
                         :connected-p nil)))
       (code-agent-org-persistent-registry-register
@@ -1164,7 +1164,7 @@ buffer point."
         (with-current-buffer test-buf
           (org-mode)
           (setq buffer-file-name "/tmp/test-kill.org")
-          (let ((mock-client (claude-agent--make-client
+          (let ((mock-client (code-agent--make-client
                               :session-key "/tmp/test-kill.org::session"
                               :connected-p nil)))
             (code-agent-org-persistent-registry-register
@@ -1193,7 +1193,7 @@ alive-p + disconnect to verify the disconnect branch fires."
     (insert ":CLAUDE_SESSION_ID: todo-session\n")
     (insert ":END:\n")
     (let* ((session-key "/tmp/test-todo.org::todo-session")
-           (mock-client (claude-agent--make-client
+           (mock-client (code-agent--make-client
                          :session-key session-key
                          :connected-p nil)))
       (code-agent-org-persistent-registry-register
@@ -1263,8 +1263,8 @@ the second message text should be visually separated from the first."
       ;; Simulate first assistant message tokens (realistic: text ends with newline)
       (code-agent-org--handle-token-v2 session-key "First message text.\n")
       ;; Simulate assistant message boundary (on-message callback)
-      (let ((msg1 (claude-agent-make-assistant-message
-                   :content (list (claude-agent-make-text-block
+      (let ((msg1 (code-agent-make-assistant-message
+                   :content (list (code-agent-make-text-block
                                    :text "First message text.\n")))))
         (code-agent-org--handle-message session-key msg1))
       ;; Simulate second assistant message tokens
@@ -1643,13 +1643,13 @@ should detect the non-struct and replace it with a fresh struct."
     (let* ((key "test-unregister")
            (cancelled nil)
            ;; Create a mock backend that records cancel calls
-           (mock-backend (claude-agent-claude-code-backend--create))
+           (mock-backend (code-agent-claude-code-backend--create))
            (mock-handle 'mock-handle))
       ;; Store backend and handle in session
       (code-agent-org--session-put key :backend mock-backend)
       (code-agent-org--session-put key :query-handle mock-handle)
       ;; Mock cancel to record the call
-      (cl-letf (((symbol-function 'claude-agent-backend-cancel)
+      (cl-letf (((symbol-function 'code-agent-backend-cancel)
                  (lambda (backend handle)
                    (setq cancelled (list backend handle)))))
         (code-agent-org--unregister-active-query key))
@@ -2151,17 +2151,17 @@ instruction was not properly marked as completed."
   "make-default-backend returns claude-code-backend by default."
   :tags '(:unit :fast :stable :isolated :org :f9)
   (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-    (should (claude-agent-claude-code-backend-p backend))))
+    (should (code-agent-claude-code-backend-p backend))))
 
 (ert-deftest test-f9-show-verbose-uses-backend-verbose-buffer ()
   "show-verbose should check backend-verbose-buffer first."
   :tags '(:unit :fast :stable :isolated :org :f9)
   (let* ((test-buf (generate-new-buffer " *test-verbose*"))
-         (backend (claude-agent-claude-code-backend--create)))
+         (backend (code-agent-claude-code-backend--create)))
     (unwind-protect
         (progn
           ;; backend-verbose-buffer returns nil for claude-code-backend (no terminal)
-          (should-not (claude-agent-backend-verbose-buffer backend)))
+          (should-not (code-agent-backend-verbose-buffer backend)))
       (kill-buffer test-buf))))
 
 (ert-deftest test-f9-handle-complete-nil-result ()
@@ -2184,7 +2184,7 @@ instruction was not properly marked as completed."
          (mock-handle 'mock-handle))
     (code-agent-org--session-put key :section-level 1)
     ;; Mock backend-query to avoid actual CLI call
-    (cl-letf (((symbol-function 'claude-agent-backend-query)
+    (cl-letf (((symbol-function 'code-agent-backend-query)
                (lambda (_backend _prompt _callbacks &rest _args)
                  mock-handle)))
       (code-agent-org--dispatch-query
@@ -2193,7 +2193,7 @@ instruction was not properly marked as completed."
        :options nil))
     ;; Backend should be stored
     (should (code-agent-org--session-get key :backend))
-    (should (claude-agent-claude-code-backend-p
+    (should (code-agent-claude-code-backend-p
              (code-agent-org--session-get key :backend)))))
 
 
@@ -2210,7 +2210,7 @@ instruction was not properly marked as completed."
     (goto-char (point-min))
     (re-search-forward "^\\* Section")
     (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-      (should (claude-agent-claude-code-backend-p backend)))))
+      (should (code-agent-claude-code-backend-p backend)))))
 
 (ert-deftest test-f9b-backend-property-absent-uses-fallback ()
   "Without CLAUDE_BACKEND property, claude-code fallback is used."
@@ -2221,7 +2221,7 @@ instruction was not properly marked as completed."
     (goto-char (point-min))
     (re-search-forward "^\\* Section")
     (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-      (should (claude-agent-claude-code-backend-p backend)))))
+      (should (code-agent-claude-code-backend-p backend)))))
 
 (ert-deftest test-f9b-backend-property-invalid-value-uses-fallback ()
   "Invalid CLAUDE_BACKEND property value falls back to claude-code."
@@ -2233,7 +2233,7 @@ instruction was not properly marked as completed."
     (goto-char (point-min))
     (re-search-forward "^\\* Section")
     (let ((backend (code-agent-org--make-default-backend "test-key" nil)))
-      (should (claude-agent-claude-code-backend-p backend)))))
+      (should (code-agent-claude-code-backend-p backend)))))
 
 (provide 'test-code-agent-org-unit)
 ;;; test-code-agent-org-unit.el ends here

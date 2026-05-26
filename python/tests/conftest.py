@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for claude-agent tests."""
+"""Shared pytest fixtures for code-agent tests."""
 
 import pytest
 

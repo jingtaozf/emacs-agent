@@ -19,7 +19,7 @@
                        (directory-file-name
                         (file-name-directory (or load-file-name
                                                  default-directory))))))))
-  (literate-elisp-load (expand-file-name "claude-agent.org" project-root))
+  (literate-elisp-load (expand-file-name "code-agent.org" project-root))
   (literate-elisp-load (expand-file-name "emacs-mcp-server.org" project-root))
   (literate-elisp-load (expand-file-name "code-agent-org.org" project-root)))
 

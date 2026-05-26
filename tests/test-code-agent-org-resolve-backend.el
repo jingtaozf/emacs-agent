@@ -45,7 +45,7 @@ Records cleanup calls in `test-resolve--cleanup-calls'."
   (declare (indent 0) (debug t))
   `(let ((saved-registry code-agent-org-backend-registry)
          (test-resolve--cleanup-calls nil))
-     (cl-letf* (((symbol-function 'claude-agent-backend-cleanup)
+     (cl-letf* (((symbol-function 'code-agent-backend-cleanup)
                  (lambda (backend)
                    (push (list 'cleanup backend) test-resolve--cleanup-calls))))
        (unwind-protect
@@ -145,7 +145,7 @@ should still succeed even if the old backend's teardown errors."
   :tags '(:unit :fast :stable)
   (let ((saved code-agent-org-backend-registry)
         (test-resolve--cleanup-calls nil))
-    (cl-letf (((symbol-function 'claude-agent-backend-cleanup)
+    (cl-letf (((symbol-function 'code-agent-backend-cleanup)
                (lambda (_b) (error "boom from cleanup"))))
       (unwind-protect
           (let ((code-agent-org-backend-registry

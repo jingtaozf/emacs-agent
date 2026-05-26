@@ -43,7 +43,7 @@ Hello
           ;; Position inside the ai block
           (goto-char (point-min))
           (search-forward "Hello")
-          
+
           (let* ((session-key (code-agent-org--current-session-key))
                  ;; Simulate being in an active query
                  (insert-point (save-excursion
@@ -53,23 +53,23 @@ Hello
                            (save-excursion
                              (goto-char insert-point)
                              (point-marker)))))
-            
+
             ;; Set up session state as if query was started
             (code-agent-org--session-put session-key :marker marker)
             (code-agent-org--session-put session-key :busy t)
             (code-agent-org--session-put session-key :process-state 'dummy-state)
-            
+
             ;; Verify marker exists before cancel
             (should (code-agent-org--session-get session-key :marker))
-            
+
             ;; Simulate the key part of cancel: it should free the marker
             ;; (We can't call full cancel without a real process)
             (code-agent-org--session-put session-key :busy nil)
             (code-agent-org--free-marker session-key)
-            
+
             ;; After cancel, marker should be nil
             (should-not (code-agent-org--session-get session-key :marker))
-            
+
             ;; Now simulate what would happen if handle-complete runs
             ;; It should NOT crash or affect anything because marker is already nil
             (let ((marker-after (code-agent-org--session-get session-key :marker)))
@@ -105,10 +105,10 @@ Some partial response
           ;; Position inside the ai block
           (goto-char (point-min))
           (search-forward "Hello")
-          
+
           ;; Should be in ai block
           (should (code-agent-org--in-ai-block-p))
-          
+
           ;; Should find insert point after cancelled response
           (let ((insert-point (code-agent-org--find-response-insert-point)))
             (should insert-point)
@@ -146,23 +146,23 @@ Test
 ")
           (goto-char (point-min))
           (search-forward "Test")
-          
+
           (let* ((session-key (code-agent-org--current-session-key))
                  (marker1 (point-marker))
                  (marker2 (progn (forward-char 1) (point-marker))))
-            
+
             ;; Query1 starts
             (code-agent-org--session-put session-key :marker marker1)
             (code-agent-org--session-put session-key :busy t)
-            
+
             ;; Cancel happens - should free marker immediately
             (code-agent-org--session-put session-key :busy nil)
             (code-agent-org--free-marker session-key)  ;; This is the fix!
-            
+
             ;; Query2 starts quickly (before sentinel runs)
             (code-agent-org--session-put session-key :marker marker2)
             (code-agent-org--session-put session-key :busy t)
-            
+
             ;; Old sentinel's handle-complete runs - would look up :marker
             ;; Before fix: would get marker2 and free it!
             ;; After fix: marker1 was already freed, marker2 is safe
@@ -219,7 +219,7 @@ Some partial response text here
             (code-agent-org--session-put session-key :query-handle nil)
             ;; Create a mock backend that does nothing on cancel
             (code-agent-org--session-put session-key :backend
-                                     (claude-agent-claude-code-backend--create))
+                                     (code-agent-claude-code-backend--create))
 
             ;; Now cancel
             (code-agent-org-cancel)
@@ -289,7 +289,7 @@ Tell me a story
             (code-agent-org--session-put session-key :query-id "test-query-cancel-002")
             (code-agent-org--session-put session-key :query-handle nil)
             (code-agent-org--session-put session-key :backend
-                                     (claude-agent-claude-code-backend--create))
+                                     (code-agent-claude-code-backend--create))
 
             ;; Cancel before any tokens streamed
             (code-agent-org-cancel)

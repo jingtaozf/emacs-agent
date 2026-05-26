@@ -1053,7 +1053,7 @@ class TestMcpEval:
         bridge = make_bridge(mcp)
         bridge._mcp_eval("(my-func)")
         call_arg = mcp.eval_elisp.call_args[0][0]
-        assert "claude-agent-trace--current-context" in call_arg
+        assert "code-agent-trace--current-context" in call_arg
         assert "aabbccddeeff0011aabbccddeeff0011" in call_arg
         assert "1122334455667788" in call_arg
         assert "(my-func)" in call_arg
@@ -1359,7 +1359,7 @@ class TestResolveRoutingViaAgentName:
         monkeypatch.setattr(wb, "McpClient", FakeMcp)
 
         org, sid, cid, recovered = wb._resolve_routing_via_agent_name(
-            "claude-agent-dev.org",
+            "code-agent-dev.org",
             "sdd-stale-from-restart",
             "stale-cid",
             "http://localhost:9999/mcp",

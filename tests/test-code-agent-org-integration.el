@@ -577,7 +577,7 @@ buffer and instruction number for better identification."
      (with-current-buffer (find-file-noselect org-file)
        (code-agent-org-mode 1)
        ;; Clear any stale queries from previous tests
-       (clrhash claude-agent--active-queries)
+       (clrhash code-agent--active-queries)
        ;; Go to instruction 1
        (goto-char (point-min))
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
@@ -592,26 +592,26 @@ buffer and instruction number for better identification."
            (maphash
             (lambda (_id state)
               (when (and state
-                         (claude-agent--process-state-p state)
-                         (not (claude-agent--process-state-closed state))
+                         (code-agent--process-state-p state)
+                         (not (code-agent--process-state-closed state))
                          ;; Filter to queries from THIS buffer
-                         (claude-agent--process-state-source-buffer state))
+                         (code-agent--process-state-source-buffer state))
                 (setq found-state state)))
-            claude-agent--active-queries)
+            code-agent--active-queries)
            ;; Should find an active query with source info
            (should found-state)
            ;; Query should have source-buffer set
-           (let ((source-buf (claude-agent--process-state-source-buffer found-state)))
+           (let ((source-buf (code-agent--process-state-source-buffer found-state)))
              (should source-buf)
              (should (buffer-live-p source-buf))
              ;; Should be our buffer
              (should (eq source-buf buf)))
            ;; Query should have instruction-num set to 1 (Instruction 1)
-           (let ((ctx (claude-agent--process-state-query-context found-state)))
+           (let ((ctx (code-agent--process-state-query-context found-state)))
              (should ctx)
-             (should (equal 1 (claude-agent-query-context-instruction-num ctx))))
+             (should (equal 1 (code-agent-query-context-instruction-num ctx))))
            ;; Format identity should show buffer#instruction
-           (let ((identity (claude-agent--format-query-identity found-state)))
+           (let ((identity (code-agent--format-query-identity found-state)))
              (should (stringp identity))
              ;; Should contain "#1" for instruction number
              (should (string-match-p "#1" identity))))
@@ -628,24 +628,24 @@ buffer and instruction number for better identification."
      (with-current-buffer (find-file-noselect org-file)
        (code-agent-org-mode 1)
        ;; Clear any stale queries from previous tests
-       (clrhash claude-agent--active-queries)
+       (clrhash code-agent--active-queries)
        (goto-char (point-min))
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
        (let ((session-key (code-agent-org--current-session-key)))
          (code-agent-org-execute)
          (sleep-for 0.5)
          ;; Trigger mode-line update
-         (claude-agent--update-activity-string)
+         (code-agent--update-activity-string)
          ;; Mode-line string should be a string (may be empty if query finished quickly)
-         (should (stringp claude-agent-activity-string))
+         (should (stringp code-agent-activity-string))
          ;; If there's an active query showing, verify the format
-         (when (and (> (length claude-agent-activity-string) 0)
-                    (claude-agent-active-p))
+         (when (and (> (length code-agent-activity-string) 0)
+                    (code-agent-active-p))
            ;; Should show spinner format "[C:..."
-           (should (string-match-p "\\[C:" claude-agent-activity-string))
+           (should (string-match-p "\\[C:" code-agent-activity-string))
            ;; For single query with source info, should show "#1"
-           (when (= 1 (claude-agent-active-query-count))
-             (should (string-match-p "#1" claude-agent-activity-string))))
+           (when (= 1 (code-agent-active-query-count))
+             (should (string-match-p "#1" code-agent-activity-string))))
          (test-claude-wait-for-completion session-key 60))))))
 
 ;;; Link Resolution Tests
@@ -708,7 +708,7 @@ FLAKY: Claude may interpret line number links differently."
                           (string-match-p "property" response)
                           (string-match-p "line" response)
                           (string-match-p "PROJECT_ROOT" response)
-                          (string-match-p "claude-agent" response)
+                          (string-match-p "code-agent" response)
                           (string-match-p "TITLE" response)
                           (string-match-p "SUBTITLE" response))))
          (unless matched

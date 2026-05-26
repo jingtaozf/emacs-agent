@@ -23,7 +23,7 @@ in ``main``. Two parent shapes exist — Flow A where Emacs has already
 written a ``traceparent`` for this session (bridge-root becomes a
 CONSUMER child) and Flow B where this process is the first observer (it
 writes its own traceparent for subsequent events to join). See
-``claude-agent-trace.org`` → "Two Execution Flows" for the current design.
+``code-agent-trace.org`` → "Two Execution Flows" for the current design.
 
 Required env vars: ``WORKSPACE_ORG_FILE``, ``WORKSPACE_SESSION_ID``,
 ``EMACS_MCP_URL`` (defaults to ``http://localhost:9999/mcp``).
@@ -59,7 +59,7 @@ try:
         setup_tracer,
     )
 except ImportError:
-    STATUS_DIR = "/tmp/claude-agent-status"
+    STATUS_DIR = "/tmp/code-agent-status"
     OI_KIND_ATTR = "openinference.span.kind"
     setup_tracer = None
     TraceContextStore = None
@@ -626,7 +626,7 @@ class WorkspaceBridge:
         """Eval ELISP in Emacs via MCP, threading the current trace context.
 
         When a span is active we wrap the form in a ``let`` that binds
-        ``claude-agent-trace--current-context`` so the Emacs-side MCP
+        ``code-agent-trace--current-context`` so the Emacs-side MCP
         handler creates child spans under our current Python span. When
         no span exists (tracing disabled or before setup) we fall through
         to a plain eval.
@@ -637,7 +637,7 @@ class WorkspaceBridge:
             ctx = span.get_span_context()
             if ctx.is_valid:
                 wrapped = (
-                    f"(let ((claude-agent-trace--current-context "
+                    f"(let ((code-agent-trace--current-context "
                     f'(cons "{ctx.trace_id:032x}" "{ctx.span_id:016x}")))'
                     f" {elisp})"
                 )
@@ -1418,7 +1418,7 @@ def main() -> None:
         )
         sys.exit(0)
 
-    tracer = setup_tracer("claude-agent-workspace-bridge") if setup_tracer else None
+    tracer = setup_tracer("code-agent-workspace-bridge") if setup_tracer else None
     trace_store = (
         TraceContextStore(STATUS_DIR) if (tracer and TraceContextStore) else None
     )

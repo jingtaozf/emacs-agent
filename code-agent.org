@@ -1,0 +1,989 @@
+# -*- encoding:utf-8 Mode: POLY-ORG; org-src-preserve-indentation: t; -*-
+#+TITLE: Claude Agent SDK for Emacs
+#+SUBTITLE: Emacs client for Claude Code CLI
+#+AUTHOR: Jingtao Xu
+#+OPTIONS: toc:2
+#+Startup: noindent
+#+PROPERTY: header-args :results silent
+#+PROPERTY: literate-lang elisp
+#+PROPERTY: literate-load yes
+
+* Table of Contents                                            :TOC:noexport:
+- [[#introduction][Introduction]]
+  - [[#usage-example][Usage Example]]
+- [[#dependencies-and-requirements][Dependencies and Requirements]]
+  - [[#package-header][Package Header]]
+  - [[#required-libraries][Required Libraries]]
+- [[#tests][Tests]]
+  - [[#running-tests][Running Tests]]
+  - [[#test-tags][Test Tags]]
+- [[#activity-mode-line][Activity Mode-Line]]
+  - [[#state-variables][State Variables]]
+  - [[#activity-count][Activity Count]]
+  - [[#activity-display][Activity Display]]
+  - [[#session-manager][Session Manager]]
+  - [[#auto-enable][Auto-Enable]]
+- [[#rate-limit-mode-line][Rate-Limit Mode-Line]]
+  - [[#customisation][Customisation]]
+  - [[#state][State]]
+  - [[#faces][Faces]]
+  - [[#usage-level-face-selection][Usage Level Face Selection]]
+  - [[#render][Render]]
+  - [[#public-api][Public API]]
+- [[#interactive-chat-mode-moved][Interactive Chat Mode (moved)]]
+- [[#package-footer][Package Footer]]
+- [[#release][Release]]
+
+* Introduction
+
+This is an Emacs client library for the [[https://claude.ai/code][Claude Code CLI]]. It provides a
+literate programming implementation of the Claude Agent SDK, allowing
+Emacs users to interact with Claude programmatically.
+
+The library mirrors the Python Claude Agent SDK API, providing:
+- ~code-agent-query~ for one-shot queries
+- ~code-agent-client~ for bidirectional interactive conversations
+- Streaming response support via callbacks
+- Basic hook support (PreToolUse, PostToolUse, Stop)
+- Session management (continue, resume)
+- Activity mode-line indicator with spinning animation
+- Usage mode-line showing API utilization percentages
+
+** Usage Example
+
+#+BEGIN_SRC elisp :load no
+;; One-shot query
+(code-agent-query
+ "What is 2+2?"
+ :on-message (lambda (msg)
+               (when (code-agent-assistant-message-p msg)
+                 (message "Response: %s"
+                          (code-agent-extract-text msg))))
+ :on-complete (lambda (_) (message "Done!")))
+
+;; Interactive client
+(let ((client (code-agent-client-create
+               :options (code-agent-options
+                         :model "claude-sonnet-4-5"
+                         :permission-mode 'accept-edits))))
+  (code-agent-client-connect client)
+  (code-agent-client-send
+   client "Hello, Claude!"
+   :on-response (lambda (msg) (message "Got: %s" msg))))
+#+END_SRC
+
+* Dependencies and Requirements
+
+** Package Header
+
+#+BEGIN_SRC elisp
+;;; code-agent.el --- Emacs client for Claude Code CLI -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024 Jingtao Xu
+
+;; Author: Jingtao Xu
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1"))
+;; Keywords: tools, processes, ai
+;; URL: https://github.com/user/code-agent
+
+;; This file is not part of GNU Emacs.
+
+;;; Commentary:
+
+;; Claude Agent SDK for Emacs - A client library for the Claude Code CLI.
+;; This package provides async subprocess communication with Claude,
+;; streaming responses, and hook support.
+
+;;; Code:
+#+END_SRC
+
+** Required Libraries
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'cl)  ; For lexical-let (needed in literate-elisp which ignores lexical-binding: t)
+(require 'json)
+(require 'subr-x)
+
+;; Load extracted modules (literate-elisp .org files)
+(let ((module-dir (file-name-directory (or load-file-name buffer-file-name ""))))
+  (dolist (module '("code-agent-backend" "code-agent-permission" "code-agent-ide"))
+    (unless (featurep (intern module))
+      (literate-elisp-load
+       (expand-file-name (concat module ".org") module-dir)))))
+#+END_SRC
+
+* Tests
+
+All tests live under =tests/=, one =.el= file per concern (~50 files
+covering core SDK, ACP, cmux, permission, backend protocol, MCP server,
+chat, structural lint, …). =make test-unit= runs the unit tier;
+=make test-integration= runs the live-CLI tier. See =ARCHITECTURE.org=
+→ "Testing & Harness" for the three-surface model
+(unit / structural / E2E).
+
+** Running Tests
+
+#+begin_example
+make test-smoke               # Fast .org loadability check (<2s)
+make test-unit                # All unit tests (covers all .org modules)
+make test-unit-parallel       # Same, parallelised
+make test-integration         # Live CLI tests (requires API key)
+make check                    # lint + test-unit + test-python (pre-commit)
+#+end_example
+
+Run a single test file in batch Emacs:
+#+begin_example
+emacs -Q --batch -L . -L tests -l tests/test-code-agent-backend.el \
+      --eval "(ert-run-tests-batch-and-exit '(tag :unit))"
+#+end_example
+
+** Test Tags
+
+Tests are tagged for selective execution: =:unit= (fast, isolated),
+=:integration= (live CLI), =:fast= / =:slow=, =:stable= (must pass),
+=:structural= (lint-style invariant), =:tdd=, =:security=,
+=:local-e2e= (requires Phoenix + cmux locally — see
+=.claude/rules/local-e2e-test-management.md=).
+
+* Activity Mode-Line
+
+Auto-enabled on load — spinner appears in =mode-line-misc-info= when
+=code-agent-active-query-count= > 0; alerts pushed via
+=code-agent-add-alert= take priority over the spinner.
+
+** State Variables
+
+#+BEGIN_SRC elisp
+(defvar code-agent-activity-string ""
+  "Current activity string for mode-line display.
+Shows spinner when queries are active, empty when idle.")
+
+(defvar code-agent--activity-timer nil
+  "Timer for updating the activity spinner.")
+
+(defconst code-agent--spinner-frames '("◐" "◓" "◑" "◒")
+  "Spinner animation frames for activity indicator.")
+
+(defvar code-agent--spinner-index 0
+  "Current index in spinner-frames for animation.")
+
+(defvar code-agent-pending-alerts nil
+  "Alist of (ID . PLIST) for sessions needing attention.
+Each PLIST has :label, :tooltip, :face, :action (a function called on click).
+Populated by `code-agent-add-alert', cleared by `code-agent-remove-alert'.")
+
+(defun code-agent-add-alert (id &rest props)
+  "Add an alert with ID and PROPS plist (:label :tooltip :face :action).
+If ID already exists, it is replaced."
+  (setq code-agent-pending-alerts
+        (cons (cons id props)
+              (assq-delete-all id code-agent-pending-alerts)))
+  (code-agent--update-activity-string))
+
+(defun code-agent-remove-alert (id)
+  "Remove the alert with ID."
+  (setq code-agent-pending-alerts
+        (assq-delete-all id code-agent-pending-alerts))
+  (code-agent--update-activity-string))
+#+END_SRC
+
+** Activity Count
+
+#+BEGIN_SRC elisp
+(defun code-agent-active-query-count ()
+  "Return count of currently active queries.
+Uses `code-agent--query-active-p' to check both closed state and process liveness."
+  (let ((count 0))
+    (maphash (lambda (_id state)
+               (when (code-agent--query-active-p state)
+                 (cl-incf count)))
+             code-agent--active-queries)
+    count))
+
+(defun code-agent-active-p ()
+  "Return non-nil if any queries are currently active."
+  (> (code-agent-active-query-count) 0))
+#+END_SRC
+
+** Activity Display
+
+#+BEGIN_SRC elisp
+(defun code-agent--format-elapsed (start-time)
+  "Format elapsed time since START-TIME as human-readable string.
+Uses compact format for mode-line display."
+  (code-agent-format-elapsed-time start-time 'compact))
+
+(defun code-agent--format-query-identity (state &optional long-form)
+  "Format human-readable identity for query STATE.
+If LONG-FORM is non-nil, use full buffer name instead of abbreviated.
+Returns a string like 'dev.org#5' or 'dev.org#5(1/3)'."
+  (let ((buf (code-agent--process-state-source-buffer state))
+        (ctx (code-agent--process-state-query-context state))
+        (req-id (code-agent--process-state-request-id state)))
+    (if (and buf (buffer-live-p buf))
+        (let* ((buf-name (buffer-name buf))
+               (short-name (if long-form
+                               buf-name
+                             (file-name-base buf-name)))
+               (id-suffix (code-agent-query-context-format-id ctx)))
+          (if id-suffix
+              (format "%s#%s" short-name id-suffix)
+            short-name))
+      ;; Fallback to request-id based format
+      (if (and req-id (string-match "req-\\([0-9]+\\)" req-id))
+          (format "#%s" (match-string 1 req-id))
+        (if req-id
+            (substring req-id 0 (min 12 (length req-id)))
+          "#?")))))
+
+(defun code-agent--get-single-active-state ()
+  "Return the single active query state, or nil if count != 1."
+  (let ((result nil)
+        (count 0))
+    (maphash
+     (lambda (_id state)
+       (when (and state
+                  (code-agent--process-state-p state)
+                  (not (code-agent--process-state-closed state)))
+         (setq result state)
+         (cl-incf count)))
+     code-agent--active-queries)
+    (when (= count 1) result)))
+
+(defun code-agent--any-docker-mode-p ()
+  "Return non-nil if any active query is running in Docker mode."
+  (let ((found nil))
+    (maphash (lambda (_id state)
+               (when (and state
+                          (code-agent--process-state-p state)
+                          (not (code-agent--process-state-closed state))
+                          (code-agent--process-state-docker-mode state))
+                 (setq found t)))
+             code-agent--active-queries)
+    found))
+
+(defun code-agent--format-activity-tooltip ()
+  "Format tooltip text for the activity mode-line indicator.
+Shows details about all active queries."
+  (let ((lines '("Active Claude Queries (click to list)"))
+        (count 0))
+    (maphash
+     (lambda (_id state)
+       (when (and state
+                  (code-agent--process-state-p state)
+                  (not (code-agent--process-state-closed state)))
+         (cl-incf count)
+         (let* ((start-time (code-agent--process-state-start-time state))
+                (elapsed (code-agent--format-elapsed start-time))
+                (identity (code-agent--format-query-identity state t))
+                (docker-p (code-agent--process-state-docker-mode state)))
+           (push (format "  • %s%s [%s]"
+                         identity
+                         (if docker-p " [Docker]" "")
+                         elapsed)
+                 lines))))
+     code-agent--active-queries)
+    (when (= count 0)
+      (push "  (no active queries)" lines))
+    (mapconcat #'identity (nreverse lines) "\n")))
+
+(defun code-agent--activity-alert-string ()
+  "Build mode-line string for pending alerts.
+Each alert entry becomes a clickable, propertized label."
+  (let ((segments '()))
+    (dolist (entry code-agent-pending-alerts)
+      (let* ((id (car entry))
+             (props (cdr entry))
+             (label (or (plist-get props :label)
+                        (code-agent--permission-label (format "%s" id))))
+             (tooltip (or (plist-get props :tooltip) "Alert"))
+             (face (or (plist-get props :face)
+                       '(:foreground "orange" :weight bold)))
+             (action (plist-get props :action)))
+        (push (propertize
+               label
+               'face face
+               'help-echo tooltip
+               'mouse-face 'mode-line-highlight
+               'local-map (when action
+                            (let ((map (make-sparse-keymap)))
+                              (define-key map [mode-line mouse-1]
+                                (lexical-let ((fn action))
+                                  (lambda (e)
+                                    (interactive "e")
+                                    (funcall fn))))
+                              map)))
+              segments)))
+    (concat " [C:⚠ " (string-join (nreverse segments) " ") "]")))
+
+(defun code-agent--activity-queries-string (count)
+  "Build mode-line string for COUNT active queries.
+Shows a spinner with query identity (single) or count (multiple)."
+  (let* ((spinner (nth code-agent--spinner-index code-agent--spinner-frames))
+         (docker-p (code-agent--any-docker-mode-p))
+         (docker-prefix (if docker-p "D:" "C:"))
+         (display (if (= count 1)
+                      (let* ((state (code-agent--get-single-active-state))
+                             (identity (when state
+                                         (code-agent--format-query-identity state))))
+                        (if identity
+                            (format " [%s%s %s]" docker-prefix spinner identity)
+                          (format " [%s%s]" docker-prefix spinner)))
+                    (format " [%s%s×%d]" docker-prefix spinner count))))
+    (setq code-agent--spinner-index
+          (mod (1+ code-agent--spinner-index)
+               (length code-agent--spinner-frames)))
+    (propertize display
+                'face '(:weight bold)
+                'help-echo (code-agent--format-activity-tooltip)
+                'mouse-face 'mode-line-highlight
+                'local-map (let ((map (make-sparse-keymap)))
+                             (define-key map [mode-line mouse-1]
+                                         #'code-agent-list-queries)
+                             map))))
+
+(defun code-agent--update-activity-string ()
+  "Update the activity mode-line string based on active queries and pending alerts."
+  (let ((count (code-agent-active-query-count))
+        (alert-count (length code-agent-pending-alerts)))
+    (cond
+     ((> alert-count 0)
+      (setq code-agent-activity-string (code-agent--activity-alert-string))
+      (setq code-agent--spinner-index 0))
+     ((> count 0)
+      (setq code-agent-activity-string (code-agent--activity-queries-string count)))
+     (t
+      (setq code-agent-activity-string "")
+      (setq code-agent--spinner-index 0))))
+  (force-mode-line-update t)
+  (code-agent--maybe-refresh-queries-buffer))
+
+(defun code-agent--permission-label (workspace-session-id)
+  "Return a short label for WORKSPACE-SESSION-ID for mode-line display.
+Extracts the timestamp portion from session IDs like sdd-20260303-132101."
+  (let ((parts (split-string workspace-session-id "-")))
+    ;; sdd-YYYYMMDD-HHMMSS → show HHMMSS
+    (if (>= (length parts) 3)
+        (car (last parts))
+      workspace-session-id)))
+
+(defun code-agent--maybe-refresh-queries-buffer ()
+  "Refresh *Claude Queries* buffer if it exists and is visible."
+  (when-let* ((buf (get-buffer "*Claude Queries*")))
+    (when (get-buffer-window buf t)  ; visible in any frame
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (pos (point)))
+          (erase-buffer)
+          (insert "Active Queries\n")
+          (insert "══════════════════════════════════════════════════\n\n")
+          (let ((has-queries nil))
+            (maphash
+             (lambda (id state)
+               (when (code-agent--query-active-p state)
+                 (setq has-queries t)
+                 (let* ((start-time (code-agent--process-state-start-time state))
+                        (elapsed (code-agent--format-elapsed start-time))
+                        (identity (code-agent--format-query-identity state t))
+                        (ctx (code-agent--process-state-query-context state))
+                        (docker-p (code-agent--process-state-docker-mode state))
+                        (loc-fn (code-agent--process-state-source-location-fn state))
+                        (navigable (not (null loc-fn)))
+                        (src-buf (code-agent--process-state-source-buffer state))
+                        (session-key (when (and src-buf (buffer-live-p src-buf))
+                                       (with-current-buffer src-buf
+                                         (condition-case nil
+                                             (code-agent-org--current-session-key)
+                                           (error nil))))))
+                   (insert (propertize (format "● %s" identity)
+                                       'face (if navigable 'link 'font-lock-function-name-face)
+                                       'query-id id
+                                       'session-key session-key
+                                       'navigable navigable))
+                   (when docker-p
+                     (insert (propertize " [Docker]" 'face '(:weight bold))))
+                   (when-let* ((label (code-agent-query-context-format-label ctx)))
+                     (insert (propertize (format " %s" label)
+                                         'face 'font-lock-keyword-face)))
+                   (insert (format "  [%s]\n" elapsed)))))
+             code-agent--active-queries)
+            (unless has-queries
+              (insert "No active queries.\n")))
+          (insert "\n")
+          (insert "Keys: RET=goto source  v=verbose  k=cancel  K=cancel all  g=refresh  q=quit\n")
+          (goto-char (min pos (point-max))))))))
+#+END_SRC
+
+** Session Manager
+
+The =*Claude Queries*= buffer (opened by =code-agent-list-queries=,
+also =M-x code-agent-list-queries= or =,m= from the agent menu) is
+the middle layer of a three-layer monitoring model. The model was
+inspired by Stern (Kubernetes log streamer), prodigy.el, tmux's
+=monitor-activity=, and =docker-compose logs=:
+
+| Layer | Surface | Role |
+|-------+---------+------|
+| 1 | Mode-line =[C:◐×3]= | Always-visible activity indicator (count + spinner) |
+| 2 | =*Claude Queries*= dashboard (this section) | One row per active query — session-key, elapsed, status, =[+N lines]= unread badge |
+| 3 | =*cmux: <story>*= verbose buffer (per session) | Full live terminal mirror; reached via =RET= or =v= on a dashboard row |
+
+The dashboard's per-row =[+N lines]= badge tracks unread output by
+comparing the verbose buffer's current line count against a
+=last-viewed-line-count= stored when the user last visited that
+buffer. =RET= opens the verbose buffer in the same window; =v= opens
+in a side window. =k= cancels a single query, =K= cancels all, =g=
+refreshes.
+
+A *unified all-output view* (one scrolling buffer aggregating output
+from every active session, like =docker-compose logs=) is intended
+future work. The shape would be: dispatcher in the verbose tick that
+also inserts into a =*Claude All Output*= buffer with a colour-coded
+session-name prefix (using =SDD_COLOR=); same scroll-preservation /
+follow-mode (=G=) / transient menu (=,= sends keys to the session
+under cursor) as the per-session buffer. Not built today because the
+per-session buffer + dashboard navigation has been sufficient.
+
+#+BEGIN_SRC elisp
+(defvar code-agent-queries-mode-map
+  (make-sparse-keymap)
+  "Keymap for `code-agent-queries-mode'.")
+
+;; Define keys outside defvar so they are applied on reload
+;; (defvar does not re-evaluate when the variable already has a value).
+(define-key code-agent-queries-mode-map (kbd "RET") #'code-agent-queries-goto-source)
+(define-key code-agent-queries-mode-map (kbd "v") #'code-agent-queries-show-verbose)
+(define-key code-agent-queries-mode-map (kbd "k") #'code-agent-queries-cancel-at-point)
+(define-key code-agent-queries-mode-map (kbd "K") #'code-agent-cancel-all-queries)
+(define-key code-agent-queries-mode-map (kbd "g") #'code-agent-list-queries)
+(define-key code-agent-queries-mode-map (kbd "q") #'quit-window)
+
+(define-derived-mode code-agent-queries-mode special-mode "Claude-Queries"
+  "Major mode for viewing and managing Claude Agent queries."
+  (setq buffer-read-only t)
+  (setq truncate-lines t))
+
+(defun code-agent-list-queries ()
+  "Display buffer showing all active queries."
+  (interactive)
+  (let ((buf (get-buffer-create "*Claude Queries*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "Active Queries\n")
+        (insert "══════════════════════════════════════════════════\n\n")
+        (let ((has-queries nil)
+              (docker-count 0)
+              (local-count 0))
+          (maphash
+           (lambda (id state)
+             (when (code-agent--query-active-p state)
+               (setq has-queries t)
+               (let* ((start-time (code-agent--process-state-start-time state))
+                      (elapsed (code-agent--format-elapsed start-time))
+                      ;; Use identity with long-form buffer name
+                      (identity (code-agent--format-query-identity state t))
+                      (ctx (code-agent--process-state-query-context state))
+                      (docker-p (code-agent--process-state-docker-mode state))
+                      ;; Check if navigable (has source-location-fn)
+                      (loc-fn (code-agent--process-state-source-location-fn state))
+                      (navigable (not (null loc-fn))))
+                 ;; Track Docker vs local counts
+                 (if docker-p (cl-incf docker-count) (cl-incf local-count))
+                 ;; Check verbose buffer for activity badge
+                 (let* ((src-buf (code-agent--process-state-source-buffer state))
+                        (session-key (when (and src-buf (buffer-live-p src-buf))
+                                      (with-current-buffer src-buf
+                                        (condition-case nil
+                                            (code-agent-org--current-session-key)
+                                          (error nil)))))
+                        (verbose-buf (when session-key
+                                       (gethash session-key code-agent--session-verbose-buffers)))
+                        (verbose-lines (when (and verbose-buf (buffer-live-p verbose-buf))
+                                         (with-current-buffer verbose-buf
+                                           (count-lines (point-min) (point-max)))))
+                        (has-verbose (and verbose-buf (buffer-live-p verbose-buf))))
+                   ;; Format: ▶ ● buffer-name Instruction N  [elapsed]  [+N lines]
+                   (if has-verbose
+                       (insert (propertize "▶ " 'face 'font-lock-warning-face))
+                     (insert "  "))
+                   (insert (propertize (format "● %s" identity)
+                                       'face (if navigable 'link 'font-lock-function-name-face)
+                                       'query-id id
+                                       'session-key session-key
+                                       'navigable navigable))
+                   (when docker-p
+                     (insert (propertize " [Docker]"
+                                         'face '(:weight bold))))
+                   (when-let* ((label (code-agent-query-context-format-label ctx)))
+                     (insert (propertize (format " %s" label)
+                                         'face 'font-lock-keyword-face)))
+                   (insert (format "  [%s]" elapsed))
+                   (when verbose-lines
+                     (insert (propertize (format "  [%d lines]" verbose-lines)
+                                         'face 'font-lock-comment-face)))
+                   (insert "\n")))))
+           code-agent--active-queries)
+          (unless has-queries
+            (insert "No active queries.\n"))
+          ;; Show summary if there are Docker queries
+          (when (> docker-count 0)
+            (insert "\n")
+            (insert (propertize (format "Docker: %d" docker-count)
+                                'face '(:weight bold)))
+            (when (> local-count 0)
+              (insert (format "  Local: %d" local-count)))
+            (insert "\n")))
+        (insert "\n")
+        (insert "Keys: RET=goto source  v=verbose output  k=cancel  K=cancel all  g=refresh  q=quit\n"))
+      (code-agent-queries-mode)
+      (goto-char (point-min)))
+    (display-buffer buf)))
+
+(defun code-agent-queries-cancel-at-point ()
+  "Cancel the query on the current line."
+  (interactive)
+  (let ((query-id (get-text-property (point) 'query-id)))
+    (if query-id
+        (progn
+          (code-agent-cancel-query query-id)
+          (message "Cancelled query: %s" query-id)
+          (code-agent-list-queries))
+      (message "No query on this line."))))
+
+(defun code-agent-queries-goto-source ()
+  "Jump to the source location for query at point.
+For navigable queries (shown as links), jumps to the source heading.
+For non-navigable queries, jumps to the source buffer only."
+  (interactive)
+  (let* ((query-id (get-text-property (point) 'query-id))
+         (navigable (get-text-property (point) 'navigable)))
+    (if (null query-id)
+        (message "No query on this line")
+      (let ((state (gethash query-id code-agent--active-queries)))
+        (if (null state)
+            (message "Query not found (may have completed)")
+          (let ((buf (code-agent--process-state-source-buffer state))
+                (loc-fn (code-agent--process-state-source-location-fn state))
+                (loc-args (code-agent--process-state-source-location-args state)))
+            (cond
+             ((null buf)
+              (message "No source buffer for this query"))
+             ((not (buffer-live-p buf))
+              (message "Source buffer no longer exists"))
+             ((null loc-fn)
+              ;; No location function - just jump to buffer
+              (pop-to-buffer buf)
+              (message "Jumped to buffer (no specific location)"))
+             (t
+              ;; Has location function - switch buffer and call it
+              (pop-to-buffer buf)
+              (if (apply loc-fn loc-args)
+                  (message "Jumped to source")
+                (message "Location function failed to find target"))))))))))
+#+END_SRC
+
+#+BEGIN_SRC elisp
+(defun code-agent-queries-show-verbose ()
+  "Show verbose output buffer for the query at point."
+  (interactive)
+  (let ((session-key (get-text-property (point) 'session-key)))
+    (if (null session-key)
+        (message "No session on this line")
+      (let ((verbose-buf (gethash session-key code-agent--session-verbose-buffers)))
+        (if (and verbose-buf (buffer-live-p verbose-buf))
+            (display-buffer verbose-buf
+              '((display-buffer-reuse-window display-buffer-in-side-window)
+                (side . right) (window-width . 0.5)))
+          (message "No verbose buffer for this session"))))))
+#+END_SRC
+
+** Auto-Enable
+
+#+BEGIN_SRC elisp
+;; Cancel existing timer if any
+(when (timerp code-agent--activity-timer)
+  (cancel-timer code-agent--activity-timer))
+
+;; Start activity timer (shows nothing when idle)
+(setq code-agent--activity-timer
+      (run-with-timer 0 0.2 #'code-agent--update-activity-string))
+
+;; Add to mode-line if not already present
+(unless (member '(:eval code-agent-activity-string) mode-line-misc-info)
+  (push '(:eval code-agent-activity-string) mode-line-misc-info))
+
+#+END_SRC
+
+* Rate-Limit Mode-Line
+:PROPERTIES:
+:CUSTOM_ID: usage-mode-line
+:END:
+
+Shows Claude Code's 5-hour and 7-day API rate-limit utilisation in the
+Emacs mode-line.  Source of truth: =~/.claude/logs/rate-limits.json=,
+written by =~/.claude/statusline-command.sh= every time Claude Code
+calls the statusline (a few seconds while a session is up).  The
+statusline receives the =rate_limits= block on stdin from Claude Code
+itself — a sanctioned channel — so this module never scrapes
+claude.ai endpoints or pokes at internal session state.  When no
+Claude Code session is running the file simply stops updating; the
+mode-line keeps the last known values until you explicitly clear them.
+
+A previous incarnation of this feature (commit f8890f1, Dec 2025)
+fetched limits directly from the claude.ai HTTP API using
+=CLAUDE_SESSION_KEY=.  That path was undocumented and was removed.
+The replacement here re-uses an officially-supplied data flow.
+
+** Customisation
+
+#+BEGIN_SRC elisp
+(defgroup code-agent-rate-limit nil
+  "Rate-limit mode-line indicator for Claude Code 5h / 7d buckets."
+  :group 'code-agent)
+
+(defcustom code-agent-rate-limit-file
+  (expand-file-name "~/.claude/logs/rate-limits.json")
+  "Path to the JSON file written by Claude Code's statusline hook.
+The file is updated every few seconds while Claude Code is active and
+contains `five_hour' and `seven_day' usage percentages plus reset
+times.  Format documented in `~/.claude/statusline-command.sh'."
+  :type 'file
+  :group 'code-agent-rate-limit)
+
+(defcustom code-agent-rate-limit-poll-interval 30
+  "Seconds between mode-line refreshes from the JSON file.
+The file itself is updated more often (statusline cadence), but
+re-reading it more than ~once per 30 s adds no information."
+  :type 'integer
+  :group 'code-agent-rate-limit)
+
+(defcustom code-agent-rate-limit-warn-threshold 60
+  "Yellow-zone usage percent.  Below this the indicator shows green."
+  :type 'integer
+  :group 'code-agent-rate-limit)
+
+(defcustom code-agent-rate-limit-crit-threshold 85
+  "Red-zone usage percent.  At or above this the indicator shows red."
+  :type 'integer
+  :group 'code-agent-rate-limit)
+
+(defcustom code-agent-rate-limit-stale-after 600
+  "Seconds before the indicator is considered stale (no statusline updates).
+After this, the indicator dims to indicate the data may not be current."
+  :type 'integer
+  :group 'code-agent-rate-limit)
+#+END_SRC
+
+** State
+
+#+BEGIN_SRC elisp
+(defvar code-agent-rate-limit-string ""
+  "Current rate-limit string for mode-line display.
+Empty when no data has been read yet.")
+
+(defvar code-agent-rate-limit--data nil
+  "Last parsed rate-limit JSON (alist).  nil if file missing or unreadable.")
+
+(defvar code-agent-rate-limit--timer nil
+  "Timer that re-reads `code-agent-rate-limit-file' periodically.")
+
+(defvar code-agent-rate-limit--last-mtime 0
+  "mtime of the last file read so we skip parsing on no-change.")
+#+END_SRC
+
+** Faces
+
+#+BEGIN_SRC elisp
+(defface code-agent-rate-limit-ok-face
+  '((t :foreground "green3"))
+  "Mode-line face for rate-limit usage below warn threshold."
+  :group 'code-agent-rate-limit)
+
+(defface code-agent-rate-limit-warn-face
+  '((t :foreground "yellow3"))
+  "Mode-line face for rate-limit usage between warn and crit thresholds."
+  :group 'code-agent-rate-limit)
+
+(defface code-agent-rate-limit-crit-face
+  '((t :foreground "red"))
+  "Mode-line face for rate-limit usage at or above crit threshold."
+  :group 'code-agent-rate-limit)
+
+(defface code-agent-rate-limit-stale-face
+  '((t :foreground "gray50"))
+  "Mode-line face when rate-limit data is older than
+`code-agent-rate-limit-stale-after' seconds."
+  :group 'code-agent-rate-limit)
+#+END_SRC
+
+** Usage Level Face Selection
+
+#+BEGIN_SRC elisp
+(defun code-agent-rate-limit--face-for (pct)
+  "Return the face symbol that matches usage percent PCT."
+  (cond
+   ((>= pct code-agent-rate-limit-crit-threshold)
+    'code-agent-rate-limit-crit-face)
+   ((>= pct code-agent-rate-limit-warn-threshold)
+    'code-agent-rate-limit-warn-face)
+   (t 'code-agent-rate-limit-ok-face)))
+
+(defun code-agent-rate-limit--format-reset (secs)
+  "Format SECS as `Xh YYm', or empty string for nil/non-positive."
+  (cond
+   ((or (null secs) (not (numberp secs)) (<= secs 0)) "")
+   (t (let ((h (/ secs 3600))
+            (m (/ (mod secs 3600) 60)))
+        (format " %dh%02dm" h m)))))
+
+(defun code-agent-rate-limit--read-file ()
+  "Re-read `code-agent-rate-limit-file' if mtime advanced.
+Updates `code-agent-rate-limit--data' as a side effect.  Returns t
+when data changed, nil otherwise."
+  (when (file-readable-p code-agent-rate-limit-file)
+    (let ((mt (float-time
+               (file-attribute-modification-time
+                (file-attributes code-agent-rate-limit-file)))))
+      (when (> mt code-agent-rate-limit--last-mtime)
+        (setq code-agent-rate-limit--last-mtime mt)
+        (condition-case _
+            (with-temp-buffer
+              (insert-file-contents code-agent-rate-limit-file)
+              (goto-char (point-min))
+              (setq code-agent-rate-limit--data
+                    (json-parse-buffer :object-type 'alist :null-object nil))
+              t)
+          (error nil))))))
+#+END_SRC
+
+** Render
+
+Mode-line format mirrors the original 2025-12 implementation
+(commit f8890f1, before the API-scraping path was removed):
+
+#+begin_example
+[C:XX|YY|ZZ]
+#+end_example
+
+- =XX= = 5-hour bucket utilisation
+- =YY= = 7-day bucket utilisation
+- =ZZ= = 7-day Sonnet bucket utilisation (omitted if not provided in
+  the JSON; format degrades to =[C:XX|YY]=)
+
+Whole bracket is coloured by the *worst* of the three buckets so a
+single glance tells you whether you are safe (green), getting close
+(yellow), or about to hit a wall (red).  Tooltip lists each bucket
+with its own percentage and reset time, matching the original layout.
+
+Click on the indicator to force a refresh.
+
+#+BEGIN_SRC elisp
+(defun code-agent-rate-limit--pct (bucket)
+  "Return integer percentage for BUCKET alist, or nil if absent."
+  (let ((p (and bucket (alist-get 'used_percentage bucket))))
+    (and (numberp p) (truncate p))))
+
+(defun code-agent-rate-limit--resets-in-secs (bucket)
+  "Return seconds until reset for BUCKET, or nil."
+  (let ((at (and bucket (alist-get 'resets_at bucket))))
+    (when (numberp at)
+      (max 0 (truncate (- at (float-time)))))))
+
+(defun code-agent-rate-limit--data-stale-p ()
+  "Return non-nil if the last update is older than the stale threshold."
+  (when code-agent-rate-limit--data
+    (let ((updated (alist-get 'updated_at code-agent-rate-limit--data)))
+      (and updated
+           (> (- (float-time) updated)
+              code-agent-rate-limit-stale-after)))))
+
+(defun code-agent-rate-limit--mouse-map ()
+  "Return a keymap that triggers a refresh on mouse-1."
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1] #'code-agent-rate-limit-refresh)
+    map))
+
+(defun code-agent-rate-limit--tooltip ()
+  "Build a multi-line tooltip in the original 2025-12 layout.
+Order: header, divider, per-bucket rows, blank, Updated, blank,
+\"Click to refresh\"."
+  (when code-agent-rate-limit--data
+    (let* ((updated-iso (alist-get 'updated_iso code-agent-rate-limit--data))
+           (five   (alist-get 'five_hour        code-agent-rate-limit--data))
+           (seven  (alist-get 'seven_day        code-agent-rate-limit--data))
+           (sonnet (alist-get 'seven_day_sonnet code-agent-rate-limit--data))
+           (rows nil))
+      (dolist (row (list (list "5-hour:      " five)
+                         (list "7-day:       " seven)
+                         (list "7-day Sonnet:" sonnet)))
+        (let* ((label (car row))
+               (b (cadr row))
+               (pct (code-agent-rate-limit--pct b))
+               (secs (code-agent-rate-limit--resets-in-secs b)))
+          (when b
+            (push (format "%s %3d%% (resets in %s)"
+                          label
+                          (or pct 0)
+                          (string-trim (or (code-agent-rate-limit--format-reset secs) "")))
+                  rows))))
+      (mapconcat #'identity
+                 (append (list "Claude Usage"
+                               "─────────────────────────")
+                         (nreverse rows)
+                         (list ""
+                               (format "Updated: %s" (or updated-iso "—"))
+                               ""
+                               "Click to refresh"))
+                 "\n"))))
+
+(defun code-agent-rate-limit--update-string ()
+  "Rebuild `code-agent-rate-limit-string' from cached data.
+Output format: ` [C:XX|YY|ZZ]` where XX/YY/ZZ are integer percentages
+for 5-hour, 7-day, and (when present) 7-day Sonnet buckets.  The
+whole bracket is coloured by the worst bucket."
+  (code-agent-rate-limit--read-file)
+  (setq code-agent-rate-limit-string
+        (cond
+         ;; No file yet — show neutral placeholder so users know the
+         ;; module is wired but no statusline payload has arrived.
+         ((null code-agent-rate-limit--data)
+          (propertize " [C:--]"
+                      'face 'code-agent-rate-limit-stale-face
+                      'help-echo
+                      (format "No rate-limit data at %s yet.\nStart Claude Code to populate."
+                              code-agent-rate-limit-file)
+                      'mouse-face 'mode-line-highlight
+                      'local-map (code-agent-rate-limit--mouse-map)))
+         (t
+          (let* ((five  (alist-get 'five_hour code-agent-rate-limit--data))
+                 (seven (alist-get 'seven_day code-agent-rate-limit--data))
+                 (sonnet (alist-get 'seven_day_sonnet code-agent-rate-limit--data))
+                 (five-pct  (code-agent-rate-limit--pct five))
+                 (seven-pct (code-agent-rate-limit--pct seven))
+                 (sonnet-pct (code-agent-rate-limit--pct sonnet))
+                 (worst (apply #'max
+                               (delq nil
+                                     (list five-pct seven-pct sonnet-pct
+                                           ;; Default to 0 if every bucket
+                                           ;; missing so `max' has an arg.
+                                           0))))
+                 (face (if (code-agent-rate-limit--data-stale-p)
+                           'code-agent-rate-limit-stale-face
+                         (code-agent-rate-limit--face-for worst)))
+                 (parts (delq nil
+                              (list (and five-pct  (format "%d" five-pct))
+                                    (and seven-pct (format "%d" seven-pct))
+                                    (and sonnet-pct (format "%d" sonnet-pct)))))
+                 (display (if parts
+                              (format " [C:%s]" (mapconcat #'identity parts "|"))
+                            " [C:--]")))
+            (propertize display
+                        'face face
+                        'help-echo (code-agent-rate-limit--tooltip)
+                        'mouse-face 'mode-line-highlight
+                        'local-map (code-agent-rate-limit--mouse-map)))))))
+#+END_SRC
+
+** Public API
+
+#+BEGIN_SRC elisp
+;;;###autoload
+(defun code-agent-rate-limit-mode-line-start ()
+  "Begin showing Claude Code rate-limit usage in the mode-line.
+Reads `code-agent-rate-limit-file' every
+`code-agent-rate-limit-poll-interval' seconds and updates
+`code-agent-rate-limit-string'."
+  (interactive)
+  (when (timerp code-agent-rate-limit--timer)
+    (cancel-timer code-agent-rate-limit--timer))
+  (setq code-agent-rate-limit--last-mtime 0)  ; force first read
+  (setq code-agent-rate-limit--timer
+        (run-with-timer 0 code-agent-rate-limit-poll-interval
+                        #'code-agent-rate-limit--update-string))
+  (unless (member '(:eval code-agent-rate-limit-string) mode-line-misc-info)
+    (push '(:eval code-agent-rate-limit-string) mode-line-misc-info))
+  (message "Claude rate-limit mode-line started (poll %ds)."
+           code-agent-rate-limit-poll-interval))
+
+;;;###autoload
+(defun code-agent-rate-limit-mode-line-stop ()
+  "Stop the rate-limit poller and clear the mode-line indicator."
+  (interactive)
+  (when (timerp code-agent-rate-limit--timer)
+    (cancel-timer code-agent-rate-limit--timer)
+    (setq code-agent-rate-limit--timer nil))
+  (setq code-agent-rate-limit-string "")
+  (setq mode-line-misc-info
+        (delete '(:eval code-agent-rate-limit-string) mode-line-misc-info))
+  (force-mode-line-update t))
+
+;;;###autoload
+(defun code-agent-rate-limit-refresh ()
+  "Force-read the rate-limit file now and refresh the mode-line."
+  (interactive)
+  (setq code-agent-rate-limit--last-mtime 0)
+  (code-agent-rate-limit--update-string)
+  (force-mode-line-update t))
+#+END_SRC
+
+* Interactive Chat Mode (moved)
+
+The comint-based chat (=M-x code-agent-chat=) was extracted to
+its own file =code-agent-chat.org= so this module can stay
+focused on activity / rate-limit mode-line concerns.  See that
+file for the chat buffer's variables, faces, send/handle pipeline,
+mode definition, and entry point.
+
+* Package Footer
+
+#+BEGIN_SRC elisp
+(provide 'code-agent)
+;;; code-agent.el ends here
+#+END_SRC
+
+* Release
+
+This section contains the tangle configuration for generating the
+standalone ~code-agent.el~ file.
+
+#+BEGIN_SRC elisp :load no
+;; To tangle this file to code-agent.el, evaluate:
+(require 'literate-elisp)
+(literate-elisp-tangle
+ "code-agent.org"
+ :header ";;; code-agent.el --- Emacs client for Claude Code CLI -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024 Jingtao Xu
+
+;; Author: Jingtao Xu
+;; Version: 0.1.0
+;; Package-Requires: ((emacs \"27.1\"))
+;; Keywords: tools, processes, ai
+;; URL: https://github.com/user/code-agent
+
+;; This file is not part of GNU Emacs.
+
+;; This file is auto-generated from code-agent.org
+;; DO NOT EDIT DIRECTLY - edit code-agent.org instead.
+
+;;; Commentary:
+
+;; Claude Agent SDK for Emacs - A client library for the Claude Code CLI.
+;; This package provides async subprocess communication with Claude,
+;; streaming responses, and hook support.
+;;
+;; Usage:
+;;   (code-agent-query \"What is 2+2?\"
+;;     :on-message (lambda (msg) (message \"%s\" msg)))
+
+;;; Code:
+
+"
+ :tail "
+(provide 'code-agent)
+;;; code-agent.el ends here
+")
+#+END_SRC

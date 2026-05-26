@@ -61,7 +61,7 @@
 Claude Org Integration is a minor mode for org-mode that enables interactive
 streaming AI queries directly within org files using ~#+begin_src ai~ blocks.
 
-This package depends on ~claude-agent~ for Claude communication and provides
+This package depends on ~code-agent~ for Claude communication and provides
 org-specific features on top of it.
 
 ** Features
@@ -107,9 +107,9 @@ Response will appear here after pressing C-c C-c inside the ai block.
 
 ;; Author: Jingtao Xu
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (claude-agent "0.1.0"))
+;; Package-Requires: ((emacs "27.1") (code-agent "0.1.0"))
 ;; Keywords: tools, org, ai
-;; URL: https://github.com/user/claude-agent
+;; URL: https://github.com/user/code-agent
 
 ;; This file is not part of GNU Emacs.
 
@@ -120,17 +120,17 @@ Response will appear here after pressing C-c C-c inside the ai block.
 
 ;;; Code:
 
-(require 'claude-agent)
+(require 'code-agent)
 (require 'org)
 (require 'cl-lib)
 (require 'cl)  ; For lexical-let in callback closures
 ;; Multiplexer backends — cl-defstruct's auto-generated
-;; `claude-agent-(cmux|tmux)-backend-create' factories live in these
+;; `code-agent-(cmux|tmux)-backend-create' factories live in these
 ;; modules.  The frontend constructs instances of them in
 ;; `code-agent-org--make-default-backend' so the byte-compiler needs
 ;; the symbol declarations.
-(require 'claude-agent-cmux-backend)
-(require 'claude-agent-tmux-backend)
+(require 'code-agent-cmux-backend)
+(require 'code-agent-tmux-backend)
 
 ;; Load extracted modules (literate-elisp .org files, not .el packages)
 ;; customize must load FIRST so every subsequent module sees the
@@ -152,11 +152,11 @@ Response will appear here after pressing C-c C-c inside the ai block.
       (literate-elisp-load
        (expand-file-name (concat module ".org") module-dir))))
   ;; Load ACP backend (our own JSON-RPC transport, no external deps)
-  (dolist (module '("claude-agent-jsonrpc"
-                    "claude-agent-acp"
-                    "claude-agent-acp-opencode"
-                    "claude-agent-acp-gemini"
-                    "claude-agent-acp-codex"))
+  (dolist (module '("code-agent-jsonrpc"
+                    "code-agent-acp"
+                    "code-agent-acp-opencode"
+                    "code-agent-acp-gemini"
+                    "code-agent-acp-codex"))
     (unless (featurep (intern module))
       (let ((path (expand-file-name (concat module ".org") module-dir)))
         (when (file-exists-p path)
@@ -175,8 +175,8 @@ Response will appear here after pressing C-c C-c inside the ai block.
 
 ;; Forward declarations for extracted backends (loaded after code-agent-org.org)
 ;; cmux execute / cancel dispatch through Protocol 3
-;; (`claude-org-backend-execute-block', `claude-org-backend-cancel-from-org')
-;; on a `claude-agent-cmux-backend' instance.  Only `open-tab' is still
+;; (`code-agent-org-backend-execute-block', `code-agent-org-backend-cancel-from-org')
+;; on a `code-agent-cmux-backend' instance.  Only `open-tab' is still
 ;; called directly — that's an interactive user command without a
 ;; backend analogue.
 (declare-function code-agent-org-cmux-open-tab "code-agent-org-cmux" ())
@@ -613,7 +613,7 @@ Result directly replaces block content. Use \\[undo] to revert."
     ;; (literate-elisp uses dynamic binding; plain let variables go void)
     (lexical-let ((source-buffer (current-buffer))
                   (source-marker (point-marker)))
-      (claude-agent-refine-prompt
+      (code-agent-refine-prompt
        content intent
        :on-result (lambda (refined)
                     (if (buffer-live-p source-buffer)
@@ -708,7 +708,7 @@ Prompts for confirmation if there are active clients."
                                                    (seconds-to-time last-activity))
                              "never")))
             (princ (format "  Alive: %s\n\n"
-                           (if (and client (claude-agent-client-alive-p client))
+                           (if (and client (code-agent-client-alive-p client))
                                "yes" "no")))))))))
 #+END_SRC
 
@@ -719,7 +719,7 @@ Supports static text, tab stops (=$1=, =${1:default}=), mirrors,
 embedded elisp (=`(elisp)`=), and =$0= exit points.
 
 The previous template system was a hand-rolled alist
-(=claude-org-templates.el=) that read =(NAME . VALUE)= pairs from disk on
+(=code-agent-org-templates.el=) that read =(NAME . VALUE)= pairs from disk on
 every invocation. 9 of 10 templates were static strings; the 10th was a
 function reference that returned a whole string. Migrating to yasnippet
 deleted the loader code (~75 lines) and bought four capabilities the
@@ -1253,8 +1253,8 @@ For other tools: returns formatted string to insert, or nil if not special."
   "Handle incoming MSG for SESSION-KEY.
 Extracts session ID from result messages and stores it."
   ;; Store SDK UUID to org property when we get a result message
-  (when (claude-agent-result-message-p msg)
-    (let ((sdk-uuid (claude-agent-result-message-session-id msg))
+  (when (code-agent-result-message-p msg)
+    (let ((sdk-uuid (code-agent-result-message-session-id msg))
           (marker (code-agent-org--session-get session-key :marker)))
       (when (and sdk-uuid marker (marker-buffer marker))
         ;; Store in session state for extraction to use
@@ -1264,7 +1264,7 @@ Extracts session ID from result messages and stores it."
             (goto-char marker)
             (code-agent-org--set-sdk-uuid sdk-uuid))))))
   ;; Handle special tool uses in assistant messages
-  (when (claude-agent-assistant-message-p msg)
+  (when (code-agent-assistant-message-p msg)
     ;; Store query-id that produced this assistant message.
     ;; In handle-token-v2, we insert a newline separator only when the
     ;; current query-id matches this stored id — meaning a previous
@@ -1276,10 +1276,10 @@ Extracts session ID from result messages and stores it."
                              (code-agent-org--session-get session-key :query-id))
     (let ((marker (code-agent-org--session-get session-key :marker)))
       (when (and marker (marker-buffer marker))
-        (dolist (block (claude-agent-assistant-message-content msg))
-          (when (claude-agent-tool-use-block-p block)
-            (let* ((tool-name (claude-agent-tool-use-block-name block))
-                   (tool-input (claude-agent-tool-use-block-input block))
+        (dolist (block (code-agent-assistant-message-content msg))
+          (when (code-agent-tool-use-block-p block)
+            (let* ((tool-name (code-agent-tool-use-block-name block))
+                   (tool-input (code-agent-tool-use-block-input block))
                    (formatted (code-agent-org--handle-tool-use session-key tool-name tool-input)))
               ;; F3/F5: Record tool call for history and increment count
               (code-agent-org--record-tool-call session-key tool-name tool-input)
@@ -1293,14 +1293,14 @@ Extracts session ID from result messages and stores it."
                     (set-marker marker (point)))))))))))
   ;; Display system messages if enabled
   (when (and code-agent-org-show-system-messages
-             (claude-agent-system-message-p msg))
+             (code-agent-system-message-p msg))
     (let ((marker (code-agent-org--session-get session-key :marker)))
       (when (and marker (marker-buffer marker))
         (with-current-buffer (marker-buffer marker)
           (save-excursion
             (goto-char marker)
             (insert (format "\n[System: %s]\n"
-                            (claude-agent-system-message-subtype msg)))
+                            (code-agent-system-message-subtype msg)))
             (set-marker marker (point))))))))
 
 (defun code-agent-org--maybe-continue-loop (session-key)
@@ -1383,7 +1383,7 @@ lookup).  This ensures tokens are routed to the new section, not the old one."
                nil nil (cons iteration max)))
             ;; Build query-context with updated iteration
             (let ((query-ctx (when instr-num
-                               (claude-agent-make-query-context
+                               (code-agent-make-query-context
                                 :instruction-num instr-num
                                 :loop-current iteration
                                 :loop-max max
@@ -1418,8 +1418,8 @@ no-op on completion because the SDK subprocess already exited."
   (when-let* ((backend (code-agent-org--session-get session-key :backend)))
     ;; Dispatch via Protocol 3 `cancel-from-org' — multiplexer backends
     ;; override to send cancel keys (Escape / C-c) to the pane; agent
-    ;; backends delegate to `claude-agent-backend-cancel'.
-    (ignore-errors (claude-org-backend-cancel-from-org backend session-key))))
+    ;; backends delegate to `code-agent-backend-cancel'.
+    (ignore-errors (code-agent-org-backend-cancel-from-org backend session-key))))
 
 (defun code-agent-org--cleanup-queued-blocks (session-key)
   "Clear pending queue for SESSION-KEY, reset exec-status on queued blocks, free markers.
@@ -1464,7 +1464,7 @@ Operations are performed in a fixed, canonical order."
     (code-agent-org--cleanup-queued-blocks session-key))
   ;; 6. Unregister from active queries (mode-line/queries buffer)
   ;;
-  ;; --unregister-active-query dispatches `claude-org-backend-cancel-from-org'
+  ;; --unregister-active-query dispatches `code-agent-org-backend-cancel-from-org'
   ;; which on multiplexer-family backends (cmux/tmux) sends a real ESC keypress
   ;; to the surface.  That's correct on cancel/error paths, but on a NORMAL
   ;; "completed" Stop hook the prompt has been delivered, response inserted,
@@ -1572,7 +1572,7 @@ spinner cleanup can also raise, so go for unwind-protect."
              session-key
              (code-agent-org--session-get session-key :busy))
     (unwind-protect
-        (claude-agent-with-span "handle-complete"
+        (code-agent-with-span "handle-complete"
             (code-agent-org--complete-span-attrs session-key result)
             trace-ctx
           (ignore-errors (code-agent-org--stop-spinner session-key))
@@ -1603,7 +1603,7 @@ spinner cleanup can also raise, so go for unwind-protect."
   "Handle error ERROR for SESSION-KEY.
 Attempts session recovery if error indicates expired session or context too long.
 If already recovering and another error occurs, give up and show error to user."
-  (let ((error-msg (claude-agent--extract-error-message error))
+  (let ((error-msg (code-agent--extract-error-message error))
         (is-recovering (code-agent-org--session-get session-key :recovering))
         (backend (code-agent-org--session-get session-key :backend)))
     (cond
@@ -1615,7 +1615,7 @@ If already recovering and another error occurs, give up and show error to user."
      ;; Use backend protocol for error classification (backend-agnostic)
      (t
       (pcase (if backend
-                 (claude-agent-backend-classify-error backend error-msg)
+                 (code-agent-backend-classify-error backend error-msg)
                'unknown)
         ('context-limit
          (message "Claude context limit reached, starting fresh session with history...")
@@ -1731,7 +1731,7 @@ after-hook.  Returns nil."
         (custom-id (code-agent-org-execute-command-custom-id cmd))
         (loop-max (code-agent-org-execute-command-loop-max cmd))
         (loop-interval (code-agent-org-execute-command-loop-interval cmd)))
-    (claude-agent-with-span "execute-core"
+    (code-agent-with-span "execute-core"
         (list :custom-id custom-id :loop-max loop-max
               :input (truncate-string-to-width (or content "") 2000)
               :session-id (ignore-errors (code-agent-org--get-session-id)))
@@ -1766,7 +1766,7 @@ after-hook.  Returns nil."
                 (code-agent-org--create-response-section session-key query-id 'normal)))
             (code-agent-org--start-spinner session-key)
             (let ((query-ctx (when instr-num
-                               (claude-agent-make-query-context
+                               (code-agent-make-query-context
                                 :instruction-num instr-num
                                 :loop-current 1
                                 :loop-max loop-max
@@ -1791,7 +1791,7 @@ headings matching `code-agent-org-auto-title-heading-pattern' (see `code-agent-o
 
 If the session is busy, queues the block for execution when current query completes."
   (interactive)
-  (claude-agent-with-trace "execute-ai-block"
+  (code-agent-with-trace "execute-ai-block"
       (list :oi-kind "CHAIN"
             :session-id (ignore-errors (code-agent-org--get-session-id))
             :custom-id (ignore-errors (code-agent-org--find-instruction-custom-id))
@@ -1847,7 +1847,7 @@ If the session is busy, queues the block for execution when current query comple
            ;; point; without it, switching :CLAUDE_BACKEND: silently keeps
            ;; dispatching to the previously-used backend.
            (mux-backend (code-agent-org--resolve-backend session-key mux-options)))
-      (when (cl-typep mux-backend 'claude-agent-multiplexer-backend)
+      (when (cl-typep mux-backend 'code-agent-multiplexer-backend)
         ;; If multiplexer session is already busy, queue this block instead
         ;; of firing a second prompt in parallel.  Mux dispatch had been
         ;; placed BEFORE the queue check, so two C-c C-c invocations would
@@ -1873,7 +1873,7 @@ If the session is busy, queues the block for execution when current query comple
                (message "This block is already scheduled [%d in queue]."
                         (code-agent-org--queue-count session-key))))
             (cl-return-from code-agent-org-execute nil)))
-        (claude-org-backend-execute-block
+        (code-agent-org-backend-execute-block
          mux-backend
          (list :prompt content
                :session-key session-key
@@ -1935,13 +1935,13 @@ This integrates with org-babel's C-c C-c execution mechanism."
   "Build IDE context system reminder for PROJECT-ROOT.
 Returns nil if IDE context is disabled or unavailable."
   (when code-agent-org-include-ide-context
-    (let ((ide-context (claude-agent-collect-ide-context
+    (let ((ide-context (code-agent-collect-ide-context
                         (or project-root default-directory)))
           ;; Hint for org header normalization
           (org-hint (when code-agent-org-normalize-headers
                       "When outputting org-mode headers, always use level 1 (*) as top-level. Headers will be auto-adjusted to fit the document hierarchy.")))
       (when ide-context
-        (claude-agent-build-system-reminder
+        (code-agent-build-system-reminder
          :current-file (plist-get ide-context :current-file)
          :open-files (plist-get ide-context :open-files)
          :selection (plist-get ide-context :selection)
@@ -1950,11 +1950,11 @@ Returns nil if IDE context is disabled or unavailable."
          :extra-lines (when org-hint (list org-hint)))))))
 
 (defun code-agent-org--build-query-options (project-root system-prompt sdk-uuid)
-  "Build options plist for claude-agent query.
+  "Build options plist for code-agent query.
 PROJECT-ROOT: Working directory
 SYSTEM-PROMPT: System prompt text
 SDK-UUID: Session UUID for resume"
-  (claude-agent-options
+  (code-agent-options
    :cwd (or project-root default-directory)
    :system-prompt system-prompt
    :resume sdk-uuid
@@ -2073,16 +2073,16 @@ PROPS are keyword args passed through to the backend.
 SESSION-KEY is automatically injected into PROPS.
 
 The dispatch goes through Protocol 3
-(`claude-org-backend-execute-block') so the frontend dispatches on
+(`code-agent-org-backend-execute-block') so the frontend dispatches on
 the backend instance rather than branching on backend type.  The
-default method on `claude-agent-backend' shims to
-`claude-agent-backend-query' — unchanged behaviour for existing
+default method on `code-agent-backend' shims to
+`code-agent-backend-query' — unchanged behaviour for existing
 JSON/ACP backends.  Concrete agent and multiplexer backends
 introduced in later phases override `execute-block' with their own
 orchestration.
 
 Stores the resulting backend and query handle in the session."
-  (claude-agent-with-span "dispatch-query"
+  (code-agent-with-span "dispatch-query"
       (list :input (truncate-string-to-width (or full-prompt "") 2000)
             :session-key session-key) nil
   (let* ((props (plist-put props :session-key session-key))
@@ -2090,7 +2090,7 @@ Stores the resulting backend and query handle in the session."
          ;; Property-aware resolution — see `code-agent-org--resolve-backend'
          ;; rationale.  Caches both struct + originating CLAUDE_BACKEND.
          (backend (code-agent-org--resolve-backend session-key options))
-         ;; Protocol 3 dispatch — see claude-agent-backend.org
+         ;; Protocol 3 dispatch — see code-agent-backend.org
          ;; §Org-Integration Protocol.  `block-info' is the plist the
          ;; generic contract expects; the default method unpacks it
          ;; back into a `backend-query' call so behaviour stays
@@ -2099,28 +2099,28 @@ Stores the resulting backend and query handle in the session."
                            :callbacks callbacks
                            :props props
                            :session-key session-key))
-         (handle (claude-org-backend-execute-block backend block-info)))
+         (handle (code-agent-org-backend-execute-block backend block-info)))
     ;; `--resolve-backend' already cached :backend + :backend-property;
     ;; only the handle still needs storing here.
     (code-agent-org--session-put session-key :query-handle handle)
     ;; Update persistent client activity if applicable
-    (when (claude-agent-backend-supports-p backend :persistent-client)
+    (when (code-agent-backend-supports-p backend :persistent-client)
       (code-agent-org-persistent-registry-update-activity
        code-agent-org--persistent-registry session-key)))))
 
 (defun code-agent-org--send-request (prompt &optional query-context session-key-override)
-  "Send PROMPT to Claude via claude-agent.
-QUERY-CONTEXT is a claude-agent-query-context struct for Session Manager display.
+  "Send PROMPT to Claude via code-agent.
+QUERY-CONTEXT is a code-agent-query-context struct for Session Manager display.
 SESSION-KEY-OVERRIDE if provided, uses this session-key instead of calculating from
 current buffer position. Essential for loop iterations where cursor may have moved.
 
 When Docker mode is active (CLAUDE_CODE_PATH contains 'docker'), this function
-passes :cli-path and :path-mappings to claude-agent-query for automatic path
+passes :cli-path and :path-mappings to code-agent-query for automatic path
 translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
-  (claude-agent-with-span "send-request"
+  (code-agent-with-span "send-request"
       (list :span-kind "CLIENT"
             :custom-id (when query-context
-                          (claude-agent-query-context-custom-id query-context))
+                          (code-agent-query-context-custom-id query-context))
             :input prompt)
     nil
   (let* ((session-key (or session-key-override (code-agent-org--current-session-key)))
@@ -2137,9 +2137,9 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
          (full-prompt (code-agent-org--build-full-prompt prompt system-reminder))
          ;; Capture source context for session manager display
          (source-buf (current-buffer))
-         (custom-id (when query-context (claude-agent-query-context-custom-id query-context))))
+         (custom-id (when query-context (code-agent-query-context-custom-id query-context))))
     ;; Store trace context for async callbacks
-    (code-agent-org--session-put session-key :trace-ctx (claude-agent-trace-context))
+    (code-agent-org--session-put session-key :trace-ctx (code-agent-trace-context))
     ;; Get session heading name for permission prompts
     ;; Need to position at heading first since we might be inside a src block
     (let ((org-section-name
@@ -2171,7 +2171,7 @@ translation between host (PROJECT_ROOT) and container (CLAUDE_CONTAINER_PATH)."
 (defun code-agent-org--execute-queued-block (session-key block-info)
   "Execute a queued BLOCK-INFO for SESSION-KEY.
 BLOCK-INFO is a plist with :custom-id, :content, :marker, :loop-max, etc."
-  (claude-agent-with-trace "execute-queued-block"
+  (code-agent-with-trace "execute-queued-block"
       (list :span-kind "CONSUMER" :oi-kind "CHAIN"
             :session-id (ignore-errors (code-agent-org--get-session-id))
             :custom-id (plist-get block-info :custom-id))
@@ -2212,7 +2212,7 @@ in 2026-05.  Symbols (=code-agent-org--refresh-header-line=,
 =--stop-header-timer=, =--original-header-line=,
 =--schedule-cursor-header-update=, header / badge / tooltip
 helpers) remain available; the new module loads after this one
-in `claude-code.el'.
+in `code-agent.el'.
 
 * Cancel Support
 
@@ -2228,7 +2228,7 @@ cancel itself shows up in Phoenix next to the query it aborted.
   "Cancel the current session's active query, stop any loop, and clear queue.
 Uses centralized `code-agent-org--cleanup-session' for complete cleanup (F19)."
   (interactive)
-  (claude-agent-with-span "cancel"
+  (code-agent-with-span "cancel"
       (list :custom-id (ignore-errors (code-agent-org--find-instruction-custom-id))) nil
   (let* ((session-key (code-agent-org--current-session-key))
          (backend (code-agent-org--session-get session-key :backend))
@@ -2242,9 +2242,9 @@ Uses centralized `code-agent-org--cleanup-session' for complete cleanup (F19)."
           (when (and loop-max (> loop-max 1))
             (code-agent-org--session-put session-key :loop-current loop-max))
           ;; Protocol 3 dispatch — mux backends send cancel keys, agent
-          ;; backends delegate to `claude-agent-backend-cancel'.  No more
+          ;; backends delegate to `code-agent-backend-cancel'.  No more
           ;; string-matching on `backend' slot value.
-          (claude-org-backend-cancel-from-org backend session-key)
+          (code-agent-org-backend-cancel-from-org backend session-key)
           ;; Insert cancellation message BEFORE cleanup (needs :query-id and :marker)
           (let ((cancel-text (if (and loop-max (> loop-max 1))
                                  (format "\n[Cancelled at iteration %d/%d]\n"
@@ -2292,7 +2292,7 @@ Uses centralized `code-agent-org--cleanup-session' for complete cleanup."
                    (when (code-agent-org--session-state-get state :busy)
                      (when-let* ((backend (code-agent-org--session-state-get state :backend)))
                        (ignore-errors
-                         (claude-org-backend-cancel-from-org backend key)))
+                         (code-agent-org-backend-cancel-from-org backend key)))
                      (cl-incf cancelled))
                    ;; Full cleanup via centralized function
                    (code-agent-org--cleanup-session key "cancelled" t))))
@@ -2321,8 +2321,8 @@ Shows the raw backend transcript buffer for the current session.
 Three sources are tried in order: the cmux capture-pane buffer
 (when the session runs through cmux and has captured output), the
 backend-specific verbose buffer (supplied by
-=claude-agent-backend-verbose-buffer=), and finally the shared
-per-session verbose buffer maintained by =claude-agent=.
+=code-agent-backend-verbose-buffer=), and finally the shared
+per-session verbose buffer maintained by =code-agent=.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-show-verbose ()
@@ -2340,8 +2340,8 @@ then the shared session verbose buffer."
                              (> (buffer-size cmux-buf) 0))
                     cmux-buf)
                   (when backend
-                    (claude-agent-backend-verbose-buffer backend))
-                  (claude-agent-get-verbose-buffer session-key))))
+                    (code-agent-backend-verbose-buffer backend))
+                  (code-agent-get-verbose-buffer session-key))))
     (if (and buf (buffer-live-p buf))
         (display-buffer buf)
       (message "No verbose buffer for session: %s" session-key))))
@@ -2441,7 +2441,7 @@ Opens the terminal tab for the current session using the cmux backend.
 #+BEGIN_SRC elisp
 (defun code-agent-org-open-terminal-tab ()
   "Open the terminal for this session based on the configured backend.
-Dispatches through Protocol 3 `claude-org-backend-open-terminal-tab'
+Dispatches through Protocol 3 `code-agent-org-backend-open-terminal-tab'
 on the backend instance — multiplexer backends override to raise
 their workspace / tab.  Agent backends default to a user-error
 (there is no terminal to open for a JSON-stream subprocess)."
@@ -2449,7 +2449,7 @@ their workspace / tab.  Agent backends default to a user-error
   (let* ((session-key (code-agent-org--current-session-key))
          (options (list :cwd default-directory))
          (backend (code-agent-org--resolve-backend session-key options)))
-    (claude-org-backend-open-terminal-tab backend)))
+    (code-agent-org-backend-open-terminal-tab backend)))
 #+END_SRC
 
 *** Transient Prefix
@@ -2478,7 +2478,7 @@ their workspace / tab.  Agent backends default to a user-error
    ["Session"
     ("n" "Session info" code-agent-org-show-session-info)
     ("l" "List sessions" code-agent-org-list-sessions)
-    ("m" "Query manager" claude-agent-list-queries)
+    ("m" "Query manager" code-agent-list-queries)
     ("P" "Permission mode" code-agent-org-switch-permission-mode)
     ("I" "Open terminal" code-agent-org-open-terminal-tab)
     ("R" "Restart Claude Code" code-agent-org-cmux-restart)
@@ -2488,11 +2488,11 @@ their workspace / tab.  Agent backends default to a user-error
    ["Backend"
     ;; `p' opens the Pi backend submenu (model / thinking / steer /
     ;; follow-up / compact / login).  The submenu function is defined
-    ;; in `claude-agent-pi-ui.org' and falls back to a one-line user-
+    ;; in `code-agent-pi-ui.org' and falls back to a one-line user-
     ;; error when the Pi backend module is not loaded.
-    ("p" "Pi control..." claude-agent-pi-ui-menu)]
+    ("p" "Pi control..." code-agent-pi-ui-menu)]
    ["Trace"
-    ("o" "Open Phoenix UI" claude-agent-trace-open-phoenix)]
+    ("o" "Open Phoenix UI" code-agent-trace-open-phoenix)]
    ["" ("q" "Quit" transient-quit-one)]])
 #+END_SRC
 
@@ -2519,7 +2519,7 @@ Use \\[code-agent-org-menu] to open the transient command menu.")
 #+BEGIN_SRC elisp
 (defun code-agent-org--register-exclusion ()
   "Register code-agent-org buffers as excluded from IDE context."
-  (add-to-list 'claude-agent-ide-context-exclude-predicates
+  (add-to-list 'code-agent-ide-context-exclude-predicates
                (lambda (buf)
                  (with-current-buffer buf
                    (bound-and-true-p code-agent-org-mode)))))
