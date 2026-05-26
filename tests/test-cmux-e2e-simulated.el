@@ -1991,6 +1991,91 @@ launch command sent, verbose timer restarted."
 ;;; Restart helpers — pure-function tests (no cmux)
 ;;; ============================================================================
 
+(ert-deftest test-cmux-claude-has-bridge-hooks-p-matches-launcher-argv ()
+  "`--claude-has-bridge-hooks-p' returns truthy when the surface's claude
+process argv contains `workspace-hooks.json' — the marker our launcher
+appends but cmux's session-restore strips.  This is the 2026-05-26
+pre-flight that decides whether to auto-relaunch before sending a
+prompt."
+  :tags '(:unit :stable)
+  ;; Mock the surface-tty lookup + ps call.  The function returns nil
+  ;; on any introspection failure (so the caller defaults to restart),
+  ;; so we exercise the three branches: missing tty / no claude /
+  ;; claude-with-hooks / claude-without-hooks.
+  (cl-letf (((symbol-function 'code-agent-org-cmux--surface-tty)
+             (lambda (sid) (cond ((string= sid "with-hooks") "ttys001")
+                                  ((string= sid "no-hooks")   "ttys002")
+                                  ((string= sid "no-claude")  "ttys003")
+                                  (t nil)))))
+    ;; ttys001 → claude with workspace-hooks.json
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (_program _infile _destination _display &rest args)
+                 (let ((tty (cadr args)))
+                   (cond
+                    ((string= tty "ttys001")
+                     (insert "~/.local/bin/claude --settings "
+                             "~/projects/emacs-agent/workspace-hooks.json "
+                             "--resume foo --name bar\n"))
+                    ((string= tty "ttys002")
+                     (insert "~/.local/bin/claude --resume foo\n"))
+                    ((string= tty "ttys003")
+                     (insert "/bin/zsh\n"))
+                    (t (insert "")))
+                   0))))
+      (should (code-agent-org-cmux--claude-has-bridge-hooks-p "with-hooks"))
+      (should-not (code-agent-org-cmux--claude-has-bridge-hooks-p "no-hooks"))
+      (should-not (code-agent-org-cmux--claude-has-bridge-hooks-p "no-claude"))
+      ;; surface-tty returned nil → entire function falls through to nil
+      ;; (the caller then restarts as the safe fallback).
+      (should-not (code-agent-org-cmux--claude-has-bridge-hooks-p "missing-surface")))))
+
+(ert-deftest test-cmux-ensure-hooks-wired-noop-when-hooks-present ()
+  "`--ensure-hooks-wired' is a no-op when the claude process is already
+correctly wired.  Critically: it does NOT call `code-agent-org-cmux-restart'
+in this case — that would interrupt a healthy session."
+  :tags '(:unit :stable)
+  (let ((restart-called nil))
+    (cl-letf (((symbol-function 'code-agent-org-cmux--claude-has-bridge-hooks-p)
+               (lambda (_) t))
+              ((symbol-function 'code-agent-org-cmux-restart)
+               (lambda () (setq restart-called t))))
+      (code-agent-org-cmux--ensure-hooks-wired "surface:42")
+      (should-not restart-called))))
+
+(ert-deftest test-cmux-ensure-hooks-wired-restarts-when-hooks-missing ()
+  "When the running claude lacks workspace-bridge hooks, the pre-flight
+calls restart + waits for the freshly-launched claude to be ready.
+This closes the recurring `cmux session-restore drops hooks → prompts
+silently vanish' failure mode."
+  :tags '(:unit :stable)
+  (let ((restart-called nil)
+        (wait-called nil)
+        (code-agent-org-cmux-auto-relaunch-on-missing-hooks t))
+    (cl-letf (((symbol-function 'code-agent-org-cmux--claude-has-bridge-hooks-p)
+               (lambda (_) nil))
+              ((symbol-function 'code-agent-org-cmux-restart)
+               (lambda () (setq restart-called t)))
+              ((symbol-function 'code-agent-org-cmux--wait-for-ready)
+               (lambda (_) (setq wait-called t) t)))
+      (code-agent-org-cmux--ensure-hooks-wired "surface:42")
+      (should restart-called)
+      (should wait-called))))
+
+(ert-deftest test-cmux-ensure-hooks-wired-opt-out-via-defcustom ()
+  "Setting `code-agent-org-cmux-auto-relaunch-on-missing-hooks' to nil
+disables the auto-fix.  The function then just warns and lets the
+prompt go through (matching the pre-2026-05-26 behaviour for users
+who prefer to relaunch manually)."
+  :tags '(:unit :stable)
+  (let ((restart-called nil)
+        (code-agent-org-cmux-auto-relaunch-on-missing-hooks nil))
+    (cl-letf (((symbol-function 'code-agent-org-cmux--claude-has-bridge-hooks-p)
+               (lambda (_) nil))
+              ((symbol-function 'code-agent-org-cmux-restart)
+               (lambda () (setq restart-called t))))
+      (code-agent-org-cmux--ensure-hooks-wired "surface:42")
+      (should-not restart-called))))
+
 (ert-deftest test-cmux-shell-prompt-p-recognises-common-prompts ()
   "Regression: the original restart code used `\\s*$` (bare backslash-s)
 which never matches anything in elisp regex.  The fix uses `\\s-*$`

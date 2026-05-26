@@ -564,6 +564,101 @@ Three phases under one ``cmux-call'' span:
   :type 'integer
   :group 'code-agent-org)
 
+(defcustom code-agent-org-cmux-auto-relaunch-on-missing-hooks t
+  "When non-nil, auto-relaunch the cmux pane's claude process if it lacks
+the workspace-bridge hook settings.
+
+The 2026-05-26 incident: cmux's session-restore replays the bare
+``claude --resume <slug>`` command without the ``--settings
+workspace-hooks.json`` / ``--plugin-dir`` extras our launcher adds at
+launch time.  The restored claude runs fine but has *no* bridge hooks
+loaded — every UserPromptSubmit / Stop hook silently no-ops, so
+prompts and responses never reach the org buffer.
+
+The check inspects the surface's tty via cmux + ``ps`` and looks for
+``workspace-hooks.json`` in the claude argv.  Missing → call
+``code-agent-org-cmux-restart`` and wait before sending the prompt.
+Set this to nil to disable the auto-fix and just rely on the existing
+restart flow."
+  :type 'boolean
+  :group 'code-agent-org)
+
+(defun code-agent-org-cmux--surface-tty (surface-id)
+  "Look up SURFACE-ID's tty (e.g. ``ttys008``) via ``cmux tree --json``.
+Returns nil if cmux is unreachable, the surface isn't a terminal, or
+the JSON shape changed."
+  (condition-case nil
+      (let* ((json-output (code-agent-org-cmux--call "tree" "--json"))
+             (data (with-temp-buffer
+                     (insert json-output)
+                     (goto-char (point-min))
+                     (json-parse-buffer :object-type 'plist :null-object nil
+                                        :false-object nil)))
+             (windows (plist-get data :windows))
+             (found nil))
+        (cl-loop for win across (or windows []) until found do
+                 (cl-loop for ws across (or (plist-get win :workspaces) []) until found do
+                          (cl-loop for pane across (or (plist-get ws :panes) []) until found do
+                                   (cl-loop for surface across (or (plist-get pane :surfaces) [])
+                                            until found do
+                                            (when (string= (plist-get surface :ref) surface-id)
+                                              (setq found (plist-get surface :tty)))))))
+        found)
+    (error nil)))
+
+(defun code-agent-org-cmux--claude-has-bridge-hooks-p (surface-id)
+  "Return non-nil when SURFACE-ID's running claude has our workspace-bridge hooks loaded.
+
+Heuristic: the launcher appends ``--settings <path>/workspace-hooks.json``
+to the spawned ``claude`` argv.  cmux's session-restore drops these
+extras when replaying a saved session, leaving the restored claude
+running without our bridge.  We inspect the claude process via
+``ps -t <tty> -o command=`` and search for the marker.
+
+Returns nil (treat as a missing-hooks signal) on any introspection
+failure — tty lookup fails, ps doesn't run, no claude on that tty.
+The caller then triggers a restart, which is the safe fallback in
+every case."
+  (when-let* ((tty (code-agent-org-cmux--surface-tty surface-id)))
+    (let ((cmd (with-temp-buffer
+                 (call-process "ps" nil t nil "-t" tty "-o" "command=")
+                 (buffer-string))))
+      (and (stringp cmd)
+           (string-match-p "/claude\\b" cmd)
+           (string-match-p "workspace-hooks\\.json" cmd)))))
+
+(defun code-agent-org-cmux--ensure-hooks-wired (surface-id)
+  "Pre-flight check before sending a prompt to SURFACE-ID.
+
+If the running claude has our workspace-bridge hooks loaded, return t.
+Otherwise — when ``code-agent-org-cmux-auto-relaunch-on-missing-hooks``
+is non-nil — call ``code-agent-org-cmux-restart'' to relaunch via the
+launcher (which adds the missing ``--settings workspace-hooks.json``
+and WORKSPACE_* env vars), then wait until the new claude is ready.
+
+This closes the 2026-05-26 ``recurring`` failure mode where cmux's
+session-restore lost the launcher's extras and every UserPromptSubmit
+/ Stop hook silently no-op'd, leaving the org buffer untouched."
+  (cond
+   ((code-agent-org-cmux--claude-has-bridge-hooks-p surface-id) t)
+   ((not code-agent-org-cmux-auto-relaunch-on-missing-hooks)
+    (message
+     "code-agent-org-cmux: surface %s's claude lacks workspace-bridge hooks; \
+prompts will not appear in the org buffer.  Press R in code-agent-org-menu \
+to relaunch, or set `code-agent-org-cmux-auto-relaunch-on-missing-hooks' \
+to t for auto-fix."
+     surface-id)
+    t)
+   (t
+    (message "code-agent-org-cmux: claude on %s is missing workspace-bridge \
+hooks (cmux session-restore drops them); auto-relaunching via launcher..."
+             surface-id)
+    (code-agent-org-cmux-restart)
+    ;; restart is async toward the end — wait until the freshly-launched
+    ;; claude reports ready before the caller proceeds to send a prompt.
+    (code-agent-org-cmux--wait-for-ready surface-id)
+    t)))
+
 (defun code-agent-org-cmux--wait-for-ready (surface-id)
   "Wait for Claude Code TUI to be ready in SURFACE-ID.
 Uses cmux wait-for signal from SessionStart hook (50ms polling).
@@ -1729,6 +1824,14 @@ Five phases:
          (sk (code-agent-org--current-session-key)))
     (when (string= status "busy")
       (user-error "Claude Code busy (status: %s). Cancel first?" status))
+    ;; Durable fix for the 2026-05-26 "prompt vanishes" failure mode.
+    ;; cmux's session-restore strips the launcher's `--settings
+    ;; workspace-hooks.json' extras, so the restored claude has no
+    ;; bridge hooks and every UserPromptSubmit fires silently.  Check
+    ;; the running claude's argv on this surface and auto-relaunch via
+    ;; the launcher when hooks are missing.  No-op when claude is
+    ;; already correctly wired (the common case after a fresh launch).
+    (code-agent-org-cmux--ensure-hooks-wired surface-id)
     (when-let* ((story (code-agent-org--find-story-heading)))
       (code-agent-org--set-active-story (car story)))
     ;; Root trace context: cache BEFORE entering the child span so async
