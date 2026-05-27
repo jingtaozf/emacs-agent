@@ -860,3 +860,14 @@ build-python-index:
 .PHONY: build-tangle-map
 build-tangle-map:
 	@$(LP_ENV) python3 $(LITERATE_AGENT_HOME)/scripts/build_tangle_map.py
+
+# audit-quarterly runs scripts/audit_lp_health.py which composites every
+# LP-alignment measurement (prose-less src, CLT violations, big defuns,
+# cross-module --leakage, anchor coverage, bare module refs, protocol
+# specialisation ratio, factory ratio, docstring gaps, Verified-by
+# coverage) into one Markdown report at tasks/audit-YYYY-Qq.md.  Run
+# once a quarter per the lp-agent-long-horizon-audit-cadence rule, then
+# commit the report so the next quarter's run diffs cleanly.
+.PHONY: audit-quarterly
+audit-quarterly:
+	@python3 scripts/audit_lp_health.py
