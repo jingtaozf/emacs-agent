@@ -81,6 +81,8 @@ order:
 
 ** Customization Variables
 
+Public =defcustom= surface — the user-tunable knobs every downstream module sees.  =defgroup= lives at the top so Customize shows a coherent tree.
+
 #+BEGIN_SRC elisp
 (defgroup code-agent nil
   "Claude Agent SDK for Emacs."
@@ -177,6 +179,8 @@ deadlock when the pipe buffer fills up (typically 64KB on Linux, 16KB on macOS).
 
 ** Error Definitions
 
+Canonical error taxonomy.  Every backend reports failures by signalling one of these types; downstream code dispatches on the symbol, not on string-matching error messages.
+
 #+BEGIN_SRC elisp
 (define-error 'code-agent-error
   "Claude Agent SDK error")
@@ -250,6 +254,8 @@ Returns a plist suitable for passing to `code-agent-query' or
 
 ** CLI Discovery
 
+Resolves the Claude CLI binary location.  Honours the =code-agent-cli-path= defcustom; falls back to PATH search and known install locations.  Signals on miss so callers see configuration errors at spawn time, not mid-query.
+
 #+BEGIN_SRC elisp
 (defun code-agent--find-cli ()
   "Find the Claude Code CLI binary.
@@ -286,6 +292,8 @@ Input validation layer to prevent security issues and denial-of-service attacks.
 
 *** Answer Validation
 
+Defensive guard on =AskUserQuestion= responses — the user's answer is forwarded verbatim to the LLM, so a length cap stops accidental megabyte responses (often a paste-buffer mishap) from flooding the prompt.
+
 #+BEGIN_SRC elisp
 (defun code-agent--validate-answer (answer)
   "Validate ANSWER string for AskUserQuestion responses.
@@ -303,6 +311,8 @@ Returns t if valid, nil for nil/empty input (valid no-answer)."
 
 *** File Path Validation
 
+Defensive guard on file paths — null-byte injection and other shell-escape patterns are rejected before reaching any tool that opens the file or shells out with it.
+
 #+BEGIN_SRC elisp
 (defun code-agent--validate-file-path (path)
   "Validate file PATH for suspicious patterns.
@@ -318,6 +328,8 @@ Returns t if valid."
 #+END_SRC
 
 *** Command Validation
+
+Defensive guard on Bash-tool commands — length cap prevents runaway prompt injection from issuing megabyte-sized shell commands.
 
 #+BEGIN_SRC elisp
 (defun code-agent--validate-command (command)
@@ -340,6 +352,8 @@ When =code-agent-cli-path= or the =:cli-path= option is a Docker command
 container startup and management.
 
 *** Docker Command Detection
+
+Recognises =docker run= / =docker-compose= / =docker exec= CLI shapes — drives the Docker-mode branch that routes subsequent invocations into the container.
 
 #+BEGIN_SRC elisp
 (defun code-agent--docker-command-p (cmd)
@@ -375,6 +389,8 @@ Returns the compose file path or nil if not found."
 #+END_SRC
 
 *** Docker Compose Directory Discovery
+
+Finds the =docker-compose.yml= owning the configured CLI — needed so subsequent =docker compose= calls run with the correct working directory regardless of where Emacs was started.
 
 #+BEGIN_SRC elisp
 (defun code-agent--find-compose-dir (&optional cli-path project-root)
@@ -421,6 +437,8 @@ Returns the directory path or nil if not found."
 
 *** Container Status Check
 
+Probes the Claude container for running state — gates the container-startup branch so we don't re-=docker compose up= an already-healthy stack.
+
 #+BEGIN_SRC elisp
 (defun code-agent--docker-container-running-p (&optional cli-path project-root)
   "Check if the Claude Docker container is running.
@@ -438,6 +456,8 @@ Optional PROJECT-ROOT is the project directory for resolving relative paths."
 #+END_SRC
 
 *** Container Startup
+
+Brings the Claude container up if it isn't running.  Called lazily from the first Docker-mode query so cold-starts are transparent to the user.
 
 #+BEGIN_SRC elisp
 (defun code-agent--ensure-docker-container (&optional cli-path project-root)
@@ -477,6 +497,8 @@ Returns t if container is ready, signals error on failure."
 #+END_SRC
 
 ** Process Environment
+
+=process-environment= assembly — collects =CLAUDE_*= env vars, the Bun memory cap, and per-session identifiers into the child process's environment before =start-process=.
 
 #+BEGIN_SRC elisp
 (defcustom code-agent-bun-memory-limit nil
@@ -573,6 +595,8 @@ to find all descendants and kills them bottom-up."
 
 ** Session Management
 
+Per-session state — verbose buffer hash table, request-id tracking, the small set of session-keyed maps the rest of the file reads through.
+
 #+BEGIN_SRC elisp
 (defvar code-agent--session-verbose-buffers (make-hash-table :test 'equal)
   "Map session-key to verbose output buffer.")
@@ -642,6 +666,8 @@ Returns non-nil if the error is about exceeding context limits."
 ** Data Structures
 
 *** Content Block Types
+
+=cl-defstruct= for each ACP/SDK message content-block kind — text, tool-use, tool-result, thinking, etc.  Typed blocks replace plist-pattern-matching across the parsing surface.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (code-agent-text-block
@@ -802,6 +828,8 @@ skills or applying rules, enabling real-time monitoring.")
 
 *** Event Dispatch Functions
 
+Per-event-type dispatch — translates a parsed message into the matching hook firing (PreToolUse, PostToolUse, Stop, etc.) so subscribers don't see raw JSON.
+
 #+BEGIN_SRC elisp
 (defun code-agent--dispatch-pre-tool-use (parsed state)
   "Dispatch PreToolUse hooks for tool_use blocks in PARSED message.
@@ -953,6 +981,8 @@ docker, recovery, …) is a separate accessor surface.
 #+END_SRC
 
 *** Composite State
+
+=cl-defstruct= bundling everything one in-flight query owns: session key, request id, callbacks, partial buffer, exit expectations.  One struct per process so cleanup is single-place.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (code-agent--process-state
@@ -1310,6 +1340,8 @@ Delegates to sub-extractors for result and assistant message types."
 
 **** Normal Message Processing
 
+Routes a non-control message (assistant / user / system / result) into the matching callback path — content blocks feed token streaming, structured events feed hooks.
+
 #+BEGIN_SRC elisp
 (defun code-agent--process-normal-message (parsed state)
   "Process a normal (non-control) message.
@@ -1396,6 +1428,8 @@ Attempted JSON has opening braces or brackets."
 #+END_SRC
 
 **** Rate Limit Support
+
+Throttles rate-limit warnings so a sustained 429 storm doesn't spam =*Messages*= with one warning per token attempt.  Configurable cooldown per rate-limit type.
 
 #+BEGIN_SRC elisp
 (defcustom code-agent-rate-limit-warning-interval 3600
@@ -1576,6 +1610,8 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
 #+END_SRC
 
 *** Process Sentinel
+
+Normal-exit branch of the sentinel.  Fires complete callback, unregisters the active query, frees the buffer — the path every non-error query takes.
 
 #+BEGIN_SRC elisp
 (defun code-agent--sentinel-handle-normal-exit (state event)
@@ -1760,6 +1796,8 @@ Automatic session recovery when CLI exits abnormally (e.g., killed by signal).
 
 **** Abnormal Exit Detection
 
+Classifies the sentinel's =event= argument into normal vs recovery-warranting.  Signals like SIGKILL + non-zero exit during streaming trigger the recovery branch below.
+
 #+BEGIN_SRC elisp
 (defun code-agent--is-abnormal-exit-p (event state)
   "Check if EVENT represents an abnormal exit that should trigger recovery.
@@ -1779,6 +1817,8 @@ STATE is the process state. Returns t if:
 
 **** Recovery Message Insertion
 
+Inserts a recovery-warning marker into the response stream so the user sees the retry without losing the prior tokens.  Goes through the same token-callback path as real tokens.
+
 #+BEGIN_SRC elisp
 (defun code-agent--insert-recovery-message (state event)
   "Insert a recovery warning message using token-callback.
@@ -1796,6 +1836,8 @@ STATE is the process state, EVENT is the exit event."
 #+END_SRC
 
 **** Session Resumption
+
+Issues =--resume <sdk-uuid>= on a fresh CLI subprocess after abnormal exit.  Reuses the same =process-state=, so the transition is invisible to callbacks.
 
 #+BEGIN_SRC elisp
 (defun code-agent--resume-session (state)
@@ -2148,6 +2190,8 @@ Retries up to 50 times (5 seconds) then force-closes to prevent hang."
 
 *** Process Creation
 
+Resolves the CLI parts tuple (executable, args, Docker-or-not, raw path).  The output is consumed by =start-process= and by the Docker-mode wrapper that injects =docker compose run=.
+
 #+BEGIN_SRC elisp
 (defun code-agent--resolve-cli-parts (options)
   "Return ``(CLI-PARTS DOCKER-P RAW-CLI-PATH)'' for OPTIONS.
@@ -2287,6 +2331,8 @@ Returns a process state object."
 
 *** Content Block Parsing
 
+Single-block parser dispatched on =:type=.  Returns a typed struct (text-block, tool-use-block, etc.); callers pattern-match on the struct type, never on the raw type string.
+
 #+BEGIN_SRC elisp
 (defun code-agent--parse-content-block (block)
   "Parse a content BLOCK plist into appropriate struct."
@@ -2313,6 +2359,8 @@ Returns a process state object."
 #+END_SRC
 
 *** Message Parsing
+
+Sequence parser — runs =parse-content-block= over the list and returns a structurally-typed list ready for dispatch.
 
 #+BEGIN_SRC elisp
 (defun code-agent--parse-content-blocks (blocks)
@@ -2363,6 +2411,8 @@ Returns a process state object."
 :END:
 
 *** Query Function
+
+The =code-agent-query= public API.  Resolves options, spawns the CLI subprocess, registers the active query, and wires the process filter + sentinel to the callbacks.
 
 #+BEGIN_SRC elisp
 (defvar emacs-mcp-server-path-mappings)
@@ -2537,6 +2587,8 @@ SESSION-KEY is an optional session key."
 
 *** Helper Functions
 
+Small text-extraction helpers shared by the user-facing API.  =code-agent-extract-text= flattens assistant messages back into a string for log output, header lines, etc.
+
 #+BEGIN_SRC elisp
 (defun code-agent-extract-text (message)
   "Extract text content from an assistant MESSAGE.
@@ -2640,6 +2692,8 @@ The client API provides bidirectional interactive conversations.
 
 *** Client Structure
 
+=code-agent-client= struct — bundles per-client options, callback set, and session identity for the interactive chat surface.  Distinct from per-query =process-state=.
+
 #+BEGIN_SRC elisp
 (cl-defstruct (code-agent-client
                (:constructor code-agent--make-client)
@@ -2666,6 +2720,8 @@ then `code-agent-client-send-message' for subsequent queries."
 #+END_SRC
 
 *** Client Creation
+
+Factory for =code-agent-client= — keyword-only construction with sensible defaults so the comint chat-mode integration stays one call.
 
 #+BEGIN_SRC elisp
 (cl-defun code-agent-client-create (&key options on-message on-error on-complete
@@ -2704,6 +2760,8 @@ Example:
 #+END_SRC
 
 *** Client Methods
+
+Connection + send + disconnect verbs on the client.  Each is a thin wrapper over the per-query =code-agent-query= path, specialised to persist state across multiple turns.
 
 #+BEGIN_SRC elisp
 (defun code-agent-client-connect (client &optional initial-prompt)
@@ -2853,6 +2911,8 @@ Returns nil if not yet available."
 
 ** Control Request Handling
 
+The =control_request= side-channel — interrupt, set-permission-mode, set-model.  Each request-id gets a matching response sent back to the CLI's stdin.
+
 #+BEGIN_SRC elisp
 (defun code-agent--send-control-response (process request-id subtype response-data)
   "Send control protocol response to PROCESS.
@@ -2974,6 +3034,8 @@ Subtypes:
 
 *** Active Query Tracking
 
+Global hash table mapping =request-id= to live =process-state=.  Cancellation, sentinel sweep, status UI all consult this single source.
+
 #+BEGIN_SRC elisp
 (defvar code-agent--active-queries (make-hash-table :test 'equal)
   "Map request-id to process state for cancellation support.")
@@ -3091,6 +3153,8 @@ Three phases — scan, kill, purge — avoid mutating the hash inside
 
 *** Cancellation Functions
 
+Public =cancel-query= + helpers — marks the state cancelled, delivers a final SIGTERM, unregisters from the active-query table regardless of whether the process actually died.
+
 #+BEGIN_SRC elisp
 (defun code-agent-cancel-query (request-id)
   "Cancel query by REQUEST-ID.
@@ -3130,6 +3194,8 @@ Cancels active queries and removes stale entries."
 
 *** Periodic Cleanup Timer
 
+Background sweep that removes stale =active-queries= entries whose process died without firing the sentinel — paranoia guard against zombie state on long-lived Emacs sessions.
+
 #+BEGIN_SRC elisp
 (defvar code-agent--cleanup-timer nil
   "Timer for periodic stale query cleanup.")
@@ -3166,6 +3232,8 @@ within a session.
 
 *** Verbose Buffer Storage
 
+Configurable cap (lines, characters, bytes) for per-session verbose buffers — without this they grow unbounded over a long session.  Trim happens at the front so the latest messages survive.
+
 #+BEGIN_SRC elisp
 (defcustom code-agent-verbose-buffer-max-size nil
   "Maximum size in characters for verbose buffers.
@@ -3179,6 +3247,8 @@ Recommended: 500000 (500KB) for typical usage."
 
 *** Verbose Mode
 
+=code-agent-verbose-mode= — read-only =special-mode= specialisation that owns the per-session verbose buffer.
+
 #+BEGIN_SRC elisp
 (define-derived-mode code-agent-verbose-mode special-mode "Claude-Verbose"
   "Major mode for viewing Claude session verbose output."
@@ -3188,6 +3258,8 @@ Recommended: 500000 (500KB) for typical usage."
 #+END_SRC
 
 *** Verbose Buffer Management
+
+Insertion + trim primitives for the verbose buffer — wraps =insert= so the cap is enforced on every write rather than as a periodic sweep.
 
 #+BEGIN_SRC elisp
 (defun code-agent--verbose-insert (session-key text)
@@ -3309,6 +3381,8 @@ banner → Command (`--insert-command-section') → Working directory
 #+END_SRC
 
 *** Message Formatter
+
+Pretty-prints tool inputs into the verbose buffer.  Different tool kinds (Read, Bash, Edit, etc.) carry different shapes; this dispatcher renders each with a tool-aware layout.
 
 #+BEGIN_SRC elisp
 (defun code-agent--verbose-format-tool-input (input)
@@ -3468,6 +3542,8 @@ and result messages."
 #+END_SRC
 
 *** View Commands
+
+Interactive commands for jumping to a session's verbose buffer — used both by the transient menu and by the session-manager UI in =code-agent.org=.
 
 #+BEGIN_SRC elisp
 (defun code-agent-show-session-verbose (session-key)
@@ -3704,6 +3780,8 @@ The presentation layer (code-agent-org.org) depends only on these generics.
 
 ** Backend Base Struct
 
+Abstract =code-agent-backend= — every concrete subclass (=claude-code=, ACP profiles, multiplexer-derived) inherits this single base; protocol generics dispatch on it.
+
 #+BEGIN_SRC elisp
 (cl-defstruct (code-agent-backend
                (:constructor nil)
@@ -3716,6 +3794,8 @@ Do not instantiate directly — use a concrete backend constructor."
 #+END_SRC
 
 ** Backend Protocol Generics
+
+Protocol 1 lifecycle + Protocol 3 org-integration =cl-defgeneric= declarations.  Concrete backends provide =cl-defmethod= specialisations; the frontend NEVER branches on backend type.
 
 #+BEGIN_SRC elisp
 (cl-defgeneric code-agent-backend-query (backend prompt callbacks &rest args)
