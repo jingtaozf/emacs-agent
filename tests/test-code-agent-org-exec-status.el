@@ -29,7 +29,7 @@ This is an integration test that verifies:
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
          (code-agent-org-execute)
 
@@ -55,7 +55,7 @@ This is an integration test that verifies:
            (should (equal status-after "cancelled")))
 
          ;; Should no longer be busy
-         (should-not (code-agent-org--session-get session-key :busy)))))))
+         (should-not (code-agent-org-session-get session-key :busy)))))))
 
 (ert-deftest test-org-integration-exec-status-completed ()
   "Test that AI_EXEC_STATUS is set to 'completed' after successful execution."
@@ -73,7 +73,7 @@ This is an integration test that verifies:
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
          (code-agent-org-execute)
 

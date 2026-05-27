@@ -118,7 +118,7 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 (require 'cl-lib)
 
 ;; Shared terminal-base for query registration and session mapping
-(declare-function code-agent-org-terminal--register-query "code-agent-org-terminal-base" (workspace-session-id terminal-id))
+(declare-function code-agent-org-terminal-register-query "code-agent-org-terminal-base" (workspace-session-id terminal-id))
 (defvar code-agent-org-terminal--workspace-to-session-key)
 
 ;; Forward declarations for the multiplexer-completion cycle.
@@ -132,8 +132,8 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 ;; un-decared — duplicating the defvar would trip the structural
 ;; "no-duplicate-definitions" lint, and the byte-compile lint only
 ;; flags undefined *functions*.
-(declare-function code-agent-org--session-get "code-agent-org" (session-key key))
-(declare-function code-agent-org--session-put "code-agent-org" (session-key key value))
+(declare-function code-agent-org-session-get "code-agent-org" (session-key key))
+(declare-function code-agent-org-session-put "code-agent-org" (session-key key value))
 (declare-function code-agent-org--cleanup-session "code-agent-org" (session-key status &optional clear-queue-p))
 (declare-function code-agent-org--dequeue-block "code-agent-org-queue" (session-key))
 (declare-function code-agent-org--persist-duration "code-agent-org" (session-key))
@@ -329,10 +329,10 @@ registers an active query, fires the standard execute-hook,
 flips :busy, maps workspace-id → session-key, marks the heading's
 AI_EXEC_STATUS, and kicks off auto-title (if enabled)."
   (goto-char heading-marker)
-  (code-agent-org-terminal--register-query session-id nil)
-  (when-let* ((session-key (code-agent-org--current-session-key)))
+  (code-agent-org-terminal-register-query session-id nil)
+  (when-let* ((session-key (code-agent-org-current-session-key)))
     (run-hook-with-args 'code-agent-org-execute-hook session-key prompt nil)
-    (code-agent-org--session-put session-key :busy t)
+    (code-agent-org-session-put session-key :busy t)
     (puthash session-id session-key
              code-agent-org-terminal--workspace-to-session-key))
   (code-agent-org--set-exec-status "executing")
@@ -517,7 +517,7 @@ Org headings in response content are shifted to become subsections."
 
 (defun code-agent-org-workspace-bridge--session-key (org-file session-id)
   "Build the canonical session-key string used by the multiplexer
-session table.  Mirrors `code-agent-org--current-session-key' but
+session table.  Mirrors `code-agent-org-current-session-key' but
 takes its inputs as arguments so the bridge MCP target can look up
 the same key without an active buffer point."
   (when (and org-file session-id)
@@ -539,8 +539,8 @@ pending block."
           (when (fboundp 'code-agent-org--persist-tool-count)
             (code-agent-org--persist-tool-count session-key)))
       (error nil))
-    (let* ((loop-current (or (code-agent-org--session-get session-key :loop-current) 1))
-           (loop-max (or (code-agent-org--session-get session-key :loop-max) 1))
+    (let* ((loop-current (or (code-agent-org-session-get session-key :loop-current) 1))
+           (loop-max (or (code-agent-org-session-get session-key :loop-max) 1))
            (should-continue (< loop-current loop-max)))
       (cond
        (should-continue
@@ -567,15 +567,15 @@ pending block."
 re-firing the original prompt.  Mirrors the agent-family
 `code-agent-org--maybe-continue-loop' but goes through the
 multiplexer execute-block dispatch rather than the streaming send."
-  (let* ((loop-current (or (code-agent-org--session-get session-key :loop-current) 1))
-         (loop-max (or (code-agent-org--session-get session-key :loop-max) 1))
-         (loop-interval (or (code-agent-org--session-get session-key :loop-interval) 0))
-         (original-prompt (code-agent-org--session-get session-key :original-prompt))
-         (custom-id (code-agent-org--session-get session-key :custom-id))
-         (section-level (code-agent-org--session-get session-key :section-level))
-         (backend (code-agent-org--session-get session-key :backend))
+  (let* ((loop-current (or (code-agent-org-session-get session-key :loop-current) 1))
+         (loop-max (or (code-agent-org-session-get session-key :loop-max) 1))
+         (loop-interval (or (code-agent-org-session-get session-key :loop-interval) 0))
+         (original-prompt (code-agent-org-session-get session-key :original-prompt))
+         (custom-id (code-agent-org-session-get session-key :custom-id))
+         (section-level (code-agent-org-session-get session-key :section-level))
+         (backend (code-agent-org-session-get session-key :backend))
          (next-iteration (1+ loop-current)))
-    (code-agent-org--session-put session-key :loop-current next-iteration)
+    (code-agent-org-session-put session-key :loop-current next-iteration)
     (when (and backend original-prompt)
       (let ((dispatch
              (lambda ()
@@ -599,7 +599,7 @@ multiplexer execute-block dispatch rather than the streaming send."
 block's saved marker, then dispatches through the backend's
 `execute-block' method.  The marker is freed after dispatch."
   (let ((marker (plist-get block-info :marker))
-        (backend (code-agent-org--session-get session-key :backend))
+        (backend (code-agent-org-session-get session-key :backend))
         (content (plist-get block-info :content)))
     (when (and backend content)
       (when (and marker (marker-buffer marker))

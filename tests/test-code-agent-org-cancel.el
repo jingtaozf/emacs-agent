@@ -44,7 +44,7 @@ Hello
           (goto-char (point-min))
           (search-forward "Hello")
 
-          (let* ((session-key (code-agent-org--current-session-key))
+          (let* ((session-key (code-agent-org-current-session-key))
                  ;; Simulate being in an active query
                  (insert-point (save-excursion
                                  (re-search-forward "#\\+end_src" nil t)
@@ -55,24 +55,24 @@ Hello
                              (point-marker)))))
 
             ;; Set up session state as if query was started
-            (code-agent-org--session-put session-key :marker marker)
-            (code-agent-org--session-put session-key :busy t)
-            (code-agent-org--session-put session-key :process-state 'dummy-state)
+            (code-agent-org-session-put session-key :marker marker)
+            (code-agent-org-session-put session-key :busy t)
+            (code-agent-org-session-put session-key :process-state 'dummy-state)
 
             ;; Verify marker exists before cancel
-            (should (code-agent-org--session-get session-key :marker))
+            (should (code-agent-org-session-get session-key :marker))
 
             ;; Simulate the key part of cancel: it should free the marker
             ;; (We can't call full cancel without a real process)
-            (code-agent-org--session-put session-key :busy nil)
+            (code-agent-org-session-put session-key :busy nil)
             (code-agent-org--free-marker session-key)
 
             ;; After cancel, marker should be nil
-            (should-not (code-agent-org--session-get session-key :marker))
+            (should-not (code-agent-org-session-get session-key :marker))
 
             ;; Now simulate what would happen if handle-complete runs
             ;; It should NOT crash or affect anything because marker is already nil
-            (let ((marker-after (code-agent-org--session-get session-key :marker)))
+            (let ((marker-after (code-agent-org-session-get session-key :marker)))
               (should-not marker-after))))
       (kill-buffer test-buffer))))
 
@@ -147,26 +147,26 @@ Test
           (goto-char (point-min))
           (search-forward "Test")
 
-          (let* ((session-key (code-agent-org--current-session-key))
+          (let* ((session-key (code-agent-org-current-session-key))
                  (marker1 (point-marker))
                  (marker2 (progn (forward-char 1) (point-marker))))
 
             ;; Query1 starts
-            (code-agent-org--session-put session-key :marker marker1)
-            (code-agent-org--session-put session-key :busy t)
+            (code-agent-org-session-put session-key :marker marker1)
+            (code-agent-org-session-put session-key :busy t)
 
             ;; Cancel happens - should free marker immediately
-            (code-agent-org--session-put session-key :busy nil)
+            (code-agent-org-session-put session-key :busy nil)
             (code-agent-org--free-marker session-key)  ;; This is the fix!
 
             ;; Query2 starts quickly (before sentinel runs)
-            (code-agent-org--session-put session-key :marker marker2)
-            (code-agent-org--session-put session-key :busy t)
+            (code-agent-org-session-put session-key :marker marker2)
+            (code-agent-org-session-put session-key :busy t)
 
             ;; Old sentinel's handle-complete runs - would look up :marker
             ;; Before fix: would get marker2 and free it!
             ;; After fix: marker1 was already freed, marker2 is safe
-            (let ((looked-up-marker (code-agent-org--session-get session-key :marker)))
+            (let ((looked-up-marker (code-agent-org-session-get session-key :marker)))
               ;; marker2 should still be valid
               (should looked-up-marker)
               (should (eq looked-up-marker marker2))
@@ -209,16 +209,16 @@ Some partial response text here
           (goto-char (point-min))
           (search-forward "Tell me a story")
 
-          (let* ((session-key (code-agent-org--current-session-key))
+          (let* ((session-key (code-agent-org-current-session-key))
                  ;; Set marker at AI block position (this is what execute does)
                  (block-marker (copy-marker (point))))
             ;; Simulate active query state
-            (code-agent-org--session-put session-key :marker block-marker)
-            (code-agent-org--session-put session-key :busy t)
-            (code-agent-org--session-put session-key :query-id "test-query-cancel-001")
-            (code-agent-org--session-put session-key :query-handle nil)
+            (code-agent-org-session-put session-key :marker block-marker)
+            (code-agent-org-session-put session-key :busy t)
+            (code-agent-org-session-put session-key :query-id "test-query-cancel-001")
+            (code-agent-org-session-put session-key :query-handle nil)
             ;; Create a mock backend that does nothing on cancel
-            (code-agent-org--session-put session-key :backend
+            (code-agent-org-session-put session-key :backend
                                      (code-agent-claude-code-backend--create))
 
             ;; Now cancel
@@ -281,14 +281,14 @@ Tell me a story
           (goto-char (point-min))
           (search-forward "Tell me a story")
 
-          (let* ((session-key (code-agent-org--current-session-key))
+          (let* ((session-key (code-agent-org-current-session-key))
                  (block-marker (copy-marker (point))))
             ;; Simulate active query state
-            (code-agent-org--session-put session-key :marker block-marker)
-            (code-agent-org--session-put session-key :busy t)
-            (code-agent-org--session-put session-key :query-id "test-query-cancel-002")
-            (code-agent-org--session-put session-key :query-handle nil)
-            (code-agent-org--session-put session-key :backend
+            (code-agent-org-session-put session-key :marker block-marker)
+            (code-agent-org-session-put session-key :busy t)
+            (code-agent-org-session-put session-key :query-id "test-query-cancel-002")
+            (code-agent-org-session-put session-key :query-handle nil)
+            (code-agent-org-session-put session-key :backend
                                      (code-agent-claude-code-backend--create))
 
             ;; Cancel before any tokens streamed

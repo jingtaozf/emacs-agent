@@ -27,8 +27,8 @@ FIX: In the completion handler, call org-entry-put for token counts."
       (insert ":QUERY_ID: q-tel-1\n")
       (insert ":END:\n")
       (insert "Response text\n")
-      (code-agent-org--session-put session-key :marker (point-min-marker))
-      (code-agent-org--session-put session-key :query-id "q-tel-1")
+      (code-agent-org-session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :query-id "q-tel-1")
       ;; Simulate persisting usage data
       (code-agent-org--persist-telemetry session-key
                                      '(:input-tokens 1500
@@ -58,9 +58,9 @@ FIX: Record start-time on query begin, compute duration on completion."
       (insert ":QUERY_ID: q-tel-2\n")
       (insert ":END:\n")
       (insert "Response text\n")
-      (code-agent-org--session-put session-key :marker (point-min-marker))
-      (code-agent-org--session-put session-key :query-id "q-tel-2")
-      (code-agent-org--session-put session-key :start-time (- (float-time) 5.3))
+      (code-agent-org-session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :query-id "q-tel-2")
+      (code-agent-org-session-put session-key :start-time (- (float-time) 5.3))
       ;; Persist duration
       (code-agent-org--persist-duration session-key)
       ;; Verify property (should be approximately 5 seconds)
@@ -87,10 +87,10 @@ FIX: Increment counter on each tool-use message, persist on completion."
       (insert ":QUERY_ID: q-tel-3\n")
       (insert ":END:\n")
       (insert "Response text\n")
-      (code-agent-org--session-put session-key :marker (point-min-marker))
-      (code-agent-org--session-put session-key :query-id "q-tel-3")
+      (code-agent-org-session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :query-id "q-tel-3")
       ;; Simulate 5 tool calls
-      (code-agent-org--session-put session-key :tool-call-count 5)
+      (code-agent-org-session-put session-key :tool-call-count 5)
       ;; Persist tool count
       (code-agent-org--persist-tool-count session-key)
       ;; Verify property

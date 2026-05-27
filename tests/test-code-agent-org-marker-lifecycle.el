@@ -80,7 +80,7 @@
                        (insert "test")
                        (point-marker))))
         ;; Set it as the running marker
-        (code-agent-org--session-put session-key :marker marker)
+        (code-agent-org-session-put session-key :marker marker)
         ;; Kill the buffer to invalidate marker
         (kill-buffer buf)
         ;; Now try to queue - should not crash
@@ -109,7 +109,7 @@
                        (insert "test")
                        (point-marker))))
         ;; Queue the block
-        (code-agent-org--session-put session-key :pending-queue
+        (code-agent-org-session-put session-key :pending-queue
                                   (list (list :marker marker
                                              :custom-id "test-id"
                                              :content "test")))
@@ -137,7 +137,7 @@
                      (insert "* Test\n#+begin_src ai\ntest\n#+end_src\n")
                      (point-marker))))
       ;; Set session state
-      (code-agent-org--session-put session-key :marker marker)
+      (code-agent-org-session-put session-key :marker marker)
       ;; Kill the buffer
       (kill-buffer buf)
       ;; Try to handle a token - should not error

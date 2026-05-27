@@ -102,12 +102,12 @@ Returns the full path if valid, signals error if not found."
 
 (defun test-org-session-field-eq (session-key field expected)
   "Assert that session SESSION-KEY's FIELD equals EXPECTED."
-  (let ((actual (code-agent-org--session-get session-key field)))
+  (let ((actual (code-agent-org-session-get session-key field)))
     (should (equal expected actual))))
 
 (defun test-org-session-field-nil (session-key field)
   "Assert that session SESSION-KEY's FIELD is nil."
-  (should-not (code-agent-org--session-get session-key field)))
+  (should-not (code-agent-org-session-get session-key field)))
 
 (provide 'org-fixtures)
 ;;; org-fixtures.el ends here

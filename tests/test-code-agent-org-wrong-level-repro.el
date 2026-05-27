@@ -11,14 +11,14 @@
 ;; at wrong org heading levels.
 ;;
 ;; Key bug: In `code-agent-org--create-response-section' (code-agent-org.org:1893):
-;;   (let* ((section-level (or (code-agent-org--session-get session-key :section-level) 1))
+;;   (let* ((section-level (or (code-agent-org-session-get session-key :section-level) 1))
 ;; When session-state initializes :section-level to 0 (line 1719), `(or 0 1)'
 ;; returns 0 in Elisp (0 is truthy!). Then `(make-string 0 ?*)' produces an
 ;; empty string, so the response heading has NO stars -- it's plain text,
 ;; not a valid org heading.
 ;;
 ;; Similarly in `code-agent-org--handle-token-v2' (line 2015):
-;;   (let* ((target-level (1+ (or (code-agent-org--session-get session-key :section-level) 0)))
+;;   (let* ((target-level (1+ (or (code-agent-org-session-get session-key :section-level) 0)))
 ;; When section-level is 0, `(or 0 0)' => 0, target-level = 1, so Claude's
 ;; `*' headers stay as `*' (top-level) instead of being normalized to nested level.
 
@@ -35,7 +35,7 @@
 has NO stars because `(make-string 0 ?*)' => \"\".
 
 BUG: Line 1893 of code-agent-org.org:
-  (let* ((section-level (or (code-agent-org--session-get session-key :section-level) 1))
+  (let* ((section-level (or (code-agent-org-session-get session-key :section-level) 1))
 In Elisp, 0 is truthy, so `(or 0 1)' returns 0.
 Then `(make-string 0 ?*)' produces \"\", making the heading plain text
 like \" Response 1 (2026-02-28 12:00) :ai_output:\" with no leading stars.
@@ -50,10 +50,10 @@ Instead it silently produces an invalid org heading."
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "/tmp/test-level-zero.org"))
       ;; Session state now initializes section-level to nil (fixed from 0)
-      (should (null (code-agent-org--session-get session-key :section-level)))
+      (should (null (code-agent-org-session-get session-key :section-level)))
       ;; Set it explicitly to 0 (simulating AI block before first heading)
-      (code-agent-org--session-put session-key :section-level 0)
-      (code-agent-org--session-put session-key :query-id "test-qid-001")
+      (code-agent-org-session-put session-key :section-level 0)
+      (code-agent-org-session-put session-key :query-id "test-qid-001")
       (goto-char (point-max))
       ;; Call create-response-section
       (code-agent-org--create-response-section session-key "test-qid-001" 'normal)
@@ -84,9 +84,9 @@ the execute function has written the correct section-level to session state."
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "/tmp/test-level-fallback.org"))
       ;; Fresh session: section-level defaults to nil
-      (should (null (code-agent-org--session-get session-key :section-level)))
+      (should (null (code-agent-org-session-get session-key :section-level)))
       ;; DO NOT set section-level - simulating race condition
-      (code-agent-org--session-put session-key :query-id "test-qid-002")
+      (code-agent-org-session-put session-key :query-id "test-qid-002")
       (goto-char (point-max))
       (code-agent-org--create-response-section session-key "test-qid-002" 'normal)
       ;; FIXED: session defaults to nil, so (if (and nil ...) ...) => 1 fallback
@@ -117,8 +117,8 @@ the response heading should use that level."
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "/tmp/test-level-queued.org"))
       ;; Simulate Block A has run at level 3
-      (code-agent-org--session-put session-key :section-level 3)
-      (code-agent-org--session-put session-key :query-id "block-a-qid")
+      (code-agent-org-session-put session-key :section-level 3)
+      (code-agent-org-session-put session-key :query-id "block-a-qid")
       ;; Block A's response was created at level 3
       (insert "*** Response 1 (2026-01-01 10:00) :ai_output:\n")
       (insert ":PROPERTIES:\n:QUERY_ID: block-a-qid\n:END:\n\n")
@@ -126,8 +126,8 @@ the response heading should use that level."
       ;; Now simulate Block B being dequeued.
       ;; execute-queued-block (line 5069) writes section-level BEFORE
       ;; calling create-response-section.
-      (code-agent-org--session-put session-key :section-level 5)
-      (code-agent-org--session-put session-key :query-id "block-b-qid")
+      (code-agent-org-session-put session-key :section-level 5)
+      (code-agent-org-session-put session-key :query-id "block-b-qid")
       ;; Create Block B's response section
       (goto-char (point-max))
       (code-agent-org--create-response-section session-key "block-b-qid" 'normal)
@@ -184,7 +184,7 @@ target-level becomes 1 via `(1+ (or 0 0))' = `(1+ 0)' = 1. Claude's
 to a nested level.
 
 BUG: handle-token-v2 (line 2015):
-  (let* ((target-level (1+ (or (code-agent-org--session-get session-key :section-level) 0)))
+  (let* ((target-level (1+ (or (code-agent-org-session-get session-key :section-level) 0)))
 When section-level is 0, `(or 0 0)' => 0 (0 is truthy in Elisp!),
 so target-level = 1. Claude's `* Heading' maps to level 1 (unchanged).
 
@@ -198,10 +198,10 @@ But because section-level was 0 (never properly set), we get level 1."
     (let ((session-key "/tmp/test-normalize-level.org"))
       ;; Session-level is nil (default), simulating the case where
       ;; execute never stored the correct level
-      (should (null (code-agent-org--session-get session-key :section-level)))
+      (should (null (code-agent-org-session-get session-key :section-level)))
       ;; Compute target-level the same way handle-token-v2 does (FIXED)
       ;; (if (and nil ...) nil 1) => 1, then (1+ 1) => 2
-      (let* ((target-level (1+ (let ((raw (code-agent-org--session-get session-key :section-level)))
+      (let* ((target-level (1+ (let ((raw (code-agent-org-session-get session-key :section-level)))
                                  (if (and raw (> raw 0)) raw 1)))))
         ;; FIXED: target-level is 2 (fallback 1 + 1), not 1
         (should (= 2 target-level))
@@ -234,17 +234,17 @@ sequencing guarantee ever breaks."
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "/tmp/test-overwrite-level.org"))
       ;; Block A is executing at level 2
-      (code-agent-org--session-put session-key :section-level 2)
-      (code-agent-org--session-put session-key :query-id "block-a-qid")
+      (code-agent-org-session-put session-key :section-level 2)
+      (code-agent-org-session-put session-key :query-id "block-a-qid")
       ;; Verify Block A's target-level for header normalization
-      (let ((target-level-a (1+ (or (code-agent-org--session-get session-key :section-level) 0))))
+      (let ((target-level-a (1+ (or (code-agent-org-session-get session-key :section-level) 0))))
         (should (= 3 target-level-a))) ; 2 + 1 = 3 (correct for Block A)
       ;; Now simulate Block B being dequeued and writing its section-level
       ;; (This is what execute-queued-block does at line 5069)
-      (code-agent-org--session-put session-key :section-level 4)
+      (code-agent-org-session-put session-key :section-level 4)
       ;; BUG: If Block A's token handler runs NOW, it reads the WRONG level
       (let ((target-level-after-overwrite
-             (1+ (or (code-agent-org--session-get session-key :section-level) 0))))
+             (1+ (or (code-agent-org-session-get session-key :section-level) 0))))
         ;; Block A would now use target-level=5 instead of 3!
         (should (= 5 target-level-after-overwrite))
         ;; CORRECT behavior: Block A should still use target-level=3

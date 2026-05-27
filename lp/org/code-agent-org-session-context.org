@@ -102,7 +102,7 @@ single org file — section-scoped takes precedence over file-scoped.
 
 #+NAME: session-id-functions
 #+BEGIN_SRC elisp
-(defun code-agent-org--get-session-id ()
+(defun code-agent-org-get-session-id ()
   "Get user-defined CLAUDE_SESSION_ID from org properties.
 Searches section property drawer first, then file-level #+PROPERTY.
 Returns nil if no session ID is defined (file path will be used alone).
@@ -126,11 +126,11 @@ Returns nil safely if not in org-mode context."
          (inherited-session 'file)
          (t nil))))))
 
-(defun code-agent-org--current-session-key ()
+(defun code-agent-org-current-session-key ()
   "Get the session key for the current context.
 Combines file path with optional CLAUDE_SESSION_ID property.
 Uses code-agent session key format for consistency."
-  (let ((custom-id (code-agent-org--get-session-id)))
+  (let ((custom-id (code-agent-org-get-session-id)))
     (code-agent-make-session-key buffer-file-name custom-id)))
 #+END_SRC
 
@@ -379,7 +379,7 @@ Returns list of (question . response) pairs for recovery."
 Inserts a user-facing error via `--insert-error' (which also runs
 `--cleanup-session') and returns t so the caller short-circuits.
 Otherwise increments the counter and returns nil."
-  (let ((count (or (code-agent-org--session-get session-key :recovery-count) 0)))
+  (let ((count (or (code-agent-org-session-get session-key :recovery-count) 0)))
     (if (>= count code-agent-org-max-recovery-attempts)
         (progn
           (code-agent-org--insert-error
@@ -387,8 +387,8 @@ Otherwise increments the counter and returns nil."
            (format "Recovery limit reached (%d attempts). Please retry manually."
                    count))
           t)
-      (code-agent-org--session-put session-key :recovery-count (1+ count))
-      (code-agent-org--session-put session-key :recovering t)
+      (code-agent-org-session-put session-key :recovery-count (1+ count))
+      (code-agent-org-session-put session-key :recovering t)
       nil)))
 
 (defun code-agent-org--insert-recovery-section (session-key response-pos
@@ -409,7 +409,7 @@ keyed on REASON.  OLD-QUERY-ID supplies the :PARENT_QUERY_ID property."
       (org-end-of-subtree t)
       (insert "\n\n")
       (let ((new-query-id (code-agent-org--generate-query-id)))
-        (code-agent-org--session-put session-key :query-id new-query-id)
+        (code-agent-org-session-put session-key :query-id new-query-id)
         (code-agent-org--create-response-section
          session-key new-query-id 'recovery old-query-id reason-str)
         (insert recovery-msg "\n\n")))))
@@ -424,9 +424,9 @@ callbacks from the dead query), and forwards through the normal
 send-request path."
   (code-agent-org--clear-sdk-uuid)
   (let* ((context         (code-agent-org--collect-session-context))
-         (original-prompt (code-agent-org--session-get session-key :original-prompt))
+         (original-prompt (code-agent-org-session-get session-key :original-prompt))
          (recovery-prompt (code-agent-org--build-recovery-prompt context original-prompt)))
-    (code-agent-org--session-put session-key :recovering nil)
+    (code-agent-org-session-put session-key :recovering nil)
     (code-agent-org--send-request recovery-prompt nil session-key)))
 
 (defun code-agent-org--recover-session (session-key &optional reason)
@@ -448,11 +448,11 @@ top-to-bottom:
 The old query's callbacks are ignored by query-id mismatch, so we
 don't cancel the in-flight process here."
   (code-agent-with-span "recover-session"
-      (list :custom-id (code-agent-org--session-get session-key :custom-id)
+      (list :custom-id (code-agent-org-session-get session-key :custom-id)
             :reason (format "%s" reason))
     nil
     (unless (code-agent-org--recovery-budget-spent-p session-key)
-      (let* ((old-query-id (code-agent-org--session-get session-key :query-id))
+      (let* ((old-query-id (code-agent-org-session-get session-key :query-id))
              (response-pos (code-agent-org--find-response-by-query-id old-query-id)))
         (if (not response-pos)
             (progn

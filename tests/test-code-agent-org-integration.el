@@ -235,14 +235,14 @@ should be able to execute in parallel without interference."
          (goto-char (point-min))
          (re-search-forward "^\\*+ Instruction 9")
          (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai")
-         (setq session-key-1 (code-agent-org--current-session-key))
+         (setq session-key-1 (code-agent-org-current-session-key))
          (code-agent-org-execute)
 
          ;; Start instruction 10 (Concurrent Session 2)
          (goto-char (point-min))
          (re-search-forward "^\\*+ Instruction 10")
          (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai")
-         (setq session-key-2 (code-agent-org--current-session-key))
+         (setq session-key-2 (code-agent-org-current-session-key))
          (code-agent-org-execute)
 
          ;; Wait for both to complete (with longer timeout for concurrent ops)
@@ -269,7 +269,7 @@ should be able to execute in parallel without interference."
          (goto-char (point-min))
          (re-search-forward "^\\*+ Instruction 1")
          (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai")
-         (let ((session-key (code-agent-org--current-session-key)))
+         (let ((session-key (code-agent-org-current-session-key)))
            (code-agent-org-execute)
 
            ;; Give it time to start and update header
@@ -302,7 +302,7 @@ should be able to execute in parallel without interference."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1")
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai")
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
 
          ;; Wait longer for query to actually start
@@ -317,7 +317,7 @@ should be able to execute in parallel without interference."
          (accept-process-output nil 0.3)
 
          ;; Should no longer be busy
-         (should-not (code-agent-org--session-get session-key :busy))
+         (should-not (code-agent-org-session-get session-key :busy))
 
          ;; Should see [Cancelled] marker
          (goto-char (point-min))
@@ -430,7 +430,7 @@ should be able to execute in parallel without interference."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1")
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai")
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
 
          ;; Wait for query to start
@@ -512,7 +512,7 @@ generated in parallel using Haiku and the heading should be updated."
          (re-search-forward "^\\*+ Instruction 1\\b" nil t)
          (let ((heading-pos (match-beginning 0)))
            (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-           (let ((session-key (code-agent-org--current-session-key)))
+           (let ((session-key (code-agent-org-current-session-key)))
              (code-agent-org-execute)
              ;; Wait for main query to complete
              (test-claude-wait-for-completion session-key 60)
@@ -546,7 +546,7 @@ Headings that don't match 'Instruction N' pattern should not be changed."
          (let ((original-heading (org-get-heading t t t t)))
            ;; Find the ai block in this section (Instruction 3)
            (when (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-             (let ((session-key (code-agent-org--current-session-key))
+             (let ((session-key (code-agent-org-current-session-key))
                    (code-agent-org-auto-generate-title t))
                (code-agent-org-execute)
                (test-claude-wait-for-completion session-key 60)
@@ -581,7 +581,7 @@ buffer and instruction number for better identification."
        ;; Go to instruction 1
        (goto-char (point-min))
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (buf (current-buffer)))
          ;; Execute and immediately check active query
          (code-agent-org-execute)
@@ -631,7 +631,7 @@ buffer and instruction number for better identification."
        (clrhash code-agent--active-queries)
        (goto-char (point-min))
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
          (sleep-for 0.5)
          ;; Trigger mode-line update
@@ -774,7 +774,7 @@ when scheduled time is in the past and no prior execution occurred."
          (forward-line 1)
 
          ;; Wait for the query to complete
-         (let ((session-key (code-agent-org--current-session-key)))
+         (let ((session-key (code-agent-org-current-session-key)))
            (test-claude-wait-for-completion session-key 60))
 
          ;; After execution, LAST_AI_EXECUTED should be set
@@ -827,7 +827,7 @@ This test verifies that a +1d repeater advances the SCHEDULED date."
          (forward-line 1)
 
          ;; Wait for the query to complete
-         (let ((session-key (code-agent-org--current-session-key)))
+         (let ((session-key (code-agent-org-current-session-key)))
            (test-claude-wait-for-completion session-key 60))
 
          ;; Navigate back and check the timestamp was advanced
@@ -945,11 +945,11 @@ Execute Block A, then immediately execute Block B - B should be queued."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          ;; Execute Block A
          (code-agent-org-execute)
          ;; Session should be busy now
-         (should (code-agent-org--session-get session-key :busy))
+         (should (code-agent-org-session-get session-key :busy))
          ;; Queue should be empty
          (should (= 0 (code-agent-org--queue-count session-key)))
 
@@ -971,7 +971,7 @@ Execute Block A, then immediately execute Block B - B should be queued."
          ;; Queue should be empty now
          (should (= 0 (code-agent-org--queue-count session-key)))
          ;; Session should not be busy
-         (should-not (code-agent-org--session-get session-key :busy)))))))
+         (should-not (code-agent-org-session-get session-key :busy)))))))
 
 (ert-deftest test-org-integration-queue-multiple ()
   "Test queueing multiple blocks in sequence.
@@ -988,7 +988,7 @@ Execute A, then queue B and C - both should execute in order."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
 
          ;; Queue Block B (Instruction 21)
@@ -1012,7 +1012,7 @@ Execute A, then queue B and C - both should execute in order."
 
          ;; All done
          (should (= 0 (code-agent-org--queue-count session-key)))
-         (should-not (code-agent-org--session-get session-key :busy)))))))
+         (should-not (code-agent-org-session-get session-key :busy)))))))
 
 (ert-deftest test-org-integration-queue-cancel-clears ()
   "Test that canceling clears the queue."
@@ -1028,7 +1028,7 @@ Execute A, then queue B and C - both should execute in order."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
 
          ;; Queue Block B
@@ -1044,7 +1044,7 @@ Execute A, then queue B and C - both should execute in order."
          ;; Queue should be cleared
          (should (= 0 (code-agent-org--queue-count session-key)))
          ;; Session should not be busy
-         (should-not (code-agent-org--session-get session-key :busy)))))))
+         (should-not (code-agent-org-session-get session-key :busy)))))))
 
 (ert-deftest test-org-integration-queue-response-appears ()
   "Test that queued blocks produce responses in the buffer."
@@ -1060,7 +1060,7 @@ Execute A, then queue B and C - both should execute in order."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
 
          ;; Queue Block B
@@ -1103,10 +1103,10 @@ AI block (Instruction 21), not inside Block A's response section."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
          ;; Session should be busy
-         (should (code-agent-org--session-get session-key :busy))
+         (should (code-agent-org-session-get session-key :busy))
 
          ;; Queue Block B (Instruction 21) while A is running
          (goto-char (point-min))
@@ -1164,9 +1164,9 @@ Execute Block A, then try to queue Block B twice - second attempt should be reje
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
-         (should (code-agent-org--session-get session-key :busy))
+         (should (code-agent-org-session-get session-key :busy))
 
          ;; Navigate to Block B (Instruction 21) and queue it
          (goto-char (point-min))
@@ -1202,9 +1202,9 @@ This tests Issue 1: prevent queueing a block that is already running."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
-         (should (code-agent-org--session-get session-key :busy))
+         (should (code-agent-org-session-get session-key :busy))
          ;; Queue should be empty (the running block is not in queue)
          (should (= 0 (code-agent-org--queue-count session-key)))
 
@@ -1235,9 +1235,9 @@ Execute Block A, queue Block B, then cancel queue - A should keep running."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 20" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key)))
+       (let ((session-key (code-agent-org-current-session-key)))
          (code-agent-org-execute)
-         (should (code-agent-org--session-get session-key :busy))
+         (should (code-agent-org-session-get session-key :busy))
 
          ;; Queue Block B (Instruction 21)
          (goto-char (point-min))
@@ -1252,13 +1252,13 @@ Execute Block A, queue Block B, then cancel queue - A should keep running."
          ;; Queue should be cleared
          (should (= 0 (code-agent-org--queue-count session-key)))
          ;; But the running query should STILL be active
-         (should (code-agent-org--session-get session-key :busy))
-         (should (code-agent-org--session-get session-key :process-state))
+         (should (code-agent-org-session-get session-key :busy))
+         (should (code-agent-org-session-get session-key :process-state))
 
          ;; Wait for Block A to complete naturally
          (test-claude-wait-for-completion session-key 60)
          ;; Verify Block A completed (not cancelled)
-         (should-not (code-agent-org--session-get session-key :busy)))))))
+         (should-not (code-agent-org-session-get session-key :busy)))))))
 
 (provide 'test-code-agent-org-integration)
 ;;; test-code-agent-org-integration.el ends here

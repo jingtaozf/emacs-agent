@@ -1051,7 +1051,7 @@ The old code used clrhash which wiped ALL entries including other sessions."
             (let ((inhibit-read-only t))
               (insert (make-string 200 ?x))))
           ;; Trigger insert which should trim
-          (code-agent--verbose-insert "test-key" "new-content")
+          (code-agent-verbose-insert "test-key" "new-content")
           (with-current-buffer buf
             ;; Buffer should have been trimmed: not dramatically larger than max
             (should (<= (buffer-size) (+ code-agent-verbose-buffer-max-size 50)))))
@@ -1067,7 +1067,7 @@ The old code used clrhash which wiped ALL entries including other sessions."
     (unwind-protect
         (progn
           (puthash "test-key" buf code-agent--session-verbose-buffers)
-          (code-agent--verbose-insert "test-key" "small text")
+          (code-agent-verbose-insert "test-key" "small text")
           (with-current-buffer buf
             (should (string-match-p "small text" (buffer-string)))))
       (when (buffer-live-p buf)
@@ -1085,7 +1085,7 @@ The old code used clrhash which wiped ALL entries including other sessions."
           (with-current-buffer buf
             (let ((inhibit-read-only t))
               (insert (make-string 200 ?x))))
-          (code-agent--verbose-insert "test-key" "more")
+          (code-agent-verbose-insert "test-key" "more")
           (with-current-buffer buf
             ;; No trimming, so buffer should be large
             (should (> (buffer-size) 200))))

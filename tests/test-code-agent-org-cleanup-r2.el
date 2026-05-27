@@ -24,9 +24,9 @@ Sets up code-agent-org--sessions hash table."
 (defun test-r2--setup-session (session-key &rest props)
   "Set up a minimal session for SESSION-KEY with PROPS."
   (code-agent-org--get-session session-key)
-  (code-agent-org--session-put session-key :busy t)
+  (code-agent-org-session-put session-key :busy t)
   (while props
-    (code-agent-org--session-put session-key (car props) (cadr props))
+    (code-agent-org-session-put session-key (car props) (cadr props))
     (setq props (cddr props)))
   session-key)
 
@@ -47,17 +47,17 @@ BUG B1: cancel only sets :busy nil, leaves :recovering stale."
         :query-id "qid-f19-1"
         :marker (copy-marker (point-min)))
       ;; Verify pre-conditions
-      (should (code-agent-org--session-get sk :recovering))
-      (should (code-agent-org--session-get sk :last-assistant-query-id))
+      (should (code-agent-org-session-get sk :recovering))
+      (should (code-agent-org-session-get sk :last-assistant-query-id))
       ;; Act: simulate cancel (without backend, just the cleanup part)
       ;; The real cancel calls backend-cancel first, then cleanup.
       ;; We test cleanup completeness by calling cleanup-session directly
       ;; with "cancelled" status — this is what cancel SHOULD do.
       (code-agent-org--cleanup-session sk "cancelled" t)
       ;; :recovering should be cleared
-      (should-not (code-agent-org--session-get sk :recovering))
+      (should-not (code-agent-org-session-get sk :recovering))
       ;; :last-assistant-query-id should be cleared
-      (should-not (code-agent-org--session-get sk :last-assistant-query-id)))))
+      (should-not (code-agent-org-session-get sk :last-assistant-query-id)))))
 
 (ert-deftest test-r2-cancel-frees-queued-block-markers ()
   "cancel should free markers in queued blocks (via cleanup-queued-blocks).
@@ -83,7 +83,7 @@ BUG B2: cancel uses clear-queue which doesn't free markers."
       (should-not (marker-position q-marker-1))
       (should-not (marker-position q-marker-2))
       ;; Queue should be empty
-      (should-not (code-agent-org--session-get sk :pending-queue)))))
+      (should-not (code-agent-org-session-get sk :pending-queue)))))
 
 (ert-deftest test-r2-cancel-function-uses-cleanup-session ()
   "The actual code-agent-org-cancel function should use cleanup-session.
@@ -95,25 +95,25 @@ Verify by checking that :recovering is cleared (which only reset-session-state d
     (setq buffer-file-name "/tmp/test-f19-cancel.org")
     (goto-char (point-min))
     (re-search-forward "begin_src ai" nil t)
-    (let ((sk (code-agent-org--current-session-key)))
+    (let ((sk (code-agent-org-current-session-key)))
       (should sk)  ; verify session key was generated
       ;; Set up session manually (need :backend for cancel's guard check)
-      (code-agent-org--session-put sk :busy t)
-      (code-agent-org--session-put sk :recovering t)
-      (code-agent-org--session-put sk :backend 'mock-backend)
-      (code-agent-org--session-put sk :query-id "qid-f19-3")
-      (code-agent-org--session-put sk :marker (copy-marker (point-min)))
+      (code-agent-org-session-put sk :busy t)
+      (code-agent-org-session-put sk :recovering t)
+      (code-agent-org-session-put sk :backend 'mock-backend)
+      (code-agent-org-session-put sk :query-id "qid-f19-3")
+      (code-agent-org-session-put sk :marker (copy-marker (point-min)))
       ;; Mock backend-cancel and other side-effect functions
       (cl-letf (((symbol-function 'code-agent-backend-cancel) #'ignore)
                 ((symbol-function 'code-agent-org--start-spinner) #'ignore)
                 ((symbol-function 'code-agent-org--stop-spinner) #'ignore)
-                ((symbol-function 'code-agent-org--refresh-header-line) #'ignore)
+                ((symbol-function 'code-agent-org-refresh-header-line) #'ignore)
                 ((symbol-function 'code-agent-org--unregister-active-query) #'ignore))
         (code-agent-org-cancel))
       ;; :recovering should be cleared (proves reset-session-state was called)
-      (should-not (code-agent-org--session-get sk :recovering))
+      (should-not (code-agent-org-session-get sk :recovering))
       ;; :busy should be nil
-      (should-not (code-agent-org--session-get sk :busy)))))
+      (should-not (code-agent-org-session-get sk :busy)))))
 
 ;;; ---------------------------------------------------------------
 ;;; F20: Complete narrowing safety
@@ -223,7 +223,7 @@ BUG A6: run-at-time timer is never stored or cancelled."
       ;; Timer should be cancelled
       (should-not (memq timer timer-list))
       ;; :loop-timer should be cleared from session
-      (should-not (code-agent-org--session-get sk :loop-timer)))))
+      (should-not (code-agent-org-session-get sk :loop-timer)))))
 
 ;;; ---------------------------------------------------------------
 ;;; F23: Minor resource cleanup

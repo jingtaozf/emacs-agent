@@ -29,11 +29,11 @@
     (org-mode)
     (setq buffer-file-name "/tmp/test.org")
     ;; Without custom session ID
-    (cl-letf (((symbol-function 'code-agent-org--get-session-id) (lambda () nil)))
-      (should (equal "/tmp/test.org" (code-agent-org--current-session-key))))
+    (cl-letf (((symbol-function 'code-agent-org-get-session-id) (lambda () nil)))
+      (should (equal "/tmp/test.org" (code-agent-org-current-session-key))))
     ;; With custom session ID
-    (cl-letf (((symbol-function 'code-agent-org--get-session-id) (lambda () "my-session")))
-      (should (equal "/tmp/test.org::my-session" (code-agent-org--current-session-key))))))
+    (cl-letf (((symbol-function 'code-agent-org-get-session-id) (lambda () "my-session")))
+      (should (equal "/tmp/test.org::my-session" (code-agent-org-current-session-key))))))
 
 (ert-deftest test-code-agent-org-get-session-id-from-property ()
   "Test getting session ID from org properties."
@@ -47,15 +47,15 @@
     ;; At Section 1 - should get section-level ID
     (goto-char (point-min))
     (re-search-forward "^\\* Section 1")
-    (should (equal "section-session" (code-agent-org--get-session-id)))
+    (should (equal "section-session" (code-agent-org-get-session-id)))
     ;; At Section 2 - should inherit file-level ID
     (goto-char (point-min))
     (re-search-forward "^\\* Section 2")
-    (should (equal "file-session" (code-agent-org--get-session-id)))
+    (should (equal "file-session" (code-agent-org-get-session-id)))
     ;; Before first heading - may return nil or file-level ID
     (goto-char (point-min))
-    (should (or (null (code-agent-org--get-session-id))
-                (stringp (code-agent-org--get-session-id))))))
+    (should (or (null (code-agent-org-get-session-id))
+                (stringp (code-agent-org-get-session-id))))))
 
 (ert-deftest test-code-agent-org-session-scope-detection ()
   "Test detection of session scope (file vs section)."
@@ -365,11 +365,11 @@ Response sections are at the same level as instructions (siblings)."
     ;; At Section 1 - section-level override
     (goto-char (point-min))
     (re-search-forward "^\\* Section 1")
-    (should (equal "/tmp/section-project" (code-agent-org--get-project-root)))
+    (should (equal "/tmp/section-project" (code-agent-org-get-project-root)))
     ;; At Section 2 - inherit file-level
     (goto-char (point-min))
     (re-search-forward "^\\* Section 2")
-    (should (equal "/tmp/project" (code-agent-org--get-project-root)))))
+    (should (equal "/tmp/project" (code-agent-org-get-project-root)))))
 
 (ert-deftest test-code-agent-org-collect-system-prompts ()
   "Test collecting :system_prompt: tagged sections."
@@ -481,10 +481,10 @@ Response sections are at the same level as instructions (siblings)."
     (setq buffer-file-name "/tmp/test.org")
     (code-agent-org-mode 1)
     (let ((key "test-key"))
-      (code-agent-org--session-put key :foo "bar")
-      (should (equal "bar" (code-agent-org--session-get key :foo)))
-      (code-agent-org--session-put key :busy t)
-      (should (equal t (code-agent-org--session-get key :busy))))))
+      (code-agent-org-session-put key :foo "bar")
+      (should (equal "bar" (code-agent-org-session-get key :foo)))
+      (code-agent-org-session-put key :busy t)
+      (should (equal t (code-agent-org-session-get key :busy))))))
 
 (ert-deftest test-code-agent-org-active-session-count ()
   "Test counting active sessions."
@@ -494,11 +494,11 @@ Response sections are at the same level as instructions (siblings)."
     (setq buffer-file-name "/tmp/test.org")
     (code-agent-org-mode 1)
     (should (= 0 (code-agent-org--active-session-count)))
-    (code-agent-org--session-put "session-1" :busy t)
+    (code-agent-org-session-put "session-1" :busy t)
     (should (= 1 (code-agent-org--active-session-count)))
-    (code-agent-org--session-put "session-2" :busy t)
+    (code-agent-org-session-put "session-2" :busy t)
     (should (= 2 (code-agent-org--active-session-count)))
-    (code-agent-org--session-put "session-1" :busy nil)
+    (code-agent-org-session-put "session-1" :busy nil)
     (should (= 1 (code-agent-org--active-session-count)))))
 
 (ert-deftest test-code-agent-org-session-display-name ()
@@ -784,19 +784,19 @@ This ensures loop iterations use the original session, not current cursor positi
   :tags '(:unit :fast :stable :isolated :org :loop)
   (let ((test-session-key "test-loop-session::test"))
     ;; Setup loop state as code-agent-org-execute would
-    (code-agent-org--session-put test-session-key :loop-max 5)
-    (code-agent-org--session-put test-session-key :loop-current 1)
-    (code-agent-org--session-put test-session-key :loop-interval 10)
-    (code-agent-org--session-put test-session-key :original-prompt "test prompt")
-    (code-agent-org--session-put test-session-key :instruction-num 1)
+    (code-agent-org-session-put test-session-key :loop-max 5)
+    (code-agent-org-session-put test-session-key :loop-current 1)
+    (code-agent-org-session-put test-session-key :loop-interval 10)
+    (code-agent-org-session-put test-session-key :original-prompt "test prompt")
+    (code-agent-org-session-put test-session-key :instruction-num 1)
     ;; Verify state is retrievable
-    (should (= 5 (code-agent-org--session-get test-session-key :loop-max)))
-    (should (= 1 (code-agent-org--session-get test-session-key :loop-current)))
-    (should (= 10 (code-agent-org--session-get test-session-key :loop-interval)))
-    (should (equal "test prompt" (code-agent-org--session-get test-session-key :original-prompt)))
+    (should (= 5 (code-agent-org-session-get test-session-key :loop-max)))
+    (should (= 1 (code-agent-org-session-get test-session-key :loop-current)))
+    (should (= 10 (code-agent-org-session-get test-session-key :loop-interval)))
+    (should (equal "test prompt" (code-agent-org-session-get test-session-key :original-prompt)))
     ;; Verify loop continuation condition
-    (let ((loop-current (code-agent-org--session-get test-session-key :loop-current))
-          (loop-max (code-agent-org--session-get test-session-key :loop-max)))
+    (let ((loop-current (code-agent-org-session-get test-session-key :loop-current))
+          (loop-max (code-agent-org-session-get test-session-key :loop-max)))
       (should (and loop-current loop-max (< loop-current loop-max))))
     ;; Cleanup
     (remhash test-session-key code-agent-org--sessions)))
@@ -816,11 +816,11 @@ This ensures loop iterations use the original session, not current cursor positi
   "Common fixture: seed session state + register a fake response heading.
 Returns alist of (calls . arg-records) recording every stubbed boundary call.
 Caller must wrap in `cl-letf' to actually install the stubs."
-  (code-agent-org--session-put session-key :query-id "old-query-id")
-  (code-agent-org--session-put session-key :section-level 1)
-  (code-agent-org--session-put session-key :original-prompt "original prompt")
-  (code-agent-org--session-put session-key :recovery-count 0)
-  (code-agent-org--session-put session-key :custom-id "test-cid"))
+  (code-agent-org-session-put session-key :query-id "old-query-id")
+  (code-agent-org-session-put session-key :section-level 1)
+  (code-agent-org-session-put session-key :original-prompt "original prompt")
+  (code-agent-org-session-put session-key :recovery-count 0)
+  (code-agent-org-session-put session-key :custom-id "test-cid"))
 
 (ert-deftest test-code-agent-org-recover-session-passes-session-key ()
   "Recovery must pass session-key — not the buffer's current point — to
@@ -876,7 +876,7 @@ path is wired without freezing the function body."
                 ((symbol-function 'code-agent-org--send-request)
                  (lambda (&rest _args) nil)))
         (code-agent-org--recover-session key))
-      (setq final-qid (code-agent-org--session-get key :query-id)))
+      (setq final-qid (code-agent-org-session-get key :query-id)))
     (should (member "old-query-id" find-by-qid-calls))
     (should generate-qid-called)
     (should (equal "new-query-id" final-qid))))
@@ -1234,10 +1234,10 @@ properties needed by handle-token-v2 / handle-message."
        (insert (format ":QUERY_ID: %s\n" query-id))
        (insert ":QUERY_TYPE: normal\n")
        (insert ":END:\n\n")
-       (code-agent-org--session-put session-key :query-id query-id)
-       (code-agent-org--session-put session-key :section-level 1)
-       (code-agent-org--session-put session-key :current-line-length 0)
-       (code-agent-org--session-put session-key :response-has-content nil)
+       (code-agent-org-session-put session-key :query-id query-id)
+       (code-agent-org-session-put session-key :section-level 1)
+       (code-agent-org-session-put session-key :current-line-length 0)
+       (code-agent-org-session-put session-key :response-has-content nil)
        ,@body)))
 
 (ert-deftest test-code-agent-org-newline-between-assistant-messages ()
@@ -1256,10 +1256,10 @@ the second message text should be visually separated from the first."
       (insert ":QUERY_TYPE: normal\n")
       (insert ":END:\n\n")
       ;; Set up session state
-      (code-agent-org--session-put session-key :query-id query-id)
-      (code-agent-org--session-put session-key :section-level 1)
-      (code-agent-org--session-put session-key :current-line-length 0)
-      (code-agent-org--session-put session-key :response-has-content nil)
+      (code-agent-org-session-put session-key :query-id query-id)
+      (code-agent-org-session-put session-key :section-level 1)
+      (code-agent-org-session-put session-key :current-line-length 0)
+      (code-agent-org-session-put session-key :response-has-content nil)
       ;; Simulate first assistant message tokens (realistic: text ends with newline)
       (code-agent-org--handle-token-v2 session-key "First message text.\n")
       ;; Simulate assistant message boundary (on-message callback)
@@ -1293,10 +1293,10 @@ the second message text should be visually separated from the first."
       (insert ":QUERY_TYPE: normal\n")
       (insert ":END:\n\n")
       ;; Set up session
-      (code-agent-org--session-put session-key :query-id query-id)
-      (code-agent-org--session-put session-key :section-level 1)
-      (code-agent-org--session-put session-key :current-line-length 0)
-      (code-agent-org--session-put session-key :response-has-content nil)
+      (code-agent-org-session-put session-key :query-id query-id)
+      (code-agent-org-session-put session-key :section-level 1)
+      (code-agent-org-session-put session-key :current-line-length 0)
+      (code-agent-org-session-put session-key :response-has-content nil)
       ;; Simulate FIRST assistant message tokens (should NOT have leading newline)
       (code-agent-org--handle-token-v2 session-key "First message")
       ;; Content after :END: should be: blank-line + "First message" (no extra newlines)
@@ -1318,17 +1318,17 @@ value from query N (different query-id) cannot trigger a separator in query N+1.
            (old-qid "qid-old-query")
            (new-qid "qid-new-query"))
       ;; Simulate leftover state from a previous query's last assistant message
-      (code-agent-org--session-put session-key :last-assistant-query-id old-qid)
+      (code-agent-org-session-put session-key :last-assistant-query-id old-qid)
       ;; Now start a NEW query with a different query-id
       (insert "* Response 1 (2026-01-01 00:00) :ai_output:\n")
       (insert ":PROPERTIES:\n")
       (insert (format ":QUERY_ID: %s\n" new-qid))
       (insert ":QUERY_TYPE: normal\n")
       (insert ":END:\n\n")
-      (code-agent-org--session-put session-key :query-id new-qid)
-      (code-agent-org--session-put session-key :section-level 1)
-      (code-agent-org--session-put session-key :current-line-length 0)
-      (code-agent-org--session-put session-key :response-has-content nil)
+      (code-agent-org-session-put session-key :query-id new-qid)
+      (code-agent-org-session-put session-key :section-level 1)
+      (code-agent-org-session-put session-key :current-line-length 0)
+      (code-agent-org-session-put session-key :response-has-content nil)
       ;; First token of new query should NOT get a separator
       (code-agent-org--handle-token-v2 session-key "New query text")
       (goto-char (point-min))
@@ -1351,10 +1351,10 @@ unwanted blank lines after the :END: property drawer."
       (insert (format ":QUERY_ID: %s\n" query-id))
       (insert ":QUERY_TYPE: normal\n")
       (insert ":END:\n\n")
-      (code-agent-org--session-put session-key :query-id query-id)
-      (code-agent-org--session-put session-key :section-level 1)
-      (code-agent-org--session-put session-key :current-line-length 0)
-      (code-agent-org--session-put session-key :response-has-content nil)
+      (code-agent-org-session-put session-key :query-id query-id)
+      (code-agent-org-session-put session-key :section-level 1)
+      (code-agent-org-session-put session-key :current-line-length 0)
+      (code-agent-org-session-put session-key :response-has-content nil)
       ;; Simulate Claude's typical first token starting with \n\n
       (code-agent-org--handle-token-v2 session-key "\n\nHello world")
       (goto-char (point-min))
@@ -1376,10 +1376,10 @@ unwanted blank lines after the :END: property drawer."
       (insert (format ":QUERY_ID: %s\n" query-id))
       (insert ":QUERY_TYPE: normal\n")
       (insert ":END:\n\n")
-      (code-agent-org--session-put session-key :query-id query-id)
-      (code-agent-org--session-put session-key :section-level 1)
-      (code-agent-org--session-put session-key :current-line-length 0)
-      (code-agent-org--session-put session-key :response-has-content nil)
+      (code-agent-org-session-put session-key :query-id query-id)
+      (code-agent-org-session-put session-key :section-level 1)
+      (code-agent-org-session-put session-key :current-line-length 0)
+      (code-agent-org-session-put session-key :response-has-content nil)
       ;; First token - leading newlines stripped
       (code-agent-org--handle-token-v2 session-key "\n\nFirst part")
       ;; Second token - newlines should be preserved
@@ -1405,17 +1405,17 @@ affecting the second token which carries real content."
       (insert (format ":QUERY_ID: %s\n" query-id))
       (insert ":QUERY_TYPE: normal\n")
       (insert ":END:\n\n")
-      (code-agent-org--session-put session-key :query-id query-id)
-      (code-agent-org--session-put session-key :section-level 1)
-      (code-agent-org--session-put session-key :current-line-length 0)
-      (code-agent-org--session-put session-key :response-has-content nil)
+      (code-agent-org-session-put session-key :query-id query-id)
+      (code-agent-org-session-put session-key :section-level 1)
+      (code-agent-org-session-put session-key :current-line-length 0)
+      (code-agent-org-session-put session-key :response-has-content nil)
       ;; First token is ONLY newlines - becomes empty after stripping
       (code-agent-org--handle-token-v2 session-key "\n\n")
       ;; :response-has-content should still be nil (nothing inserted)
-      (should-not (code-agent-org--session-get session-key :response-has-content))
+      (should-not (code-agent-org-session-get session-key :response-has-content))
       ;; Second token has real content - should NOT be stripped
       (code-agent-org--handle-token-v2 session-key "Real content")
-      (should (code-agent-org--session-get session-key :response-has-content))
+      (should (code-agent-org-session-get session-key :response-has-content))
       (goto-char (point-min))
       (re-search-forward ":END:\n" nil t)
       (let ((content (buffer-substring-no-properties (point) (point-max))))
@@ -1428,28 +1428,28 @@ affecting the second token which carries real content."
   "Test that reset-session-state clears busy, recovering, query-id flags."
   :tags '(:unit :fast :stable :isolated :session :phase-1b)
   (let ((code-agent-org--sessions (make-hash-table :test 'equal)))
-    (code-agent-org--session-put "test-key" :busy t)
-    (code-agent-org--session-put "test-key" :recovering t)
-    (code-agent-org--session-put "test-key" :last-assistant-query-id "qid-123")
+    (code-agent-org-session-put "test-key" :busy t)
+    (code-agent-org-session-put "test-key" :recovering t)
+    (code-agent-org-session-put "test-key" :last-assistant-query-id "qid-123")
     ;; Reset
     (code-agent-org--reset-session-state "test-key")
     ;; All should be nil
-    (should-not (code-agent-org--session-get "test-key" :busy))
-    (should-not (code-agent-org--session-get "test-key" :recovering))
-    (should-not (code-agent-org--session-get "test-key" :last-assistant-query-id))))
+    (should-not (code-agent-org-session-get "test-key" :busy))
+    (should-not (code-agent-org-session-get "test-key" :recovering))
+    (should-not (code-agent-org-session-get "test-key" :last-assistant-query-id))))
 
 (ert-deftest test-code-agent-org-reset-session-state-preserves-other-props ()
   "Test that reset-session-state preserves unrelated session properties."
   :tags '(:unit :fast :stable :isolated :session :phase-1b)
   (let ((code-agent-org--sessions (make-hash-table :test 'equal)))
-    (code-agent-org--session-put "test-key" :busy t)
-    (code-agent-org--session-put "test-key" :custom-id "my-block-id")
-    (code-agent-org--session-put "test-key" :query-id "qid-456")
+    (code-agent-org-session-put "test-key" :busy t)
+    (code-agent-org-session-put "test-key" :custom-id "my-block-id")
+    (code-agent-org-session-put "test-key" :query-id "qid-456")
     ;; Reset
     (code-agent-org--reset-session-state "test-key")
     ;; Unrelated props should survive
-    (should (equal "my-block-id" (code-agent-org--session-get "test-key" :custom-id)))
-    (should (equal "qid-456" (code-agent-org--session-get "test-key" :query-id)))))
+    (should (equal "my-block-id" (code-agent-org-session-get "test-key" :custom-id)))
+    (should (equal "qid-456" (code-agent-org-session-get "test-key" :query-id)))))
 
 ;;; Phase 1c: find-heading-by-property tests
 
@@ -1586,15 +1586,15 @@ affecting the second token which carries real content."
     (code-agent-org-mode 1)
     (let ((key "test-phase7"))
       ;; Put known properties
-      (code-agent-org--session-put key :busy t)
-      (code-agent-org--session-put key :query-id "qid-456")
-      (code-agent-org--session-put key :section-level 2)
-      (code-agent-org--session-put key :loop-max 10)
+      (code-agent-org-session-put key :busy t)
+      (code-agent-org-session-put key :query-id "qid-456")
+      (code-agent-org-session-put key :section-level 2)
+      (code-agent-org-session-put key :loop-max 10)
       ;; Get them back
-      (should (eq t (code-agent-org--session-get key :busy)))
-      (should (equal "qid-456" (code-agent-org--session-get key :query-id)))
-      (should (= 2 (code-agent-org--session-get key :section-level)))
-      (should (= 10 (code-agent-org--session-get key :loop-max))))))
+      (should (eq t (code-agent-org-session-get key :busy)))
+      (should (equal "qid-456" (code-agent-org-session-get key :query-id)))
+      (should (= 2 (code-agent-org-session-get key :section-level)))
+      (should (= 10 (code-agent-org-session-get key :loop-max))))))
 
 (ert-deftest test-code-agent-org-session-state-stored-as-struct ()
   "Test that sessions hash stores struct instances, not plists."
@@ -1604,7 +1604,7 @@ affecting the second token which carries real content."
     (setq buffer-file-name "/tmp/test-phase7b.org")
     (code-agent-org-mode 1)
     (let ((key "test-struct-check"))
-      (code-agent-org--session-put key :busy t)
+      (code-agent-org-session-put key :busy t)
       (let ((stored (gethash key code-agent-org--sessions)))
         (should (code-agent-org--session-state-p stored))))))
 
@@ -1646,8 +1646,8 @@ should detect the non-struct and replace it with a fresh struct."
            (mock-backend (code-agent-claude-code-backend--create))
            (mock-handle 'mock-handle))
       ;; Store backend and handle in session
-      (code-agent-org--session-put key :backend mock-backend)
-      (code-agent-org--session-put key :query-handle mock-handle)
+      (code-agent-org-session-put key :backend mock-backend)
+      (code-agent-org-session-put key :query-handle mock-handle)
       ;; Mock cancel to record the call
       (cl-letf (((symbol-function 'code-agent-backend-cancel)
                  (lambda (backend handle)
@@ -1670,7 +1670,7 @@ should detect the non-struct and replace it with a fresh struct."
     (insert "* Test Block\n:PROPERTIES:\n:CUSTOM_ID: block-7b-exec\n:END:\n\n")
     (let ((key "test-7b-exec"))
       ;; Store custom-id for exec-status lookup
-      (code-agent-org--session-put key :custom-id "block-7b-exec")
+      (code-agent-org-session-put key :custom-id "block-7b-exec")
       ;; Set status should work via custom-id
       (should (code-agent-org--set-exec-status-for-session key "executing"))
       ;; Get status should return what we set
@@ -1703,8 +1703,8 @@ should detect the non-struct and replace it with a fresh struct."
     (code-agent-org-mode 1)
     (let ((key "test-7b-running"))
       ;; Set custom-id for the running session
-      (code-agent-org--session-put key :custom-id "running-blk")
-      (code-agent-org--session-put key :busy t)
+      (code-agent-org-session-put key :custom-id "running-blk")
+      (code-agent-org-session-put key :busy t)
       ;; Try to queue the same block that's running
       (should (eq 'running
                   (code-agent-org--queue-block key '(:custom-id "running-blk" :content "test"))))
@@ -1870,20 +1870,20 @@ should detect the non-struct and replace it with a fresh struct."
     (let ((key "test-r6-limit")
           (error-inserted nil))
       ;; Set recovery count at the limit
-      (code-agent-org--session-put key :recovery-count 3)
-      (code-agent-org--session-put key :busy t)
-      (code-agent-org--session-put key :query-id "old-q")
+      (code-agent-org-session-put key :recovery-count 3)
+      (code-agent-org-session-put key :busy t)
+      (code-agent-org-session-put key :query-id "old-q")
       ;; Stub functions called during recovery failure path
       (cl-letf (((symbol-function 'code-agent-org--insert-error)
                  (lambda (_key _msg) (setq error-inserted t)))
                 ((symbol-function 'code-agent-org--stop-spinner) #'ignore)
-                ((symbol-function 'code-agent-org--refresh-header-line) #'ignore)
+                ((symbol-function 'code-agent-org-refresh-header-line) #'ignore)
                 ((symbol-function 'code-agent-org--reset-session-state) #'ignore))
         (code-agent-org--recover-session key 'expired)
         ;; Should have inserted error, not attempted recovery
         (should error-inserted)
         ;; Should NOT have set recovering flag (it was short-circuited)
-        (should-not (code-agent-org--session-get key :recovering))))))
+        (should-not (code-agent-org-session-get key :recovering))))))
 
 (ert-deftest test-recovery-count-resets-on-success ()
   "recovery-count should be reset to 0 when a new query starts."
@@ -1894,11 +1894,11 @@ should detect the non-struct and replace it with a fresh struct."
     (code-agent-org-mode 1)
     (let ((key "test-r6-reset"))
       ;; Simulate some recovery attempts
-      (code-agent-org--session-put key :recovery-count 2)
-      (should (= 2 (code-agent-org--session-get key :recovery-count)))
+      (code-agent-org-session-put key :recovery-count 2)
+      (should (= 2 (code-agent-org-session-get key :recovery-count)))
       ;; Reset (simulating what send-request does on new query)
-      (code-agent-org--session-put key :recovery-count 0)
-      (should (= 0 (code-agent-org--session-get key :recovery-count))))))
+      (code-agent-org-session-put key :recovery-count 0)
+      (should (= 0 (code-agent-org-session-get key :recovery-count))))))
 
 ;;; R2: with-session-marker macro tests
 
@@ -2018,9 +2018,9 @@ should detect the non-struct and replace it with a fresh struct."
     (let ((key "test-recovery-incr")
           (recovery-attempted nil))
       ;; Initialize session state
-      (code-agent-org--session-put key :recovery-count 0)
-      (code-agent-org--session-put key :busy t)
-      (code-agent-org--session-put key :query-id "old-q-1")
+      (code-agent-org-session-put key :recovery-count 0)
+      (code-agent-org-session-put key :busy t)
+      (code-agent-org-session-put key :query-id "old-q-1")
       ;; Stub out all side-effect functions - we just want to verify counter
       (cl-letf (((symbol-function 'code-agent-org--find-response-by-query-id)
                  (lambda (_) (point-min)))
@@ -2035,14 +2035,14 @@ should detect the non-struct and replace it with a fresh struct."
                 ((symbol-function 'code-agent-org--generate-query-id)
                  (lambda () "new-q"))
                 ((symbol-function 'code-agent-org--stop-spinner) #'ignore)
-                ((symbol-function 'code-agent-org--refresh-header-line) #'ignore))
+                ((symbol-function 'code-agent-org-refresh-header-line) #'ignore))
         ;; First recovery call: count should go from 0 to 1
         (code-agent-org--recover-session key 'expired)
-        (should (= 1 (code-agent-org--session-get key :recovery-count)))
+        (should (= 1 (code-agent-org-session-get key :recovery-count)))
         ;; Second recovery call: count should go from 1 to 2
-        (code-agent-org--session-put key :query-id "old-q-2")
+        (code-agent-org-session-put key :query-id "old-q-2")
         (code-agent-org--recover-session key 'expired)
-        (should (= 2 (code-agent-org--session-get key :recovery-count)))))))
+        (should (= 2 (code-agent-org-session-get key :recovery-count)))))))
 
 ;;; Completion status: exec-status must be "completed" and :busy nil after handle-complete
 
@@ -2069,13 +2069,13 @@ instruction was not properly marked as completed."
     (insert "Some response text\n")
     ;; Set up session state as if execution is in progress
     (let ((key "test-completion-status"))
-      (code-agent-org--session-put key :busy t)
-      (code-agent-org--session-put key :query-id "test-qid-123")
-      (code-agent-org--session-put key :custom-id "test-completion-block")
-      (code-agent-org--session-put key :loop-max 1)
-      (code-agent-org--session-put key :loop-current 1)
-      (code-agent-org--session-put key :marker (copy-marker (point-min)))
-      (code-agent-org--session-put key :section-level 2)
+      (code-agent-org-session-put key :busy t)
+      (code-agent-org-session-put key :query-id "test-qid-123")
+      (code-agent-org-session-put key :custom-id "test-completion-block")
+      (code-agent-org-session-put key :loop-max 1)
+      (code-agent-org-session-put key :loop-current 1)
+      (code-agent-org-session-put key :marker (copy-marker (point-min)))
+      (code-agent-org-session-put key :section-level 2)
       ;; Set exec-status to "executing" on the heading
       (save-excursion
         (goto-char (point-min))
@@ -2083,12 +2083,12 @@ instruction was not properly marked as completed."
         (org-entry-put nil "AI_EXEC_STATUS" "executing"))
       ;; Stub side-effect functions
       (cl-letf (((symbol-function 'code-agent-org--stop-spinner) #'ignore)
-                ((symbol-function 'code-agent-org--refresh-header-line) #'ignore)
+                ((symbol-function 'code-agent-org-refresh-header-line) #'ignore)
                 ((symbol-function 'code-agent-org--unregister-active-query) #'ignore))
         ;; Call handle-complete
         (code-agent-org--handle-complete key nil)
         ;; CRITICAL: :busy should be nil (so scheduled blocks can run)
-        (should-not (code-agent-org--session-get key :busy))
+        (should-not (code-agent-org-session-get key :busy))
         ;; CRITICAL: exec-status should be "completed"
         (let ((status (save-excursion
                         (goto-char (point-min))
@@ -2122,26 +2122,26 @@ instruction was not properly marked as completed."
     (insert "#+begin_src ai\nquery B\n#+end_src\n")
     ;; Set up session state: Block A is executing
     (let ((key "test-sched-unblock"))
-      (code-agent-org--session-put key :busy t)
-      (code-agent-org--session-put key :query-id "qid-a")
-      (code-agent-org--session-put key :custom-id "block-a")
-      (code-agent-org--session-put key :loop-max 1)
-      (code-agent-org--session-put key :loop-current 1)
-      (code-agent-org--session-put key :marker (copy-marker (point-min)))
-      (code-agent-org--session-put key :section-level 2)
+      (code-agent-org-session-put key :busy t)
+      (code-agent-org-session-put key :query-id "qid-a")
+      (code-agent-org-session-put key :custom-id "block-a")
+      (code-agent-org-session-put key :loop-max 1)
+      (code-agent-org-session-put key :loop-current 1)
+      (code-agent-org-session-put key :marker (copy-marker (point-min)))
+      (code-agent-org-session-put key :section-level 2)
       ;; Stub side-effect functions
       (cl-letf (((symbol-function 'code-agent-org--stop-spinner) #'ignore)
-                ((symbol-function 'code-agent-org--refresh-header-line) #'ignore)
+                ((symbol-function 'code-agent-org-refresh-header-line) #'ignore)
                 ((symbol-function 'code-agent-org--unregister-active-query) #'ignore))
         ;; Before handle-complete: session should be busy
-        (should (code-agent-org--session-get key :busy))
+        (should (code-agent-org-session-get key :busy))
         ;; Complete Block A
         (code-agent-org--handle-complete key nil)
         ;; After handle-complete: session should NOT be busy
-        (should-not (code-agent-org--session-get key :busy))
+        (should-not (code-agent-org-session-get key :busy))
         ;; Scheduled checker would now see session as free
         ;; (simulating what code-agent-org-scheduled--maybe-execute checks)
-        (should-not (code-agent-org--session-get key :busy))))))
+        (should-not (code-agent-org-session-get key :busy))))))
 
 ;;; ============================================================
 ;;; F9: code-agent-org Backend Integration
@@ -2170,19 +2170,19 @@ instruction was not properly marked as completed."
   ;; This test verifies that handle-complete doesn't crash when
   ;; result is nil (as returned by claude-backend's bell handler)
   (let ((key "test-f9-complete::nil-result"))
-    (code-agent-org--session-put key :query-id "q1")
-    (code-agent-org--session-put key :section-level 1)
+    (code-agent-org-session-put key :query-id "q1")
+    (code-agent-org-session-put key :section-level 1)
     ;; handle-complete with nil result should not error
     (code-agent-org--handle-complete key nil)
     ;; Session should not be busy after completion
-    (should-not (code-agent-org--session-get key :busy))))
+    (should-not (code-agent-org-session-get key :busy))))
 
 (ert-deftest test-f9-dispatch-query-stores-backend ()
   "dispatch-query should store backend in session."
   :tags '(:unit :fast :stable :isolated :org :f9)
   (let* ((key "test-f9-dispatch::stores-backend")
          (mock-handle 'mock-handle))
-    (code-agent-org--session-put key :section-level 1)
+    (code-agent-org-session-put key :section-level 1)
     ;; Mock backend-query to avoid actual CLI call
     (cl-letf (((symbol-function 'code-agent-backend-query)
                (lambda (_backend _prompt _callbacks &rest _args)
@@ -2192,9 +2192,9 @@ instruction was not properly marked as completed."
        (list :on-token #'ignore :on-complete #'ignore)
        :options nil))
     ;; Backend should be stored
-    (should (code-agent-org--session-get key :backend))
+    (should (code-agent-org-session-get key :backend))
     (should (code-agent-claude-code-backend-p
-             (code-agent-org--session-get key :backend)))))
+             (code-agent-org-session-get key :backend)))))
 
 
 ;;; F9b: CLAUDE_BACKEND org property override

@@ -298,9 +298,9 @@ string with `--model VALUE' and `--effort VALUE' from ENV_FILE."
       (let ((code-agent-org-cmux-launch-command 'claude-workspace)
             (code-agent-org-cmux-workspace-script "STUB_LAUNCHER")
             (code-agent-org-cmux-extra-args nil))
-        (cl-letf (((symbol-function 'code-agent-org-terminal--find-session-property)
+        (cl-letf (((symbol-function 'code-agent-org-terminal-find-session-property)
                    (lambda (_p) nil))
-                  ((symbol-function 'code-agent-org-terminal--goto-session-heading)
+                  ((symbol-function 'code-agent-org-terminal-goto-session-heading)
                    (lambda () nil)))
           (let ((cmd (code-agent-org-cmux--build-claude-legacy-launch-command
                       "/tmp/fake.org" "sdd-fake" "/tmp")))

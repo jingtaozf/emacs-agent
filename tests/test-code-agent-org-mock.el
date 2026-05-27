@@ -48,7 +48,7 @@ Uses a temp file so `buffer-file-name' is non-nil (required for session keys)."
               ;; Find and execute the AI block
               (goto-char (point-min))
               (re-search-forward "#\\+begin_src ai" nil t)
-              (let ((session-key (code-agent-org--current-session-key)))
+              (let ((session-key (code-agent-org-current-session-key)))
                 (code-agent-org-execute)
                 ;; Wait for completion
                 (if (test-claude-wait-for-completion session-key timeout)
@@ -128,7 +128,7 @@ Verifies the full pipeline: execute → subprocess → JSON parse → response i
                    (cons "MOCK_SCENARIO=simple-query" process-environment)))
               (goto-char (point-min))
               (re-search-forward "#\\+begin_src ai" nil t)
-              (let ((session-key (code-agent-org--current-session-key)))
+              (let ((session-key (code-agent-org-current-session-key)))
                 (code-agent-org-execute)
                 (should (test-claude-wait-for-completion session-key 10))
                 ;; Verify Response heading exists with ai_output tag
@@ -176,24 +176,24 @@ Write a very long story about numbers...
                    (cons "MOCK_SCENARIO=slow-response" process-environment)))
               (goto-char (point-min))
               (re-search-forward "#\\+begin_src ai" nil t)
-              (let ((session-key (code-agent-org--current-session-key))
+              (let ((session-key (code-agent-org-current-session-key))
                     (block-pos (point)))
                 (code-agent-org-execute)
                 ;; Wait for query to start (busy flag set)
                 (should (test-claude-wait-until
                          (lambda ()
-                           (code-agent-org--session-get session-key :busy))
+                           (code-agent-org-session-get session-key :busy))
                          5))
                 ;; Wait for query-handle (process-state) to appear
                 (should (test-claude-wait-until
                          (lambda ()
-                           (let ((qh (code-agent-org--session-get session-key :query-handle)))
+                           (let ((qh (code-agent-org-session-get session-key :query-handle)))
                              (and qh (code-agent--process-state-request-id qh))))
                          5))
                 (sleep-for 0.2)
                 (accept-process-output nil 0.1)
 
-                (let* ((query-handle (code-agent-org--session-get session-key :query-handle))
+                (let* ((query-handle (code-agent-org-session-get session-key :query-handle))
                        (request-id (code-agent--process-state-request-id query-handle)))
                   (should request-id)
                   ;; Before cancel: should be in hash table
@@ -204,7 +204,7 @@ Write a very long story about numbers...
                   (code-agent-org-cancel)
 
                   ;; Immediately after cancel: busy cleared, cancelled flag set
-                  (should-not (code-agent-org--session-get session-key :busy))
+                  (should-not (code-agent-org-session-get session-key :busy))
                   (should (code-agent--process-state-cancelled query-handle))
 
                   ;; Wait for process to die and sentinel to unregister
@@ -252,26 +252,26 @@ Write a very long story about numbers...
                    (cons "MOCK_SCENARIO=slow-response" process-environment)))
               (goto-char (point-min))
               (re-search-forward "#\\+begin_src ai" nil t)
-              (let ((session-key (code-agent-org--current-session-key)))
+              (let ((session-key (code-agent-org-current-session-key)))
                 (code-agent-org-execute)
                 ;; Wait for query to be busy with query-handle present
                 (should (test-claude-wait-until
                          (lambda ()
-                           (and (code-agent-org--session-get session-key :busy)
-                                (code-agent-org--session-get session-key :query-handle)))
+                           (and (code-agent-org-session-get session-key :busy)
+                                (code-agent-org-session-get session-key :query-handle)))
                          5))
                 (sleep-for 0.3)
                 (accept-process-output nil 0.1)
 
                 ;; Verify busy before cancel
-                (should (code-agent-org--session-get session-key :busy))
+                (should (code-agent-org-session-get session-key :busy))
 
-                (let ((query-handle (code-agent-org--session-get session-key :query-handle)))
+                (let ((query-handle (code-agent-org-session-get session-key :query-handle)))
                   ;; Cancel
                   (code-agent-org-cancel)
 
                   ;; Immediately: busy should be nil, cancelled flag set
-                  (should-not (code-agent-org--session-get session-key :busy))
+                  (should-not (code-agent-org-session-get session-key :busy))
                   (should (code-agent--process-state-cancelled query-handle))
 
                   ;; Wait for process to fully exit (sentinel fires)
@@ -279,7 +279,7 @@ Write a very long story about numbers...
                   (accept-process-output nil 0.5)
 
                   ;; After sentinel: busy must STILL be nil, cancelled must persist
-                  (should-not (code-agent-org--session-get session-key :busy))
+                  (should-not (code-agent-org-session-get session-key :busy))
                   (should (code-agent--process-state-cancelled query-handle)))))))
       (when (and test-buffer (buffer-live-p test-buffer))
         (with-current-buffer test-buffer
@@ -309,7 +309,7 @@ Write a very long story about numbers...
                    (cons "MOCK_SCENARIO=simple-query" process-environment)))
               (goto-char (point-min))
               (re-search-forward "#\\+begin_src ai" nil t)
-              (let ((session-key (code-agent-org--current-session-key)))
+              (let ((session-key (code-agent-org-current-session-key)))
                 (code-agent-org-execute)
                 (should (test-claude-wait-for-completion session-key 10))
                 ;; SDK UUID should have been captured from the result message
@@ -413,7 +413,7 @@ What number did I ask you to remember? Just the number.
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-for-completion session-key 10))
               ;; SDK UUID should be stored
@@ -424,7 +424,7 @@ What number did I ask you to remember? Just the number.
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 2" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-for-completion session-key 10)))))
       (test-code-agent-org-mock--cleanup buf temp-file))))
@@ -468,14 +468,14 @@ What is 2+2? Answer with just the number.
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((key-a (code-agent-org--current-session-key)))
+            (let ((key-a (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-for-completion key-a 10))
               ;; Execute in Session B
               (goto-char (point-min))
               (re-search-forward "^\\*+ Instruction 2" nil t)
               (re-search-forward "#\\+begin_src ai" nil t)
-              (let ((key-b (code-agent-org--current-session-key)))
+              (let ((key-b (code-agent-org-current-session-key)))
                 ;; Session keys should be different
                 (should-not (equal key-a key-b))
                 (code-agent-org-execute)
@@ -498,12 +498,12 @@ What is 2+2? Answer with just the number.
                  (cons "MOCK_SCENARIO=slow-response" process-environment)))
             (goto-char (point-min))
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               ;; Wait for query to start
               (should (test-claude-wait-until
                        (lambda ()
-                         (code-agent-org--session-get session-key :busy))
+                         (code-agent-org-session-get session-key :busy))
                        5))
               ;; Header line should exist
               (should header-line-format)
@@ -530,7 +530,7 @@ What is 2+2? Answer with just the number.
             (clrhash code-agent--active-queries)
             (goto-char (point-min))
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (sleep-for 0.5)
               (accept-process-output nil 0.2)
@@ -569,7 +569,7 @@ What is 2+2? Answer with just the number.
             (clrhash code-agent--active-queries)
             (goto-char (point-min))
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (sleep-for 0.5)
               (accept-process-output nil 0.2)
@@ -600,10 +600,10 @@ Execute Block A (slow), then Block B — B should be queued."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               (should (= 0 (code-agent-org--queue-count session-key)))
               ;; Navigate to Block B and execute while A runs
@@ -619,7 +619,7 @@ Execute Block A (slow), then Block B — B should be queued."
               (test-claude-wait-for-completion session-key 10)
               ;; Queue should be empty, session not busy
               (should (= 0 (code-agent-org--queue-count session-key)))
-              (should-not (code-agent-org--session-get session-key :busy)))))
+              (should-not (code-agent-org-session-get session-key :busy)))))
       (test-code-agent-org-mock--cleanup buf temp-file))))
 
 (ert-deftest test-org-mock-queue-multiple ()
@@ -636,10 +636,10 @@ Execute Block A (slow), then Block B — B should be queued."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               ;; Queue Block B
               (goto-char (point-min))
@@ -659,7 +659,7 @@ Execute Block A (slow), then Block B — B should be queued."
               (test-claude-wait-for-completion session-key 10)
               ;; All done
               (should (= 0 (code-agent-org--queue-count session-key)))
-              (should-not (code-agent-org--session-get session-key :busy)))))
+              (should-not (code-agent-org-session-get session-key :busy)))))
       (test-code-agent-org-mock--cleanup buf temp-file))))
 
 (ert-deftest test-org-mock-queue-cancel-clears ()
@@ -675,10 +675,10 @@ Execute Block A (slow), then Block B — B should be queued."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               ;; Queue Block B
               (goto-char (point-min))
@@ -689,7 +689,7 @@ Execute Block A (slow), then Block B — B should be queued."
               ;; Cancel all — should clear queue
               (code-agent-org-cancel)
               (should (= 0 (code-agent-org--queue-count session-key)))
-              (should-not (code-agent-org--session-get session-key :busy)))))
+              (should-not (code-agent-org-session-get session-key :busy)))))
       (test-code-agent-org-mock--cleanup buf temp-file))))
 
 (ert-deftest test-org-mock-queue-response-appears ()
@@ -705,10 +705,10 @@ Execute Block A (slow), then Block B — B should be queued."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               ;; Queue Block B
               (goto-char (point-min))
@@ -737,10 +737,10 @@ Verifies Block B's response is present when Block A completes first."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               ;; Queue Block B
               (goto-char (point-min))
@@ -771,10 +771,10 @@ Verifies Block B's response is present when Block A completes first."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               ;; Queue Block B
               (goto-char (point-min))
@@ -805,10 +805,10 @@ Verifies Block B's response is present when Block A completes first."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               ;; Try to execute the SAME block again
               (goto-char (point-min))
@@ -833,10 +833,10 @@ Verifies Block B's response is present when Block A completes first."
             (goto-char (point-min))
             (re-search-forward "^\\*+ Instruction 1" nil t)
             (re-search-forward "#\\+begin_src ai" nil t)
-            (let ((session-key (code-agent-org--current-session-key)))
+            (let ((session-key (code-agent-org-current-session-key)))
               (code-agent-org-execute)
               (should (test-claude-wait-until
-                       (lambda () (code-agent-org--session-get session-key :busy))
+                       (lambda () (code-agent-org-session-get session-key :busy))
                        5))
               ;; Queue Block B
               (goto-char (point-min))
@@ -849,10 +849,10 @@ Verifies Block B's response is present when Block A completes first."
               ;; Queue cleared
               (should (= 0 (code-agent-org--queue-count session-key)))
               ;; Running query still active
-              (should (code-agent-org--session-get session-key :busy))
+              (should (code-agent-org-session-get session-key :busy))
               ;; Wait for Block A to complete naturally
               (test-claude-wait-for-completion session-key 15)
-              (should-not (code-agent-org--session-get session-key :busy)))))
+              (should-not (code-agent-org-session-get session-key :busy)))))
       (test-code-agent-org-mock--cleanup buf temp-file))))
 
 ;;; Scheduled Execution Tests
@@ -906,7 +906,7 @@ This should not run.
               (re-search-forward ":CUSTOM_ID: mock-scheduled-past-due" nil t)
               (re-search-forward "#\\+begin_src ai" nil t)
               (forward-line 1)
-              (let ((session-key (code-agent-org--current-session-key)))
+              (let ((session-key (code-agent-org-current-session-key)))
                 (test-claude-wait-for-completion session-key 10))
               ;; LAST_AI_EXECUTED should now be set
               (goto-char (point-min))
@@ -956,7 +956,7 @@ Say daily-repeater-executed
               (re-search-forward ":CUSTOM_ID: mock-scheduled-repeater" nil t)
               (re-search-forward "#\\+begin_src ai" nil t)
               (forward-line 1)
-              (let ((session-key (code-agent-org--current-session-key)))
+              (let ((session-key (code-agent-org-current-session-key)))
                 (test-claude-wait-for-completion session-key 10))
               ;; Check timestamp was advanced
               (goto-char (point-min))
@@ -1037,14 +1037,14 @@ BODY runs after cancel, with point in the test buffer."
                   (cons "MOCK_SCENARIO=cancel-test" process-environment))
                  (code-agent-cli-path test-claude-mock-cli-path))
              (test-code-agent-org-mock--goto-ai-block)
-             (let ((session-key (code-agent-org--current-session-key)))
+             (let ((session-key (code-agent-org-current-session-key)))
                (code-agent-org-execute)
                (test-code-agent-org-mock--wait-for-first-token)
                ;; Capture state BEFORE cancel for assertions
                (let* ((pre-cancel-tokens
                        (test-code-agent-org-mock--count-tokens (buffer-string)))
                       (query-handle
-                       (code-agent-org--session-get session-key :query-handle))
+                       (code-agent-org-session-get session-key :query-handle))
                       (cancel-process
                        (when query-handle
                          (code-agent--process-state-process query-handle))))
@@ -1130,7 +1130,7 @@ after cancel, the user sees a new query start unexpectedly."
       (should (re-search-forward "\\[Cancelled\\]" nil t))
       (should (> (match-beginning 0) end-src-pos)))
     ;; Session should no longer be busy
-    (should-not (code-agent-org--session-get session-key :busy))))
+    (should-not (code-agent-org-session-get session-key :busy))))
 
 (ert-deftest test-org-mock-cancel-execute-cancel-cycle ()
   "Test rapid execute -> cancel -> re-execute cycle.
@@ -1139,7 +1139,7 @@ query.  If cancel leaves stale state, the re-execute may fail or
 behave incorrectly."
   :tags '(:mock :cancel :reproduction :org :cycle)
   (test-code-agent-org-mock--with-cancel-fixture
-    (should-not (code-agent-org--session-get session-key :busy))
+    (should-not (code-agent-org-session-get session-key :busy))
     ;; Ensure first process is fully dead before re-executing
     (should (test-claude-wait-until
              (lambda () (not (process-live-p cancel-process)))
@@ -1154,7 +1154,7 @@ behave incorrectly."
       ;; Should start a new query successfully
       (should (test-claude-wait-until
                (lambda ()
-                 (code-agent-org--session-get session-key :busy))
+                 (code-agent-org-session-get session-key :busy))
                5))
       ;; Wait for second query to complete
       (should (test-claude-wait-for-completion session-key 10))

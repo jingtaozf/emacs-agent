@@ -471,10 +471,10 @@ text that disrupts the tree structure."
     ;; Set up a session -- session-get initializes :section-level to 0
     (let* ((session-key "/tmp/test-content-loss.org")
            (query-id "test-query-42"))
-      (code-agent-org--session-put session-key :query-id query-id)
+      (code-agent-org-session-put session-key :query-id query-id)
       ;; FIXED: session now initializes section-level to nil
       ;; The guard (if (and nil ...) ...) correctly falls back to 1
-      (let ((raw (code-agent-org--session-get session-key :section-level)))
+      (let ((raw (code-agent-org-session-get session-key :section-level)))
         (should (null raw))
         (let ((effective-level (if (and raw (> raw 0)) raw 1)))
           (should (= 1 effective-level))))

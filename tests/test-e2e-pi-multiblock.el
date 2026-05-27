@@ -120,19 +120,19 @@ hanging multiblock test diagnoses itself (without needing
 TEST_MB_VERBOSE)."
   (with-current-buffer buf
     (let ((deadline (+ (float-time) timeout)))
-      (while (and (code-agent-org--session-get sk :busy)
+      (while (and (code-agent-org-session-get sk :busy)
                   (< (float-time) deadline))
         (accept-process-output nil 0.1)
         (sleep-for 0.05))
-      (let ((cleared (not (code-agent-org--session-get sk :busy))))
+      (let ((cleared (not (code-agent-org-session-get sk :busy))))
         (unless cleared
-          (let* ((b (code-agent-org--session-get sk :backend))
+          (let* ((b (code-agent-org-session-get sk :backend))
                  (proc (and (code-agent-pi-backend-p b)
                             (code-agent-pi-backend-process b))))
             (princ (format "TIMEOUT DUMP: busy=%s query-handle=%s query-id=%s backend=%s process-status=%s handshake-done=%s active-prompt-id=%s pending=%s\n"
-                           (code-agent-org--session-get sk :busy)
-                           (code-agent-org--session-get sk :query-handle)
-                           (code-agent-org--session-get sk :query-id)
+                           (code-agent-org-session-get sk :busy)
+                           (code-agent-org-session-get sk :query-handle)
+                           (code-agent-org-session-get sk :query-id)
                            (and b (type-of b))
                            (and proc (process-status proc))
                            (and (code-agent-pi-backend-p b)
@@ -177,7 +177,7 @@ return that subtree's body."
 (defun test-mb--backend-pid (buf sk)
   "Return the PID of the Pi subprocess cached in SK's :backend, or nil."
   (with-current-buffer buf
-    (when-let* ((b (code-agent-org--session-get sk :backend))
+    (when-let* ((b (code-agent-org-session-get sk :backend))
                 (p (and (code-agent-pi-backend-p b)
                         (code-agent-pi-backend-process b))))
       (and (process-live-p p) (process-id p)))))
@@ -249,7 +249,7 @@ write :PI_SESSION_ID:, or didn't pass --session on respawn."
           (should (string-match-p "4242" resp2)))
 
         ;; ---- Kill Pi between blocks ----
-        (let* ((backend (code-agent-org--session-get sk :backend))
+        (let* ((backend (code-agent-org-session-get sk :backend))
                (proc (and backend
                           (code-agent-pi-backend-p backend)
                           (code-agent-pi-backend-process backend))))

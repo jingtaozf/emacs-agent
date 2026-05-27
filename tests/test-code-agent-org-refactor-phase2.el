@@ -62,13 +62,13 @@
     (org-mode)
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((key "test::reset"))
-      (code-agent-org--session-put key :busy t)
-      (code-agent-org--session-put key :recovering t)
-      (code-agent-org--session-put key :last-assistant-query-id "q-old")
+      (code-agent-org-session-put key :busy t)
+      (code-agent-org-session-put key :recovering t)
+      (code-agent-org-session-put key :last-assistant-query-id "q-old")
       (code-agent-org--reset-session-state key)
-      (should-not (code-agent-org--session-get key :busy))
-      (should-not (code-agent-org--session-get key :recovering))
-      (should-not (code-agent-org--session-get key :last-assistant-query-id)))))
+      (should-not (code-agent-org-session-get key :busy))
+      (should-not (code-agent-org-session-get key :recovering))
+      (should-not (code-agent-org-session-get key :last-assistant-query-id)))))
 
 ;; F5.7 get-or-create-session creates new
 (ert-deftest test-f5-get-or-create-session-new ()
@@ -89,7 +89,7 @@
     (org-mode)
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((key "test::existing"))
-      (code-agent-org--session-put key :busy t)
+      (code-agent-org-session-put key :busy t)
       (let ((state (code-agent-org--get-session key)))
         (should (eq t (code-agent-org--session-state-get state :busy)))))))
 
@@ -101,11 +101,11 @@
     (org-mode)
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (should (= 0 (code-agent-org--active-session-count)))
-    (code-agent-org--session-put "s1" :busy t)
+    (code-agent-org-session-put "s1" :busy t)
     (should (= 1 (code-agent-org--active-session-count)))
-    (code-agent-org--session-put "s2" :busy t)
+    (code-agent-org-session-put "s2" :busy t)
     (should (= 2 (code-agent-org--active-session-count)))
-    (code-agent-org--session-put "s1" :busy nil)
+    (code-agent-org-session-put "s1" :busy nil)
     (should (= 1 (code-agent-org--active-session-count)))))
 
 ;; F5.10 session-display-name
@@ -149,8 +149,8 @@
   :tags '(:unit :fast :stable :isolated :refactor :f5)
   ;; If code-agent-org loaded successfully and session module exists,
   ;; session functions should be available
-  (should (fboundp 'code-agent-org--session-get))
-  (should (fboundp 'code-agent-org--session-put))
+  (should (fboundp 'code-agent-org-session-get))
+  (should (fboundp 'code-agent-org-session-put))
   (should (fboundp 'code-agent-org--get-session))
   (should (fboundp 'code-agent-org--make-session-state)))
 
@@ -172,7 +172,7 @@
     (org-mode)
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((key "test::queue"))
-      (code-agent-org--session-put key :busy t)
+      (code-agent-org-session-put key :busy t)
       (let ((block-info (list :custom-id "test-id"
                               :content "hello"
                               :marker (point-marker))))
@@ -187,7 +187,7 @@
     (org-mode)
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((key "test::dequeue"))
-      (code-agent-org--session-put key :busy t)
+      (code-agent-org-session-put key :busy t)
       (let ((b1 (list :custom-id "id-1" :content "first" :marker (point-marker)))
             (b2 (list :custom-id "id-2" :content "second" :marker (point-marker))))
         (code-agent-org--queue-block key b1)
@@ -221,11 +221,11 @@
     (org-mode)
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((key "test::session-dep"))
-      (code-agent-org--session-put key :busy t)
+      (code-agent-org-session-put key :busy t)
       (code-agent-org--queue-block key
         (list :custom-id "x" :content "test" :marker (point-marker)))
       ;; Queue stored via session state
-      (let ((queue (code-agent-org--session-get key :pending-queue)))
+      (let ((queue (code-agent-org-session-get key :pending-queue)))
         (should (= 1 (length queue)))))))
 
 ;;; ============================================================
@@ -282,7 +282,7 @@
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((key "test::cross"))
       ;; Set up session, queue a block, verify through session accessor
-      (code-agent-org--session-put key :busy t)
+      (code-agent-org-session-put key :busy t)
       (code-agent-org--queue-block key
         (list :custom-id "cross-test" :content "test" :marker (point-marker)))
       (should (= 1 (code-agent-org--queue-count key)))

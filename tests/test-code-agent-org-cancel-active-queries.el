@@ -47,7 +47,7 @@ and should not appear in mode line or Active Queries buffer."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
 
          (code-agent-org-execute)
@@ -55,13 +55,13 @@ and should not appear in mode line or Active Queries buffer."
          ;; Wait for query to start and get a request-id
          (should (test-claude-wait-until
                   (lambda ()
-                    (let ((ps (code-agent-org--session-get session-key :process-state)))
+                    (let ((ps (code-agent-org-session-get session-key :process-state)))
                       (and ps (code-agent--process-state-request-id ps))))
                   10))
          (sleep-for 0.5)
          (accept-process-output nil 0.3)
 
-         (let* ((process-state (code-agent-org--session-get session-key :process-state))
+         (let* ((process-state (code-agent-org-session-get session-key :process-state))
                 (request-id (code-agent--process-state-request-id process-state)))
            (should request-id)
            ;; Before cancel: this specific request-id should be in the hash table
@@ -96,7 +96,7 @@ This ensures `code-agent--query-active-p' returns nil for the cancelled query."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
 
          (code-agent-org-execute)
@@ -104,12 +104,12 @@ This ensures `code-agent--query-active-p' returns nil for the cancelled query."
          ;; Wait for query to start
          (should (test-claude-wait-until
                   (lambda ()
-                    (code-agent-org--session-get session-key :process-state))
+                    (code-agent-org-session-get session-key :process-state))
                   10))
          (sleep-for 0.5)
          (accept-process-output nil 0.3)
 
-         (let ((process-state (code-agent-org--session-get session-key :process-state)))
+         (let ((process-state (code-agent-org-session-get session-key :process-state)))
            (should process-state)
            ;; Before cancel: process state should NOT be closed
            (should-not (code-agent--process-state-closed process-state))
@@ -136,7 +136,7 @@ The request-id should no longer be in `code-agent--active-queries' hash table."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
 
          (code-agent-org-execute)
@@ -144,13 +144,13 @@ The request-id should no longer be in `code-agent--active-queries' hash table."
          ;; Wait for query to start and get registered
          (should (test-claude-wait-until
                   (lambda ()
-                    (let ((ps (code-agent-org--session-get session-key :process-state)))
+                    (let ((ps (code-agent-org-session-get session-key :process-state)))
                       (and ps (code-agent--process-state-request-id ps))))
                   10))
          (sleep-for 0.5)
          (accept-process-output nil 0.3)
 
-         (let* ((process-state (code-agent-org--session-get session-key :process-state))
+         (let* ((process-state (code-agent-org-session-get session-key :process-state))
                 (request-id (code-agent--process-state-request-id process-state)))
            (should request-id)
            ;; Before cancel: request-id should be in hash table
@@ -183,7 +183,7 @@ even if the CLI process hasn't exited yet."
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
 
          (code-agent-org-execute)
@@ -191,11 +191,11 @@ even if the CLI process hasn't exited yet."
          ;; Wait for query to start and get a request-id
          (should (test-claude-wait-until
                   (lambda ()
-                    (let ((ps (code-agent-org--session-get session-key :process-state)))
+                    (let ((ps (code-agent-org-session-get session-key :process-state)))
                       (and ps (code-agent--process-state-request-id ps))))
                   10))
 
-         (let* ((process-state (code-agent-org--session-get session-key :process-state))
+         (let* ((process-state (code-agent-org-session-get session-key :process-state))
                 (request-id (code-agent--process-state-request-id process-state)))
            (should request-id)
            ;; Before completion: request-id should be registered

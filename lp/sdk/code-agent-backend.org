@@ -1617,7 +1617,7 @@ Uses `process-get' to retrieve state instead of closures (for dynamic binding co
         (when (and state (code-agent--process-state-ready state))
           ;; Log stdout to verbose buffer for debugging
           (when-let* ((session-key (code-agent--process-state-session-key state)))
-            (code-agent--verbose-insert session-key
+            (code-agent-verbose-insert session-key
                                           (format "<<< STDOUT: %s" output)))
           (let* ((json-buf (or (code-agent--process-state-json-buffer state) ""))
                  (new-buf (concat json-buf output)))
@@ -1685,7 +1685,7 @@ then resumes the session."
   (code-agent-with-span "sentinel-abnormal-exit"
       (list :event (string-trim event)) trace-ctx
   (when-let* ((session-key (code-agent--process-state-session-key state)))
-    (code-agent--verbose-insert session-key
+    (code-agent-verbose-insert session-key
                                   (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
   (code-agent--insert-recovery-message state event)
   (code-agent--kill-child-processes (process-id process))
@@ -1723,7 +1723,7 @@ query, clears Docker mappings, and kills output buffer."
 (defun code-agent--sentinel-log-exit (state event)
   "Log PROCESS EVENT to STATE's verbose buffer with pending-counter summary."
   (when-let* ((session-key (code-agent--process-state-session-key state)))
-    (code-agent--verbose-insert
+    (code-agent-verbose-insert
      session-key
      (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
              (string-trim event)
@@ -1750,19 +1750,19 @@ Three shapes matter:
           (cond
            ((not (stringp msg-type))
             (when session-key
-              (code-agent--verbose-insert
+              (code-agent-verbose-insert
                session-key
                (format ">>> INFO: Final JSON without :type: %s" trimmed))))
            ((equal msg-type "control_request")
             (when session-key
-              (code-agent--verbose-insert
+              (code-agent-verbose-insert
                session-key
                ">>> WARNING: control_request received without newline (CLI died?) - cannot respond"))
             (message "Claude: control_request received but CLI died before we could respond"))
            (t
             (code-agent--debug-log "Parsed remaining JSON: %S" msg-type)
             (when session-key
-              (code-agent--verbose-insert
+              (code-agent-verbose-insert
                session-key
                (format ">>> INFO: Final message without newline: %s" msg-type))))))
       (when error-callback
@@ -1883,7 +1883,7 @@ STATE is the previous process state containing session-id and callbacks."
 
     ;; Log the recovery attempt
     (when session-key
-      (code-agent--verbose-insert session-key
+      (code-agent-verbose-insert session-key
                                     (format ">>> RECOVERY: Resuming session %s" session-id)))
     (code-agent--debug-log "Resuming session after abnormal exit: %s" session-id)
 
@@ -1931,7 +1931,7 @@ Drains output before sending, chunks large messages.
 SESSION-KEY is used for verbose logging."
   ;; Log to verbose buffer
   (when session-key
-    (code-agent--verbose-insert session-key
+    (code-agent-verbose-insert session-key
                                   (format ">>> STDIN: %s" json-str)))
   (code-agent--debug-log "Sending to stdin: %s"
                            (substring json-str 0 (min 200 (length json-str))))
@@ -2299,7 +2299,7 @@ holds STATE)."
      (code-agent--process-state-request-id state) state)
     (when session-key
       (code-agent--get-session-verbose-buffer session-key)
-      (code-agent--verbose-insert-query-header
+      (code-agent-verbose-insert-query-header
        session-key prompt (string-join cli-parts " ")
        args default-directory env-vars))
     (code-agent--streaming-init process state prompt)
@@ -3005,7 +3005,7 @@ Also untracks the request from pending control requests."
                             (substring json 0 (min 200 (length json))))
     ;; Log to verbose buffer for debugging
     (when session-key
-      (code-agent--verbose-insert session-key
+      (code-agent-verbose-insert session-key
                                     (format ">>> STDIN (control_response): %s"
                                             (substring json 0 (min 300 (length json))))))
     ;; Untrack the request now that we're sending the response
@@ -3020,7 +3020,7 @@ Also untracks the request from pending control requests."
       (code-agent--debug-log "WARNING: Cannot send control_response - process is dead (id=%s)"
                                request-id)
       (when session-key
-        (code-agent--verbose-insert session-key
+        (code-agent-verbose-insert session-key
                                       (format ">>> ERROR: control_response DROPPED (process dead) id=%s"
                                               request-id)))
       (message "Claude: control_response dropped - CLI process died (request-id: %s)" request-id))))
@@ -3331,7 +3331,7 @@ Recommended: 500000 (500KB) for typical usage."
 Insertion + trim primitives for the verbose buffer — wraps =insert= so the cap is enforced on every write rather than as a periodic sweep.
 
 #+BEGIN_SRC elisp
-(defun code-agent--verbose-insert (session-key text)
+(defun code-agent-verbose-insert (session-key text)
   "Insert TEXT into verbose buffer for SESSION-KEY.
 When `code-agent-verbose-buffer-max-size' is set, trims oldest content
 if buffer exceeds the limit after insertion."
@@ -3417,7 +3417,7 @@ nil VAL.  Returns a list of cons cells in original order."
                       (propertize name 'face 'font-lock-variable-name-face)
                       display-value)))))
 
-(defun code-agent--verbose-insert-query-header
+(defun code-agent-verbose-insert-query-header
     (session-key prompt &optional cli-path args cwd env-vars)
   "Insert query header in verbose buffer for SESSION-KEY with PROMPT.
 CLI-PATH is the path to claude CLI, ARGS are command line arguments,
@@ -4159,12 +4159,12 @@ stops.
 (cl-defgeneric code-agent-org-backend-cancel-from-org (backend session-key)
   "Handle user-initiated cancel (C-c C-k) from the org buffer on BACKEND.
 Default dispatches to `code-agent-backend-cancel' with the query
-handle read from session state (via `code-agent-org--session-get'
+handle read from session state (via `code-agent-org-session-get'
 when available).  The `fboundp' guard keeps this SDK-layer default
 from hard-depending on the org-integration layer at load time."
   (let ((handle (when (and session-key
-                           (fboundp 'code-agent-org--session-get))
-                  (funcall 'code-agent-org--session-get
+                           (fboundp 'code-agent-org-session-get))
+                  (funcall 'code-agent-org-session-get
                            session-key :query-handle))))
     (code-agent-backend-cancel backend handle)))
 #+END_SRC

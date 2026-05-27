@@ -25,9 +25,9 @@ Sets up code-agent-org--sessions hash table."
   "Set up a minimal session for SESSION-KEY with PROPS.
 Returns the session-key."
   (let ((state (code-agent-org--get-session session-key)))
-    (code-agent-org--session-put session-key :busy t)
+    (code-agent-org-session-put session-key :busy t)
     (while props
-      (code-agent-org--session-put session-key (car props) (cadr props))
+      (code-agent-org-session-put session-key (car props) (cadr props))
       (setq props (cddr props))))
   session-key)
 
@@ -43,15 +43,15 @@ Returns the session-key."
         :busy t :recovering t :last-assistant-query-id "old-qid"
         :marker (copy-marker (point-min)))
       ;; Pre-conditions
-      (should (code-agent-org--session-get sk :busy))
-      (should (code-agent-org--session-get sk :recovering))
-      (should (code-agent-org--session-get sk :marker))
+      (should (code-agent-org-session-get sk :busy))
+      (should (code-agent-org-session-get sk :recovering))
+      (should (code-agent-org-session-get sk :marker))
       ;; Act
       (code-agent-org--cleanup-session sk "completed")
       ;; Assert
-      (should-not (code-agent-org--session-get sk :busy))
-      (should-not (code-agent-org--session-get sk :recovering))
-      (should-not (code-agent-org--session-get sk :marker)))))
+      (should-not (code-agent-org-session-get sk :busy))
+      (should-not (code-agent-org-session-get sk :recovering))
+      (should-not (code-agent-org-session-get sk :marker)))))
 
 (ert-deftest test-cleanup-session-frees-marker ()
   "cleanup-session should nil out the marker to prevent memory leak."
@@ -64,7 +64,7 @@ Returns the session-key."
       (code-agent-org--cleanup-session sk "completed")
       ;; Marker should be freed (set to nil position)
       (should-not (marker-position marker))
-      (should-not (code-agent-org--session-get sk :marker)))))
+      (should-not (code-agent-org-session-get sk :marker)))))
 
 (ert-deftest test-cleanup-session-clears-queue-when-requested ()
   "cleanup-session with clear-queue-p should clear pending queue."
@@ -74,11 +74,11 @@ Returns the session-key."
     (let ((sk "test-session"))
       (test-cleanup--setup-session sk
         :pending-queue (list (list :content "queued block")))
-      (should (code-agent-org--session-get sk :pending-queue))
+      (should (code-agent-org-session-get sk :pending-queue))
       ;; Act: cleanup WITH clear-queue
       (code-agent-org--cleanup-session sk "error" t)
       ;; Queue should be empty
-      (should-not (code-agent-org--session-get sk :pending-queue)))))
+      (should-not (code-agent-org-session-get sk :pending-queue)))))
 
 (ert-deftest test-cleanup-session-preserves-queue-by-default ()
   "cleanup-session without clear-queue-p should preserve pending queue.
@@ -92,7 +92,7 @@ This is needed for handle-complete which dequeues after cleanup."
       ;; Act: cleanup WITHOUT clear-queue
       (code-agent-org--cleanup-session sk "completed")
       ;; Queue should be preserved
-      (should (code-agent-org--session-get sk :pending-queue)))))
+      (should (code-agent-org-session-get sk :pending-queue)))))
 
 ;;; F15: cancel-all completeness
 
@@ -128,8 +128,8 @@ BUG A1: cancel-all currently does NOT set exec-status."
       ;; We verify indirectly: after cancel-all, :busy should be nil
       ;; and marker should be freed (proves cleanup-session was used)
       (code-agent-org-cancel-all)
-      (should-not (code-agent-org--session-get sk :busy))
-      (should-not (code-agent-org--session-get sk :marker)))))
+      (should-not (code-agent-org-session-get sk :busy))
+      (should-not (code-agent-org-session-get sk :marker)))))
 
 ;;; F16: insert-error location
 
@@ -235,9 +235,9 @@ BUG: loop-abort currently only does 2/8 cleanup operations."
       ;; For now, test that cleanup-session handles this case
       (code-agent-org--cleanup-session sk "error")
       ;; All state should be cleaned
-      (should-not (code-agent-org--session-get sk :busy))
-      (should-not (code-agent-org--session-get sk :recovering))
-      (should-not (code-agent-org--session-get sk :marker))
+      (should-not (code-agent-org-session-get sk :busy))
+      (should-not (code-agent-org-session-get sk :recovering))
+      (should-not (code-agent-org-session-get sk :marker))
       (should-not (marker-position marker)))))
 
 (ert-deftest test-cleanup-queued-blocks-frees-markers ()
@@ -254,7 +254,7 @@ BUG: loop-abort currently only does 2/8 cleanup operations."
       ;; Queued marker should be freed
       (should-not (marker-position q-marker))
       ;; Queue should be cleared
-      (should-not (code-agent-org--session-get sk :pending-queue)))))
+      (should-not (code-agent-org-session-get sk :pending-queue)))))
 
 (provide 'test-code-agent-org-cleanup)
 ;;; test-code-agent-org-cleanup.el ends here

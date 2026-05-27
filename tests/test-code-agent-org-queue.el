@@ -146,15 +146,15 @@
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "/tmp/test-queue.org::test-session"))
       ;; Set busy state
-      (code-agent-org--session-put session-key :busy t)
+      (code-agent-org-session-put session-key :busy t)
       ;; Queue should still work
       (code-agent-org--queue-block session-key '(:custom-id "queued"))
       (should (= 1 (code-agent-org--queue-count session-key)))
       ;; Verify busy state
-      (should (code-agent-org--session-get session-key :busy))
+      (should (code-agent-org-session-get session-key :busy))
       ;; Clear busy
-      (code-agent-org--session-put session-key :busy nil)
-      (should (not (code-agent-org--session-get session-key :busy))))))
+      (code-agent-org-session-put session-key :busy nil)
+      (should (not (code-agent-org-session-get session-key :busy))))))
 
 ;;; Duplicate Prevention Tests
 
@@ -229,26 +229,26 @@
     (setq buffer-file-name "/tmp/test-cancel.org")
     (insert "* Test\n#+begin_src ai\ntest\n#+end_src\n")
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
-    ;; Navigate into AI block so code-agent-org--current-session-key works
+    ;; Navigate into AI block so code-agent-org-current-session-key works
     (goto-char (point-min))
     (re-search-forward "begin_src ai" nil t)
     (forward-line 1)
     ;; Get the actual session key that will be computed
-    (let ((session-key (code-agent-org--current-session-key)))
+    (let ((session-key (code-agent-org-current-session-key)))
       ;; Simulate running query
-      (code-agent-org--session-put session-key :busy t)
-      (code-agent-org--session-put session-key :process-state 'fake-process)
+      (code-agent-org-session-put session-key :busy t)
+      (code-agent-org-session-put session-key :process-state 'fake-process)
       ;; Queue some blocks
       (code-agent-org--queue-block session-key '(:custom-id "q1"))
       (code-agent-org--queue-block session-key '(:custom-id "q2"))
       (should (= 2 (code-agent-org--queue-count session-key)))
-      (should (code-agent-org--session-get session-key :busy))
+      (should (code-agent-org-session-get session-key :busy))
       ;; Cancel queue only
       (code-agent-org-cancel-queue)
       ;; Queue should be empty but session should still be busy
       ;; (running query not interrupted)
       (should (= 0 (code-agent-org--queue-count session-key)))
-      (should (code-agent-org--session-get session-key :busy)))))
+      (should (code-agent-org-session-get session-key :busy)))))
 
 (ert-deftest test-code-agent-org-queue-duplicate-prevention-integration ()
   "Integration test: same block position cannot be queued multiple times."
@@ -324,8 +324,8 @@ queue the same block should be rejected."
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "/tmp/test-running.org::test-session"))
       ;; Simulate that this block is already running with custom-id
-      (code-agent-org--session-put session-key :busy t)
-      (code-agent-org--session-put session-key :custom-id "b1")
+      (code-agent-org-session-put session-key :busy t)
+      (code-agent-org-session-put session-key :custom-id "b1")
       ;; Queue should be empty
       (should (= 0 (code-agent-org--queue-count session-key)))
       ;; Now try to queue the SAME block (same custom-id)

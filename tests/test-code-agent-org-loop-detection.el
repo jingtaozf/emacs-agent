@@ -45,9 +45,9 @@ FIX: Add (run-hook-with-args ...) in code-agent-org--execute-loop-iteration."
       (let* ((session-key "test-session")
              (marker (point-min-marker)))
         ;; Initialize session
-        (code-agent-org--session-put session-key :marker marker)
-        (code-agent-org--session-put session-key :loop-current 1)
-        (code-agent-org--session-put session-key :loop-max 3)
+        (code-agent-org-session-put session-key :marker marker)
+        (code-agent-org-session-put session-key :loop-current 1)
+        (code-agent-org-session-put session-key :loop-max 3)
         ;; Add buffer-local hook
         (add-hook 'code-agent-org-loop-iteration-hook
                   (lambda (sk iter)
@@ -67,14 +67,14 @@ FIX: Append (TOOL-NAME . ARGS-HASH) in code-agent-org--handle-message for tool-u
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "test-session"))
       ;; Initialize session
-      (code-agent-org--session-put session-key :marker (point-min-marker))
-      (code-agent-org--session-put session-key :query-id "q1")
+      (code-agent-org-session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :query-id "q1")
       ;; Simulate recording tool calls
       (code-agent-org--record-tool-call session-key "Read" '(:file_path "/foo.el"))
       (code-agent-org--record-tool-call session-key "Write" '(:file_path "/bar.el"))
       (code-agent-org--record-tool-call session-key "Read" '(:file_path "/foo.el"))
       ;; Verify history
-      (let ((history (code-agent-org--session-get session-key :tool-call-history)))
+      (let ((history (code-agent-org-session-get session-key :tool-call-history)))
         (should (= 3 (length history)))
         (should (equal "Read" (car (nth 0 history))))
         (should (equal "Write" (car (nth 1 history))))
@@ -89,12 +89,12 @@ FIX: Implement (defun code-agent-org-loop-inject-warning (session-key message) .
   (with-temp-buffer
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "test-session"))
-      (code-agent-org--session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :marker (point-min-marker))
       ;; Inject warning
       (code-agent-org-loop-inject-warning session-key "Detected repetitive tool calls")
       ;; Verify it's stored
       (should (equal "Detected repetitive tool calls"
-                     (code-agent-org--session-get session-key :loop-warning))))))
+                     (code-agent-org-session-get session-key :loop-warning))))))
 
 (ert-deftest test-loop-detection-warning-included-in-prompt ()
   "Loop warning is included in the system prompt for the next iteration.
@@ -103,14 +103,14 @@ FIX: Read :loop-warning in prompt assembly and clear after use."
   (with-temp-buffer
     (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
     (let ((session-key "test-session"))
-      (code-agent-org--session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :marker (point-min-marker))
       ;; Set a warning
-      (code-agent-org--session-put session-key :loop-warning "Stop repeating!")
+      (code-agent-org-session-put session-key :loop-warning "Stop repeating!")
       ;; Read and clear the warning (this is what prompt assembly does)
       (let ((warning (code-agent-org--consume-loop-warning session-key)))
         (should (equal "Stop repeating!" warning))
         ;; After consumption, it should be nil
-        (should (null (code-agent-org--session-get session-key :loop-warning)))))))
+        (should (null (code-agent-org-session-get session-key :loop-warning)))))))
 
 (provide 'test-code-agent-org-loop-detection)
 ;;; test-code-agent-org-loop-detection.el ends here

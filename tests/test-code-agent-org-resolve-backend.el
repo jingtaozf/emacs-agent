@@ -71,9 +71,9 @@ Records cleanup calls in `test-resolve--cleanup-calls'."
              (result (code-agent-org--resolve-backend sk nil)))
         (should (equal '(:tag alpha :session-key "test-sk-first") result))
         (should (equal result
-                       (code-agent-org--session-get sk :backend)))
+                       (code-agent-org-session-get sk :backend)))
         (should (equal "alpha"
-                       (code-agent-org--session-get sk :backend-property)))
+                       (code-agent-org-session-get sk :backend-property)))
         ;; No cleanup on first dispatch (nothing to invalidate).
         (should (null test-resolve--cleanup-calls))))))
 
@@ -119,9 +119,9 @@ the property, re-execute the same block) — not move across buffers."
           (should (equal (list 'cleanup cached-alpha)
                          (car test-resolve--cleanup-calls)))
           (should (equal rebuilt
-                         (code-agent-org--session-get sk :backend)))
+                         (code-agent-org-session-get sk :backend)))
           (should (equal "beta"
-                         (code-agent-org--session-get sk :backend-property))))))))
+                         (code-agent-org-session-get sk :backend-property))))))))
 
 
 (ert-deftest test-resolve--unknown-property-falls-back-and-caches-string ()
@@ -136,7 +136,7 @@ correctly invalidates."
         ;; Hit the "claude-code" fallback (per --make-default-backend).
         (should (equal '(:tag fallback :session-key "test-sk-unknown") result))
         (should (equal "no-such-backend"
-                       (code-agent-org--session-get sk :backend-property)))))))
+                       (code-agent-org-session-get sk :backend-property)))))))
 
 
 (ert-deftest test-resolve--cleanup-error-is-swallowed ()

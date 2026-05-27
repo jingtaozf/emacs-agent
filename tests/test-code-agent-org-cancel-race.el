@@ -40,7 +40,7 @@ This verifies the race condition is fixed:
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
          (code-agent-org-execute)
 
@@ -87,7 +87,7 @@ This verifies the race condition is fixed:
        (goto-char (point-min))
        (re-search-forward "^\\*+ Instruction 1" nil t)
        (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-       (let ((session-key (code-agent-org--current-session-key))
+       (let ((session-key (code-agent-org-current-session-key))
              (block-pos (point)))
          (code-agent-org-execute)
 
@@ -100,7 +100,7 @@ This verifies the race condition is fixed:
          (should (equal (code-agent-org--get-exec-status) "executing"))
 
          ;; Verify custom-id is available
-         (let ((custom-id (code-agent-org--session-get session-key :custom-id)))
+         (let ((custom-id (code-agent-org-session-get session-key :custom-id)))
            (should custom-id))
 
          ;; Cancel it

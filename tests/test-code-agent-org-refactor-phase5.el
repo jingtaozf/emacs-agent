@@ -89,9 +89,9 @@ Hello world
   "Session assertion helpers should work correctly."
   :tags '(:unit :fast :stable :isolated :refactor :f15)
   (test-org-with-session "* Test\n" "test::f15-assert"
-    (code-agent-org--session-put "test::f15-assert" :busy t)
+    (code-agent-org-session-put "test::f15-assert" :busy t)
     (test-org-session-field-eq "test::f15-assert" :busy t)
-    (code-agent-org--session-put "test::f15-assert" :busy nil)
+    (code-agent-org-session-put "test::f15-assert" :busy nil)
     (test-org-session-field-nil "test::f15-assert" :busy)))
 
 ;; F15.9 Verify fixture used in refactor test files (meta-test)
@@ -102,8 +102,8 @@ Hello world
   ;; This test verifies the fixtures provide equivalent functionality
   (test-org-with-sessions ""
     (should (hash-table-p code-agent-org--sessions))
-    (code-agent-org--session-put "test::meta" :busy t)
-    (should (eq t (code-agent-org--session-get "test::meta" :busy)))))
+    (code-agent-org-session-put "test::meta" :busy t)
+    (should (eq t (code-agent-org-session-get "test::meta" :busy)))))
 
 (provide 'test-code-agent-org-refactor-phase5)
 ;;; test-code-agent-org-refactor-phase5.el ends here

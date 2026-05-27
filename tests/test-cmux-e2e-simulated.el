@@ -254,14 +254,14 @@ Returns values from BODY. Cleans up buffer afterwards."
   "Can find CLAUDE_SESSION_ID from within AI block."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (let ((sid (code-agent-org-terminal--find-session-property "CLAUDE_SESSION_ID")))
+    (let ((sid (code-agent-org-terminal-find-session-property "CLAUDE_SESSION_ID")))
       (should (equal sid "test-cmux-session-001")))))
 
 (ert-deftest test-cmux-find-session-property-missing ()
   "Returns nil for missing property."
   (test-cmux--with-org-buffer test-cmux--org-content-basic
     (test-cmux--goto-ai-block)
-    (should (null (code-agent-org-terminal--find-session-property "NONEXISTENT_PROP")))))
+    (should (null (code-agent-org-terminal-find-session-property "NONEXISTENT_PROP")))))
 
 ;;; ============================================================================
 ;;; Tests: Tab Title
@@ -449,7 +449,7 @@ Returns values from BODY. Cleans up buffer afterwards."
     (test-cmux--with-org-buffer test-cmux--org-content-with-backend
       (test-cmux--goto-ai-block)
       ;; Verify the property is accessible (still a plain string from org)
-      (let ((backend (code-agent-org--get-org-property "CLAUDE_BACKEND" t)))
+      (let ((backend (code-agent-org-get-org-property "CLAUDE_BACKEND" t)))
         (should (equal backend "cmux")))
       ;; Execute should dispatch to cmux
       (code-agent-org-execute)
@@ -532,19 +532,19 @@ do not continue past iteration 1."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
-      (let ((session-key (code-agent-org--current-session-key)))
+      (let ((session-key (code-agent-org-current-session-key)))
         ;; Before execute: not busy
-        (should-not (code-agent-org--session-get session-key :busy))
+        (should-not (code-agent-org-session-get session-key :busy))
         ;; Execute sets :busy t synchronously so subsequent cancel/queue
         ;; paths see the active query.
         (code-agent-org-cmux--execute-ai-block)
-        (should (code-agent-org--session-get session-key :busy))
+        (should (code-agent-org-session-get session-key :busy))
         ;; Bridge UserPromptSubmit hook can re-affirm idempotently.
-        (code-agent-org--session-put session-key :busy t)
-        (should (code-agent-org--session-get session-key :busy))
+        (code-agent-org-session-put session-key :busy t)
+        (should (code-agent-org-session-get session-key :busy))
         ;; Complete clears busy
         (code-agent-org-cmux--query-completed "test-cmux-session-001")
-        (should-not (code-agent-org--session-get session-key :busy))
+        (should-not (code-agent-org-session-get session-key :busy))
         ;; Clean up files
         (ignore-errors
           (delete-file (expand-file-name
@@ -562,8 +562,8 @@ do not continue past iteration 1."
     (test-cmux--with-org-buffer test-cmux--org-content-basic
       (test-cmux--goto-ai-block)
       (code-agent-org-cmux--execute-ai-block)
-      (let* ((session-key (code-agent-org--current-session-key))
-             (backend (code-agent-org--session-get session-key :backend)))
+      (let* ((session-key (code-agent-org-current-session-key))
+             (backend (code-agent-org-session-get session-key :backend)))
         (should (code-agent-cmux-backend-p backend))
         ;; Clean up
         (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-001")))
@@ -580,14 +580,14 @@ query-completed clears busy and unregisters query."
       (test-cmux--goto-ai-block)
       ;; 1. Execute sets up the query
       (code-agent-org-cmux--execute-ai-block)
-      (let ((session-key (code-agent-org--current-session-key))
+      (let ((session-key (code-agent-org-current-session-key))
             (req-id (code-agent-org-terminal--read-request-id "test-cmux-session-003")))
         ;; Query should be registered
         (should req-id)
         (should (code-agent--get-active-query req-id))
         ;; 2. Simulate bridge setting busy (as hook would)
-        (code-agent-org--session-put session-key :busy t)
-        (should (code-agent-org--session-get session-key :busy))
+        (code-agent-org-session-put session-key :busy t)
+        (should (code-agent-org-session-get session-key :busy))
         ;; 3. Cancel sends escape
         (code-agent-org-cmux-cancel)
         (let ((key-calls (test-cmux--mock-calls-for "send-key")))
@@ -596,7 +596,7 @@ query-completed clears busy and unregisters query."
         ;; 4. query-completed fires (Python hook detects agent stopped)
         (code-agent-org-cmux--query-completed "test-cmux-session-003")
         ;; 5. Verify clean state: not busy, query unregistered
-        (should-not (code-agent-org--session-get session-key :busy))
+        (should-not (code-agent-org-session-get session-key :busy))
         (should-not (code-agent--get-active-query req-id))
         ;; Clean up files
         (ignore-errors
@@ -615,9 +615,9 @@ query-completed clears busy and unregisters query."
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
       ;; Set up session state as if execute had run
-      (let ((session-key (code-agent-org--current-session-key)))
-        (code-agent-org--session-put session-key :backend (code-agent-cmux-backend-create :session-key session-key))
-        (code-agent-org--session-put session-key :busy t)
+      (let ((session-key (code-agent-org-current-session-key)))
+        (code-agent-org-session-put session-key :backend (code-agent-cmux-backend-create :session-key session-key))
+        (code-agent-org-session-put session-key :busy t)
         ;; Mock cleanup functions
         (cl-letf (((symbol-function 'code-agent-org--cleanup-session) #'ignore)
                   ((symbol-function 'code-agent-org--queue-count) (lambda (_) 0)))
@@ -633,8 +633,8 @@ query-completed clears busy and unregisters query."
   (test-cmux--with-mock
     (test-cmux--with-org-buffer test-cmux--org-content-with-surface
       (test-cmux--goto-ai-block)
-      (let ((session-key (code-agent-org--current-session-key)))
-        (code-agent-org--session-put session-key :backend (code-agent-cmux-backend-create :session-key session-key))
+      (let ((session-key (code-agent-org-current-session-key)))
+        (code-agent-org-session-put session-key :backend (code-agent-cmux-backend-create :session-key session-key))
         ;; :busy is NOT set -- cancel should be a no-op message, not an error
         (code-agent-org-cancel)
         ;; No send-key calls should have been made
@@ -867,7 +867,7 @@ First query.
                   (should-not (string-match-p "--resume" cmd1)))
                 ;; 2. Simulate bridge saving CLI session (what Python hook does)
                 (save-excursion
-                  (code-agent-org-terminal--goto-session-heading)
+                  (code-agent-org-terminal-goto-session-heading)
                   (org-set-property "CLAUDE_CLI_SESSION" "saved-cli-session-uuid"))
                 ;; 3. Verify property persisted
                 (should (equal "saved-cli-session-uuid"
@@ -1026,7 +1026,7 @@ file-level #+PROPERTY must also dispatch correctly."
     (test-cmux--with-org-buffer test-cmux--org-file-level-backend
       (test-cmux--goto-ai-block)
       ;; Verify the file-level property is accessible (plain string from org)
-      (let ((backend (code-agent-org--get-org-property "CLAUDE_BACKEND" t)))
+      (let ((backend (code-agent-org-get-org-property "CLAUDE_BACKEND" t)))
         (should (equal backend "cmux")))
       ;; Execute should dispatch to cmux backend
       (code-agent-org-execute)
@@ -1056,8 +1056,8 @@ T52b: Ensures generic cancel works for file-level backend dispatch."
     (test-cmux--with-org-buffer test-cmux--org-file-level-backend
       (test-cmux--goto-ai-block)
       (code-agent-org-execute)
-      (let* ((session-key (code-agent-org--current-session-key))
-             (backend (code-agent-org--session-get session-key :backend)))
+      (let* ((session-key (code-agent-org-current-session-key))
+             (backend (code-agent-org-session-get session-key :backend)))
         (should (code-agent-cmux-backend-p backend))
         ;; Clean up
         (let ((req-id (code-agent-org-terminal--read-request-id "test-cmux-session-file-backend")))
@@ -1164,11 +1164,11 @@ call new-workspace."
                       (should (cl-find "rename-tab" calls
                                        :key #'car :test #'equal))
                       ;; Verbose timer started
-                      (let ((sk (code-agent-org--current-session-key)))
-                        (should (code-agent-org--session-get sk :verbose-follow-process)))))))
+                      (let ((sk (code-agent-org-current-session-key)))
+                        (should (code-agent-org-session-get sk :verbose-follow-process)))))))
             ;; Cleanup: stop verbose, clear state, kill buffer
             (let ((sk (with-current-buffer buf
-                        (code-agent-org--current-session-key))))
+                        (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-003"
                      code-agent-org-terminal--workspace-to-session-key)
@@ -1382,13 +1382,13 @@ Guards against firing queued timers after user cancels."
 
           (setq session-key (concat buffer-file-name "::test-lc"))
           ;; Set up loop state as if iteration 1 completed
-          (code-agent-org--session-put session-key :loop-current 2)
-          (code-agent-org--session-put session-key :loop-max 3)
-          (code-agent-org--session-put session-key :marker (point-marker))
-          (code-agent-org--session-put session-key :original-prompt "test")
-          (code-agent-org--session-put session-key :instruction-num 1)
-          (code-agent-org--session-put session-key :custom-id "test-lc")
-          (code-agent-org--session-put session-key :busy nil)
+          (code-agent-org-session-put session-key :loop-current 2)
+          (code-agent-org-session-put session-key :loop-max 3)
+          (code-agent-org-session-put session-key :marker (point-marker))
+          (code-agent-org-session-put session-key :original-prompt "test")
+          (code-agent-org-session-put session-key :instruction-num 1)
+          (code-agent-org-session-put session-key :custom-id "test-lc")
+          (code-agent-org-session-put session-key :busy nil)
 
           ;; Simulate: session was cancelled
           (cl-letf (((symbol-function 'code-agent-org--get-exec-status-for-session)
@@ -1403,9 +1403,9 @@ Guards against firing queued timers after user cancels."
             ;; send-request should NOT have been called
             (should-not send-called)
             ;; E25: :busy stays nil (not set by cancelled iteration)
-            (should-not (code-agent-org--session-get session-key :busy))
+            (should-not (code-agent-org-session-get session-key :busy))
             ;; E25: :loop-current unchanged (still 2, not incremented)
-            (should (equal 2 (code-agent-org--session-get session-key :loop-current)))))
+            (should (equal 2 (code-agent-org-session-get session-key :loop-current)))))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when buffer-file-name
@@ -1431,10 +1431,10 @@ continue its loop."
           (set-buffer-modified-p nil)
 
           (setq session-key (concat buffer-file-name "::test-le"))
-          (code-agent-org--session-put session-key :loop-current 2)
-          (code-agent-org--session-put session-key :loop-max 3)
-          (code-agent-org--session-put session-key :marker (point-marker))
-          (code-agent-org--session-put session-key :original-prompt "test")
+          (code-agent-org-session-put session-key :loop-current 2)
+          (code-agent-org-session-put session-key :loop-max 3)
+          (code-agent-org-session-put session-key :marker (point-marker))
+          (code-agent-org-session-put session-key :original-prompt "test")
 
           (cl-letf (((symbol-function 'code-agent-org--get-exec-status-for-session)
                      (lambda (&rest _) "error"))
@@ -1484,7 +1484,7 @@ Verifies session-key resolution and property lookup work with special chars."
     (save-excursion
       (goto-char (point-min))
       (re-search-forward ":CUSTOM_ID: test-unicode-instr-1" nil t)
-      (let ((sk (code-agent-org--current-session-key)))
+      (let ((sk (code-agent-org-current-session-key)))
         (should (stringp sk))
         (should (string-match-p "sdd-unicode-001" sk))))
     ;; ACTIVE_STORY with CJK chars reads correctly
@@ -1562,20 +1562,20 @@ Verifies that non-ASCII characters are stripped and only alphanum + hyphens rema
 Non-ASCII chars are replaced with hyphens and collapsed."
   :tags '(:e2e :simulated :unit :fast :stable)
   ;; CJK section name: [:alnum:] includes unicode letters, so CJK chars preserved
-  (let ((id (code-agent-org--generate-custom-id "sdd-001" "データベース設計")))
+  (let ((id (code-agent-org-generate-custom-id "sdd-001" "データベース設計")))
     (should (stringp id))
     (should (string-match-p "sdd-001" id))
     ;; CJK chars ARE alphanumeric in Emacs regex — preserved in CUSTOM_ID
     (should (string-match-p "データベース設計" id)))
   ;; Emoji section name: emoji are NOT [:alnum:], so stripped
-  (let ((id (code-agent-org--generate-custom-id "sdd-002" "Deploy 🚀 Pipeline")))
+  (let ((id (code-agent-org-generate-custom-id "sdd-002" "Deploy 🚀 Pipeline")))
     (should (stringp id))
     (should (string-match-p "deploy" id))
     (should (string-match-p "pipeline" id))
     ;; Emoji should be stripped (replaced by hyphens and collapsed)
     (should-not (string-match-p "🚀" id)))
   ;; Plain ASCII
-  (let ((id (code-agent-org--generate-custom-id "sdd-003" "Research Output")))
+  (let ((id (code-agent-org-generate-custom-id "sdd-003" "Research Output")))
     (should (equal "sdd-003-research-output" id))))
 
 ;;; ============================================================================
@@ -1752,7 +1752,7 @@ calling new-workspace."
                 ;; property we persist; workspace identity lives in
                 ;; the heading title)
                 (save-excursion
-                  (code-agent-org-terminal--goto-session-heading)
+                  (code-agent-org-terminal-goto-session-heading)
                   (should (equal "surface:42"
                                  (org-entry-get nil "CMUX_SURFACE_ID"))))
                 ;; Hash tables point to fresh workspace
@@ -1765,8 +1765,8 @@ calling new-workspace."
                 ;; E03 extensions: verify restore-workspace side effects
                 ;; after phase 2 recovery
                 ;; Verbose timer started
-                (let ((sk (code-agent-org--current-session-key)))
-                  (should (code-agent-org--session-get sk :verbose-follow-process)))
+                (let ((sk (code-agent-org-current-session-key)))
+                  (should (code-agent-org-session-get sk :verbose-follow-process)))
                 ;; list-workspaces was queried for name lookup
                 (should (cl-find "list-workspaces" calls
                                  :key #'car :test #'equal))
@@ -1775,7 +1775,7 @@ calling new-workspace."
                                  :key #'car :test #'equal)))))
           ;; Cleanup
           (let ((sk (with-current-buffer buf
-                      (code-agent-org--current-session-key))))
+                      (code-agent-org-current-session-key))))
             (when sk (code-agent-org-cmux--stop-verbose sk)))
           (remhash "test-cmux-session-recover-001"
                    code-agent-org-terminal--workspace-to-session-key)
@@ -1880,7 +1880,7 @@ Color and verbose must be applied BEFORE wait-for-ready."
                         ;; 3. CMUX_SURFACE_ID persisted (only property we write;
                         ;; workspace identity = heading title, not a UUID)
                         (save-excursion
-                          (code-agent-org-terminal--goto-session-heading)
+                          (code-agent-org-terminal-goto-session-heading)
                           (should (equal "surface:mock-77"
                                          (org-entry-get nil "CMUX_SURFACE_ID"))))
                         ;; 4. Hash tables populated (UUID resolved from ref)
@@ -1904,7 +1904,7 @@ Color and verbose must be applied BEFORE wait-for-ready."
                           (when (and color-pos wait-pos)
                             (should (< color-pos wait-pos))))))))
               ;; Inner cleanup: stop verbose, clear hash tables, kill buffer
-              (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+              (let ((sk (with-current-buffer buf (code-agent-org-current-session-key))))
                 (when sk (code-agent-org-cmux--stop-verbose sk)))
               (remhash "test-cmux-session-launch-001" code-agent-org-terminal--workspace-to-session-key)
               (remhash "test-cmux-session-launch-001" code-agent-org-cmux--workspace-to-surface)
@@ -1976,10 +1976,10 @@ launch command sent, verbose timer restarted."
                       ;; At least 2 send calls: /exit + launch-cmd
                       (should (>= (length send-calls) 2)))
                     ;; 4. Verbose timer restarted
-                    (let ((sk (code-agent-org--current-session-key)))
-                      (should (code-agent-org--session-get sk :verbose-follow-process))))))
+                    (let ((sk (code-agent-org-current-session-key)))
+                      (should (code-agent-org-session-get sk :verbose-follow-process))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+            (let ((sk (with-current-buffer buf (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
             (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
@@ -2261,7 +2261,7 @@ Test
                       (should-not (org-entry-get nil "CLAUDE_CLI_SESSION"))))))
             ;; Cleanup
             (let ((sk (with-current-buffer buf
-                        (code-agent-org--current-session-key))))
+                        (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-resume-001"
                      code-agent-org-terminal--workspace-to-session-key)
@@ -2352,7 +2352,7 @@ Test
                       (should (equal (org-entry-get nil "CLAUDE_CLI_SESSION")
                                      "healthy-uuid-cafebabe"))))))
             (let ((sk (with-current-buffer buf
-                        (code-agent-org--current-session-key))))
+                        (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-good-001"
                      code-agent-org-terminal--workspace-to-session-key)
@@ -2399,7 +2399,7 @@ with header-line containing the session ID and keybinding hints."
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
                     (code-agent-org-cmux--ensure-session)
-                    (let* ((sk (code-agent-org--current-session-key))
+                    (let* ((sk (code-agent-org-current-session-key))
                            (vbuf (gethash sk code-agent--session-verbose-buffers)))
                       ;; Buffer exists and is live
                       (should vbuf)
@@ -2411,9 +2411,9 @@ with header-line containing the session ID and keybinding hints."
                       (with-current-buffer vbuf
                         (should header-line-format))
                       ;; Timer is running
-                      (should (code-agent-org--session-get sk :verbose-follow-process))))))
+                      (should (code-agent-org-session-get sk :verbose-follow-process))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+            (let ((sk (with-current-buffer buf (code-agent-org-current-session-key))))
               (when sk
                 (code-agent-org-cmux--stop-verbose sk)
                 (let ((vbuf (gethash sk code-agent--session-verbose-buffers)))
@@ -2452,7 +2452,7 @@ them sequentially via its own input buffer."
           ;; for prompt text, plus initial sends from ensure-session)
           (should (> send-count-after-b send-count-after-a))
           ;; No queue was used — cmux sends directly
-          (let ((sk (code-agent-org--current-session-key)))
+          (let ((sk (code-agent-org-current-session-key)))
             (should (zerop (code-agent-org--queue-count sk)))))))))
 
 ;;; ============================================================================
@@ -2527,7 +2527,7 @@ buffer forever with \"not_found: Workspace not found\"."
           ;; Session-state slot populated → same lookup via different path.
           (remhash session-id code-agent-org-cmux--workspace-to-cmux-id)
           (should-not (code-agent-org-cmux--verbose-workspace-uuid session-key))
-          (code-agent-org--session-put session-key :workspace-session-id session-id)
+          (code-agent-org-session-put session-key :workspace-session-id session-id)
           (puthash session-id hash-uuid code-agent-org-cmux--workspace-to-cmux-id)
           (should (equal (code-agent-org-cmux--verbose-workspace-uuid session-key)
                          hash-uuid))
@@ -2586,27 +2586,27 @@ tracking the new surface."
                                (funcall orig "cmux-follow-mock" nil "sleep" "60")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((sk (code-agent-org--current-session-key)))
+                    (let ((sk (code-agent-org-current-session-key)))
                       ;; Start verbose with surface-A
                       (code-agent-org-cmux--start-verbose "surface:A" sk)
-                      (let ((proc-a (code-agent-org--session-get sk :verbose-follow-process)))
+                      (let ((proc-a (code-agent-org-session-get sk :verbose-follow-process)))
                         (should proc-a)
                         (should (equal "surface:A"
-                                       (code-agent-org--session-get sk :verbose-surface-id)))
+                                       (code-agent-org-session-get sk :verbose-surface-id)))
                         ;; Start verbose with surface-B (surface changed)
                         (code-agent-org-cmux--start-verbose "surface:B" sk)
-                        (let ((proc-b (code-agent-org--session-get sk :verbose-follow-process)))
+                        (let ((proc-b (code-agent-org-session-get sk :verbose-follow-process)))
                           ;; Process replaced (not the same object)
                           (should proc-b)
                           (should-not (eq proc-a proc-b))
                           (should (equal "surface:B"
-                                         (code-agent-org--session-get sk :verbose-surface-id)))
+                                         (code-agent-org-session-get sk :verbose-surface-id)))
                           ;; Start verbose with SAME surface-B — no restart
                           (code-agent-org-cmux--start-verbose "surface:B" sk)
-                          (let ((proc-b2 (code-agent-org--session-get sk :verbose-follow-process)))
+                          (let ((proc-b2 (code-agent-org-session-get sk :verbose-follow-process)))
                             (should (eq proc-b proc-b2)))))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+            (let ((sk (with-current-buffer buf (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
             (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
@@ -2642,19 +2642,19 @@ Ensures no orphan timers remain after cleanup."
                               (t "ok")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((sk (code-agent-org--current-session-key)))
+                    (let ((sk (code-agent-org-current-session-key)))
                       ;; Start verbose
                       (code-agent-org-cmux--start-verbose "surface:test" sk)
-                      (should (code-agent-org--session-get sk :verbose-follow-process))
+                      (should (code-agent-org-session-get sk :verbose-follow-process))
                       ;; Stop verbose
                       (code-agent-org-cmux--stop-verbose sk)
                       ;; Timer cleared
-                      (should-not (code-agent-org--session-get sk :verbose-follow-process))
+                      (should-not (code-agent-org-session-get sk :verbose-follow-process))
                       ;; Stopping again is safe (no error)
                       (code-agent-org-cmux--stop-verbose sk)
-                      (should-not (code-agent-org--session-get sk :verbose-follow-process))))))
+                      (should-not (code-agent-org-session-get sk :verbose-follow-process))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+            (let ((sk (with-current-buffer buf (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
             (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
@@ -2780,16 +2780,16 @@ nothing, wasting ~34 MB RSS and a pipe per killed buffer."
                                (funcall orig "cmux-kill-test" nil "sleep" "60")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((sk (code-agent-org--current-session-key)))
+                    (let ((sk (code-agent-org-current-session-key)))
                       (code-agent-org-cmux--start-verbose "surface:test" sk)
-                      (let ((proc (code-agent-org--session-get sk :verbose-follow-process))
+                      (let ((proc (code-agent-org-session-get sk :verbose-follow-process))
                             (vbuf (gethash sk code-agent--session-verbose-buffers)))
                         (should (process-live-p proc))
                         (should (buffer-live-p vbuf))
                         (kill-buffer vbuf)
                         (should-not (process-live-p proc))
-                        (should-not (code-agent-org--session-get sk :verbose-follow-process)))))))
-            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+                        (should-not (code-agent-org-session-get sk :verbose-follow-process)))))))
+            (let ((sk (with-current-buffer buf (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
             (kill-buffer buf)))
@@ -2959,13 +2959,13 @@ test
                               (t "ok")))))
                   (with-current-buffer buf
                     (test-cmux--goto-ai-block)
-                    (let ((sk (code-agent-org--current-session-key)))
+                    (let ((sk (code-agent-org-current-session-key)))
                       ;; Set up loop state
-                      (code-agent-org--session-put sk :loop-org-buffer buf)
-                      (code-agent-org--session-put sk :loop-block-marker
+                      (code-agent-org-session-put sk :loop-org-buffer buf)
+                      (code-agent-org-session-put sk :loop-block-marker
                                                (copy-marker (point)))
-                      (code-agent-org--session-put sk :loop-current 2)
-                      (code-agent-org--session-put sk :loop-max 5)
+                      (code-agent-org-session-put sk :loop-current 2)
+                      (code-agent-org-session-put sk :loop-max 5)
                       ;; Send
                       (code-agent-org-cmux--loop-send
                        "test-cmux-session-003" "surface:existing-123"
@@ -3073,7 +3073,7 @@ test
                       ;; Two new-workspace attempts
                       (should (= 2 new-workspace-attempt))))))
             ;; Cleanup
-            (let ((sk (with-current-buffer buf (code-agent-org--current-session-key))))
+            (let ((sk (with-current-buffer buf (code-agent-org-current-session-key))))
               (when sk (code-agent-org-cmux--stop-verbose sk)))
             (remhash "test-cmux-session-002" code-agent-org-terminal--workspace-to-session-key)
             (remhash "test-cmux-session-002" code-agent-org-cmux--workspace-to-surface)

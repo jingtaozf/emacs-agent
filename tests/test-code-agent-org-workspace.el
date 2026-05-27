@@ -313,7 +313,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
       ;; Position inside the query for execution
       (goto-char query-start)
       (code-agent-org-mode 1)
-      (let ((session-key (code-agent-org--current-session-key)))
+      (let ((session-key (code-agent-org-current-session-key)))
         (code-agent-org-execute)
         ;; Wait for completion
         (when (test-claude-wait-for-completion session-key 30)
@@ -369,30 +369,30 @@ were not inherited because org-get-tags was called with LOCAL=t."
 ;;; CUSTOM_ID Tests - Stable Link Support
 
 (ert-deftest test-workspace-generate-custom-id ()
-  "Test code-agent-org--generate-custom-id creates valid IDs."
+  "Test code-agent-org-generate-custom-id creates valid IDs."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   ;; Workspace section IDs without file-base (legacy format)
   (should (equal "sdd-12345-workflow"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Workflow")))
+                 (code-agent-org-generate-custom-id "sdd-12345" "Workflow")))
   (should (equal "sdd-12345-research-output"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Research Output")))
+                 (code-agent-org-generate-custom-id "sdd-12345" "Research Output")))
   ;; Workspace section IDs with file-base (new format for cross-file uniqueness)
   (should (equal "my-notes-workflow-sdd-12345"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Workflow" "my-notes")))
+                 (code-agent-org-generate-custom-id "sdd-12345" "Workflow" "my-notes")))
   (should (equal "code-agent-dev-research-output-sdd-12345"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Research Output" "code-agent-dev")))
+                 (code-agent-org-generate-custom-id "sdd-12345" "Research Output" "code-agent-dev")))
   (should (equal "code-agent-dev-spec-sdd-12345"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Spec" "code-agent-dev")))
+                 (code-agent-org-generate-custom-id "sdd-12345" "Spec" "code-agent-dev")))
   ;; Handle special characters
   (should (equal "sdd-12345-non-goals"
-                 (code-agent-org--generate-custom-id "sdd-12345" "Non-Goals"))))
+                 (code-agent-org-generate-custom-id "sdd-12345" "Non-Goals"))))
 
 (ert-deftest test-workspace-generate-custom-id-nil-handling ()
-  "Test code-agent-org--generate-custom-id handles nil inputs."
+  "Test code-agent-org-generate-custom-id handles nil inputs."
   :tags '(:unit :fast :stable :isolated :org :sdd)
-  (should-not (code-agent-org--generate-custom-id nil "Workflow"))
-  (should-not (code-agent-org--generate-custom-id "sdd-12345" nil))
-  (should-not (code-agent-org--generate-custom-id nil nil)))
+  (should-not (code-agent-org-generate-custom-id nil "Workflow"))
+  (should-not (code-agent-org-generate-custom-id "sdd-12345" nil))
+  (should-not (code-agent-org-generate-custom-id nil nil)))
 
 (ert-deftest test-workspace-insert-adds-custom-id-to-notebook-sections ()
   "Test that code-agent-org-insert-workspace adds CUSTOM_ID to notebook sections."

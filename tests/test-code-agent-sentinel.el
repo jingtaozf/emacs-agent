@@ -387,7 +387,7 @@ Both normal and abnormal exit paths must clear mappings."
                      (lambda (_state) nil))
                     ((symbol-function 'code-agent--resume-session)
                      (lambda (_state) nil))
-                    ((symbol-function 'code-agent--verbose-insert)
+                    ((symbol-function 'code-agent-verbose-insert)
                      (lambda (_key _msg) nil)))
             (code-agent--sentinel-handle-abnormal-exit
              proc state "killed: 9\n"))
@@ -421,7 +421,7 @@ a concurrent Docker query."
                      (lambda (_state) nil))
                     ((symbol-function 'code-agent--resume-session)
                      (lambda (_state) nil))
-                    ((symbol-function 'code-agent--verbose-insert)
+                    ((symbol-function 'code-agent-verbose-insert)
                      (lambda (_key _msg) nil)))
             (code-agent--sentinel-handle-abnormal-exit
              proc state "killed: 9\n"))

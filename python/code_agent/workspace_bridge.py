@@ -1066,7 +1066,7 @@ class WorkspaceBridge:
             f'"{_escape_elisp_string(self.org_file)}") '
             f"(run-hook-with-args "
             f"'code-agent-org-complete-hook "
-            f"(code-agent-org--current-session-key) nil "
+            f"(code-agent-org-current-session-key) nil "
             f"'completed)))"
         )
         try:

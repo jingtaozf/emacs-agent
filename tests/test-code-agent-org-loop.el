@@ -19,16 +19,16 @@
   "Set up loop session state for SESSION-KEY.
 PROPS is a plist with :loop-current, :loop-max, :loop-interval,
 :marker, :prompt, :instr-num, :custom-id, :section-level, :query-id."
-  (code-agent-org--session-put session-key :loop-current (plist-get props :loop-current))
-  (code-agent-org--session-put session-key :loop-max (plist-get props :loop-max))
-  (code-agent-org--session-put session-key :loop-interval (or (plist-get props :loop-interval) 0))
-  (code-agent-org--session-put session-key :marker (plist-get props :marker))
-  (code-agent-org--session-put session-key :original-prompt (or (plist-get props :prompt) "test"))
-  (code-agent-org--session-put session-key :instruction-num (or (plist-get props :instr-num) 1))
-  (code-agent-org--session-put session-key :custom-id (plist-get props :custom-id))
-  (code-agent-org--session-put session-key :section-level (or (plist-get props :section-level) 2))
-  (code-agent-org--session-put session-key :busy t)
-  (code-agent-org--session-put session-key :query-id (plist-get props :query-id)))
+  (code-agent-org-session-put session-key :loop-current (plist-get props :loop-current))
+  (code-agent-org-session-put session-key :loop-max (plist-get props :loop-max))
+  (code-agent-org-session-put session-key :loop-interval (or (plist-get props :loop-interval) 0))
+  (code-agent-org-session-put session-key :marker (plist-get props :marker))
+  (code-agent-org-session-put session-key :original-prompt (or (plist-get props :prompt) "test"))
+  (code-agent-org-session-put session-key :instruction-num (or (plist-get props :instr-num) 1))
+  (code-agent-org-session-put session-key :custom-id (plist-get props :custom-id))
+  (code-agent-org-session-put session-key :section-level (or (plist-get props :section-level) 2))
+  (code-agent-org-session-put session-key :busy t)
+  (code-agent-org-session-put session-key :query-id (plist-get props :query-id)))
 
 (defmacro with-loop-test-mocks (extra-bindings &rest body)
   "Run BODY with standard handle-complete mocks plus EXTRA-BINDINGS.
@@ -36,7 +36,7 @@ EXTRA-BINDINGS is a list of additional cl-letf bindings."
   (declare (indent 1))
   `(let ((code-agent-org-complete-hook nil))
      (cl-letf (((symbol-function 'code-agent-org--stop-spinner) #'ignore)
-               ((symbol-function 'code-agent-org--refresh-header-line) #'ignore)
+               ((symbol-function 'code-agent-org-refresh-header-line) #'ignore)
                ((symbol-function 'code-agent-org--start-spinner) #'ignore)
                ((symbol-function 'code-agent-org--insert-at-response) #'ignore)
                ((symbol-function 'code-agent-org--set-exec-status-for-session) #'ignore)
@@ -100,14 +100,14 @@ EXTRA-BINDINGS is a list of additional cl-letf bindings."
           (goto-char (point-min))
           (search-forward "Test")
 
-          (let ((session-key (code-agent-org--current-session-key)))
-            (code-agent-org--session-put session-key :loop-max 3)
-            (code-agent-org--session-put session-key :loop-current 1)
-            (code-agent-org--session-put session-key :original-prompt "Test")
+          (let ((session-key (code-agent-org-current-session-key)))
+            (code-agent-org-session-put session-key :loop-max 3)
+            (code-agent-org-session-put session-key :loop-current 1)
+            (code-agent-org-session-put session-key :original-prompt "Test")
 
-            (should (= (code-agent-org--session-get session-key :loop-max) 3))
-            (should (= (code-agent-org--session-get session-key :loop-current) 1))
-            (should (equal (code-agent-org--session-get session-key :original-prompt) "Test"))))
+            (should (= (code-agent-org-session-get session-key :loop-max) 3))
+            (should (= (code-agent-org-session-get session-key :loop-current) 1))
+            (should (equal (code-agent-org-session-get session-key :original-prompt) "Test"))))
       (kill-buffer test-buffer))))
 
 ;;; Re-execute Response Section Tests
@@ -198,7 +198,7 @@ maybe-continue-loop, causing execute-loop-iteration to silently fail."
             ;; send-request should have been called for iteration 2
             (should send-request-called)
             ;; loop-current should be 2 (incremented by maybe-continue-loop)
-            (should (= 2 (code-agent-org--session-get session-key :loop-current)))))
+            (should (= 2 (code-agent-org-session-get session-key :loop-current)))))
       (when (buffer-live-p test-buffer)
         (kill-buffer test-buffer)))))
 
@@ -230,8 +230,8 @@ When loop-current >= loop-max, the loop should end and cleanup should happen."
             (code-agent-org--handle-complete session-key nil)
 
             (should-not send-request-called)
-            (should-not (code-agent-org--session-get session-key :marker))
-            (should-not (code-agent-org--session-get session-key :busy))))
+            (should-not (code-agent-org-session-get session-key :marker))
+            (should-not (code-agent-org-session-get session-key :busy))))
       (when (buffer-live-p test-buffer)
         (kill-buffer test-buffer)))))
 
@@ -271,7 +271,7 @@ The marker must remain valid until the timer fires."
             ;; Timer delay should be the interval (5 seconds)
             (should (= 5 (car (car scheduled-timers))))
             ;; Marker should still be valid (NOT freed)
-            (let ((m (code-agent-org--session-get session-key :marker)))
+            (let ((m (code-agent-org-session-get session-key :marker)))
               (should m)
               (should (marker-buffer m)))))
       (when (buffer-live-p test-buffer)
@@ -364,7 +364,7 @@ Without QUERY_ID, tokens can't be routed to the correct section."
               (should (re-search-forward ":QUERY_ID:" nil t)))
 
             ;; Session should have a NEW query-id (different from original)
-            (let ((new-qid (code-agent-org--session-get session-key :query-id)))
+            (let ((new-qid (code-agent-org-session-get session-key :query-id)))
               (should new-qid)
               (should-not (equal new-qid "test-q1")))))
       (when (buffer-live-p test-buffer)

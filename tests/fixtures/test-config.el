@@ -138,7 +138,7 @@ Returns the value of PREDICATE on success, nil on timeout."
   "Wait for SESSION-KEY to complete or TIMEOUT (default 30s).
 Returns t if completed successfully, nil if timed out."
   (test-claude-wait-until
-   (lambda () (not (code-agent-org--session-get session-key :busy)))
+   (lambda () (not (code-agent-org-session-get session-key :busy)))
    timeout))
 
 (defun test-claude-execute-and-wait (org-file instruction-num &optional timeout)
@@ -152,7 +152,7 @@ Returns the response text or nil if timeout."
            nil t)
       ;; Find the ai block
       (when (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai" nil t)
-        (let ((session-key (code-agent-org--current-session-key)))
+        (let ((session-key (code-agent-org-current-session-key)))
           ;; Execute
           (code-agent-org-execute)
           ;; Wait for completion

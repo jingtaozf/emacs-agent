@@ -42,8 +42,8 @@ FIX: Add (run-hook-with-args 'code-agent-org-query-complete-hook ...) in handle-
       (setq-local code-agent-org--sessions (make-hash-table :test 'equal))
       (let* ((session-key "test-session")
              (marker (point-min-marker)))
-        (code-agent-org--session-put session-key :marker marker)
-        (code-agent-org--session-put session-key :query-id "q-123")
+        (code-agent-org-session-put session-key :marker marker)
+        (code-agent-org-session-put session-key :query-id "q-123")
         (add-hook 'code-agent-org-query-complete-hook
                   (lambda (sk qid)
                     (push (list sk qid) calls))
@@ -68,7 +68,7 @@ FIX: Implement (defun code-agent-org-append-to-response (session-key query-id te
       (insert ":QUERY_ID: q-456\n")
       (insert ":END:\n")
       (insert "Some response content\n")
-      (code-agent-org--session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :marker (point-min-marker))
       ;; Append text to response
       (code-agent-org-append-to-response session-key "q-456" "\n[Verification: tests passed]")
       ;; Verify text appears at end of response
@@ -92,7 +92,7 @@ FIX: Implement (defun code-agent-org-append-to-response (session-key query-id te
       (insert ":QUERY_ID: q-789\n")
       (insert ":END:\n")
       (insert "Response content\n")
-      (code-agent-org--session-put session-key :marker (point-min-marker))
+      (code-agent-org-session-put session-key :marker (point-min-marker))
       ;; Set window-start somewhere in the middle
       (let ((original-ws (window-start)))
         (code-agent-org-append-to-response session-key "q-789" "\n[Appended]")
