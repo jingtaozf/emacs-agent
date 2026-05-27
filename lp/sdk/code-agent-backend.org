@@ -2337,31 +2337,63 @@ Returns a process state object."
 
 *** Content Block Parsing
 
-Single-block parser dispatched on =:type=.  Returns a typed struct (text-block, tool-use-block, etc.); callers pattern-match on the struct type, never on the raw type string.
+Per-type dispatch via =cl-defgeneric=.  Each block kind gets its own
+=cl-defmethod=, keyed on the type symbol (=text=, =tool_use=, etc.).
+Adding a new block kind is one new =cl-defmethod=, no central edit.
+The default method returns the raw block — back-compat with prior
+unknown-type behaviour.
+
+The string-to-symbol bridge =--parse-content-block= keeps the wire
+contract (JSON =:type= is a string) decoupled from the dispatch key
+(Elisp symbol), so generics dispatch via cheap =eq= on interned
+symbols rather than =equal= on strings.
 
 #+BEGIN_SRC elisp
+(cl-defgeneric code-agent-block-parse (type block)
+  "Parse BLOCK into a typed struct based on TYPE.
+TYPE is a symbol derived from the wire-protocol =:type= string.
+Default method (unspecialised) returns BLOCK unchanged — preserves the
+prior unknown-type fall-through behaviour."
+  (ignore type)
+  block)
+
+(cl-defmethod code-agent-block-parse ((_type (eql 'text)) block)
+  "Wrap a =text= block payload in a typed =code-agent-text-block= struct."
+  (code-agent-make-text-block
+   :text (plist-get block :text)))
+
+(cl-defmethod code-agent-block-parse ((_type (eql 'thinking)) block)
+  "Wrap a =thinking= block in =code-agent-thinking-block= (carries
+the chain-of-thought stream + the LLM's signature)."
+  (code-agent-make-thinking-block
+   :thinking (plist-get block :thinking)
+   :signature (plist-get block :signature)))
+
+(cl-defmethod code-agent-block-parse ((_type (eql 'tool_use)) block)
+  "Wrap a =tool_use= block in =code-agent-tool-use-block= (the tool
+call the LLM wants the runtime to execute)."
+  (code-agent-make-tool-use-block
+   :id (plist-get block :id)
+   :name (plist-get block :name)
+   :input (plist-get block :input)))
+
+(cl-defmethod code-agent-block-parse ((_type (eql 'tool_result)) block)
+  "Wrap a =tool_result= block in =code-agent-tool-result-block= (the
+runtime's reply to a prior =tool_use= request)."
+  (code-agent-make-tool-result-block
+   :tool-use-id (plist-get block :tool_use_id)
+   :content (plist-get block :content)
+   :is-error (plist-get block :is_error)))
+
 (defun code-agent--parse-content-block (block)
-  "Parse a content BLOCK plist into appropriate struct."
-  (let ((type (plist-get block :type)))
-    (pcase type
-      ("text"
-       (code-agent-make-text-block
-        :text (plist-get block :text)))
-      ("thinking"
-       (code-agent-make-thinking-block
-        :thinking (plist-get block :thinking)
-        :signature (plist-get block :signature)))
-      ("tool_use"
-       (code-agent-make-tool-use-block
-        :id (plist-get block :id)
-        :name (plist-get block :name)
-        :input (plist-get block :input)))
-      ("tool_result"
-       (code-agent-make-tool-result-block
-        :tool-use-id (plist-get block :tool_use_id)
-        :content (plist-get block :content)
-        :is-error (plist-get block :is_error)))
-      (_ block)))) ; Return raw block for unknown types
+  "Parse a content BLOCK plist into appropriate struct.
+Bridges the string-typed wire protocol to the symbol-keyed generic
+dispatch above.  Unknown block types fall through to the default
+method, which returns the raw plist unchanged."
+  (let ((type-str (plist-get block :type)))
+    (code-agent-block-parse
+     (if type-str (intern type-str) 'unknown)
+     block)))
 #+END_SRC
 
 *** Message Parsing
