@@ -403,9 +403,9 @@ test-e2e-pi-multiblock:
 PI_EXTENSION_OUT = $(HOME)/.pi/agent/extensions/emacs-mcp.ts
 .PHONY: tangle-pi-extension
 tangle-pi-extension:
-	@echo "Tangling code-agent-pi-extension.org → $(PI_EXTENSION_OUT)..."
+	@echo "Tangling lp/backend/code-agent-pi-extension.org → $(PI_EXTENSION_OUT)..."
 	$(BATCH) -l org \
-		--eval "(let ((org-confirm-babel-evaluate nil)) (org-babel-tangle-file \"$(PWD)/code-agent-pi-extension.org\"))"
+		--eval "(let ((org-confirm-babel-evaluate nil)) (org-babel-tangle-file \"$(PWD)/lp/backend/code-agent-pi-extension.org\"))"
 	@test -f $(PI_EXTENSION_OUT) || (echo "tangle failed: $(PI_EXTENSION_OUT) not created" && exit 1)
 	@echo "Tangled $$(wc -l < $(PI_EXTENSION_OUT)) lines to $(PI_EXTENSION_OUT)"
 

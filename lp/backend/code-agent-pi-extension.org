@@ -93,7 +93,7 @@ knobs immediately.
 |---------|---------|------|
 | =EMACS_MCP_URL= | =http://localhost:9999/mcp= | Endpoint of the Emacs MCP HTTP server |
 | =EMACS_MCP_TIMEOUT_MS= | =5000= | Per-call HTTP timeout |
-| =EMACS_MCP_ALLOW_EVAL= | (unset) | =1= → skip the confirm gate for =emacs_eval= |
+| =EMACS_MCP_ALLOW_EVAL= | =1= (default-allow) | =0= → re-engage the confirm gate for =emacs_eval=.  Default flipped 2026-05-27 — pi-permission-system's =tools.emacs_eval= rule + =yoloMode= is the authoritative gate in this stack, so a second confirmation here was redundant and noisy. |
 | =EMACS_MCP_VERBOSE= | (unset) | =1= → log every MCP call to stderr |
 
 #+begin_src typescript
@@ -102,7 +102,12 @@ import { Type } from "typebox";
 
 const MCP_URL = process.env.EMACS_MCP_URL ?? "http://localhost:9999/mcp";
 const MCP_TIMEOUT_MS = Number(process.env.EMACS_MCP_TIMEOUT_MS ?? "5000");
-const ALLOW_EVAL = process.env.EMACS_MCP_ALLOW_EVAL === "1";
+// Default-allow: the agent harness already gates emacs_eval through
+// pi-permission-system (tools.emacs_eval, plus the global deny floor).
+// Set EMACS_MCP_ALLOW_EVAL=0 to re-engage this redundant in-extension
+// confirm prompt — useful only when you don't trust the harness's
+// policy file.
+const ALLOW_EVAL = process.env.EMACS_MCP_ALLOW_EVAL !== "0";
 const VERBOSE = process.env.EMACS_MCP_VERBOSE === "1";
 
 const vlog = (msg: string): void => {
@@ -508,11 +513,20 @@ function attachHealthCheck(pi: ExtensionAPI): void {
 :CUSTOM_ID: pi-ext-confirm
 :END:
 
-The =tool_call= event fires *before* a tool is executed. Returning
-=block: true= aborts the call. We gate =emacs_eval= behind a y/n
-confirm — except when the user has explicitly set
-=EMACS_MCP_ALLOW_EVAL=1=, which is appropriate for trusted sandboxes
-(e.g. an SDD workspace where every Pi turn is supervised).
+The =tool_call= event fires *before* a tool is executed.  Returning
+=block: true= aborts the call.
+
+Historically this gate ran by default and asked a y/n confirm on
+every =emacs_eval=.  Pre-2026-05 the gate was the only thing in
+front of arbitrary elisp; today the agent harness layers on
+=pi-permission-system= ([[file:code-agent-pi-backend.org::*Setting up Pi on a fresh machine][per-setup instructions]]) which already
+runs =tools.emacs_eval= through =pi-permissions.jsonc= +
+=yoloMode=.  Two prompts on the same call was just noise, so the
+default of =ALLOW_EVAL= is flipped to *allow*; set
+=EMACS_MCP_ALLOW_EVAL=0= to re-engage this in-extension confirm
+(useful when running a Pi without =pi-permission-system= installed
+or with a deliberately-permissive policy and you still want
+emacs_eval gated).
 
 #+begin_src typescript
 function attachConfirmGate(pi: ExtensionAPI): void {
