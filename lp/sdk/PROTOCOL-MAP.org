@@ -1,0 +1,142 @@
+#+TITLE: Protocol Map — every cl-defgeneric × every backend
+#+OPTIONS: toc:nil
+#+PROPERTY: literate-load no
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: protocol-map-overview
+:END:
+
+One-page reference of every =cl-defgeneric= in the code-agent SDK,
+broken down by protocol family + showing which backends implement
+each (= a real =cl-defmethod= specialisation, not the abstract
+default).  Read this BEFORE adding a new backend or a new generic —
+the patterns visible here are the conventions a new entry should
+match.
+
+Invariant: every row's "Specialised by" column lists *only*
+=cl-defmethod= sites; "(default)" means the generic's abstract
+implementation handles all callers.  Generated 2026-05-27 from
+=audit-quarterly=; refresh via =make audit-quarterly= (see
+[[file:../../tasks/lessons.md][tasks/lessons.md]] for cadence).
+
+* Protocol 1 — Lifecycle (=code-agent-backend-*=)
+:PROPERTIES:
+:CUSTOM_ID: protocol-1-lifecycle
+:END:
+
+The abstract base every concrete agent backend extends.  Multiplexer
+backends inherit through =code-agent-multiplexer-backend=, which
+itself extends =code-agent-backend=.
+
+| Generic | Default | Specialised by |
+|---------+---------+----------------|
+| =code-agent-backend-query= | abstract (raises) | every concrete backend |
+| =code-agent-backend-cancel= | abstract | every concrete backend |
+| =code-agent-backend-send-input= | abstract | claude-code only (stream-json control msg) |
+| =code-agent-backend-cleanup= | abstract | acp, claude-code, pi |
+| =code-agent-backend-classify-error= | =unknown= | acp, claude-code, pi |
+| =code-agent-backend-active-p= | nil | acp, claude-code, pi |
+| =code-agent-backend-session-id= | nil | acp, claude-code, pi |
+| =code-agent-backend-ready-p= | t | acp, claude-code, pi |
+| =code-agent-backend-supports-p= | nil | acp, claude-code, pi |
+| =code-agent-backend-verbose-buffer= | nil (use session default) | acp, claude-code, pi |
+
+Pattern: 10 generics × 3 fully-implementing agent backends + 1
+multiplexer family base.  Adding a new agent backend means writing
+~10 cl-defmethods.
+
+* Protocol 2b — Multiplexer Wire (=code-agent-mux-*=)
+:PROPERTIES:
+:CUSTOM_ID: protocol-2b-mux
+:END:
+
+The wire protocol multiplexer backends speak to type into a shell
+pane.  Only the multiplexer-family subclasses implement.
+
+| Generic | tmux | cmux | Frontend callers |
+|---------+------+------+------------------|
+| =code-agent-mux-cli-path= | yes | yes | yes (via dispatch) |
+| =code-agent-mux-launch-session= | yes | (legacy direct) | 2 |
+| =code-agent-mux-ensure-session= | yes | yes | yes |
+| =code-agent-mux-send-text= | yes | (legacy direct) | 3 |
+| =code-agent-mux-send-key= | yes | (legacy direct) | 5 |
+| =code-agent-mux-capture-screen= | yes | (legacy direct) | 1 |
+| =code-agent-mux-start-follower= | yes | (legacy direct) | yes |
+| =code-agent-mux-stop-follower= | yes | yes | yes |
+| =code-agent-mux-session-status= | yes | (legacy direct) | 3 |
+| =code-agent-mux-rename= | yes | no | *0* — not wired |
+| =code-agent-mux-focus= | yes | no | *0* — not wired |
+
+Pattern: tmux is the reference multi-backend implementation; cmux's
+hot path still uses legacy =code-agent-org-cmux--call= direct
+dispatch (see [[file:../backend/code-agent-cmux-backend.org][code-agent-cmux-backend.org]] §"Two-Module Split" for
+the Phase-3b migration plan).  When cmux migrates, both backends
+will share the same 11-generic surface.
+
+* Protocol 3 — Org Integration (=code-agent-org-backend-*=)
+:PROPERTIES:
+:CUSTOM_ID: protocol-3-org
+:END:
+
+How a backend interacts with the org buffer (execute AI block,
+insert prompts, stream responses, recover sessions).  Visible to
+the frontend at =lp/org/code-agent-org.org=.
+
+| Generic | Default | Specialised by | Test coverage |
+|---------+---------+----------------+---------------|
+| =execute-block= | unpacks + delegates to query | tmux | yes |
+| =open-terminal-tab= | nil | cmux | 2 callers |
+| =insert-prompt= | no-op | none yet (multiplexer future) | yes (default no-op) |
+| =open-response-section= | nil | none (frontend supplies real impl) | yes (default nil) |
+| =append-response= | safe insert + marker advance | none | 3 tests |
+| =finalize-response= | no-op | none | yes (default no-op) |
+| =query-completed= | no-op | none | yes |
+| =on-story-changed= | no-op | none | yes |
+| =status-badge= | nil | none | yes |
+| =todos-update= | no-op | none | yes |
+| =recover-session= | no-op | none | yes |
+| =register-query= | no-op | none | *no* — pending wire-up |
+| =permission-notify= | mode-line alert via =code-agent-add-alert= | none | *no* |
+| =permission-resolved= | clear mode-line alert | none | *no* |
+| =cancel-from-org= | abstract | (frontend) | yes |
+
+Pattern: Protocol 3 leans heavily on safe defaults so frontend code
+can dispatch through the protocol without backend-specific guards.
+Concrete backends override only when they have real custom behaviour
+(cmux's =open-terminal-tab=, tmux's =execute-block=).
+
+* Internal dispatch protocols (within-module)
+:PROPERTIES:
+:CUSTOM_ID: internal-dispatch
+:END:
+
+Three more cl-defgeneric protocols introduced in Phase 6/8 of the
+LP-alignment pass to replace large =cond= dispatchers.  These live
+inside a single module (not the cross-module SDK protocols above);
+listed here for completeness.
+
+| Generic | Module | Replaces | Specialisations |
+|---------+--------+----------+-----------------|
+| =code-agent-block-parse= | [[file:code-agent-backend.org::*Content Block Parsing][code-agent-backend.org]] | 5-arm pcase on JSON =:type= | text, thinking, tool_use, tool_result |
+| =code-agent-acp--session-update= | [[file:../backend/code-agent-acp.org::*Streaming Dispatch][code-agent-acp.org]] | 6-arm cond on ACP =sessionUpdate= | agent_message_chunk, tool_call, tool_call_update, agent_thought_chunk, usage_update |
+| =code-agent-pi-ui--ext-method= | [[file:../backend/code-agent-pi-ui.org::*Internal state + extension handlers][code-agent-pi-ui.org]] | 8-arm cond on Pi UI method | select, confirm, input, editor, notify, setStatus, setWidget, setTitle, set_editor_text |
+
+Pattern: when adding a new wire-protocol message kind to any of the
+three, write ONE =cl-defmethod=; no central dispatcher edit.
+
+* See also
+:PROPERTIES:
+:CUSTOM_ID: protocol-map-see-also
+:END:
+
+- [[file:code-agent-backend.org::*Backend Protocol Generics][code-agent-backend.org § Backend Protocol Generics]] — Protocol 1 declarations
+- [[file:code-agent-backend.org::*Org-Integration Protocol (Protocol 3)][code-agent-backend.org § Org-Integration Protocol]] — Protocol 3 declarations
+- [[file:../backend/code-agent-multiplexer.org::*Protocol 2b Generics][code-agent-multiplexer.org § Protocol 2b Generics]] — Protocol 2b declarations
+- [[file:../../ARCHITECTURE.org][ARCHITECTURE.org]] §"Tri-Protocol Architecture" — meta-design
+- [[file:../INDEX.org::*Per-module load sequence][lp/INDEX.org § Per-module load sequence]] — load order
+
+#+begin_src elisp :tangle no
+;; literate-elisp reader sentinel — keeps file's final non-empty
+;; content a code block.
+#+end_src

@@ -50,6 +50,7 @@
 - [[#mode-definition][Mode Definition]]
   - [[#transient-menu-system][Transient Menu System]]
     - [[#unified-terminal-dispatchers][Unified Terminal Dispatchers]]
+    - [[#with-backend-macro][with-backend macro]]
     - [[#unified-terminal-tab][Unified Terminal Tab]]
     - [[#transient-prefix][Transient Prefix]]
     - [[#keymap][Keymap]]
@@ -2498,6 +2499,33 @@ Tries cmux (checks hash table, then falls back to request-id file)."
    (t (message "code-agent-org: no terminal backend loaded for permission-resolved"))))
 #+END_SRC
 
+*** with-backend macro
+
+Three things every "dispatch on the backend for point's session"
+callsite repeats: read =current-session-key=, build the resolve
+=options= plist with =:cwd=, and call =--resolve-backend=.  Lifting
+that triple into one macro keeps callers focused on the verb they
+actually want, and the macro becomes the single place to change the
+"resolve from current context" recipe.
+
+#+BEGIN_SRC elisp
+(defmacro code-agent-org-with-backend (backend-var &rest body)
+  "Bind BACKEND-VAR to the resolved backend for the current org
+session and run BODY.  Resolve uses =current-session-key= +
+=(:cwd default-directory)= options, the canonical preamble for
+interactive callers.
+
+Callers that already hold a session-key (e.g. =--send-request=
+which receives one as a parameter) should NOT use this macro —
+call =--resolve-backend= directly so the session-key flows through
+explicitly."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let* ((session-key (code-agent-org-current-session-key))
+          (options (list :cwd default-directory))
+          (,backend-var (code-agent-org--resolve-backend session-key options)))
+     ,@body))
+#+END_SRC
+
 *** Unified Terminal Tab
 
 Opens the terminal tab for the current session using the cmux backend.
@@ -2510,9 +2538,7 @@ on the backend instance — multiplexer backends override to raise
 their workspace / tab.  Agent backends default to a user-error
 (there is no terminal to open for a JSON-stream subprocess)."
   (interactive)
-  (let* ((session-key (code-agent-org-current-session-key))
-         (options (list :cwd default-directory))
-         (backend (code-agent-org--resolve-backend session-key options)))
+  (code-agent-org-with-backend backend
     (code-agent-org-backend-open-terminal-tab backend)))
 #+END_SRC
 
