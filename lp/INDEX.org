@@ -26,6 +26,8 @@ group's README for the role-level overview and the per-module table.
 
 * Load order (enforced by =code-agent.el=)
 
+The high-level group order is:
+
 1. =lp/trace/= — macros must exist before any consumer compiles.
 2. =lp/sdk/= — protocol generics + backend abstract base.
 3. =lp/backend/= — concrete backends register =cl-defmethod=
@@ -34,6 +36,54 @@ group's README for the role-level overview and the per-module table.
    internal-order.
 5. =lp/chat/= — independent of /org/; loads at any point after /sdk/.
 6. =lp/ide/= — independent of everything except minimal /sdk/ surface.
+
+** Per-module load sequence
+
+The full enumerated sequence enforced by =code-agent.el=, with
+"why this position" for each module:
+
+| Order | Module | Why this position |
+|-------+--------+-------------------|
+|     0 | [[file:trace/code-agent-trace.org][trace/code-agent-trace]] | OTel tracing macros — must compile before any consumer expands a =code-agent-with-span= |
+|     1 | [[file:sdk/code-agent-backend.org][sdk/code-agent-backend]] | SDK core: protocol generics, lifecycle, JSON stream backend |
+|     2 | [[file:sdk/code-agent-permission.org][sdk/code-agent-permission]] | Tool-permission engine, no other deps |
+|     3 | [[file:sdk/code-agent-ide.org][sdk/code-agent-ide]] | IDE-context envelope builder, no other deps |
+|     4 | [[file:chat/code-agent.org][chat/code-agent]] | Package shell + activity / rate-limit mode-lines, needs 1-3 |
+|   4.5 | [[file:org/code-agent-org-customize.org][org/code-agent-org-customize]] | All defcustoms + hook defvars (zero deps, loaded first within /org/) |
+|   4.7 | [[file:backend/code-agent-pi-backend.org][backend/code-agent-pi-backend]] | Pi RPC backend (default-loaded; needs =pi= npm at runtime) |
+|     5 | [[file:org/code-agent-org-session.org][org/code-agent-org-session]] | Typed session-state struct, needs 4.5 |
+|   5.2 | [[file:org/code-agent-org-session-context.org][org/code-agent-org-session-context]] | Session-context collector + recovery, needs 5 |
+|   5.5 | [[file:org/code-agent-org-env-permission.org][org/code-agent-org-env-permission]] | ENV file parser + permission-mode resolver, needs 4.5 |
+|   5.7 | [[file:org/code-agent-org-project-prompts.org][org/code-agent-org-project-prompts]] | PROJECT_ROOT + system-prompt assembly, needs 4.5 |
+|   5.8 | [[file:org/code-agent-org-block.org][org/code-agent-org-block]] | Block / heading boundary primitives, needs 4.5 |
+|   5.9 | [[file:org/code-agent-org-title-gen.org][org/code-agent-org-title-gen]] | Auto-title generator, needs 5.8 |
+|   5.95 | [[file:org/code-agent-org-workspace.org][org/code-agent-org-workspace]] | Workspace navigation + ACTIVE_STORY lifecycle, needs 5.2 |
+|     6 | [[file:org/code-agent-org-queue.org][org/code-agent-org-queue]] | Per-session block queue, needs 5 |
+|     7 | [[file:org/code-agent-org-response.org][org/code-agent-org-response]] | Response rendering helpers, needs 5 |
+|   7.5 | [[file:org/code-agent-org-process.org][org/code-agent-org-process]] | Persistent client registry + marker lifecycle, needs 5..7 |
+|     8 | [[file:org/code-agent-org.org][org/code-agent-org]] | Top-level org integration (mode + transient + execute) |
+|   8.5 | [[file:org/code-agent-org-header-line.org][org/code-agent-org-header-line]] | Header-line UI, needs 8 |
+|     9 | [[file:org/code-agent-org-scheduled.org][org/code-agent-org-scheduled]] | Scheduled execution timer, needs 8 |
+|  10.5 | [[file:org/code-agent-org-workspace-bridge.org][org/code-agent-org-workspace-bridge]] | MCP-side hook → org buffer adapter, needs 8 |
+|  10.6 | [[file:org/code-agent-org-terminal-base.org][org/code-agent-org-terminal-base]] | Shared cmux/tmux helpers, needs 4 |
+|    11 | [[file:org/code-agent-org-cmux.org][org/code-agent-org-cmux]] | cmux terminal backend, needs 10.5/10.6 |
+|    12 | [[file:backend/code-agent-multiplexer.org][backend/code-agent-multiplexer]] | Multiplexer family base + Protocol 2b generics |
+|    12.1 | [[file:backend/code-agent-cmux-backend.org][backend/code-agent-cmux-backend]] | cmux concrete multiplexer backend |
+|    12.2 | [[file:backend/code-agent-tmux-backend.org][backend/code-agent-tmux-backend]] | tmux concrete multiplexer backend |
+|    13 | [[file:backend/code-agent-jsonrpc.org][backend/code-agent-jsonrpc]] | JSON-RPC 2.0 transport (ACP base) |
+|    13.1 | [[file:backend/code-agent-acp.org][backend/code-agent-acp]] | Generic ACP backend |
+|    13.2 | [[file:backend/code-agent-acp-opencode.org][backend/code-agent-acp-opencode]] | OpenCode profile (opt-in) |
+|    13.3 | [[file:backend/code-agent-acp-gemini.org][backend/code-agent-acp-gemini]] | Gemini profile (opt-in) |
+|    13.4 | [[file:backend/code-agent-acp-codex.org][backend/code-agent-acp-codex]] | Codex profile (opt-in) |
+|    13.5 | [[file:backend/code-agent-pi-extension.org][backend/code-agent-pi-extension]] | Tangle source for Pi-side TS extension (no Elisp load) |
+|    13.6 | [[file:backend/code-agent-pi-ui.org][backend/code-agent-pi-ui]] | Pi UI affordances (opt-in) |
+|    14 | [[file:sdk/emacs-mcp-server.org][sdk/emacs-mcp-server]] | Independent MCP server, loaded last |
+|   opt | [[file:chat/code-agent-chat.org][chat/code-agent-chat]] | Comint-based interactive chat surface |
+|   opt | [[file:chat/code-agent-refine.org][chat/code-agent-refine]] | Prompt refinement helper |
+|   opt | [[file:chat/code-agent-title.org][chat/code-agent-title]] | Response-section auto-titling |
+|   opt | [[file:chat/code-agent-translate.org][chat/code-agent-translate]] | Translation helper |
+|   opt | [[file:sdk/code-agent-python.org][sdk/code-agent-python]] | Tangle source for =python/code_agent/*= (no Elisp load) |
+|   opt | [[file:ide/claude-ide.org][ide/claude-ide]] | WebSocket IDE bridge (needs =websocket= pkg) |
 
 * See also
 
