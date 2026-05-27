@@ -712,11 +712,16 @@ before Phase 4 — old extensions don't lose anything by this change."
                        ctype (if registered " [registry]" " [fallback]")))
       (code-agent-pi--render-tool-text rendered cbs))))
 
-(defcustom code-agent-pi-show-tool-calls t
+(defcustom code-agent-pi-show-tool-calls nil
   "If non-nil, render Pi tool-execution events inline in the response
 section: a folded `**** Tool: <name>' subheading with args + result.
-Set to nil to keep the response visually clean (tool activity still
-shows up in the verbose buffer)."
+
+Default flipped from t → nil 2026-05-27: every Pi tool call was
+emitting a heading + JSON args + JSON result block into the
+response section, drowning the assistant prose.  Tool activity is
+verbose-buffer material (one click away via
+`code-agent-org-show-verbose'), not response material.  Flip back
+to t if you want the old inline-render behaviour."
   :type 'boolean
   :group 'code-agent)
 
@@ -1222,11 +1227,19 @@ caller "use the default."
 
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-verbose-buffer
-  ((_backend code-agent-pi-backend))
-  "Return nil to opt into the shared per-session verbose buffer
-=code-agent-verbose-insert= creates on demand (Pi has no dedicated
-verbose buffer of its own)."
-  nil)
+  ((backend code-agent-pi-backend))
+  "Return the shared per-session verbose buffer for BACKEND.
+Pi has no dedicated verbose buffer of its own — every Pi event
+routes through `code-agent-verbose-insert' which writes to the
+session buffer.  Returning *that* buffer (instead of nil) lets
+`code-agent-org-show-verbose's fallback chain find it without
+hitting the \"No verbose buffer for session\" branch.
+
+Auto-creates the buffer via `code-agent--get-session-verbose-buffer'
+if Pi has not yet written anything — common in the gap between
+backend instantiation and the first event."
+  (when-let* ((sk (code-agent-pi-backend-session-key backend)))
+    (code-agent--get-session-verbose-buffer sk)))
 #+END_SRC
 
 *** Supports-p

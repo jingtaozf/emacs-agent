@@ -1,0 +1,70 @@
+# -*- mode: org; eval: (code-agent-org-mode 1) -*-
+#+TITLE: Pi Tool Output Routing — Reproduces 2 bugs
+#+PROPERTY: PROJECT_ROOT /Users/jingtao/projects/emacs-agent
+
+* Pi tool-routing repro
+:PROPERTIES:
+:CUSTOM_ID: pi-tool-routing-repro
+:CLAUDE_BACKEND: pi
+:CLAUDE_SESSION_ID: pi-tool-routing-repro
+:END:
+
+Reproduces 2 bugs reported 2026-05-27 against =:CLAUDE_BACKEND: pi=
+on =claude-agent-dev.org::pi-dev1=:
+
+1. *Tool input/output bleeds into response section* — every tool
+   call emits a =**** Tool: <name>= subheading + JSON =args= /
+   =result= blocks inline in the streamed response, cluttering the
+   prose answer.
+2. =M-x code-agent-org-show-verbose= prints =No verbose buffer for
+   session: <session-key>= even though the session ran multiple
+   tool calls.
+
+** Story — trigger several tool calls
+:PROPERTIES:
+:CUSTOM_ID: pi-tool-routing-trigger
+:CLAUDE_SESSION_ID: pi-tool-routing-repro
+:END:
+
+#+begin_src ai
+List 3 .org files under lp/sdk/ then say "done".
+#+end_src
+
+After =C-c C-c=:
+
+- *Expected (after fix)*: response section contains the assistant
+  prose ("done" + a short list).  Tool activity (=ls= / =find= /
+  =glob= invocations) lives in the *verbose buffer*, reachable
+  via =M-x code-agent-org-show-verbose=.
+- *Bug repro (current behaviour)*: response section contains 3-5
+  =**** Tool: <name> :tool:= subheadings with full JSON args +
+  truncated result, drowning the actual answer.  Verbose buffer
+  message reports it does not exist.
+
+** Diagnostic checks (run after =C-c C-c=)
+
+| Check | Command | Pass after fix |
+|-------+---------+----------------|
+| Verbose buffer exists | =(get-buffer (format "*Claude Session[%s]*" "pi-tool-routing-repro"))= | non-nil buffer |
+| Verbose buffer has tool events | grep =tool_start= in that buffer | ≥1 hit |
+| Response section clean of =**** Tool:= | =grep -c "^\\*\\*\\*\\* Tool:" "pi-tool-routing-test.org"= under this heading | 0 |
+| =show-verbose= opens the buffer | =M-x code-agent-org-show-verbose= | window displays buffer (no error message) |
+
+** Root cause (verified by source reading)
+
+| Symptom | Code path |
+|---------+-----------|
+| Tool inline in response | =lp/backend/code-agent-pi-backend.org=: =code-agent-pi--handle-tool-start/end= calls =--render-tool-text= → =on-token= callback → response section.  Default =code-agent-pi-show-tool-calls t=. |
+| No verbose buffer | =lp/sdk/code-agent-backend.org=: =code-agent-verbose-insert= only =gethash=, never creates.  =code-agent--get-session-verbose-buffer= (creator) is internal + uncalled by the Pi path.  =code-agent-backend-verbose-buffer= on Pi returns nil. |
+
+** Fix plan
+
+1. Default =code-agent-pi-show-tool-calls= → =nil= (clean response;
+   tool events go to verbose buffer only).  User who wants the old
+   inline-render flips back with =M-x customize=.
+2. =code-agent-verbose-insert= auto-creates the session buffer (via
+   =code-agent--get-session-verbose-buffer=) if missing — closes
+   the gap that left Pi's =--verbose-log= no-oping.
+3. Pi's =code-agent-backend-verbose-buffer= returns the buffer
+   (created on demand) instead of =nil= so the
+   =code-agent-org-show-verbose= fallback chain finds it.

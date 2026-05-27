@@ -80,11 +80,21 @@
 (ert-deftest code-agent-pi-smoke--protocol-state ()
   "Generics behave correctly on a freshly-constructed (un-spawned) backend."
   :tags '(:smoke :pi-backend)
-  (let ((b (code-agent-pi-backend-create :session-key "smoke")))
-    (should-not (code-agent-backend-active-p b))
-    (should-not (code-agent-backend-ready-p b))
-    (should (null (code-agent-backend-session-id b)))
-    (should (null (code-agent-backend-verbose-buffer b)))))
+  (let ((b (code-agent-pi-backend-create :session-key "smoke-protocol-state")))
+    (unwind-protect
+        (progn
+          (should-not (code-agent-backend-active-p b))
+          (should-not (code-agent-backend-ready-p b))
+          (should (null (code-agent-backend-session-id b)))
+          ;; 2026-05-27: verbose-buffer auto-creates on demand so the user
+          ;; can M-x code-agent-org-show-verbose even before any tool event
+          ;; fires.  Was: should return nil; now: should return a live buffer.
+          (let ((buf (code-agent-backend-verbose-buffer b)))
+            (should buf)
+            (should (buffer-live-p buf))))
+      (when-let* ((buf (gethash "smoke-protocol-state" code-agent--session-verbose-buffers)))
+        (when (buffer-live-p buf) (kill-buffer buf))
+        (remhash "smoke-protocol-state" code-agent--session-verbose-buffers)))))
 
 
 (ert-deftest code-agent-pi-smoke--supports-capabilities ()
@@ -327,6 +337,48 @@ Phase 2 inline tool-call rendering wiring."
       (should-not (process-live-p proc))
       (should-not (code-agent-backend-ready-p b)))))
 
+
+
+;;; Regression: 2026-05-27 — verbose-buffer + tool-output routing
+
+(ert-deftest code-agent-pi--verbose-insert-auto-creates-buffer ()
+  "`code-agent-verbose-insert' creates the session buffer on first
+write — closes the gap that previously left Pi's --verbose-log
+no-oping and the user staring at \"No verbose buffer for session\"."
+  :tags '(:unit :pi-backend :stable)
+  (let ((sk (format "pi-verbose-autocreate-%d" (random 100000))))
+    (unwind-protect
+        (progn
+          (should-not (gethash sk code-agent--session-verbose-buffers))
+          (code-agent-verbose-insert sk "  [pi] sentinel event")
+          (let ((buf (gethash sk code-agent--session-verbose-buffers)))
+            (should buf)
+            (should (buffer-live-p buf))
+            (with-current-buffer buf
+              (should (string-match-p "sentinel event" (buffer-string))))))
+      (when-let* ((buf (gethash sk code-agent--session-verbose-buffers)))
+        (when (buffer-live-p buf) (kill-buffer buf))
+        (remhash sk code-agent--session-verbose-buffers)))))
+
+(ert-deftest code-agent-pi--verbose-buffer-method-returns-buffer ()
+  "`code-agent-backend-verbose-buffer' on a Pi backend returns the
+shared session buffer (creating it if missing) so the
+`code-agent-org-show-verbose' fallback chain finds it."
+  :tags '(:unit :pi-backend :stable)
+  (let* ((sk (format "pi-verbose-method-%d" (random 100000)))
+         (b (code-agent-pi-backend-create :session-key sk)))
+    (unwind-protect
+        (let ((buf (code-agent-backend-verbose-buffer b)))
+          (should buf)
+          (should (buffer-live-p buf)))
+      (when-let* ((buf (gethash sk code-agent--session-verbose-buffers)))
+        (when (buffer-live-p buf) (kill-buffer buf))
+        (remhash sk code-agent--session-verbose-buffers)))))
+
+(ert-deftest code-agent-pi-show-tool-calls-default-is-nil ()
+  "Default 2026-05-27: tool calls go to verbose buffer, NOT response section."
+  :tags '(:unit :pi-backend :stable)
+  (should (eq (default-value 'code-agent-pi-show-tool-calls) nil)))
 
 (provide 'test-code-agent-pi-backend)
 ;;; test-code-agent-pi-backend.el ends here
