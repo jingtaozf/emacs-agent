@@ -4,6 +4,25 @@
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
 #+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
+* Overview
+
+The cmux multiplexer is fundamentally different from tmux: it
+exposes a =claude-hook= subcommand, a sidebar status surface
+(=set-status= / =set-progress= / =report_meta_block= / =markdown open=),
+and a 100+-method dual-protocol (V1 text + V2 JSON-RPC) CLI guarded by
+=cmuxOnly= PID-ancestry security.  This module is the
+=code-agent-multiplexer-backend= subclass that adapts those
+capabilities into Protocol 2b (multiplexer-wire) generics, so the
+generic frontend code never branches on backend type.
+
+Invariant: any code that needs cmux-specific behaviour goes through
+=cl-defmethod= on =code-agent-cmux-backend=, never a string match on
+"cmux" in the frontend.  This module is currently a thin facade — the
+bulk of cmux-driving Elisp still lives in =code-agent-org-cmux.org=
+and Protocol 2b methods here delegate to =code-agent-org-cmux--*=;
+the facade exists so a future Phase 3b cut-over can swap the legacy
+direct calls for the protocol methods without touching callers.
+
 * Claude Agent — cmux Backend
 :PROPERTIES:
 :LITERATE_ORG_BLOCK_KIND: atomic
@@ -54,6 +73,8 @@ makes the wire surface cheaper to evolve.
 
 ** Dependencies
 
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
+
 #+BEGIN_SRC elisp
 (require 'cl-lib)
 (require 'code-agent-backend)
@@ -101,6 +122,8 @@ Slots in addition to those inherited from
 
 ** Factory
 
+Single factory function — callers MUST go through this, not =make-instance= equivalents.
+
 #+BEGIN_SRC elisp
 (defun code-agent-cmux-backend-create (&rest args)
   "Create a cmux backend.
@@ -120,6 +143,8 @@ Each Protocol 2b generic dispatches to the corresponding
 
 *** CLI Path
 
+Resolves the multiplexer CLI executable path, honouring the per-backend defcustom override.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-mux-cli-path ((_backend code-agent-cmux-backend))
   (if (boundp 'code-agent-org-cmux-cli-path)
@@ -128,6 +153,8 @@ Each Protocol 2b generic dispatches to the corresponding
 #+END_SRC
 
 *** Ensure Session
+
+Lazy-create the underlying mux session if one is not already running for this backend.
 
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-mux-ensure-session
@@ -188,6 +215,8 @@ goes through `cancel-from-org' which dispatches to
 
 *** Cancel From Org
 
+Cancellation path invoked from the org-buffer side (C-g or transient menu).
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-org-backend-cancel-from-org
   ((_backend code-agent-cmux-backend) _session-key)
@@ -199,6 +228,8 @@ Copilot / OpenCode) to the surface."
 
 *** Open Terminal Tab
 
+Surfaces the backing terminal pane to the user — opens a tab / focuses the surface.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-org-backend-open-terminal-tab
   ((_backend code-agent-cmux-backend))
@@ -207,6 +238,8 @@ Copilot / OpenCode) to the surface."
 #+END_SRC
 
 ** Provide
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-cmux-backend)

@@ -167,17 +167,14 @@
     (unwind-protect
         (progn
           (code-agent-trace--write-context trace-id span-id session-id "my-block-id")
-          ;; Check generic traceparent file
-          (let ((content (with-temp-buffer
-                           (insert-file-contents (expand-file-name "traceparent" tmp-dir))
-                           (buffer-string))))
-            (should (string-match-p expected content)))
-          ;; Check per-session file
+          ;; Per-session file — Python hooks look up the W3C traceparent
+          ;; by CLAUDE_SESSION_ID so this is the load-bearing contract.
           (let ((content (with-temp-buffer
                            (insert-file-contents (expand-file-name "test-session.trace-context" tmp-dir))
                            (buffer-string))))
             (should (string-match-p expected content)))
-          ;; Check per-custom-id file
+          ;; Per-custom-id file — alternate lookup key when the session
+          ;; id isn't known at the point of the lookup.
           (let ((content (with-temp-buffer
                            (insert-file-contents (expand-file-name "my-block-id.trace-context" tmp-dir))
                            (buffer-string))))
@@ -201,7 +198,11 @@
 ;;; Test 10: start-bridge launches process
 
 (ert-deftest test-otel-ensure-bridge ()
-  "code-agent-trace--ensure-bridge auto-starts the bridge process."
+  "code-agent-trace--ensure-bridge auto-starts the bridge process.
+Mocks port-listening-p so the test passes even on a dev machine
+where a real otel-bridge is already running on 7331 — without the
+mock, the new external-detection path would short-circuit the
+spawn and (should started) would fail."
   :tags '(:unit :otel)
   (let ((started nil)
         (code-agent-trace-enabled t)
@@ -210,7 +211,9 @@
     (setf (code-agent-trace-service-process
            code-agent-trace--bridge-service) nil)
     (unwind-protect
-        (cl-letf (((symbol-function 'start-process)
+        (cl-letf (((symbol-function 'code-agent-trace--port-listening-p)
+                   (lambda (_port) nil))
+                  ((symbol-function 'start-process)
                    (lambda (&rest args)
                      (setq started args)
                      mock-buf)))
@@ -246,14 +249,17 @@
 ;;; Test 12: ensure-phoenix auto-starts
 
 (ert-deftest test-otel-ensure-phoenix ()
-  "code-agent-trace--ensure-phoenix auto-starts Phoenix."
+  "code-agent-trace--ensure-phoenix auto-starts Phoenix.
+Mocks port-listening-p — see test-otel-ensure-bridge for why."
   :tags '(:unit :otel)
   (let ((started nil)
         (mock-buf (generate-new-buffer " *mock-phoenix*")))
     (setf (code-agent-trace-service-process
            code-agent-trace--phoenix-service) nil)
     (unwind-protect
-        (cl-letf (((symbol-function 'start-process)
+        (cl-letf (((symbol-function 'code-agent-trace--port-listening-p)
+                   (lambda (_port) nil))
+                  ((symbol-function 'start-process)
                    (lambda (&rest args)
                      (setq started args)
                      mock-buf)))
@@ -390,6 +396,76 @@
       (sleep-for 2.5)  ;; Wait for retries to exhaust
       (should-not callback-called)
       (should (cl-some (lambda (m) (string-match-p "Timed out" m)) messages)))))
+
+;;; Test: port-listening probe — port-not-listening case
+
+(ert-deftest test-otel-port-listening-p-refused ()
+  "Probe returns nil when nothing is listening on the port.
+Uses port 0 which is reserved / never listened-to by user processes."
+  :tags '(:unit :otel)
+  (should-not (code-agent-trace--port-listening-p 0))
+  ;; Pick a deliberately-unlikely high port too — guards against
+  ;; the rare race where some user process owns the test port.
+  (should-not (code-agent-trace--port-listening-p 64321)))
+
+(ert-deftest test-otel-port-listening-p-bad-input ()
+  "Probe returns nil for nil / non-integer / negative inputs."
+  :tags '(:unit :otel)
+  (should-not (code-agent-trace--port-listening-p nil))
+  (should-not (code-agent-trace--port-listening-p "7331"))
+  (should-not (code-agent-trace--port-listening-p -1))
+  (should-not (code-agent-trace--port-listening-p 0)))
+
+;;; Test: service-ensure skips spawn when port already listening
+
+(ert-deftest test-otel-service-ensure-skips-when-port-busy ()
+  "When the service's port is already listening (e.g. external
+otel-bridge from a previous Emacs session), service-ensure returns
+t WITHOUT calling start-process.  This is the regression that
+fixes the recurring 'Address already in use' on Emacs re-load."
+  :tags '(:unit :otel)
+  (let ((spawn-called nil)
+        (service (code-agent-trace-service--create
+                  :name "fake-bridge"
+                  :buffer-name "*fake-bridge*"
+                  :command '("true")
+                  :port 7331)))
+    (cl-letf (((symbol-function 'code-agent-trace--port-listening-p)
+               (lambda (port) (= port 7331)))
+              ((symbol-function 'start-process)
+               (lambda (&rest _args)
+                 (setq spawn-called t)
+                 (error "start-process MUST NOT be called when port is busy"))))
+      (should (code-agent-trace-service-ensure service "/tmp"))
+      (should-not spawn-called)
+      ;; Slot stays nil because we did not spawn — that is correct;
+      ;; we don't own the externally-running process.
+      (should-not (code-agent-trace-service-process service)))))
+
+(ert-deftest test-otel-service-ensure-spawns-when-port-free ()
+  "When nothing is listening on the service port, service-ensure
+calls start-process exactly once."
+  :tags '(:unit :otel)
+  (let ((spawn-calls 0)
+        (service (code-agent-trace-service--create
+                  :name "fake-bridge"
+                  :buffer-name "*fake-bridge*"
+                  :command '("true")
+                  :port 7331)))
+    (cl-letf (((symbol-function 'code-agent-trace--port-listening-p)
+               (lambda (_port) nil))
+              ((symbol-function 'start-process)
+               (lambda (&rest _args)
+                 (cl-incf spawn-calls)
+                 ;; Return a process-like sentinel so the setter
+                 ;; in service-ensure has something non-nil to store.
+                 'fake-process))
+              ((symbol-function 'process-live-p)
+               (lambda (_p) t)))
+      (should (code-agent-trace-service-ensure service "/tmp"))
+      (should (= 1 spawn-calls))
+      (should (eq 'fake-process
+                  (code-agent-trace-service-process service))))))
 
 (provide 'test-otel-trace)
 ;;; test-otel-trace.el ends here

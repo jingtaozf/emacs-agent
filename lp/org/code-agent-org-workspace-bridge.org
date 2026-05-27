@@ -4,6 +4,23 @@
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
 #+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
+* Overview
+
+When the user types a prompt directly into the Claude Code terminal
+(not via =C-c C-c= on an =#+begin_src ai= block), Emacs is bypassed
+entirely — there is no marker, no session state, no in-flight query
+to track.  Without this module, the prompt and its eventual response
+would never appear in the org buffer; the user would have two
+disconnected views of the conversation.
+
+Invariant: every function here is called non-interactively from
+=python/code_agent/workspace_bridge.py= through MCP =evalElisp=.  Each
+mutation is idempotent (re-running a handler with the same payload
+must not double-insert a heading or marker).  The routing-key
+contract — =:CUSTOM_ID:= preferred, falling back to
+=CLAUDE_SESSION_ID=, falling back to agent =--name= slug — is the
+*only* path from a terminal hook payload to the right org section.
+
 * Claude Org Workspace Bridge
 :PROPERTIES:
 :LITERATE_ORG_BLOCK_KIND: atomic
@@ -86,6 +103,8 @@ the Emacs side. Adding them is a small additive change to
 backend; left as a follow-up because no current consumer needs it.
 
 ** Dependencies
+
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
@@ -775,6 +794,8 @@ Replaces or creates the checkbox list between the src block and child headings."
 #+END_SRC
 
 ** Provide
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-org-workspace-bridge)

@@ -4,6 +4,23 @@
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
 #+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
+* Overview
+
+The agent-family branch of the tri-protocol split drives a CLI
+subprocess over stdio and reads structured ACP events; the
+multiplexer-family branch types prompts into a shell pane and
+collects response text asynchronously through the Python
+=workspace-bridge= adapter.  This module owns the multiplexer side
+— the abstract base class plus Protocol 2b (multiplexer-wire)
+generics that cmux and tmux subclasses implement.
+
+Invariant: every multiplexer backend MUST extend
+=code-agent-multiplexer-backend= and provide Protocol 2b methods
+(send-text, capture-screen, wait-for-ready, etc.).  Shared
+machinery — agent profile resolution, Python bridge contract,
+verbose buffer ring — lives here so a third multiplexer (kitty,
+zellij) drops in as a subclass without forking the contract.
+
 * Claude Agent — Multiplexer Family Base
 :PROPERTIES:
 :LITERATE_ORG_BLOCK_KIND: atomic
@@ -31,6 +48,8 @@ cmux Phase 3b cut-over; until then, the 11 generic declarations below
 serve as the documented contract a future cmux method set must honour.
 
 ** Dependencies
+
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
@@ -235,6 +254,11 @@ extraction and were retired once the shared versions stabilised.
 
 *** Strip ANSI escapes from a chunk
 
+Terminal output arrives with color codes, cursor moves, and OSC
+sequences mixed in.  This pure-text-out helper feeds the verbose
+buffer machinery and the bridge that ferries response text into the
+org buffer — both want plain text, so the strip happens here once.
+
 #+BEGIN_SRC elisp
 (defun code-agent-multiplexer--strip-ansi (chunk)
   "Best-effort strip of ANSI escape sequences + control chars from CHUNK.
@@ -245,6 +269,11 @@ Preserves newline/tab/CR for line-structured output."
 #+END_SRC
 
 *** Verbose buffer size ceiling
+
+Without a cap the verbose buffer grows forever on long-running
+sessions; commit 1f016b8 in the cmux backend was the leak that
+motivated this knob.  Whole-line trim from the front so partial
+escape sequences never get cut mid-byte.
 
 #+BEGIN_SRC elisp
 (defcustom code-agent-multiplexer-verbose-buffer-max-size (* 256 1024)
@@ -258,6 +287,8 @@ will grow without bound — not recommended)."
 #+END_SRC
 
 ** Provide
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-multiplexer)

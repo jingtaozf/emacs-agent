@@ -4,6 +4,21 @@
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
 #+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
+* Overview
+
+When a Claude query is in flight on a buffer and the user submits a
+second =#+begin_src ai= block (or the same block again), the second
+submission queues here instead of racing the first.  Without this
+queue, concurrent queries would interleave tokens into each other's
+response sections and clobber each other's marker positions.
+
+Invariant: the queue is per-session (keyed by session-key), FIFO,
+capped by =code-agent-org-max-queue-depth=, and deduped by
+=:CUSTOM_ID:= when present so a re-submission of the same block does
+not double-count.  =code-agent-org--queue-pop= is the only path that
+advances; the session's =:busy= flag must be nil before a pop
+materialises a new in-flight query.
+
 * Claude Org Queue
 :PROPERTIES:
 :LITERATE_ORG_BLOCK_KIND: atomic
@@ -14,6 +29,8 @@ Pending block queue management for code-agent-org.
 
 ** Dependencies
 
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
+
 #+BEGIN_SRC elisp
 (require 'cl-lib)
 ;; Depends on code-agent-org-session for session-get/put
@@ -22,6 +39,11 @@ Pending block queue management for code-agent-org.
 #+END_SRC
 
 ** Queue Operations
+
+Three primitives drive the queue: =--same-block-p= for dedup,
+=--queue-block= for enqueue with depth check + dedup, and
+=--queue-pop= for FIFO dequeue.  Each session has its own pending
+queue stored on the lifecycle sub-struct's =pending-queue= slot.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org--same-block-p (id-a marker-a id-b marker-b)
@@ -104,6 +126,8 @@ Returns nil if queue is empty."
 #+END_SRC
 
 ** Provide
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-org-queue)

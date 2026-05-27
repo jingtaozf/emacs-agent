@@ -1,18 +1,18 @@
 #+TITLE: Claude IDE Integration
 #+PROPERTY: literate-load yes
 
-* Commentary
-
-Implement Claude Code IDE support in Emacs using websockets + MCP.
-
-Based on [[https://github.com/stevemolitor/monet][monet.el]] by Stephen Molitor, adapted for the code-agent SDK.
-
 * Overview
 
 Claude Code's IDE integration protocol gives the agent rich editor
 context: open files, diagnostics, selection tracking, interactive diff
-review, workspace folders. This module implements the Emacs side — a
+review, workspace folders.  This module implements the Emacs side — a
 WebSocket MCP server that Claude Code discovers via lockfile.
+
+Originally derived from [[https://github.com/stevemolitor/monet][monet.el]] by Stephen Molitor (2026-03
+adaptation); =monet-= prefix renamed to =claude-ide-=, file converted
+to literate org.  Wire protocol unchanged — bug-for-bug compatible
+with monet, so Claude Code's =--ide= clients work without server-side
+changes.
 
 ** Discovery Protocol
 
@@ -83,6 +83,8 @@ companion test (=test-diff-visibility.el=) moved to
 
 * Dependencies
 
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
+
 #+BEGIN_SRC elisp
 (require 'cl-lib)
 (require 'diff)
@@ -94,6 +96,8 @@ companion test (=test-diff-visibility.el=) moved to
 #+END_SRC
 
 * Customization
+
+User-facing knobs.  Each =defcustom= is documented inline; the group name keeps Customize navigable for end users.
 
 #+BEGIN_SRC elisp
 (defgroup claude-ide nil
@@ -260,6 +264,8 @@ The MCP response should be a list of content objects."
 
 * Constants
 
+File-scope constants used by the helpers below.  Kept together so tuning is a one-place change.
+
 #+BEGIN_SRC elisp
 (defconst claude-ide-version "0.0.1")
 (defconst claude-ide--port-min 10000 "Minimum port number for WebSocket server.")
@@ -270,6 +276,8 @@ The MCP response should be a list of content objects."
 #+END_SRC
 
 * Data Structures
+
+=cl-defstruct= declarations the rest of the module reads through the typed accessors below.
 
 #+BEGIN_SRC elisp
 (cl-defstruct claude-ide--session
@@ -290,7 +298,14 @@ The MCP response should be a list of content objects."
   )
 #+END_SRC
 
-* Utility Functions
+* Session Bootstrap Helpers
+
+These nine helpers prepare the ground for spawning a new IDE WebSocket
+session: a UUID for the session id, a free TCP port the server can
+listen on, a discovery lockfile that other IDE clients use to find
+the running server, and a MIME-type lookup used when streaming diff
+files.  Each is independently testable and reused across both the
+single-window and multi-window session paths below.
 
 #+BEGIN_SRC elisp
 (defun claude-ide--generate-uuid ()
@@ -2055,6 +2070,8 @@ If URI is nil, gets diagnostics for all open files."
 
 * Logging
 
+Diagnostic helpers — calls go to =*Messages*= and (when enabled) a per-module log buffer.
+
 #+BEGIN_SRC elisp
 (defvar claude-ide--logging-enabled nil
   "Whether to enable logging of Claude communication.")
@@ -2165,6 +2182,8 @@ FRAME is the websocket frame containing the message."
 
 * User Commands
 
+Interactive commands bound on the user-facing keymap; each carries =;;;###autoload=.
+
 #+BEGIN_SRC elisp
 (defun claude-ide--make-unique-key (base-key)
   "Generate a unique key based on BASE-KEY.
@@ -2268,6 +2287,8 @@ Otherwise, use project root if in a project, or current file's directory."
 #+END_SRC
 
 * Provide Feature
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'claude-ide)

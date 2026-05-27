@@ -4,6 +4,23 @@
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
 #+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
+* Overview
+
+Earlier versions kept session state in a 600+-call-site plist — every
+mutation reached in by keyword, every reader did the same, and there
+was no static check that =--session-put :start-time ...= matched a
+field anyone ever read.  This module replaces the plist with a
+typed =cl-defstruct=, but it keeps the keyword API
+=--session-get= / =--session-put= as the *sole* read/write surface so
+the 600+ call sites need no change while gaining slot-level checking.
+
+Invariant: the four sub-structs (=lifecycle=, =render=, =loop=,
+=identity=) cover every typed slot; anything not yet promoted to a
+sub-struct lives in =extras= (a plist hatch).  Slot reads MUST go
+through =--session-get= — direct accessor calls (e.g.
+=(code-agent-org--session-lifecycle-busy state)=) are reserved for
+the module itself and bypass the keyword API's normalisation.
+
 * Claude Org Session
 :PROPERTIES:
 :LITERATE_ORG_BLOCK_KIND: atomic
@@ -18,6 +35,8 @@ slots through the keyword API =--session-get= / =--session-put= so
 the receiver-only typed shape stays decoupled from the 600+ call sites.
 
 ** Dependencies
+
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
@@ -326,6 +345,8 @@ via `code-agent-org--ensure-positive-level'."
 #+END_SRC
 
 ** Provide
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-org-session)

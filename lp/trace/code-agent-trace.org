@@ -189,6 +189,8 @@ kind to pair with which role.
 
 * Dependencies
 
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
+
 #+BEGIN_SRC elisp
 ;;; code-agent-trace.el --- OpenTelemetry tracing for code-agent -*- lexical-binding: t; -*-
 
@@ -677,28 +679,67 @@ the start/stop verbs can be defined once."
                :documentation "Name of the buffer that receives stdout/stderr.")
   (command nil
            :documentation "List passed to `start-process' after name + buffer-name.")
+  (port nil
+        :documentation "TCP port the service listens on (integer).  Used by
+`code-agent-trace-service-ensure' to detect externally-managed instances
+(previous Emacs session, manual `make otel-server' / `make phoenix-start')
+so we never double-spawn and trip an `Address already in use' error.")
   (process nil
            :documentation "The running process object, or nil when stopped."))
 
+(defun code-agent-trace--port-listening-p (port)
+  "Return non-nil if localhost:PORT is accepting TCP connections.
+Probe uses `open-network-stream' with a tight timeout so even on a
+cold local stack the check completes in well under a second.  Errors
+(refused, timeout) return nil — exactly what the caller wants."
+  (when (and port (integerp port) (> port 0))
+    (let ((proc nil))
+      (unwind-protect
+          (condition-case _err
+              (progn
+                (setq proc (open-network-stream
+                            "code-agent-trace-probe" nil "127.0.0.1" port
+                            :type 'plain :nowait nil :timeout 1))
+                (and proc (eq (process-status proc) 'open)))
+            (error nil))
+        (when (and proc (process-live-p proc))
+          (delete-process proc))))))
+
 (defun code-agent-trace-service-ensure (service cwd)
   "Ensure SERVICE is running, starting it in CWD if needed.
-Returns non-nil on success, nil on failure (silently logged)."
-  (let ((proc (code-agent-trace-service-process service)))
-    (if (and proc (process-live-p proc))
-        t
+Returns non-nil on success, nil on failure (silently logged).
+
+Three live-states:
+1. Our own subprocess is alive → no-op, return t.
+2. SERVICE has a `port' slot and something is already listening
+   on it → treat as externally-managed (previous Emacs session,
+   manual `make otel-server', etc.) and return t without spawning.
+   This is the path that fixes the recurring `Address already in use'
+   on re-load.
+3. Neither holds → spawn fresh."
+  (let ((proc (code-agent-trace-service-process service))
+        (port (code-agent-trace-service-port service))
+        (name (code-agent-trace-service-name service)))
+    (cond
+     ((and proc (process-live-p proc)) t)
+     ((code-agent-trace--port-listening-p port)
+      (message "%s already running on port %d (external) — skipping spawn"
+               name port)
+      t)
+     (t
       (condition-case err
           (let ((default-directory cwd))
             (setf (code-agent-trace-service-process service)
                   (apply #'start-process
-                         (code-agent-trace-service-name service)
+                         name
                          (code-agent-trace-service-buffer-name service)
                          (code-agent-trace-service-command service)))
             t)
         (error
          (message "%s failed to start: %s"
-                  (code-agent-trace-service-name service)
+                  name
                   (error-message-string err))
-         nil)))))
+         nil))))))
 
 (defun code-agent-trace-service-stop (service)
   "Kill SERVICE's process if alive; clear the slot either way."
@@ -736,22 +777,29 @@ source; falls back to locating this file on disk."
    :name "otel-bridge"
    :buffer-name "*otel-bridge*"
    :command '("uv" "run"
-              "python" "-m" "code_agent.otel_bridge"))
+              "python" "-m" "code_agent.otel_bridge")
+   :port 7331)
   "Singleton controlling the OTel bridge Flask server.
 
 Previously launched via `uv run --extra tracing'.  The `tracing'
 optional-dependencies group was promoted to required deps in
 commit c6a1297, so passing `--extra tracing' now fails with
 `Extra `tracing' is not defined in the project's
-optional-dependencies table' and the bridge never starts.")
+optional-dependencies table' and the bridge never starts.
+
+Port 7331 declared in the slot so re-loading Emacs (or running
+this in parallel with a manual `make otel-server') doesn't try to
+re-bind a port already held by an external process.")
 
 (defvar code-agent-trace--phoenix-service
   (code-agent-trace-service--create
    :name "phoenix"
    :buffer-name "*phoenix*"
    :command '("uv" "run" "--extra" "phoenix"
-              "python" "-m" "phoenix.server.main" "serve"))
-  "Singleton controlling the Phoenix collector process.")
+              "python" "-m" "phoenix.server.main" "serve")
+   :port 6006)
+  "Singleton controlling the Phoenix collector process.
+Port 6006 is Phoenix's default UI + OTLP endpoint.")
 #+END_SRC
 
 ** Thin Wrappers
@@ -998,6 +1046,8 @@ blockers, but each is worth revisiting when the relevant pain shows up.
    shorten the first-time setup from a checklist to one =M-x=.
 
 * Package Footer
+
+Closing =provide= + package boilerplate.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-trace)

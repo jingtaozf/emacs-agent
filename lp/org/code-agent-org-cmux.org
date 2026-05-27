@@ -3,45 +3,46 @@
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA e0b759f81409817c05a816ba9a68498f34c8c6e5
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
 #+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
+#+PROPERTY: header-args:elisp :tangle yes
 
-* Claude Org cmux
-:PROPERTIES:
-:LITERATE_ORG_BLOCK_KIND: atomic
-:header-args:elisp: :tangle yes
-:END:
+* Overview
 
 cmux backend for code-agent-org.  Sends prompts to a Claude CLI
 (=claude= / =copilot= / =opencode=) running inside a cmux workspace
 via the cmux Unix socket; responses arrive through workspace-bridge
-hook events. Part of code-agent-org, loaded after code-agent-org.org.
-
-** Overview
+hook events.  Part of code-agent-org, loaded after code-agent-org.org.
 
 This file is the operational body of the cmux multiplexer backend.
 The matching =code-agent-cmux-backend.org= holds the Protocol 2b
 class + dispatch shell; everything cmux-specific that doesn't fit
 into the abstract =code-agent-multiplexer-backend= base lives here.
 
-The reading order that matches the C-c C-c lifecycle:
+Invariant: every cmux-specific behaviour goes through =cl-defmethod=
+on =code-agent-cmux-backend= (in =code-agent-cmux-backend.org=) or
+through one of the private =code-agent-org-cmux--*= helpers here.
+The frontend (=code-agent-org.org=) NEVER reaches into this file
+directly — it dispatches via the multiplexer-backend generics.
 
-| Section | Role |
-|---------+------|
-| * Configuration / * Agent Profiles | What the backend can launch |
-| * CLI Gateway | How calls reach the cmux daemon (V1 + V2 protocols) |
-| * Wait for Ready / * Send Text Helper / * Launch Command | The launch + first-prompt path |
-| * Session Management / * Session Recovery | Workspace identity across Emacs / cmux restarts |
-| * Status Detection / * Query Completion | When a turn ends |
-| * Execution / * Response Delivery | The actual C-c C-c handler |
-| * Verbose Output (Live Output Mirror) | The =*cmux: <id>*= live buffer |
-| * IDE Server / * Sidebar Feedback / * Permission Handling | cmux-specific cosmetics + alerts |
-| * User Commands | Interactive entry points (menus, keybindings) |
+** Reading order (matches the C-c C-c lifecycle)
+
+| Section group | Sections | Role |
+|---------------+----------+------|
+| Configuration | Configuration, Agent Profiles, Internal State | What the backend can launch, what state it keeps |
+| Wire surface | CLI Gateway, Workspace Color | How calls reach the cmux daemon; per-workspace colour stamping |
+| Launch path | Wait for Ready, Send Text Helper, Launch Command | First-prompt boot + hook verification |
+| Session lifecycle | Session Management, Session Recovery, Status Detection, Query Completion | Workspace identity across restarts; turn-end detection |
+| Execution | Loop Support, Execution, Response Delivery | The actual C-c C-c handler |
+| Observability + UI | Verbose Output, IDE Server, Story Change Hook, Sidebar Feedback, Permission Handling | Live mirror, IDE bridge, sidebar status, permission alerts |
+| User entry points | User Commands | Menus, keybindings, transient |
 
 The "Agent Profiles" subsection under Configuration is the heart of
 the multi-agent design — it's the data structure that lets one cmux
 backend launch Claude Code, OpenCode, or Copilot interchangeably.
 Read it before any of the launch-path code.
 
-** Dependencies
+* Dependencies
+
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
@@ -303,6 +304,8 @@ Resolution order:
 #+END_SRC
 
 * Internal State
+
+Module-private state holders.  External readers use the accessor functions further down; direct =defvar= access stays inside this module.
 
 #+BEGIN_SRC elisp
 (defvar code-agent-org-cmux--workspace-to-surface (make-hash-table :test 'equal)
@@ -629,9 +632,14 @@ Alternatives considered:
 | Defcustom opt-out | Some users may prefer the warning-only behaviour (default before this fix); honour their choice. |
 | Pre-flight at =--execute-ai-block= (not =--send-text=) | =--send-text= is also called from restart-internal flows (sending =/exit=, sending the relaunch command).  Putting the check at the outer block-execute level scopes it to the user-initiated path. |
 
-** Implementation
+** Hook Verification Helpers
 
-The three helpers:
+Three small helpers implement the pre-flight check.  =--surface-tty=
+resolves the cmux surface to its underlying tty, =--claude-has-bridge-hooks-p=
+inspects the live ~claude~ argv on that tty for the launcher's stable
+=workspace-hooks.json= marker, and =--ensure-hooks-wired= is the
+choreography step that triggers a restart + ready-wait when the marker
+is missing.
 
 | Function | Role |
 |---+---|
@@ -2357,6 +2365,8 @@ Registered on `code-agent-org-active-story-changed-hook'."
 
 * User Commands
 
+Interactive commands bound on the user-facing keymap; each carries =;;;###autoload=.
+
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux--activate-app ()
   "Bring cmux to the foreground on macOS."
@@ -2876,6 +2886,8 @@ session-key if found, nil otherwise."
 #+END_SRC
 
 * Provide
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-org-cmux)

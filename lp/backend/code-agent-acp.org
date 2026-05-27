@@ -1,6 +1,26 @@
 #+TITLE: Claude Agent ACP Backend (Generic)
 #+PROPERTY: literate-load yes
 
+* Overview
+
+ACP is to AI agents what LSP is to language servers — one JSON-RPC
+protocol that every conforming agent speaks the same way.  Without
+this generic backend, each agent (OpenCode, Gemini, Codex, future
+arrivals) would need a per-agent backend module hand-coded against
+its own RPC vocabulary.  This module provides the single ACP
+implementation that all per-agent profile modules (=code-agent-acp-opencode.org=
+et al.) wrap with their own spawn-command + auth-method tuple.
+
+Invariant: every ACP backend instance owns one persistent subprocess,
+one =session/new= -derived =sessionId=, and runs the full handshake
+(initialize → optional authenticate → session/new) exactly once at
+construction time.  =session/prompt= calls reuse the same process
+for all turns; cancellation flows through =session/cancel= notification,
+not by killing the subprocess.  Permission requests
+(=session/request_permission=) flow back to the user through the
+interactive permission system, never silently auto-approved unless a
+user-set defcustom flips that default.
+
 * Claude Agent ACP Backend
 
 Generic Agent Client Protocol (ACP) backend.  Supports any agent that
@@ -86,6 +106,8 @@ interchangeable on every axis:
 
 ** Dependencies
 
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
+
 #+BEGIN_SRC elisp
 (require 'cl-lib)
 (require 'json)
@@ -96,6 +118,8 @@ interchangeable on every axis:
 #+END_SRC
 
 ** Customization
+
+User-facing knobs.  Each =defcustom= is documented inline; the group name keeps Customize navigable for end users.
 
 #+BEGIN_SRC elisp
 (defgroup code-agent-acp nil
@@ -237,6 +261,8 @@ explicit `--get-session-verbose-buffer' call is needed here."
 
 ** Process Startup
 
+Subprocess lifecycle entry — spawns the daemon and wires its stdout/stderr filters.
+
 #+BEGIN_SRC elisp
 (defun code-agent-acp--start-process (backend)
   "Start the agent subprocess for BACKEND.
@@ -265,6 +291,8 @@ into the backend and calling `code-agent-acp--register-backend'."
 #+END_SRC
 
 ** Handshake
+
+Protocol handshake — exchanged once at session start to negotiate capabilities + auth.
 
 #+BEGIN_SRC elisp
 (defun code-agent-acp--connect (backend on-ready on-error)
@@ -455,6 +483,8 @@ fall back to `session/new'."
 
 ** Notification and Request Subscriptions
 
+Wiring for server-initiated messages — every notification / request the protocol can deliver routes through here.
+
 #+BEGIN_SRC elisp
 (defun code-agent-acp--subscribe (backend)
   "Wire ACP-level notification and request handlers onto BACKEND's client."
@@ -471,6 +501,8 @@ fall back to `session/new'."
 #+END_SRC
 
 ** Notification Handler
+
+Dispatcher for server-initiated notifications (one-way messages, no response expected).
 
 #+BEGIN_SRC elisp
 (defun code-agent-acp--handle-notification (backend notification)
@@ -794,6 +826,8 @@ Returns the option id, or nil if the user hit C-g.  TITLE is sanitised
 
 *** Query
 
+Public query entry — translates user prompt + callbacks into a backend-specific RPC.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-query
     ((backend code-agent-acp-backend) prompt callbacks &rest _args)
@@ -907,6 +941,8 @@ first prompt's `:on-complete' and `:on-error'."
 
 *** Cancel
 
+Cancellation entry-point — flips the busy flag, kills the backend handle, restores idle UI.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-cancel
     ((backend code-agent-acp-backend) _handle)
@@ -924,6 +960,8 @@ first prompt's `:on-complete' and `:on-error'."
 
 *** Cleanup
 
+Resource-cleanup helpers — release sockets / processes / temp files when the session ends.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-cleanup
     ((backend code-agent-acp-backend))
@@ -939,6 +977,8 @@ first prompt's `:on-complete' and `:on-error'."
 #+END_SRC
 
 *** State Queries
+
+Read-only accessors over the backend's internal state — no side effects.
 
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-active-p
@@ -964,6 +1004,8 @@ first prompt's `:on-complete' and `:on-error'."
 
 *** Capability Declaration
 
+Returns the capability tuple the abstract base advertises to the rest of the SDK.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-supports-p
     ((_backend code-agent-acp-backend) capability)
@@ -972,6 +1014,8 @@ first prompt's `:on-complete' and `:on-error'."
 #+END_SRC
 
 *** Error Classification
+
+Maps raw backend errors onto the canonical error taxonomy in =code-agent-backend.org=.
 
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-classify-error
@@ -1028,6 +1072,8 @@ would not capture `auth-method-symbol' and would error
 #+END_SRC
 
 ** Provide Feature
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-acp)

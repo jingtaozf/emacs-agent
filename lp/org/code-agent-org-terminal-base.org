@@ -4,6 +4,22 @@
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-23T07:07:40Z
 #+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
 
+* Overview
+
+cmux and tmux backends both need the same handful of cross-cutting
+primitives: a =/tmp/code-agent-status= file the Python bridge can
+poll, a workspace-id-to-session-key hash table, session heading
+navigation, request-id registration in =code-agent--active-queries=,
+and tab-title formatting.  Without this base module, every backend
+duplicates the same five functions and the duplicates drift apart.
+
+Invariant: every helper here is named with a =code-agent-org-terminal--=
+prefix and is purely data-shaping — no backend-specific RPCs.  The
+shared workspace-to-session-key hash table is the single source of
+truth for which org buffer owns each terminal session; both cmux and
+tmux register through =code-agent-org-terminal--register-workspace=
+and look up through =code-agent-org-terminal--lookup-session-key=.
+
 * Claude Org Terminal Base
 :PROPERTIES:
 :LITERATE_ORG_BLOCK_KIND: atomic
@@ -17,6 +33,8 @@ and tab-title generation. Extracted with a =code-agent-org-terminal--=
 prefix so both cmux and tmux backends reuse the same logic.
 
 ** Dependencies
+
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
 #+BEGIN_SRC elisp
 (require 'cl-lib)
@@ -32,6 +50,11 @@ prefix so both cmux and tmux backends reuse the same logic.
 #+END_SRC
 
 ** Status Directory
+
+Both the Emacs side and the Python =workspace-bridge= write
+session-status JSON files into the same directory.  Centralising the
+path constant here means a future relocation (e.g. to
+=$XDG_RUNTIME_DIR=) is a single-line change rather than a sed sweep.
 
 #+BEGIN_SRC elisp
 (defconst code-agent-org-terminal-status-dir "/tmp/code-agent-status"
@@ -183,6 +206,8 @@ and saves the request-id to a status file for the Python hook."
 #+END_SRC
 
 ** Provide
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-org-terminal-base)

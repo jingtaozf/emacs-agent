@@ -1,6 +1,23 @@
 #+TITLE: Claude Agent ACP — OpenCode Profile
 #+PROPERTY: literate-load yes
 
+* Overview
+
+This module exists so OpenCode can be driven through structured
+ACP/JSON-RPC over stdio, sidestepping the alternative cmux-profile
+path that mutates =opencode.jsonc=, =AGENTS.md=, and
+=.opencode/plugins/= during a session.  A crash before the cmux
+profile's =atexit= cleanup leaves the project in a half-modified
+state; the direct-ACP path avoids that whole class of problem
+because OpenCode reads its own config and we never touch it.
+
+Invariant: every direct-ACP call spawns =opencode acp= on stdio,
+relies on OpenCode's pre-existing =opencode auth login= credentials
+(so no ACP =authenticate= RPC is needed), and never writes into the
+target project's configuration files.  The factory =code-agent-acp-opencode-create=
+is the only constructor; callers MUST NOT instantiate the generic
+ACP backend directly with OpenCode-specific spawn-args.
+
 * OpenCode ACP Profile
 
 Per-agent configuration for OpenCode.  Provides a thin constructor
@@ -48,11 +65,15 @@ References:
 
 ** Dependencies
 
+Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
+
 #+BEGIN_SRC elisp
 (require 'code-agent-acp)
 #+END_SRC
 
 ** Customization
+
+User-facing knobs.  Each =defcustom= is documented inline; the group name keeps Customize navigable for end users.
 
 #+BEGIN_SRC elisp
 (defgroup code-agent-acp-opencode nil
@@ -90,6 +111,8 @@ the abstract base.
 
 ** Constructor
 
+Single factory function — callers MUST go through this, not =make-instance= equivalents.
+
 #+BEGIN_SRC elisp
 (defun code-agent-acp-opencode-create (&rest args)
   "Create an ACP backend configured for OpenCode.
@@ -107,6 +130,8 @@ opencode-specific defaults.  Typical usage:
 #+END_SRC
 
 ** Provide Feature
+
+Single =provide= so the module can be =require=d.
 
 #+BEGIN_SRC elisp
 (provide 'code-agent-acp-opencode)
