@@ -77,3 +77,17 @@
 ## Glossary(unknowns 投票后凝练成 design rationale 的内容)
 
 - (空 — 等 unknowns 累积到一定量再写到 docs/design-docs/)
+
+## 2026-05-27 — literate-elisp EOF when file ends with prose
+
+**Mistake**: Added `* See also` heading + Verified-by prose at the end of LP `.org` files. literate-elisp's reader signalled `(end-of-file nil)` and aborted load.
+
+**Context**: The reader treats every char after the last `#+END_SRC` and decides whether to read it as Lisp. A `*` heading + `:PROPERTIES:` drawer + `**Verified by:**` block hits the fallthrough "enter Emacs read" branch, which then EOFs mid-sexp.
+
+**Rule**: Any `.org` file loaded via literate-elisp must end with a `#+BEGIN_SRC ... #+END_SRC` block. When trailing prose is needed, append a no-tangle sentinel src block:
+
+```org
+#+begin_src elisp :tangle no
+;; literate-elisp reader sentinel — keeps file's final non-empty content a code block
+#+end_src
+```
