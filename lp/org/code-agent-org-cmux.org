@@ -2546,6 +2546,53 @@ captured window if the user's prompt occupies multiple lines."
   (let ((screen (code-agent-org-cmux--capture-screen surface-id 15)))
     (and screen (string-match-p "No conversation found" screen))))
 
+(defun code-agent-org-cmux--recover-from-resume-failure (surface-id launch-cmd)
+  "When the just-issued LAUNCH-CMD with =--resume= bounced off a stale
+session id, drop the stale property and re-send a resume-free command.
+
+SURFACE-ID is the cmux surface to drive.  Only call this after sending
+LAUNCH-CMD and waiting long enough for Claude to print its
+=No conversation found= banner if applicable (~3s in practice).
+
+Stripping =--resume <id>= from LAUNCH-CMD is deterministic; rebuilding
+from scratch via =--build-launch-command= would race a not-yet-visible
+property delete in some org versions."
+  (when (code-agent-org-cmux--resume-failed-p surface-id)
+    (message "Resume failed (stale CLAUDE_CLI_SESSION); relaunching fresh...")
+    (condition-case nil
+        (save-excursion
+          (code-agent-org-terminal--goto-session-heading)
+          (org-entry-delete nil "CLAUDE_CLI_SESSION")
+          (let ((inhibit-message t)) (save-buffer)))
+      (error nil))
+    (code-agent-org-cmux--wait-for-shell surface-id 5)
+    (let ((fresh-cmd (code-agent-org-cmux--launch-cmd-without-resume
+                      launch-cmd)))
+      (code-agent-org-cmux--call "send" "--surface" surface-id
+                                 (concat fresh-cmd "\n")))))
+
+(defun code-agent-org-cmux--post-restart-ide-setup (surface-id workspace-session-id)
+  "Wire the IDE server + send =/ide= to SURFACE-ID after a restart.
+
+Does nothing when WORKSPACE-SESSION-ID is nil (no IDE bridge expected).
+The =/ide= send is delayed 10s so Claude finishes booting before it
+receives the command.
+
+Extracted from `code-agent-org-cmux-restart' to flatten the restart
+function's body — this is one of its larger conceptual phases."
+  (when workspace-session-id
+    (code-agent-org-cmux--ensure-ide-server
+     (or (code-agent-org--get-project-root) default-directory)
+     workspace-session-id)
+    (run-at-time 10 nil
+      (lexical-let ((sid surface-id))
+        (lambda ()
+          (condition-case nil
+              (progn
+                (code-agent-org-cmux--call "send" "--surface" sid "/ide")
+                (code-agent-org-cmux--call "send-key" "--surface" sid "Return"))
+            (error nil)))))))
+
 (defun code-agent-org-cmux-restart ()
   "Restart Claude Code in the current cmux tab.
 
@@ -2602,33 +2649,13 @@ foreground (vim, less, …) this may be a no-op."
       (message "Launching fresh Claude Code...")
       (code-agent-org-cmux--call "send" "--surface" surface-id
                              (concat launch-cmd "\n"))
-      ;; 2a. Resume-failure recovery — see docstring.  Claude exits
-      ;; within ~1s on a bad session id, so a 2-3s settle is enough
-      ;; to see the banner.  Only kick the recovery path when we
+      ;; 2a. Resume-failure recovery — see helper docstring.  Claude
+      ;; exits within ~1s on a bad session id, so a 2-3s settle is
+      ;; enough for the banner.  Only kick the recovery path when we
       ;; actually used --resume; otherwise skip the round trip.
       (when (string-match-p " --resume " launch-cmd)
         (sleep-for 3)
-        (when (code-agent-org-cmux--resume-failed-p surface-id)
-          (message "Resume failed (stale CLAUDE_CLI_SESSION); relaunching fresh...")
-          ;; Drop the stale property so future restarts don't repeat
-          ;; the failure.  A successful prompt will repopulate it via
-          ;; the workspace bridge save-cli-session path.
-          (condition-case nil
-              (save-excursion
-                (code-agent-org-terminal--goto-session-heading)
-                (org-entry-delete nil "CLAUDE_CLI_SESSION")
-                (let ((inhibit-message t)) (save-buffer)))
-            (error nil))
-          ;; Wait for claude to release the shell, then re-send a
-          ;; --resume-free command.  Don't rebuild from scratch via
-          ;; --build-launch-command — the property write above won't
-          ;; be visible to that helper until the next read cycle in
-          ;; some org versions.  Stripping the flag is deterministic.
-          (code-agent-org-cmux--wait-for-shell surface-id 5)
-          (let ((fresh-cmd (code-agent-org-cmux--launch-cmd-without-resume
-                            launch-cmd)))
-            (code-agent-org-cmux--call "send" "--surface" surface-id
-                                       (concat fresh-cmd "\n")))))
+        (code-agent-org-cmux--recover-from-resume-failure surface-id launch-cmd))
       ;; 3. Rename tab to active story (cmux may reset title on relaunch)
       (let ((ws-ref (code-agent-org-cmux--session-workspace-ref))
             (tab-title (code-agent-org-terminal--tab-title)))
@@ -2643,17 +2670,7 @@ foreground (vim, less, …) this may be a no-op."
         (code-agent-org--session-put sk :verbose-surface-id nil)
         (code-agent-org-cmux--start-verbose surface-id sk))
       ;; 5. Ensure IDE server and send /ide after ready
-      (when workspace-session-id
-        (code-agent-org-cmux--ensure-ide-server
-         (or (code-agent-org--get-project-root) default-directory) workspace-session-id)
-        (run-at-time 10 nil
-          (lexical-let ((sid surface-id))
-            (lambda ()
-              (condition-case nil
-                  (progn
-                    (code-agent-org-cmux--call "send" "--surface" sid "/ide")
-                    (code-agent-org-cmux--call "send-key" "--surface" sid "Return"))
-                (error nil))))))
+      (code-agent-org-cmux--post-restart-ide-setup surface-id workspace-session-id)
       (message "Claude Code restarting in surface %s" surface-id))))
 
 (defun code-agent-org-cmux-cancel ()

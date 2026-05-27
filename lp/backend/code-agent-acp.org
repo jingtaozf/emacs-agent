@@ -508,105 +508,136 @@ Wiring for server-initiated messages — every notification / request the protoc
 Dispatcher for server-initiated notifications (one-way messages, no response expected).
 
 #+BEGIN_SRC elisp
+(cl-defgeneric code-agent-acp--session-update (event-type backend update callbacks sk)
+  "Dispatch one ACP =sessionUpdate= EVENT-TYPE.
+
+EVENT-TYPE is a symbol derived from the wire string.  Default method
+(unspecialised) ignores the event — preserves the prior cond's
+fall-through behaviour for events we don't handle (e.g.
+=available_commands_update=).
+
+Adding a new sessionUpdate kind is one =cl-defmethod= alongside
+existing five, not a central cond edit."
+  (ignore event-type update callbacks sk)
+  nil)
+
+(cl-defmethod code-agent-acp--session-update
+  ((_e (eql 'agent_message_chunk)) _backend update callbacks sk)
+  "Streaming text chunk from the agent — forward to verbose buffer and
+the caller's :on-token callback."
+  (let* ((content (map-elt update 'content))
+         (text (map-elt content 'text)))
+    (when text
+      (when sk
+        (code-agent--verbose-insert sk text))
+      (when (plist-get callbacks :on-token)
+        (funcall (plist-get callbacks :on-token) text)))))
+
+(cl-defmethod code-agent-acp--session-update
+  ((_e (eql 'tool_call)) _backend update callbacks sk)
+  "Tool invocation announcement — render header in verbose buffer
++ surface a single-line marker to :on-token."
+  (let ((title (map-elt update 'title))
+        (status (map-elt update 'status)))
+    (when sk
+      (code-agent--verbose-insert
+       sk (format "\n%s %s  (%s)\n"
+                  (propertize "▶ Tool:" 'face 'font-lock-keyword-face)
+                  (propertize (or title "unknown")
+                              'face 'font-lock-function-name-face)
+                  (or status ""))))
+    (when (plist-get callbacks :on-token)
+      (funcall (plist-get callbacks :on-token)
+               (format "\n[Tool: %s (%s)]\n"
+                       (or title "unknown") (or status ""))))))
+
+(cl-defmethod code-agent-acp--session-update
+  ((_e (eql 'tool_call_update)) _backend update callbacks sk)
+  "Tool result (completed / failed) — render outcome + truncated output."
+  (let ((status (map-elt update 'status))
+        (title (map-elt update 'title))
+        (content-items (map-elt update 'content)))
+    (when (member status '("completed" "failed"))
+      (let ((output (code-agent-acp--extract-content-text content-items)))
+        (when sk
+          (code-agent--verbose-insert
+           sk (format "%s %s  %s\n%s\n"
+                      (propertize "◀ Result:" 'face 'font-lock-keyword-face)
+                      (if (equal status "failed")
+                          (propertize "FAILED" 'face 'error)
+                        (propertize "OK" 'face 'success))
+                      (or title "")
+                      (or (and output (> (length output) 0)
+                               (truncate-string-to-width
+                                output 2000 nil nil "..."))
+                          ""))))
+        (when (and output (> (length output) 0)
+                   (plist-get callbacks :on-token))
+          (funcall (plist-get callbacks :on-token)
+                   (format "\n[%s: %s]\n%s\n"
+                           (if (equal status "failed")
+                               "Tool failed" "Tool result")
+                           (or title "")
+                           (truncate-string-to-width
+                            output 500 nil nil "..."))))))))
+
+(cl-defmethod code-agent-acp--session-update
+  ((_e (eql 'agent_thought_chunk)) _backend update _callbacks sk)
+  "Chain-of-thought stream — verbose-buffer only, not user-visible
+through :on-token (CoT goes to inspection surfaces)."
+  (let* ((content (map-elt update 'content))
+         (text (map-elt content 'text)))
+    (when (and sk text)
+      (code-agent--verbose-insert
+       sk (propertize text 'face 'font-lock-doc-face)))))
+
+(cl-defmethod code-agent-acp--session-update
+  ((_e (eql 'usage_update)) backend update _callbacks sk)
+  "Token-usage + cost stamps from the agent — mutates backend slots
+so the rate-limit mode-line stays accurate, logs to verbose buffer."
+  (let ((usage (map-elt update 'usage))
+        (cost (map-elt update 'cost))
+        (used (map-elt update 'used))
+        (size (map-elt update 'size)))
+    (when usage
+      (when-let* ((inp (map-elt usage 'inputTokens)))
+        (setf (code-agent-acp-backend-input-tokens backend) inp))
+      (when-let* ((out (map-elt usage 'outputTokens)))
+        (setf (code-agent-acp-backend-output-tokens backend) out)))
+    (when cost
+      (when-let* ((amt (map-elt cost 'amount)))
+        (setf (code-agent-acp-backend-cost-amount backend) amt))
+      (when-let* ((cur (map-elt cost 'currency)))
+        (setf (code-agent-acp-backend-cost-currency backend) cur)))
+    (when used
+      (setf (code-agent-acp-backend-context-used backend) used))
+    (when size
+      (setf (code-agent-acp-backend-context-size backend) size))
+    (when sk
+      (code-agent-acp--verbose-log
+       backend
+       (format "usage: in=%s out=%s%s"
+               (or (and usage (map-elt usage 'inputTokens)) "?")
+               (or (and usage (map-elt usage 'outputTokens)) "?")
+               (if cost
+                   (format " cost=%s %s"
+                           (or (map-elt cost 'amount) "?")
+                           (or (map-elt cost 'currency) ""))
+                 ""))))))
+
 (defun code-agent-acp--handle-notification (backend notification)
-  "Dispatch ACP NOTIFICATION to BACKEND callbacks."
+  "Dispatch ACP NOTIFICATION to BACKEND callbacks.
+
+Bridges the JSON =sessionUpdate= string to the cl-defgeneric
+dispatch above so new event kinds drop in as one cl-defmethod."
   (let* ((params (map-elt notification 'params))
          (update (map-elt params 'update))
          (event-type (map-elt update 'sessionUpdate))
          (callbacks (code-agent-acp-backend-callbacks backend))
          (sk (code-agent-acp-backend-session-key backend)))
-    (cond
-     ((equal event-type "agent_message_chunk")
-      (let* ((content (map-elt update 'content))
-             (text (map-elt content 'text)))
-        (when text
-          (when sk
-            (code-agent--verbose-insert sk text))
-          (when (plist-get callbacks :on-token)
-            (funcall (plist-get callbacks :on-token) text)))))
-
-     ((equal event-type "tool_call")
-      (let ((title (map-elt update 'title))
-            (status (map-elt update 'status)))
-        (when sk
-          (code-agent--verbose-insert
-           sk (format "\n%s %s  (%s)\n"
-                      (propertize "▶ Tool:" 'face 'font-lock-keyword-face)
-                      (propertize (or title "unknown")
-                                  'face 'font-lock-function-name-face)
-                      (or status ""))))
-        (when (plist-get callbacks :on-token)
-          (funcall (plist-get callbacks :on-token)
-                   (format "\n[Tool: %s (%s)]\n"
-                           (or title "unknown") (or status ""))))))
-
-     ((equal event-type "tool_call_update")
-      (let ((status (map-elt update 'status))
-            (title (map-elt update 'title))
-            (content-items (map-elt update 'content)))
-        (when (member status '("completed" "failed"))
-          (let ((output (code-agent-acp--extract-content-text content-items)))
-            (when sk
-              (code-agent--verbose-insert
-               sk (format "%s %s  %s\n%s\n"
-                          (propertize "◀ Result:" 'face 'font-lock-keyword-face)
-                          (if (equal status "failed")
-                              (propertize "FAILED" 'face 'error)
-                            (propertize "OK" 'face 'success))
-                          (or title "")
-                          (or (and output (> (length output) 0)
-                                   (truncate-string-to-width
-                                    output 2000 nil nil "..."))
-                              ""))))
-            (when (and output (> (length output) 0)
-                       (plist-get callbacks :on-token))
-              (funcall (plist-get callbacks :on-token)
-                       (format "\n[%s: %s]\n%s\n"
-                               (if (equal status "failed")
-                                   "Tool failed" "Tool result")
-                               (or title "")
-                               (truncate-string-to-width
-                                output 500 nil nil "..."))))))))
-
-     ((equal event-type "agent_thought_chunk")
-      (let* ((content (map-elt update 'content))
-             (text (map-elt content 'text)))
-        (when (and sk text)
-          (code-agent--verbose-insert
-           sk (propertize text 'face 'font-lock-doc-face)))))
-
-     ((equal event-type "usage_update")
-      (let ((usage (map-elt update 'usage))
-            (cost (map-elt update 'cost))
-            (used (map-elt update 'used))
-            (size (map-elt update 'size)))
-        (when usage
-          (when-let* ((inp (map-elt usage 'inputTokens)))
-            (setf (code-agent-acp-backend-input-tokens backend) inp))
-          (when-let* ((out (map-elt usage 'outputTokens)))
-            (setf (code-agent-acp-backend-output-tokens backend) out)))
-        (when cost
-          (when-let* ((amt (map-elt cost 'amount)))
-            (setf (code-agent-acp-backend-cost-amount backend) amt))
-          (when-let* ((cur (map-elt cost 'currency)))
-            (setf (code-agent-acp-backend-cost-currency backend) cur)))
-        (when used
-          (setf (code-agent-acp-backend-context-used backend) used))
-        (when size
-          (setf (code-agent-acp-backend-context-size backend) size))
-        (when sk
-          (code-agent-acp--verbose-log
-           backend
-           (format "usage: in=%s out=%s%s"
-                   (or (and usage (map-elt usage 'inputTokens)) "?")
-                   (or (and usage (map-elt usage 'outputTokens)) "?")
-                   (if cost
-                       (format " cost=%s %s"
-                               (or (map-elt cost 'amount) "?")
-                               (or (map-elt cost 'currency) ""))
-                     ""))))))
-
-     ((equal event-type "available_commands_update") nil))))
+    (code-agent-acp--session-update
+     (if event-type (intern event-type) 'unknown)
+     backend update callbacks sk)))
 
 (defun code-agent-acp--extract-content-text (content-items)
   "Extract text from ACP CONTENT-ITEMS (vector of content objects)."

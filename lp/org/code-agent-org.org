@@ -55,6 +55,7 @@
     - [[#keymap][Keymap]]
   - [[#minor-mode][Minor Mode]]
 - [[#package-footer][Package Footer]]
+- [[#see-also][See also]]
 
 * Overview
 :PROPERTIES:
@@ -1827,6 +1828,44 @@ after-hook.  Returns nil."
             (run-hook-with-args 'code-agent-org-execute-after-hook
                                 session-key content nil)))))))
 
+(defun code-agent-org--maybe-queue-when-busy
+    (session-key custom-id content marker loop-max loop-interval
+                 section-level should-auto-title heading-marker)
+  "Queue the current block on SESSION-KEY when the session is busy.
+
+When the session already has a query in flight, package the current
+block into a queue entry and dispatch via
+`code-agent-org--queue-block', reporting the outcome to the user.
+
+Returns non-nil when the caller should stop and return from
+`code-agent-org-execute' (block was queued / already running /
+already in queue), nil when the session is idle and the caller
+should proceed with the dispatch path.
+
+Extracted from `code-agent-org-execute' where the same dance was
+duplicated between the multiplexer-branch and the agent-branch."
+  (when (code-agent-org--session-get session-key :busy)
+    (let* ((block-info (list :custom-id custom-id
+                             :content content
+                             :marker marker
+                             :loop-max loop-max
+                             :loop-interval loop-interval
+                             :section-level section-level
+                             :should-auto-title should-auto-title
+                             :heading-marker heading-marker))
+           (result (code-agent-org--queue-block session-key block-info)))
+      (pcase result
+        ('queued
+         (code-agent-org--set-exec-status "scheduled")
+         (message "Scheduled [%d]. Will run after current query completes."
+                  (code-agent-org--queue-count session-key)))
+        ('running
+         (message "This block is already running. Wait for it to complete."))
+        ('in-queue
+         (message "This block is already scheduled [%d in queue]."
+                  (code-agent-org--queue-count session-key))))
+      t)))
+
 (defun code-agent-org-execute ()
   "Execute the AI query at point.
 Must be called when point is inside a #+begin_src ai block.
@@ -1904,27 +1943,11 @@ If the session is busy, queues the block for execution when current query comple
         ;; of firing a second prompt in parallel.  Mux dispatch had been
         ;; placed BEFORE the queue check, so two C-c C-c invocations would
         ;; both go to cmux unconditionally — A6 caught this regression.
-        (when (code-agent-org--session-get session-key :busy)
-          (let* ((block-info (list :custom-id custom-id
-                                   :content content
-                                   :marker (copy-marker (point))
-                                   :loop-max loop-max
-                                   :loop-interval loop-interval
-                                   :section-level section-level
-                                   :should-auto-title should-auto-title
-                                   :heading-marker heading-marker))
-                 (result (code-agent-org--queue-block session-key block-info)))
-            (pcase result
-              ('queued
-               (code-agent-org--set-exec-status "scheduled")
-               (message "Scheduled [%d]. Will run after current query completes."
-                        (code-agent-org--queue-count session-key)))
-              ('running
-               (message "This block is already running. Wait for it to complete."))
-              ('in-queue
-               (message "This block is already scheduled [%d in queue]."
-                        (code-agent-org--queue-count session-key))))
-            (cl-return-from code-agent-org-execute nil)))
+        (when (code-agent-org--maybe-queue-when-busy
+               session-key custom-id content (copy-marker (point))
+               loop-max loop-interval section-level
+               should-auto-title heading-marker)
+          (cl-return-from code-agent-org-execute nil))
         (code-agent-org-backend-execute-block
          mux-backend
          (list :prompt content
@@ -1935,28 +1958,11 @@ If the session is busy, queues the block for execution when current query comple
                :section-level section-level))
         (cl-return-from code-agent-org-execute nil)))
     ;; If session is busy, queue the block instead of erroring
-    (when (code-agent-org--session-get session-key :busy)
-      (let* ((block-info (list :custom-id custom-id
-                               :content content
-                               :marker (copy-marker (point))
-                               :loop-max loop-max
-                               :loop-interval loop-interval
-                               :section-level section-level
-                               :should-auto-title should-auto-title
-                               :heading-marker heading-marker))
-             (result (code-agent-org--queue-block session-key block-info)))
-        (pcase result
-          ('queued
-           ;; Set status to scheduled
-           (code-agent-org--set-exec-status "scheduled")
-           (message "Scheduled [%d]. Will run after current query completes."
-                    (code-agent-org--queue-count session-key)))
-          ('running
-           (message "This block is already running. Wait for it to complete."))
-          ('in-queue
-           (message "This block is already scheduled [%d in queue]."
-                    (code-agent-org--queue-count session-key))))
-        (cl-return-from code-agent-org-execute nil)))
+    (when (code-agent-org--maybe-queue-when-busy
+           session-key custom-id content (copy-marker (point))
+           loop-max loop-interval section-level
+           should-auto-title heading-marker)
+      (cl-return-from code-agent-org-execute nil))
     ;; Bundle inputs + dispatch through the command class.
     (code-agent-org-execute-command-run
      (code-agent-org-execute-command--create
