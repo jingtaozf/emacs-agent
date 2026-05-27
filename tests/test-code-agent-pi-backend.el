@@ -380,5 +380,47 @@ shared session buffer (creating it if missing) so the
   :tags '(:unit :pi-backend :stable)
   (should (eq (default-value 'code-agent-pi-show-tool-calls) nil)))
 
+
+(ert-deftest code-agent-pi--prompt-payload-includes-streaming-behavior ()
+  "Every prompt command carries the streamingBehavior field so Pi
+does not return \"Agent is already processing\" when a new C-c C-c
+arrives mid-stream.  Default behavior maps to Pi's `followUp'."
+  :tags '(:unit :pi-backend :stable)
+  (let* ((sk (format "pi-streaming-payload-%d" (random 100000)))
+         (b (code-agent-pi-backend-create :session-key sk))
+         (sent nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'code-agent-pi--ensure-spawn-and-handshake)
+                   (lambda (_b on-ready _on-err) (funcall on-ready)))
+                  ((symbol-function 'code-agent-pi--send)
+                   (lambda (_backend obj) (setq sent obj))))
+          (code-agent-backend-query b "hello" (list :on-token #'ignore))
+          (should sent)
+          (should (equal (alist-get 'type sent) "prompt"))
+          (should (equal (alist-get 'streamingBehavior sent) "followUp")))
+      (when-let* ((buf (gethash sk code-agent--session-verbose-buffers)))
+        (when (buffer-live-p buf) (kill-buffer buf))
+        (remhash sk code-agent--session-verbose-buffers)))))
+
+(ert-deftest code-agent-pi--prompt-payload-omits-streaming-behavior-when-nil ()
+  "When `code-agent-pi-streaming-behavior' is nil the field is OMITTED
+(opt-out for users who want the Emacs-side queue as the sole gate)."
+  :tags '(:unit :pi-backend :stable)
+  (let* ((sk (format "pi-streaming-omit-%d" (random 100000)))
+         (b (code-agent-pi-backend-create :session-key sk))
+         (sent nil)
+         (code-agent-pi-streaming-behavior nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'code-agent-pi--ensure-spawn-and-handshake)
+                   (lambda (_b on-ready _on-err) (funcall on-ready)))
+                  ((symbol-function 'code-agent-pi--send)
+                   (lambda (_backend obj) (setq sent obj))))
+          (code-agent-backend-query b "hello" (list :on-token #'ignore))
+          (should sent)
+          (should-not (alist-get 'streamingBehavior sent)))
+      (when-let* ((buf (gethash sk code-agent--session-verbose-buffers)))
+        (when (buffer-live-p buf) (kill-buffer buf))
+        (remhash sk code-agent--session-verbose-buffers)))))
+
 (provide 'test-code-agent-pi-backend)
 ;;; test-code-agent-pi-backend.el ends here

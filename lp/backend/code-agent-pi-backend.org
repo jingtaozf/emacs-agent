@@ -271,6 +271,36 @@ prevents Emacs OOM if Pi ever streams a multi-megabyte single line
 without a trailing newline.  Default 8 MiB."
   :type 'integer
   :group 'code-agent)
+
+(defcustom code-agent-pi-streaming-behavior 'follow-up
+  "How a new prompt behaves when Pi is already mid-stream.
+
+Pi's RPC requires `streamingBehavior' on a `prompt' command when the
+agent is already processing.  Without it Pi returns:
+
+  Agent is already processing.  Specify streamingBehavior ('steer'
+  or 'followUp') to queue the message.
+
+Choices:
+
+- `follow-up' (default, safe) — queue the new prompt to fire after
+  the current turn finishes.  Maps to Pi's =followUp=.  Matches the
+  Emacs C-c C-c convention that new input does not interrupt
+  in-flight work.
+- `steer' — interrupt the current turn, the new prompt takes over.
+  Maps to Pi's =steer=.  Equivalent to typing in Pi's TUI mid-stream.
+- nil — omit the field.  Pi will return the above error when busy.
+  Only useful when the Emacs-side queue is the sole gatekeeper and
+  you want errors to surface noisy state drift.
+
+Idle case: the value is ignored — the prompt fires immediately
+regardless of which choice is set.  This matters only when Pi is
+already mid-stream (e.g. after a session restore, a queued tool
+call, or rapid C-c C-c)."
+  :type '(choice (const :tag "follow-up — queue after current turn" follow-up)
+                 (const :tag "steer — interrupt current turn" steer)
+                 (const :tag "(none — error on busy)" nil))
+  :group 'code-agent)
 #+END_SRC
 
 *** Backend Struct
@@ -1123,11 +1153,17 @@ callbacks. Returns the prompt id as the cancellation handle.
        backend
        (lambda ()
          (condition-case send-err
-             (code-agent-pi--send
-              backend
-              `((id . ,pid)
-                (type . "prompt")
-                (message . ,prompt)))
+             (let* ((sb-sym code-agent-pi-streaming-behavior)
+                    (sb-str (cond
+                             ((eq sb-sym 'follow-up) "followUp")
+                             ((eq sb-sym 'steer)     "steer")
+                             (t nil)))
+                    (cmd `((id . ,pid)
+                           (type . "prompt")
+                           (message . ,prompt))))
+               (when sb-str
+                 (setq cmd (append cmd `((streamingBehavior . ,sb-str)))))
+               (code-agent-pi--send backend cmd))
            (error
             (code-agent-pi--fire-error
              backend pid
