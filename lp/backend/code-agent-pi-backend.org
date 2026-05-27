@@ -1066,14 +1066,23 @@ Three small predicates the rest of the SDK reads to decide whether a Pi session 
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-active-p
   ((backend code-agent-pi-backend))
+  "Return non-nil when a Pi prompt is currently in flight on BACKEND.
+Read from the =active-prompt-id= slot which is set on prompt-send and
+cleared on completion / cancellation."
   (not (null (code-agent-pi-backend-active-prompt-id backend))))
 
 (cl-defmethod code-agent-backend-session-id
   ((backend code-agent-pi-backend))
+  "Return the live Pi =session-id= for BACKEND or nil before first
+prompt.  The id is supplied by Pi on the first response and persists
+across turns of the same session."
   (code-agent-pi-backend-session-id backend))
 
 (cl-defmethod code-agent-backend-ready-p
   ((backend code-agent-pi-backend))
+  "Return non-nil iff the Pi subprocess is alive AND the readiness
+handshake completed.  Until both are true, callers should defer
+sending a prompt — the wire will accept nothing useful."
   (and (let ((p (code-agent-pi-backend-process backend)))
          (and p (process-live-p p)))
        (code-agent-pi-backend-handshake-done backend)))
@@ -1091,6 +1100,9 @@ caller "use the default."
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-verbose-buffer
   ((_backend code-agent-pi-backend))
+  "Return nil to opt into the shared per-session verbose buffer
+=code-agent-verbose-insert= creates on demand (Pi has no dedicated
+verbose buffer of its own)."
   nil)
 #+END_SRC
 
@@ -1105,6 +1117,10 @@ Capabilities advertised against the proven RPC command list (see
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-supports-p
   ((_backend code-agent-pi-backend) capability)
+  "Declare which Protocol 1 capabilities the Pi backend supports.
+The list mirrors the verified RPC command set in
+=reference/pi/packages/coding-agent/src/modes/rpc/rpc-types.ts= —
+keep these in lockstep when Pi adds new RPC verbs."
   (memq capability
         '(:streaming-tokens
           :structured-messages
@@ -1129,6 +1145,11 @@ Pi error strings are free-form; we match a few common patterns.
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-backend-classify-error
   ((_backend code-agent-pi-backend) error)
+  "Map a Pi ERROR (string / plist / form) into the SDK error taxonomy.
+Pi's wire errors are free-form text; the regex ladder below covers
+the common kinds (=context-limit=, =session-expired=, =auth=,
+=network=).  Default tail returns =unknown= so the caller can decide
+how to escalate."
   (let ((msg (cond ((stringp error) error)
                    ((listp error) (or (map-elt error 'error)
                                       (format "%S" error)))
