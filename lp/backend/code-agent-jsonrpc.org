@@ -37,7 +37,11 @@ free-function-over-plist shape stopped carrying its weight.  Struct
 accessors are exported so callers read state through them rather
 than the raw fields.
 
-** Dependencies
+** Setup
+
+Two depth-3 sub-sections: deps + the client =cl-defstruct=.
+
+*** Dependencies
 
 Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
@@ -47,7 +51,7 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 (require 'map)
 #+END_SRC
 
-** The Client Class
+*** The Client Class
 
 =cl-defstruct= for the JSON-RPC client — bundles process handle, request-id counter, pending callbacks hash, stderr buffer.
 
@@ -75,7 +79,12 @@ A global counter is sufficient because each client has its own
 `pending' hash; routing never confuses ids across clients.")
 #+END_SRC
 
-** Factory
+** Lifecycle
+
+Factory + shutdown verbs.  Both honour the protocol that
+exactly one process is owned by a client instance.
+
+*** Factory
 
 =lexical-let= is required because literate-elisp does not honour the
 file-level =lexical-binding= directive — without it the lambda
@@ -107,7 +116,12 @@ struct)."
     client))
 #+END_SRC
 
-** Sending
+** Wire Protocol
+
+Outbound (request/notification sending) + inbound (response/
+notification receiving) + handler registration.
+
+*** Sending
 
 Outbound side — serialises a request struct, writes to the process stdin / socket.
 
@@ -155,7 +169,7 @@ Provide RESULT on success or ERROR-OBJ on failure."
     (process-send-string proc (concat json-str "\n"))))
 #+END_SRC
 
-** Receiving
+*** Receiving
 
 The filter accumulates partial lines then parses each complete line.
 An outer =condition-case= wraps the loop because a process filter
@@ -255,7 +269,7 @@ dies mid-stream."
     (error (message "code-agent-jsonrpc: sentinel error: %S" err))))
 #+END_SRC
 
-** Handler Registration
+*** Handler Registration
 
 Registration surface — maps the incoming identity to the local handler / state slot.
 
@@ -269,7 +283,7 @@ Registration surface — maps the incoming identity to the local handler / state
   (push handler (code-agent-jsonrpc-client-request-handlers client)))
 #+END_SRC
 
-** Shutdown
+*** Shutdown
 
 Tear-down sequence — kills the subprocess, closes pipes, drops state.
 

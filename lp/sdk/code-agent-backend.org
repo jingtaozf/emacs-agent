@@ -82,7 +82,14 @@ order:
 | Process Lifecycle + Wire | Process Lifecycle, JSON Protocol, Core API, Client API | =start-process= + sentinel, newline-delimited JSON parsing, =code-agent-query= public API, interactive client wrappers |
 | Control + Cancellation + Verbose | Control Request Handling, Query Cancellation, Verbose Output | =control_request= dispatch (interrupt, set-permission-mode, set-model), cancellation taxonomy, verbose buffer machinery |
 
-** Customization Variables
+** Setup + Config
+
+Three depth-3 sub-sections: the =defgroup= + =defcustom= root,
+the canonical error taxonomy, and the public =code-agent-options=
+struct constructor.  Loaded first so subsequent sections can
+reference any symbol declared here.
+
+*** Customization Variables
 
 Public =defcustom= surface — the user-tunable knobs every downstream module sees.  =defgroup= lives at the top so Customize shows a coherent tree.
 
@@ -180,7 +187,7 @@ deadlock when the pipe buffer fills up (typically 64KB on Linux, 16KB on macOS).
   :group 'code-agent)
 #+END_SRC
 
-** Error Definitions
+*** Error Definitions
 
 Canonical error taxonomy.  Every backend reports failures by signalling one of these types; downstream code dispatches on the symbol, not on string-matching error messages.
 
@@ -209,7 +216,7 @@ Canonical error taxonomy.  Every backend reports failures by signalling one of t
   'code-agent-error)
 #+END_SRC
 
-** Options API
+*** Options API
 
 The options plist mirrors the Python ~ClaudeAgentOptions~ dataclass.
 
@@ -255,7 +262,13 @@ Returns a plist suitable for passing to `code-agent-query' or
     defaults))
 #+END_SRC
 
-** CLI Discovery
+** Discovery + Environment
+
+Five depth-3 sub-sections: locating the CLI binary, enforcing
+permission modes, validating spawn args, Docker-mode sandboxing,
+and assembling the child process's environment block.
+
+*** CLI Discovery
 
 Resolves the Claude CLI binary location.  Honours the =code-agent-cli-path= defcustom; falls back to PATH search and known install locations.  Signals on miss so callers see configuration errors at spawn time, not mid-query.
 
@@ -272,7 +285,7 @@ Returns the path to the CLI or signals an error if not found."
               (list "Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code"))))
 #+END_SRC
 
-** Permission Mode
+*** Permission Mode
 
 Convert Emacs symbols to CLI-compatible permission mode strings.
 
@@ -289,7 +302,7 @@ Convert Emacs symbols to CLI-compatible permission mode strings.
     (_ nil)))
 #+END_SRC
 
-** Input Validation
+*** Input Validation
 
 Input validation layer to prevent security issues and denial-of-service attacks.
 
@@ -348,7 +361,7 @@ Returns t if valid."
    (t t)))
 #+END_SRC
 
-** Docker Management
+*** Docker Management
 
 When =code-agent-cli-path= or the =:cli-path= option is a Docker command
 (e.g., "docker compose exec claude claude"), these functions handle automatic
@@ -499,7 +512,7 @@ Returns t if container is ready, signals error on failure."
           (error "Failed to start Claude Docker container (timeout)"))))))
 #+END_SRC
 
-** Process Environment
+*** Process Environment
 
 =process-environment= assembly — collects =CLAUDE_*= env vars, the Bun memory cap, and per-session identifiers into the child process's environment before =start-process=.
 
@@ -596,7 +609,13 @@ to find all descendants and kills them bottom-up."
         (kill-process process)))))
 #+END_SRC
 
-** Session Management
+** Session + Process State
+
+Four depth-3 sub-sections: per-session state holders, the typed
+structs (=options=, =query-context=, =process-state=), CLI argv
+assembly, and in-flight process tracking.
+
+*** Session Management
 
 Per-session state — verbose buffer hash table, request-id tracking, the small set of session-keyed maps the rest of the file reads through.
 
@@ -666,7 +685,7 @@ Returns non-nil if the error is about exceeding context limits."
 
 #+END_SRC
 
-** Data Structures
+*** Data Structures
 
 *** Content Block Types
 
@@ -867,7 +886,7 @@ STATE is the process state struct."
                                 state)))))))
 #+END_SRC
 
-** Argument Builder
+*** Argument Builder
 
 The argument builder transforms the options plist into CLI arguments for the
 Claude Code CLI. This is split into logical groups for maintainability.
@@ -937,7 +956,7 @@ If STREAMING-P is non-nil, use streaming input mode."
     args))
 #+END_SRC
 
-** Process State
+*** Process State
 
 Internal state structure for managing async process communication.
 
@@ -1200,7 +1219,13 @@ that a process state is terminated without reaching into private internals."
       (code-agent--unregister-query req-id))))
 #+END_SRC
 
-** Process Lifecycle
+** Process Lifecycle + Wire
+
+Four depth-3 sub-sections: =start-process= + sentinel, newline-
+delimited JSON parsing, the =code-agent-query= public API, and
+the interactive client wrappers.
+
+*** Process Lifecycle
 
 *** Process Filter
 
@@ -2333,7 +2358,7 @@ Returns a process state object."
       state)))
 #+END_SRC
 
-** JSON Protocol
+*** JSON Protocol
 
 *** Content Block Parsing
 
@@ -2442,7 +2467,7 @@ Sequence parser — runs =parse-content-block= over the list and returns a struc
       (_ json))))
 #+END_SRC
 
-** Core API
+*** Core API
 :PROPERTIES:
 :DEPENDS_ON: Data Structures, Process Management, Permission System, Session Management
 :DEPENDED_BY: Client API, Conversation Titling, Prompt Refinement, code-agent-org.org
@@ -2720,7 +2745,7 @@ Returns \"unknown\" if START-TIME is nil."
           (format "%dh" (round (/ elapsed 3600)))))))))
 #+END_SRC
 
-** Client API
+*** Client API
 :PROPERTIES:
 :DEPENDS_ON: Data Structures, Process Management, Core API
 :DEPENDED_BY: Interactive Chat Mode
@@ -2947,7 +2972,13 @@ Returns nil if not yet available."
 
 #+END_SRC
 
-** Control Request Handling
+** Control + Cancellation + Verbose
+
+Three depth-3 sub-sections: =control_request= dispatch (interrupt,
+set-permission-mode, set-model), cancellation taxonomy, and the
+verbose buffer machinery.
+
+*** Control Request Handling
 
 The =control_request= side-channel — interrupt, set-permission-mode, set-model.  Each request-id gets a matching response sent back to the CLI's stdin.
 
@@ -3064,7 +3095,7 @@ Subtypes:
           (list :error (error-message-string err))))))))
 #+END_SRC
 
-** Query Cancellation
+*** Query Cancellation
 :PROPERTIES:
 :DEPENDS_ON: Data Structures, Process Management
 :DEPENDED_BY: Core API, Activity Mode-Line, code-agent-org.org
@@ -3263,7 +3294,7 @@ Registered on `kill-emacs-hook' to ensure clean shutdown."
 (add-hook 'kill-emacs-hook #'code-agent--kill-emacs-cleanup)
 #+END_SRC
 
-** Verbose Output
+*** Verbose Output
 
 Per-session verbose output buffers display CLI-like output for all queries
 within a session.

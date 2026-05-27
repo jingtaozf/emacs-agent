@@ -107,7 +107,13 @@ interchangeable on every axis:
 | Cancellation | kill process / SIGINT | =session/cancel= notification |
 | Multi-turn | new process per turn | same process, new =session/prompt= |
 
-** Dependencies
+** Setup
+
+Five depth-3 sub-sections cover deps, defcustoms, the backend
+=cl-defstruct=, the live-backend registry for atexit cleanup,
+and a single verbose-log helper.
+
+*** Dependencies
 
 Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
@@ -120,7 +126,7 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 (require 'code-agent-jsonrpc)
 #+END_SRC
 
-** Customization
+*** Customization
 
 User-facing knobs.  Each =defcustom= is documented inline; the group name keeps Customize navigable for end users.
 
@@ -177,7 +183,7 @@ terminal-escape or homoglyph spoofing."
   :group 'code-agent-acp)
 #+END_SRC
 
-** Backend Struct
+*** Backend Struct
 
 Per-agent knobs live on the struct, not in global defvars — each
 profile module constructs an instance with its own =:spawn-args=,
@@ -217,7 +223,7 @@ profile module constructs an instance with its own =:spawn-args=,
   (context-size 0))
 #+END_SRC
 
-** Live-Backend Registry (cleanup on Emacs exit)
+*** Live-Backend Registry (cleanup on Emacs exit)
 
 Track every backend whose subprocess is alive so we can kill them when
 Emacs exits — prevents orphan =opencode acp= / =gemini --experimental-acp=
@@ -247,7 +253,7 @@ cleanup or by `kill-emacs-hook'.")
 (add-hook 'kill-emacs-hook #'code-agent-acp--cleanup-all)
 #+END_SRC
 
-** Verbose Buffer Helper
+*** Verbose Buffer Helper
 
 Shares [[file:../chat/code-agent.org][code-agent.org]]'s verbose buffer system; ACP notifications
 stream text straight in.
@@ -262,7 +268,13 @@ explicit `--get-session-verbose-buffer' call is needed here."
      sk (format "  %s  %s" (format-time-string "%H:%M:%S") text))))
 #+END_SRC
 
-** Process Startup
+** Connection
+
+Spawning the subprocess + running the ACP handshake +
+subscribing to notifications/requests — everything that has
+to happen exactly once at backend creation.
+
+*** Process Startup
 
 Subprocess lifecycle entry — spawns the daemon and wires its stdout/stderr filters.
 
@@ -293,7 +305,7 @@ into the backend and calling `code-agent-acp--register-backend'."
     client))
 #+END_SRC
 
-** Handshake
+*** Handshake
 
 Protocol handshake — exchanged once at session start to negotiate capabilities + auth.
 
@@ -484,7 +496,7 @@ fall back to `session/new'."
        (funcall on-error (or (map-elt err 'message) "unknown"))))))
 #+END_SRC
 
-** Notification and Request Subscriptions
+*** Notification and Request Subscriptions
 
 Wiring for server-initiated messages — every notification / request the protocol can deliver routes through here.
 
@@ -503,7 +515,13 @@ Wiring for server-initiated messages — every notification / request the protoc
          (code-agent-acp--handle-request backend request))))))
 #+END_SRC
 
-** Notification Handler
+** Streaming Dispatch
+
+Inbound message routing: notifications (one-way updates
+delivered via =cl-defgeneric= per event kind) and permission
+requests (interactive prompts the agent waits on).
+
+*** Notification Handler
 
 Dispatcher for server-initiated notifications (one-way messages, no response expected).
 
@@ -650,7 +668,7 @@ dispatch above so new event kinds drop in as one cl-defmethod."
         (string-join (nreverse texts) "\n")))))
 #+END_SRC
 
-** Permission Request Handler
+*** Permission Request Handler
 
 Default (=code-agent-acp-auto-approve= nil) prompts the user via
 =completing-read=; C-g translates into a =cancelled= outcome.
@@ -856,7 +874,13 @@ Returns the option id, or nil if the user hit C-g.  TITLE is sanitised
         (cdr (assoc label choices))))))
 #+END_SRC
 
-** Backend Protocol Methods
+** Public API
+
+The Protocol 1 method specialisations + the profile-factory
+helper that downstream per-agent modules (Gemini, Codex,
+OpenCode) wrap.  Frontend dispatches only through these.
+
+*** Backend Protocol Methods
 
 *** Query
 
@@ -1069,7 +1093,7 @@ Maps raw backend errors onto the canonical error taxonomy in [[file:../sdk/code-
      (t 'unknown))))
 #+END_SRC
 
-** Profile Factory Helper
+*** Profile Factory Helper
 
 Shared by every per-vendor ACP profile (=opencode=, =gemini=,
 =codex=).  The =auth-method-symbol= is dereferenced *at request

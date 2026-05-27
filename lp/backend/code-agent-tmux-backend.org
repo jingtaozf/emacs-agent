@@ -50,7 +50,13 @@ sidebar feedback) stay no-op by default inheritance from
 adapter is unchanged; tmux status files live in the same
 =/tmp/code-agent-status= directory as cmux's.
 
-** Dependencies
+** Setup
+
+Five depth-3 sub-sections cover the file's build-up: package
+deps, defcustoms, the backend class + factory, and the single
+=call-process= helper every Protocol 2b method shells through.
+
+*** Dependencies
 
 Loaded eagerly at file evaluation time — symbols below assume every required feature is already provided.
 
@@ -60,7 +66,7 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 (require 'code-agent-multiplexer)
 #+END_SRC
 
-** Customization
+*** Customization
 
 User-facing knobs.  Each =defcustom= is documented inline; the group name keeps Customize navigable for end users.
 
@@ -83,7 +89,7 @@ the user's own tmux client attaches later."
   :group 'code-agent-tmux)
 #+END_SRC
 
-** Class
+*** Class
 
 Single =cl-defstruct= the rest of this module reads through typed accessors.
 
@@ -99,7 +105,7 @@ Slots in addition to those inherited from
   (tmux-cmd nil))
 #+END_SRC
 
-** Factory
+*** Factory
 
 Single factory function — callers MUST go through this, not =make-instance= equivalents.
 
@@ -113,7 +119,7 @@ ARGS are forwarded to `code-agent-tmux-backend--create'.  Defaults
     (apply #'code-agent-tmux-backend--create :tmux-cmd cmd args)))
 #+END_SRC
 
-** Internal Helper — Run tmux
+*** Internal Helper — Run tmux
 
 All the Protocol 2b methods shell out to tmux via =call-process=
 (one-shot commands) or =start-process= (long-running like
@@ -132,7 +138,14 @@ nil if the process exits non-zero.  BACKEND supplies the cli path."
           (buffer-string))))))
 #+END_SRC
 
-** Protocol 2b — CLI Path
+** Protocol 2b — Multiplexer Wire
+
+Ten methods implement Protocol 2b on =code-agent-tmux-backend=,
+each shelling out to =tmux= via =--call=.  Sibling cmux backend
+implements the same set against =cmux=; the frontend dispatches
+identically.
+
+*** Protocol 2b — CLI Path
 
 Protocol 2b method =mux-cli-path=, dispatched on the multiplexer backend receiver.
 
@@ -142,7 +155,7 @@ Protocol 2b method =mux-cli-path=, dispatched on the multiplexer backend receive
       code-agent-tmux-cli-path))
 #+END_SRC
 
-** Protocol 2b — Launch Session
+*** Protocol 2b — Launch Session
 
 Protocol 2b method =mux-launch-session=, dispatched on the multiplexer backend receiver.
 
@@ -203,7 +216,7 @@ detached session to die instantly when launched from Elisp's
       session-name)))
 #+END_SRC
 
-** Protocol 2b — Ensure Session
+*** Protocol 2b — Ensure Session
 
 =ensure-session= returns the existing tmux session id if it's still
 live (the =session-id= slot is set and =tmux has-session -t= confirms
@@ -230,7 +243,7 @@ directly with the agent CLI command."
         nil))))
 #+END_SRC
 
-** Protocol 2b — Send Text
+*** Protocol 2b — Send Text
 
 tmux's =send-keys -l= sends literal text without key-name expansion.
 We append =Enter= as a separate arg so users can distinguish "typed
@@ -244,7 +257,7 @@ the text" from "typed text + hit enter" via the =send-key= pairing.
     (code-agent-tmux--call backend "send-keys" "-t" target "-l" text)))
 #+END_SRC
 
-** Protocol 2b — Send Key
+*** Protocol 2b — Send Key
 
 Maps our keyword vocabulary (=:enter=, =:escape=, =:ctrl-c=, =:ctrl-b=)
 onto tmux's =send-keys= key-name grammar.  The mapping is
@@ -273,7 +286,7 @@ fall through with a log message.
       nil)))
 #+END_SRC
 
-** Protocol 2b — Capture Screen
+*** Protocol 2b — Capture Screen
 
 Protocol 2b method =mux-capture-screen=, dispatched on the multiplexer backend receiver.
 
@@ -286,7 +299,7 @@ Protocol 2b method =mux-capture-screen=, dispatched on the multiplexer backend r
       ""))
 #+END_SRC
 
-** Protocol 2b — Start / Stop Follower
+*** Protocol 2b — Start / Stop Follower
 
 tmux's =pipe-pane "cat >> FILE"= redirects the pane's output to a
 shell command.  The =-o= flag means "only pipe if no pipe is already
@@ -330,7 +343,7 @@ path, so sink paths with spaces or unusual characters work safely."
           (code-agent-multiplexer-backend-stream-sink backend) nil)))
 #+END_SRC
 
-** Protocol 2b — Session Status
+*** Protocol 2b — Session Status
 
 Reads =pane_current_command= via =display-message -p=.  When the
 agent CLI is running, the value is =claude= / =opencode= / etc.;
@@ -369,7 +382,7 @@ Distinct return values encode distinct failure modes:
             :busy))))))
 #+END_SRC
 
-** Protocol 2b — Rename
+*** Protocol 2b — Rename
 
 Protocol 2b method =mux-rename=, dispatched on the multiplexer backend receiver.
 
@@ -389,7 +402,7 @@ windows)."
             (format "%s:0.0" workspace-name)))))
 #+END_SRC
 
-** Protocol 2b — Focus
+*** Protocol 2b — Focus
 
 tmux has no notion of "focus" in the OS-window sense; the closest
 action is =switch-client -t= which switches the attached client.  If
@@ -402,7 +415,13 @@ no client is attached, this is a no-op.
     (code-agent-tmux--call backend "switch-client" "-t" sid)))
 #+END_SRC
 
-** Protocol 3 — Execute Block
+** Protocol 3 — Org Integration
+
+Three methods bridge the multiplexer wire to the org buffer:
+execute-block fires a launch + send-text, the wait helper
+schedules the bridge / status poll, and cancel pulls the plug.
+
+*** Protocol 3 — Execute Block
 
 Launch Claude Code in a detached tmux session (or reuse an existing
 one), then type the user's prompt into the pane.  The Stop hook
@@ -530,7 +549,7 @@ the agent profile's cancel keys)."
     nil))
 #+END_SRC
 
-** Protocol 3 — Wait Helper
+*** Protocol 3 — Wait Helper
 
 Async polling helper used by =execute-block= to fire the user's
 prompt only after the agent's TUI has taken the pane.  Polls
@@ -588,7 +607,7 @@ variables and the timer fires with `void-variable' errors."
     (run-at-time 1.0 nil poll-fn)))
 #+END_SRC
 
-** Protocol 3 — Cancel From Org
+*** Protocol 3 — Cancel From Org
 
 Send the agent's cancel key (Escape for Claude) into the tmux pane.
 
@@ -602,7 +621,13 @@ Mirrors the cmux backend's cancel semantics for the Claude Code TUI."
     (error nil)))
 #+END_SRC
 
-** Protocol 1 — Supports-P capabilities
+** Protocol 1 — Lifecycle Capabilities
+
+The =supports-p= override declares which lifecycle capabilities
+this backend supports — the SDK reads this map to gate features
+(streaming, partial-results, cancellation) at the right boundary.
+
+*** Protocol 1 — Supports-P capabilities
 
 tmux backends lack cmux's workspace-style / sidebar-feedback / IDE
 server hooks.  Verbose follower and session resume are supported
