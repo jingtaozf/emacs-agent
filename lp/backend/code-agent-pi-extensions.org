@@ -1,12 +1,37 @@
 # -*- mode: org; -*-
-#+TITLE: Claude Agent — Pi Extension (Emacs MCP bridge)
-#+PROPERTY: header-args:typescript :tangle ~/.pi/agent/extensions/emacs-mcp.ts :mkdirp yes :comments no
+#+TITLE: Claude Agent — Pi native extensions
+#+PROPERTY: header-args:typescript :mkdirp yes :comments no
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA 6829b0532227efa4e9fd99ad2fb593f836e2bc8e
 #+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-05-25T09:42:44Z
 
-* Claude Agent — Pi Extension (Emacs MCP bridge)
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-extensions-file-overview
+:END:
+
+This file is the *single source of truth* for every TypeScript
+extension installed into =~/.pi/agent/extensions/=. Each Pi
+extension owns one top-level =* Extension: <name>= section with a
+section-local =:header-args:typescript :tangle …:= drawer so the
+tangle targets do not collide.
+
+| Top-level section | Tangle target | What it does |
+|-------------------+---------------+--------------|
+| =* Extension: emacs-mcp= | =~/.pi/agent/extensions/emacs-mcp.ts= | Bridges Pi-side tool calls back to Emacs MCP (the user's live editor) |
+| =* Extension: doom-loop-detector= | =~/.pi/agent/extensions/doom-loop.ts= | Catches token-repeat + same-arg tool-call doom loops, aborts the turn |
+
+Both ship together — =make tangle-pi-extensions= writes both
+=.ts= files in one Emacs batch invocation.
+
+To add a new extension: copy the section-shape of either existing
+extension (heading + =:CUSTOM_ID:= + =:header-args:typescript
+:tangle ...:= drawer + prose preamble + src blocks), then teach
+=Makefile= about the new output if you want CI to assert it.
+
+* Extension: emacs-mcp
 :PROPERTIES:
 :CUSTOM_ID: pi-extension-overview
+:header-args:typescript: :tangle ~/.pi/agent/extensions/emacs-mcp.ts :mkdirp yes :comments no
 :END:
 
 ** Overview
@@ -564,5 +589,319 @@ export default function emacsMcpExtension(pi: ExtensionAPI): void {
 	registerReportInvocationTool(pi);
 	attachHealthCheck(pi);
 	attachConfirmGate(pi);
+}
+#+end_src
+
+* Extension: doom-loop-detector
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop
+:header-args:typescript: :tangle ~/.pi/agent/extensions/doom-loop.ts :mkdirp yes :comments no
+:END:
+
+** Why this exists
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop-why
+:END:
+
+Pi's =session.prompt()= path has *no native doom-loop detection*.
+The maintainer's stated design (=mariozechner.at 2025-11-30=) is
+"doom-loop detection is available as an opt-in extension." This
+file is that extension.
+
+Two failure modes observed in practice ([[https://github.com/earendil-works/pi/issues/4338][pi#4338]] "Agent says
+'working' but makes no progress"):
+
+| Symptom | Mechanism | Where this extension catches it |
+|---------+-----------+---------------------------------|
+| Same =(tool, args)= called repeatedly | Tool returns same result, model re-decides to retry | =tool_call= handler counts hashed-arg suffix repeats, returns =block: true= once threshold tripped |
+| Same prose sentence streamed over and over | Model token-level loop (low temperature, prior repetition, or prompt-driven) | =message_end= handler tokenises into sentences, suffix-counts identical ones |
+
+Thresholds default to *5 tool repeats* / *10 sentence repeats* —
+aligned with the Claude Code [[https://github.com/anthropics/claude-code/issues/4277][#4277]] spec for the same problem
+shape. Tunable via =~/.pi/agent/settings.json= →
+=extensions.doomLoop.*= so a user can dial them up for chatty
+models or down if false positives appear.
+
+When tripped:
+
+1. =process.stderr.write("[doom-loop] ...\n")= surfaces a single
+   line into the cmux verbose buffer (Emacs side reads pi's
+   stderr via the =start-process= sentinel; users see it through
+   =M-x code-agent-org-show-verbose=).
+2. =ctx.abort()= cancels the current streaming turn, dropping
+   back to =Agent.isStreaming = false=. The user's next prompt
+   then starts cleanly.
+3. For tool repeats, additionally =return { block: true, reason
+   }= so Pi short-circuits the about-to-execute tool call —
+   prevents one final wasted invocation.
+
+** Configuration
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop-config
+:END:
+
+Pi loads =~/.pi/agent/settings.json= at startup and exposes its
+contents to extensions only indirectly — there is no
+=pi.getConfig()=. The extension re-reads the file directly. Per
+the 2026-05-27 settings-schema agreement, the config sits at a
+top-level =doomLoop= key — *not* nested under =extensions=,
+because Pi reserves the top-level =extensions= key for resource
+discovery (=RESOURCE_TYPES = ["extensions", "skills", "prompts",
+"themes"]= in =package-manager.js=) and crashes on startup if it
+finds an object there instead of an array:
+
+#+begin_src json
+{
+  "doomLoop": {
+    "enabled": true,
+    "toolThreshold": 5,
+    "sentenceThreshold": 10,
+    "minSentenceLength": 10,
+    "ringSize": 20
+  }
+}
+#+end_src
+
+Missing keys fall back to the same defaults — extension survives
+on a fresh =settings.json= without =doomLoop= at all.
+
+#+begin_src typescript
+import type {
+	AgentMessage,
+	AssistantMessage,
+	ExtensionAPI,
+	ExtensionContext,
+	TextContent,
+	ToolCallEvent,
+	MessageEndEvent,
+} from "@earendil-works/pi-coding-agent";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+interface DoomLoopConfig {
+	enabled: boolean;
+	toolThreshold: number;
+	sentenceThreshold: number;
+	minSentenceLength: number;
+	ringSize: number;
+}
+
+const DEFAULT_CONFIG: DoomLoopConfig = {
+	enabled: true,
+	toolThreshold: 5,
+	sentenceThreshold: 10,
+	minSentenceLength: 10,
+	ringSize: 20,
+};
+
+function readConfig(): DoomLoopConfig {
+	const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+	try {
+		const raw = fs.readFileSync(settingsPath, "utf8");
+		const parsed = JSON.parse(raw) as { doomLoop?: Partial<DoomLoopConfig> };
+		const fromFile = parsed.doomLoop ?? {};
+		return { ...DEFAULT_CONFIG, ...fromFile };
+	} catch {
+		return DEFAULT_CONFIG;
+	}
+}
+#+end_src
+
+** Detector primitives
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop-primitives
+:END:
+
+Three pure helpers do the actual detection — kept separate from
+the hook wiring so they unit-test without an =ExtensionAPI=
+instance.
+
+=hashArgs= normalises the tool-input object via JSON
+serialisation with sorted top-level keys, then takes the first 16
+hex chars of a SHA-256 digest. Sorted keys mean
+=ls({path:"/a", recursive:false})= and =ls({recursive:false,
+path:"/a"})= hash identical — Pi may emit either ordering
+depending on the model.
+
+=suffixRepeatCount= walks back from the ring's tail counting how
+many consecutive entries equal the last one. The "suffix" framing
+is load-bearing: a sentence said 3 times → break for 5 turns →
+said 3 more times is *not* a doom loop; only contiguous repeats
+matter.
+
+=pushBounded= caps the ring size so the detector stays O(1) per
+event — without the bound, a long session accumulates every tool
+call ever made.
+
+#+begin_src typescript
+interface ToolSig {
+	name: string;
+	argsHash: string;
+}
+interface SentenceSig {
+	sentence: string;
+}
+
+function hashArgs(input: unknown): string {
+	const obj = (input ?? {}) as Record<string, unknown>;
+	const sortedKeys = Object.keys(obj).sort();
+	const normalised = JSON.stringify(obj, sortedKeys);
+	return crypto.createHash("sha256").update(normalised).digest("hex").slice(0, 16);
+}
+
+function suffixRepeatCount<T>(ring: readonly T[], eq: (a: T, b: T) => boolean): number {
+	if (ring.length === 0) return 0;
+	const last = ring[ring.length - 1];
+	let n = 1;
+	for (let i = ring.length - 2; i >= 0; i--) {
+		if (!eq(ring[i], last)) break;
+		n++;
+	}
+	return n;
+}
+
+function pushBounded<T>(ring: T[], item: T, cap: number): void {
+	ring.push(item);
+	while (ring.length > cap) ring.shift();
+}
+#+end_src
+
+** Assistant-message prose extraction
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop-extract
+:END:
+
+=AssistantMessage.content= is a heterogeneous array of
+=TextContent | ThinkingContent | ToolCall= (per
+=reference/pi/packages/ai/src/types.ts:279=). For doom-loop
+purposes only the prose matters — thinking blocks and tool calls
+are not user-visible repetition.
+
+=splitSentences= is intentionally simple: split on =.?!= followed
+by whitespace. Catches "I will do X. I will do X. I will do X."
+but not list bullets or code blocks (which is fine — repeated
+code blocks would re-hash to identical sentences anyway under
+strict-equality compare).
+
+#+begin_src typescript
+function extractProse(msg: AgentMessage): string {
+	if (msg.role !== "assistant") return "";
+	const assistant = msg as AssistantMessage;
+	const parts: string[] = [];
+	for (const block of assistant.content) {
+		if (block.type === "text") parts.push((block as TextContent).text);
+	}
+	return parts.join("\n");
+}
+
+function splitSentences(text: string): string[] {
+	return text
+		.split(/(?<=[.!?])\s+/)
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0);
+}
+#+end_src
+
+** Tool-call hook
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop-tool-hook
+:END:
+
+Pi calls every registered =tool_call= handler *before* dispatching
+the tool. Returning =block: true= short-circuits execution and
+sends an error message back to the model as if the tool had
+failed — exactly the signal we want to break the loop.
+
+The hash is logged at debug-only volume to avoid filling stderr
+under normal operation; only the threshold-trip line surfaces by
+default.
+
+#+begin_src typescript
+function attachToolHook(pi: ExtensionAPI, cfg: DoomLoopConfig, toolRing: ToolSig[]): void {
+	pi.on("tool_call", (event: ToolCallEvent, ctx: ExtensionContext) => {
+		pushBounded(
+			toolRing,
+			{ name: event.toolName, argsHash: hashArgs(event.input) },
+			cfg.ringSize,
+		);
+		const n = suffixRepeatCount(
+			toolRing,
+			(a, b) => a.name === b.name && a.argsHash === b.argsHash,
+		);
+		if (n >= cfg.toolThreshold) {
+			const reason = `${n}× ${event.toolName} same-args`;
+			process.stderr.write(`[doom-loop] tool repeat: ${reason} — aborting turn\n`);
+			try {
+				ctx.abort();
+			} catch {
+				// abort throws if already aborted; ignore.
+			}
+			return { block: true, reason: `doom-loop: ${reason}` };
+		}
+		return undefined;
+	});
+}
+#+end_src
+
+** Sentence-repeat hook
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop-sentence-hook
+:END:
+
+=message_end= fires once per assistant message — after the full
+content has streamed. Earlier candidates (=message_update=) fire
+on every token chunk; that's expensive and unnecessary because
+the sentence isn't fully formed until terminating punctuation
+lands.
+
+#+begin_src typescript
+function attachSentenceHook(pi: ExtensionAPI, cfg: DoomLoopConfig, sentRing: SentenceSig[]): void {
+	pi.on("message_end", (event: MessageEndEvent, ctx: ExtensionContext) => {
+		if (event.message.role !== "assistant") return;
+		const text = extractProse(event.message);
+		for (const sentence of splitSentences(text)) {
+			if (sentence.length < cfg.minSentenceLength) continue;
+			pushBounded(sentRing, { sentence }, cfg.ringSize);
+			const n = suffixRepeatCount(sentRing, (a, b) => a.sentence === b.sentence);
+			if (n >= cfg.sentenceThreshold) {
+				const preview = sentence.length > 60 ? `${sentence.slice(0, 60)}...` : sentence;
+				process.stderr.write(
+					`[doom-loop] sentence repeat ${n}×: "${preview}" — aborting turn\n`,
+				);
+				try {
+					ctx.abort();
+				} catch {
+					// already aborted
+				}
+				break;
+			}
+		}
+	});
+}
+#+end_src
+
+** Extension entry point
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-doom-loop-entry
+:END:
+
+Pi loads the default export and calls it with the
+=ExtensionAPI=. If =enabled: false=, the extension registers
+nothing — cheaper than having Pi load a no-op extension every
+session.
+
+#+begin_src typescript
+export default function doomLoopExtension(pi: ExtensionAPI): void {
+	const cfg = readConfig();
+	if (!cfg.enabled) {
+		process.stderr.write("[doom-loop] disabled by settings.json — skipping\n");
+		return;
+	}
+	const toolRing: ToolSig[] = [];
+	const sentRing: SentenceSig[] = [];
+	attachToolHook(pi, cfg, toolRing);
+	attachSentenceHook(pi, cfg, sentRing);
 }
 #+end_src

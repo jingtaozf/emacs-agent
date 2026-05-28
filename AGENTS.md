@@ -6,7 +6,7 @@
      markers by opencode_workspace.py + copilot_workspace.py, written
      at session start and stripped at session end via the content-
      driven idempotent cleanup landed in commit a6e9d21 (2026-04-30
-     pollution fix; see lp/backend/code-agent-pi-extension.org and
+     pollution fix; see lp/backend/code-agent-pi-extensions.org and
      code-agent-python.org § workspace_launcher for the helpers). -->
 
 # code-agent — AGENTS.md (base)

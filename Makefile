@@ -397,22 +397,25 @@ test-e2e-pi-multiblock:
 		-l tests/test-e2e-pi-multiblock.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :e2e-pi-multiblock))"
 
-# Tangle the Pi extension .org → ~/.pi/agent/extensions/emacs-mcp.ts.
+# Tangle the Pi extensions .org → ~/.pi/agent/extensions/{emacs-mcp,doom-loop}.ts.
 # Per the user's decision, the .ts is installed at $HOME (not repo-local)
 # so multiple consumer repos share one extension.
-PI_EXTENSION_OUT = $(HOME)/.pi/agent/extensions/emacs-mcp.ts
-.PHONY: tangle-pi-extension
-tangle-pi-extension:
-	@echo "Tangling lp/backend/code-agent-pi-extension.org → $(PI_EXTENSION_OUT)..."
+PI_EXTENSION_OUT      = $(HOME)/.pi/agent/extensions/emacs-mcp.ts
+PI_EXTENSION_DOOM_OUT = $(HOME)/.pi/agent/extensions/doom-loop.ts
+.PHONY: tangle-pi-extensions tangle-pi-extension
+tangle-pi-extensions tangle-pi-extension:
+	@echo "Tangling lp/backend/code-agent-pi-extensions.org → ~/.pi/agent/extensions/{emacs-mcp,doom-loop}.ts..."
 	$(BATCH) -l org \
-		--eval "(let ((org-confirm-babel-evaluate nil)) (org-babel-tangle-file \"$(PWD)/lp/backend/code-agent-pi-extension.org\"))"
+		--eval "(let ((org-confirm-babel-evaluate nil)) (org-babel-tangle-file \"$(PWD)/lp/backend/code-agent-pi-extensions.org\"))"
 	@test -f $(PI_EXTENSION_OUT) || (echo "tangle failed: $(PI_EXTENSION_OUT) not created" && exit 1)
+	@test -f $(PI_EXTENSION_DOOM_OUT) || (echo "tangle failed: $(PI_EXTENSION_DOOM_OUT) not created" && exit 1)
 	@echo "Tangled $$(wc -l < $(PI_EXTENSION_OUT)) lines to $(PI_EXTENSION_OUT)"
+	@echo "Tangled $$(wc -l < $(PI_EXTENSION_DOOM_OUT)) lines to $(PI_EXTENSION_DOOM_OUT)"
 
-.PHONY: untangle-pi-extension
-untangle-pi-extension:
-	@rm -f $(PI_EXTENSION_OUT)
-	@echo "Removed $(PI_EXTENSION_OUT)"
+.PHONY: untangle-pi-extensions untangle-pi-extension
+untangle-pi-extensions untangle-pi-extension:
+	@rm -f $(PI_EXTENSION_OUT) $(PI_EXTENSION_DOOM_OUT)
+	@echo "Removed $(PI_EXTENSION_OUT) $(PI_EXTENSION_DOOM_OUT)"
 
 .PHONY: test-org-unit
 test-org-unit:
