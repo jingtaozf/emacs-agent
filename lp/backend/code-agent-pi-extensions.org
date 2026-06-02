@@ -23,6 +23,18 @@ tangle targets do not collide.
 Both ship together — =make tangle-pi-extensions= writes both
 =.ts= files in one Emacs batch invocation.
 
+*Not every installed extension is tangled from here.* Some are
+*vendored* (copied verbatim from upstream — we don't own the source,
+so re-tangling would be wrong) or *staged* (built but held outside
+the live runtime pending verification). These get a prose-only
+section that records install location + E2E status, never a
+=:tangle:= drawer:
+
+| Top-level section | Live? | Source of truth | Status |
+|-------------------+-------+-----------------+--------|
+| =* Extension: subagent (vendored upstream)= | yes | pi repo =examples/extensions/subagent/= | E2E-verified |
+| =* Extension: pi-workflow DSL (engine-verified)= | yes | =~/.pi/agent/extensions/pi-workflow/= | engine E2E-verified |
+
 To add a new extension: copy the section-shape of either existing
 extension (heading + =:CUSTOM_ID:= + =:header-args:typescript
 :tangle ...:= drawer + prose preamble + src blocks), then teach
@@ -905,3 +917,145 @@ export default function doomLoopExtension(pi: ExtensionAPI): void {
 	attachSentenceHook(pi, cfg, sentRing);
 }
 #+end_src
+
+* Extension: subagent (vendored upstream)
+:PROPERTIES:
+:CUSTOM_ID: pi-extension-subagent
+:END:
+
+Pi ships *no native sub-agents* by design (README §Philosophy:
+"No sub-agents. … build your own with extensions, or install a
+package that does it your way"). The closest analogue to Claude
+Code's dynamic-workflow =parallel()= / =pipeline()= primitives is the
+*official example extension* in the pi repo at
+=packages/coding-agent/examples/extensions/subagent/=. It is
+*vendored* — copied verbatim into the live runtime — not tangled
+from this file, because we don't own the source. Re-tangling it
+here would fork upstream's 1135-line implementation.
+
+It registers one =subagent= tool with three modes, mapping 1:1 onto
+Claude Code's orchestration primitives:
+
+| =subagent= mode | param | Claude Code analogue | semantics |
+|-----------------+-------+----------------------+-----------|
+| single | =agent= + =task= | one =agent()= call | delegate one task to one agent |
+| parallel | =tasks: [{agent,task}]= | =parallel()= (barrier) | spawn all tasks concurrently |
+| chain | =chain: [{agent,task}]= + ={previous}= | =pipeline()= | sequential, prior output substituted into ={previous}= |
+
+Each subagent is an isolated =pi --mode json -p --no-session=
+child process (separate context window, like a Claude Code
+subagent). Agent definitions live in =~/.pi/agent/agents/*.md=
+(frontmatter =name/description/tools/model= + body system prompt);
+workflow presets live in =~/.pi/agent/prompts/*.md=.
+
+** Install
+:PROPERTIES:
+:CUSTOM_ID: pi-subagent-install
+:END:
+
+Copy the extension dir + sample agents + prompts into the live
+runtime, reusing the =typebox= dependency already present under
+=agent-stuff= (no network install):
+
+#+begin_example
+SRC=<pi-repo>/packages/coding-agent/examples/extensions/subagent
+cp $SRC/index.ts $SRC/agents.ts          ~/.pi/agent/extensions/subagent/
+cp -R agent-stuff/node_modules/typebox   ~/.pi/agent/extensions/subagent/node_modules/typebox
+cp $SRC/agents/*.md                      ~/.pi/agent/agents/
+cp $SRC/prompts/*.md                     ~/.pi/agent/prompts/
+#+end_example
+
+*The one trap*: the sample agents hard-code =model: claude-sonnet-4-5=
+in their frontmatter. With no Anthropic key configured the child
+processes die with =No API key found for anthropic=. *Delete the
+=model:= line* from each agent =.md= so children inherit the live
+default provider (here =openai-codex/gpt-5.5=). The extension only
+passes =--model= when =agent.model= is set, so an absent line = use
+default.
+
+** E2E verification
+:PROPERTIES:
+:CUSTOM_ID: pi-subagent-e2e
+:END:
+
+All three modes verified 2026-05-31 against =gpt-5.5= via
+=openai-codex= (each = one clean child-pi spawn):
+
+| mode | test | result |
+|------+------+--------|
+| single | worker → "Reply MANGO" | ✅ MANGO |
+| parallel | worker×2 → BANANA / CHERRY | ✅ both, concurrent |
+| chain | KIWI →(={previous}=)append -PIE | ✅ KIWI-PIE |
+
+*Caveat observed*: child-pi spawns are slow (a full agent turn each),
+and the =openai-codex= provider intermittently returns =fetch
+failed= on tool-call round-trips under heavy concurrent spawn load —
+transient, recovers on retry. Keep delegated tasks small and avoid
+hammering the provider with many parallel children.
+
+* Extension: pi-workflow DSL (engine-verified)
+:PROPERTIES:
+:CUSTOM_ID: pi-extension-workflow-dsl
+:END:
+
+A hand-written extension giving pi the *JS-script* ergonomics of
+Claude Code's Workflow tool — a =workflow= tool whose =script= param
+is an inline JS body with =agent()= / =parallel()= / =pipeline()= /
+=phase()= / =log()= in scope, so deterministic control flow (loops,
+conditionals, fan-out over a list, accumulate-to-target) can be
+expressed directly — the thing the =subagent= tool's fixed
+=tasks= / =chain= params cannot. =agent()= reuses the exact child-pi
+spawn recipe the =subagent= example uses. Source =index.ts= +
+a standalone =engine-e2e-test.mjs= live in
+=~/.pi/agent/extensions/pi-workflow/= (active).
+
+** Orchestration engine — E2E verified
+:PROPERTIES:
+:CUSTOM_ID: pi-workflow-engine-e2e
+:END:
+
+The DSL *engine* (=loadAgents= + =runAgent= child-pi spawn + the
+=parallel= / =pipeline= combinators) is verified end-to-end by
+=engine-e2e-test.mjs=, which drives the exact same primitives the
+extension exposes *without the pi model in the loop* — so it proves
+the orchestration core deterministically, isolated from the flaky
+model-driven tool-call path:
+
+| test | drives | expected | 2026-06-01 result |
+|------+--------+----------+-------------------|
+| parallel fan-out | 3 concurrent =agent("worker", …)= | =[APPLE-DONE, BERRY-DONE, CITRON-DONE]= | ✅ all three, ~11-29s |
+| pipeline threading | 2-stage, stage-2 reads stage-1 output | =[KIWI-PIE]= | ✅ KIWI → -PIE appended |
+
+Verdict: *=ENGINE_E2E_PASS=*. Re-run anytime with
+=node ~/.pi/agent/extensions/pi-workflow/engine-e2e-test.mjs=.
+
+** Provider degradation is the only blocker (not the code)
+:PROPERTIES:
+:CUSTOM_ID: pi-workflow-provider-caveat
+:END:
+
+The earlier "the workflow tool hangs" symptom was traced to
+*intermittent =openai-codex= / =gpt-5.5= provider degradation*, not a
+defect in this extension. The smoking gun: the engine test echoes the
+*task verbatim* (=["Task: Reply with exactly: APPLE-DONE…"]=) in a
+degraded window and returns the correct =APPLE-DONE= seconds later in a
+healthy one — same code, same machine. The degradation hits *every*
+model-dependent path equally:
+
+- child-pi =agent()= calls (engine + =subagent= children) — echo / hang,
+- the parent model emitting a *custom-tool* =tool_call= in =-p= mode —
+  hangs for *both* =workflow= and the official =subagent= tool, while
+  *built-in* tools (=ls=) keep working.
+
+Because the official =subagent= extension hangs in the exact same
+degraded windows, this is an environment property, not specific to the
+DSL. The engine test's 3× retry loop distinguishes =PROVIDER_DEGRADED=
+(retryable) from a real engine failure.
+
+*Recommendation*: for everyday orchestration prefer =subagent= (fixed
+=tasks= / =chain= cover most needs). Reach for the =workflow= DSL when
+you need real JS control flow (loops / conditionals / fan-out over a
+discovered list). For the most deterministic invocation, call the
+engine directly (as =engine-e2e-test.mjs= does) or via =--mode rpc=,
+rather than relying on the model to emit the =workflow= =tool_call=
+during a degraded provider window.
