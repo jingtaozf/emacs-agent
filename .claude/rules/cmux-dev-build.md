@@ -188,3 +188,30 @@ register an exception.
 
 Set per-file: `#+PROPERTY: CMUX_VERSION dev`
 Or global: `(setq code-agent-org-cmux-socket-path "/tmp/cmux-debug-emacs-test.sock")`
+
+## Disk hygiene — clean the Zig build cache after a build
+
+Every cmux/Ghostty build writes a Zig build cache at
+`reference/cmux/ghostty/.zig-cache`. It is **pure build output** (no
+source) and it grows to **~9 GB** — measured 2026-06-01, it was the
+single largest reclaimable item in the whole `~/projects` tree. It
+regenerates on the next build, so once you are done iterating, delete it.
+
+```bash
+# After you finish building cmux (and don't plan to rebuild soon):
+rm -rf ~/projects/emacs-agent/reference/cmux/ghostty/.zig-cache
+```
+
+Two sibling caches worth clearing the same way when space is tight (both
+regenerate on the next build):
+
+```bash
+# Xcode build artifacts (cmux-* DerivedData) — ~14 GB, rebuilt by reload.sh
+rm -rf ~/Library/Developer/Xcode/DerivedData/*
+# cmux's own ~/.cache entry
+rm -rf ~/.cache/cmux
+```
+
+Rule of thumb: the `.zig-cache` only earns its 9 GB while you are
+actively iterating on a build. If `reload.sh` hasn't run today, the
+cache is dead weight — reclaim it.
