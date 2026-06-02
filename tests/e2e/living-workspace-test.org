@@ -1798,3 +1798,67 @@ build — re-check =code-agent-org-cmux--build-env-prefix= is loaded
 (=fboundp= via evalElisp) and verify cmux is running a build where
 =cmux new-workspace --command "$shell-string"= is dispatched through a
 shell that honours =set -a; . FILE; set +a;=.
+
+** E39: CMUX_GROUP org property files workspace under a named sidebar group
+:PROPERTIES:
+:STATUS: PASS
+:ADDED: 2026-06-02
+:STORY: e2e-cmux-group-a, e2e-cmux-group-b
+:END:
+
+*Background.*  cmux 0.64.11 added collapsible *workspace groups*
+(=cmux workspace-group <subcommand>=).  Each group is owned by an
+anchor workspace whose sidebar row IS the group header.  Emacs-agent
+gained a =:CMUX_GROUP: <name>= org property so a launched workspace is
+filed under that named group.  The property *inherits*
+(=find-session-property= → =org-entry-get nil PROP t= + file-level
+=#+PROPERTY:=), so a project-level heading groups every session beneath
+it.  No property → ungrouped, exactly as before.
+
+*Implementation.*  =code-agent-org-cmux--ensure-group-membership= runs
+right after =--apply-color= in =--launch-workspace=:
+- group missing → =workspace-group create --name <group> --from <ws>=
+  (the *create* path; cmux titles the auto-created anchor header with
+  the group name — *no "分组 N" placeholder*);
+- group exists → =workspace-group add --group <ref> --workspace <ws>=
+  (the *add* path; group resolved by name via
+  =--find-group-by-name= parsing =workspace-group list --json=).
+Best-effort: a missing subcommand (older cmux) or RPC hiccup is logged,
+never signalled, so grouping can never abort a launch.
+
+*Live run.*
+1. Ensure cmux ≥ 0.64.11 is running (=cmux --version=) and Emacs has
+   the reload: =(fboundp 'code-agent-org-cmux--ensure-group-membership)=.
+2. Open =tests/e2e/org/workspace-test.org=.
+3. Jump to =* CMUX Group Test A=, =C-c C-c= the =GROUP_A_OK= AI block
+   (or =M-x code-agent-org-cmux-open-tab=).  This is the *create* path.
+4. Jump to =* CMUX Group Test B=, launch it.  This is the *add* path
+   (group =e2e-group-test= now exists).
+5. Verify both workspaces landed in the group:
+   #+begin_src bash
+   cmux workspace-group list --json | \
+     python3 -c "import sys,json;d=json.load(sys.stdin); \
+     g=[x for x in d['groups'] if x['name']=='e2e-group-test'][0]; \
+     print('name:',g['name'],'members:',g['member_workspace_refs'])"
+   #+end_src
+   Expected: a group named =e2e-group-test= whose members include the
+   two test workspaces, and whose anchor workspace title is
+   =e2e-group-test= (NOT "分组 N").
+6. Cleanup: =cmux workspace-group delete <ref>= (closes the test
+   workspaces) — or =ungroup= to keep them.
+
+*Verified 2026-06-02 (live Emacs → production cmux 0.64.11).*  Drove
+=--ensure-group-membership= directly via =evalElisp= against two fresh
+workspaces:
+- create path: wsA placed in new group =workspace_group:8=,
+  =A-in: t=; anchor workspace titled =emacs-grp-impl= (not "分组 N").
+- add path: wsB added to the now-existing group, =B-in: t=;
+  members =[anchor, wsA, wsB]=.
+- cleanup restored the original 12 workspaces + 4 groups, zero leftover.
+=make test-smoke= 3/3 pass after the change; no regression.
+
+*Simulated coverage (future).*  A unit test can mock
+=code-agent-org-cmux--call= to return canned =workspace-group list
+--json= and assert =--find-group-by-name= resolves the ref and
+=--ensure-group-membership= picks create-vs-add correctly.  Not yet
+added — the live run above is the current proof.

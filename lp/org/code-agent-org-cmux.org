@@ -1488,6 +1488,18 @@ cmux workspace back under Emacs's hash-table control on Emacs restart,
 launching a brand-new workspace + claude pair, and persisting the org
 properties cmux relies on for cross-restart workspace identity.
 
+*Sidebar grouping* is an optional fourth aspect of launch.  Set a
+=:CMUX_GROUP: <name>= org property (it inherits, so a project-level
+heading or a file-level =#+PROPERTY: CMUX_GROUP <name>= covers every
+session beneath it) and the freshly-launched workspace is filed under
+that named cmux sidebar group.  =--ensure-group-membership= reuses an
+existing group (=workspace-group add=) or creates one
+(=workspace-group create --name=, which titles the auto-created anchor
+header with the group name — no "分组 N" placeholder).  Grouping is
+best-effort: an older cmux without the =workspace-group= subcommand, or
+any RPC hiccup, is logged and skipped so it can never abort a launch.
+No property → ungrouped workspace, exactly as before.
+
 #+BEGIN_SRC elisp
 
 (defun code-agent-org-cmux--restore-workspace (saved-surface workspace-session-id
@@ -1589,13 +1601,57 @@ agent profiles that explicitly disable it (e.g. copilot)."
                     (code-agent-org-cmux--call "send-key" "--surface" sid "Return"))
                 (error nil)))))))))
 
+(defun code-agent-org-cmux--find-group-by-name (name)
+  "Return the cmux =workspace_group:N= ref whose group name is NAME, else nil.
+Parses =cmux workspace-group list --json=.  Returns nil when no group
+matches, the JSON can't be parsed, or the running cmux predates the
+=workspace-group= subcommand (older builds error out, which we swallow)."
+  (condition-case nil
+      (let* ((out (code-agent-org-cmux--call "workspace-group" "list" "--json"))
+             (data (json-parse-string out :object-type 'alist :array-type 'list))
+             (groups (alist-get 'groups data))
+             (hit (seq-find (lambda (g) (equal (alist-get 'name g) name)) groups)))
+        (and hit (alist-get 'ref hit)))
+    (error nil)))
+
+(defun code-agent-org-cmux--ensure-group-membership (workspace-ref group-name)
+  "Place WORKSPACE-REF into the cmux sidebar group named GROUP-NAME.
+No-op when GROUP-NAME is nil/blank or WORKSPACE-REF is not a
+\"workspace:N\" ref.  An existing group is reused via =workspace-group
+add=; otherwise the group is created with =workspace-group create
+--name=, which also titles the auto-created anchor header with
+GROUP-NAME (so there's no \"分组 N\" placeholder — verified against
+cmux 0.64.11).  Best-effort: any failure (e.g. an older cmux without
+the subcommand) is logged, never signalled, so a grouping hiccup
+cannot abort the workspace launch."
+  (when (and (stringp group-name)
+             (not (string-empty-p (string-trim group-name)))
+             (stringp workspace-ref)
+             (string-prefix-p "workspace:" workspace-ref))
+    (let ((group (string-trim group-name)))
+      (condition-case err
+          (let ((group-ref (code-agent-org-cmux--find-group-by-name group)))
+            (if group-ref
+                (code-agent-org-cmux--call "workspace-group" "add"
+                                           "--group" group-ref
+                                           "--workspace" workspace-ref)
+              (code-agent-org-cmux--call "workspace-group" "create"
+                                         "--name" group
+                                         "--from" workspace-ref))
+            (message "cmux: workspace %s placed in group %S" workspace-ref group))
+        (error
+         (message "cmux: group %S membership skipped: %s"
+                  group (error-message-string err)))))))
+
 (defun code-agent-org-cmux--launch-workspace (workspace-session-id tab-title
-                                          workspace-title project-root)
+                                          workspace-title project-root &optional group-name)
   "Launch a new cmux workspace running Claude Code.
 WORKSPACE-SESSION-ID identifies the org session, TAB-TITLE and
 WORKSPACE-TITLE name the tab and workspace, PROJECT-ROOT sets the
-working directory.  Stores org properties, mappings, waits for the TUI
-to become ready, and returns the surface ref."
+working directory.  Optional GROUP-NAME places the new workspace in
+that named cmux sidebar group (creating the group if absent).  Stores
+org properties, mappings, waits for the TUI to become ready, and
+returns the surface ref."
   (unless workspace-session-id
     (user-error "No CLAUDE_SESSION_ID found. Create a workspace section first"))
   (let* ((org-file (buffer-file-name))
@@ -1641,7 +1697,8 @@ to become ready, and returns the surface ref."
     ;; If we wait first, a slow or stuck agent launch means color/verbose
     ;; never get applied (wait-for-ready can time out).
     (when (string-prefix-p "workspace:" workspace-ref)
-      (code-agent-org-cmux--apply-color workspace-ref))
+      (code-agent-org-cmux--apply-color workspace-ref)
+      (code-agent-org-cmux--ensure-group-membership workspace-ref group-name))
     (code-agent-org-cmux--start-verbose surface-id (code-agent-org-current-session-key))
     (message "Agent starting in cmux (surface: %s) — waiting for TUI..." surface-id)
     ;; Wait for agent TUI to be ready before returning
@@ -1680,6 +1737,9 @@ Auto-starts the Emacs MCP server if not running."
          (workspace-session-id
           (code-agent-org-terminal-find-session-property "CLAUDE_SESSION_ID"))
          (project-root (or (code-agent-org-get-project-root) default-directory))
+         ;; Optional sidebar group — inherits from parent headings and
+         ;; file-level #+PROPERTY via find-session-property.
+         (group-name (code-agent-org-terminal-find-session-property "CMUX_GROUP"))
          ;; Single source of truth: resolve workspace by heading name.
          ;; Names are stable across cmux restart; UUIDs and refs are not.
          (ws-ref (code-agent-org-cmux--find-workspace-by-name workspace-title)))
@@ -1703,7 +1763,8 @@ Auto-starts the Emacs MCP server if not running."
      ;; No workspace by this name — launch a fresh one.
      (t
       (code-agent-org-cmux--launch-workspace
-       workspace-session-id tab-title workspace-title project-root))))))
+       workspace-session-id tab-title workspace-title project-root
+       group-name))))))
 #+END_SRC
 
 * Status Detection
