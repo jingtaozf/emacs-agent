@@ -116,6 +116,33 @@ The workspace has: * Workspace > ** Story > *** System Prompt + *** Workflow."
     (should (equal "First Story" (org-entry-get nil "ACTIVE_STORY"))))
 )
 
+(ert-deftest test-collect-workspaces-finds-session-id-only-workspace ()
+  "Workspaces marked only by CLAUDE_SESSION_ID (the SDD/cmux creation path,
+no CMUX_WORKSPACE) must be found by code-agent-org--collect-workspaces.
+Regression: such workspaces were invisible to goto-story, which reported
+\"No workspaces found in buffer\"."
+  :tags '(:unit :fast :stable :isolated :org :sdd)
+  (with-temp-buffer
+    (org-mode)
+    ;; Workspace A: SDD/cmux layout — only CLAUDE_SESSION_ID, no CMUX_WORKSPACE.
+    (insert "* dev1\n:PROPERTIES:\n:CLAUDE_SESSION_ID: sdd-20260327-194735\n"
+            ":CMUX_SURFACE_ID: surface:15\n:END:\n"
+            "** First Story\n*** Workflow :sdd:\n**** Instruction 1 :ai:\n"
+            "#+begin_src ai\nhi\n#+end_src\n\n")
+    ;; Workspace B: named layout — CMUX_WORKSPACE present.
+    (insert "* dev2\n:PROPERTIES:\n:CMUX_WORKSPACE: dev2\n:CLAUDE_SESSION_ID: sdd-x\n:END:\n"
+            "** First Story\n")
+    (let ((wss (code-agent-org--collect-workspaces)))
+      (should (= 2 (length wss)))
+      (should (equal "dev1" (car (nth 0 wss))))
+      (should (equal "dev2" (car (nth 1 wss))))
+      (should (equal "sdd-20260327-194735" (nth 2 (nth 0 wss)))))
+    ;; A story heading inherits the session id but has none of its own, so it
+    ;; must NOT be classified as a workspace root.
+    (goto-char (point-min))
+    (re-search-forward "^\\*\\* First Story")
+    (should-not (code-agent-org--workspace-heading-p))))
+
 (ert-deftest test-workspace-level-alignment ()
   "Test that new workspace aligns with previous workspace level."
   :tags '(:unit :fast :stable :isolated :org :sdd)

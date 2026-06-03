@@ -134,9 +134,31 @@ property), or falls back to the grandparent of the :sdd: Workflow section."
 
 Movement primitives for workspace heading — wraps =org-goto-*= so callers express intent, not point arithmetic.
 
+A workspace root is recognised by its *own* (non-inherited) =CMUX_WORKSPACE=
+or =CLAUDE_SESSION_ID= property. =CMUX_WORKSPACE= is the human-readable name
+=code-agent-org-insert-workspace= stamps, but the SDD/cmux creation paths
+stamp only =CLAUDE_SESSION_ID= — the universal marker every backend (cmux
+launch, the Python bridge) already keys on. Keying on =CMUX_WORKSPACE= alone
+made those SDD-created workspaces invisible to navigation (=goto-story=
+reported "No workspaces found in buffer"); matching either fixes that. Both
+reads are non-inherited so a story or sub-section — which merely *inherits*
+the session id — is never mistaken for a workspace root.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org--workspace-heading-p ()
+  "Non-nil if the heading at point is a workspace root.
+Matches a heading carrying its OWN `CMUX_WORKSPACE' (named layout) or
+`CLAUDE_SESSION_ID' (the session marker every backend keys on), read
+non-inherited so a story/sub-section that only inherits the session id is
+not counted as a workspace."
+  (or (org-entry-get nil "CMUX_WORKSPACE")
+      (org-entry-get nil "CLAUDE_SESSION_ID")))
+#+END_SRC
+
 #+BEGIN_SRC elisp
 (defun code-agent-org--find-workspace-heading ()
-  "Find nearest ancestor heading with CMUX_WORKSPACE property.
+  "Find nearest ancestor workspace heading (see
+`code-agent-org--workspace-heading-p').
 Returns (name . position) or nil. Works from any point inside a workspace."
   (save-excursion
     (save-restriction
@@ -147,7 +169,7 @@ Returns (name . position) or nil. Works from any point inside a workspace."
             ;; Check current heading and walk up until found or at top
             (cl-block nil
               (while t
-                (when (org-entry-get nil "CMUX_WORKSPACE")
+                (when (code-agent-org--workspace-heading-p)
                   (cl-return (cons (org-get-heading t t t t) (point))))
                 (unless (org-up-heading-safe)
                   (cl-return nil)))))
@@ -245,7 +267,8 @@ Movement primitives for story — wraps =org-goto-*= so callers express intent, 
 
 #+BEGIN_SRC elisp
 (defun code-agent-org--collect-workspaces ()
-  "Collect all workspace headings in current buffer.
+  "Collect all workspace headings in current buffer (see
+`code-agent-org--workspace-heading-p').
 Returns list of (NAME POS SESSION-ID) ordered by position."
   (save-excursion
     (save-restriction
@@ -253,12 +276,11 @@ Returns list of (NAME POS SESSION-ID) ordered by position."
       (goto-char (point-min))
       (let (result)
         (while (re-search-forward "^\\*+ " nil t)
-          (let ((ws (org-entry-get nil "CMUX_WORKSPACE")))
-            (when ws
-              (push (list (org-get-heading t t t t)
-                          (line-beginning-position)
-                          (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
-                    result))))
+          (when (code-agent-org--workspace-heading-p)
+            (push (list (org-get-heading t t t t)
+                        (line-beginning-position)
+                        (or (org-entry-get nil "CLAUDE_SESSION_ID") ""))
+                  result)))
         (nreverse result)))))
 
 (defun code-agent-org--collect-stories (workspace-pos)
