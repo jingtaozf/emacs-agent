@@ -136,3 +136,225 @@ mutates state via Pi RPC; steer/follow_up accepted).
 - [[file:../backend/code-agent-pi-backend.org][code-agent-pi-backend.org]] — backend integration.
 - [[file:../backend/code-agent-pi-ui.org][code-agent-pi-ui.org]] — Phase 1 control panel.
 - =tests/test-code-agent-pi-ui.el= — Phase 1 tests.
+
+* 2026-06-05-human-onboarding-interface
+:PROPERTIES:
+:CUSTOM_ID: human-onboarding-interface
+:STATUS: research-done; proposal pending approval
+:OWNER: jt
+:END:
+
+** Motivation
+The codebase is increasingly written/driven by a code agent (Claude
+Code) but co-owned by a human who did not author most of it.  The
+human gets lost: doesn't know how to run features from the CLI, and
+lacks a mental model of the main modules.  Goal: guide the agent to
+produce + continuously keep fresh a *human-friendly onboarding
+interface*, especially in our org-mode literate-programming way.
+
+Four human pain points (all in scope):
+1. *How to run* — accurate, copy-pasteable command cheatsheet / runbook.
+2. *Architecture map* — main modules, data flow, entry points, "to change X edit Y".
+3. *Freshness* — keep onboarding docs up to date as the agent edits; avoid doc rot.
+4. *Getting started* — explicit read order + how to make a safe trial change + verify.
+
+** Mechanism comparison (research, 2026-06-05)
+| Mechanism | Pain | Auto-fresh? | LP/org fit | Precedent |
+|-----------+------+-------------+------------+-----------|
+| Self-documenting Makefile (=##= + =make help= grep/awk) | ① | Yes — targets are the source of truth | High | marmelab; prwhite gist |
+| AGENTS.md / CLAUDE.md (root agent instructions) | ②④ | Manual | Med | codersera AGENTS-vs-CLAUDE 2026 |
+| llms.txt (curated root index) | ②④ | Manual/gen | Med (web-leaning) | llmstxt.org |
+| Aider-style repo map (tree-sitter + PageRank) | ② | Yes — generated from source | Med (elisp grammar) | aider.chat repomap |
+| INDEX/README generation from .org metadata | ②④ | Yes — skill rebuild | High (have =rebuild-lp-readme=) | this repo |
+| ADR + diagrams-as-code (Mermaid/C4 embedded) | ② | Semi | High (org inlines mermaid) | C4 / ADR practice |
+| docs-as-tests / tangled runnable examples | ①④ | Yes — CI runs them | High (LP already tangles) | =tests-embedded-in-narrative= rule |
+| Getting-started golden path (read + safe-try + verify) | ④ | Manual (short ⇒ low rot) | High | golden-path / executable onboarding |
+
+** Current emacs-agent coverage (gap analysis, 2026-06-05)
+| Pain | Current state | Verdict |
+|------+---------------+---------|
+| ① run | =make help= exists but *hand-written =@echo=*; 144 targets, ~30 documented | Will drift; already incomplete — highest-leverage fix |
+| ② arch | =ARCHITECTURE.org= (191 ln, boundary diagram) + =lp/INDEX.org= group table + per-group READMEs | Strong but structural/agent-flavoured; missing human "change X → edit Y" table |
+| ③ fresh | =rebuild-lp-readme= auto-regens READMEs/INDEX | Index layer auto-fresh; =make help= + ARCHITECTURE prose hand-maintained |
+| ④ start | =lp/INDEX.org= has "Read order for first-time readers" | Read order present; missing "safe trial change + verify" path |
+| misc | =README.org= is 2231 lines; =AGENTS.md= (64) + =CLAUDE.md= (300) both present | README too big for quickstart; AGENTS/CLAUDE dual-write drift risk |
+
+** Recommended artifact mix (5)
+1. *Self-document =make help=* (① ③).  Annotate 144 targets with =##=,
+   render via grep/awk, =.DEFAULT_GOAL := help=.  Auto-fresh by
+   construction; this is the live "how to run X" cheatsheet.
+2. *=QUICKSTART.org=, ≤1 screen, human-written* (④ + entry to ②).  Not
+   the 2231-line README: what this is in 3 sentences → the 5 things
+   you actually run (point at =make help=) → read order (point at
+   =lp/INDEX.org=) → safe first-change + verify golden path
+   (=make test-smoke= → reload → run an AI block) → where to ask.
+3. *"Where things live / change recipes" table in =ARCHITECTURE.org=* (②).
+   10–15 rows: "change X → edit =lp/<group>/Y.org § Z=".  Human-curated.
+4. *(advanced) generated elisp repo map* (② ③) as a machine-fresh
+   cross-check that the hand-written change table hasn't drifted.
+5. *Freshness enforcement* (③): post-edit/pre-commit regenerates
+   make-help-derived + INDEX/READMEs (reuse =rebuild-lp-readme=); CI
+   fails on staleness; scheduled =lp-research-audit= catches narrative drift.
+
+** Anti-patterns (research-grounded)
+- Hand-maintained command list that drifts — current =make help= 30/144 is the live example.
+- 2231-line README as the onboarding doc — split a 1-screen quickstart out.
+- *Agent free-writing onboarding prose unreviewed* — ETH Zürich AGENTbench
+  (2026-02, 138 instances / 12 repos): LLM-generated context files lowered
+  task success ~3% and raised cost 20%+; human-written improved ~4%.  Rule:
+  agent generates *derived* artifacts (command table / INDEX / repo map);
+  human writes the *narrative* (why / tour / change recipes); agent at most
+  proposes narrative for human review.
+- Architecture doc drifting from code — keep ARCHITECTURE a thin meta-map
+  (it already is) + back with a generated repo map + drift check.
+- AGENTS.md vs CLAUDE.md dual-write drift — one imports/derives the other.
+
+** Landing plan (propose-before-edit; Risk: med)
+1. (quick, no narrative risk) Self-document =make help= → verify output covers all targets.
+2. (highest human value) Draft =QUICKSTART.org= (1 screen) + add "change X → edit Y" table to ARCHITECTURE; human finalises the narrative.
+3. (freshness) pre-commit/CI doc-drift check (make-help ↔ targets; INDEX current); reuse =rebuild-lp-readme=.
+4. (optional/advanced) elisp repo-map generator + hook.
+
+** Protecting human-authored regions from the agent
+:PROPERTIES:
+:CUSTOM_ID: human-onboarding-protect-thread
+:STATUS: v1 landed (Claude + Pi) 2026-06-05; live E2E + hardening pending
+:END:
+
+Companion question (2026-06-05): stop the agent editing human-owned
+doc/code, or force confirm-before-change.  Decision after research:
+*defense in depth* (hard block + soft confirm), protect at *region +
+org-property* level, and *cross-agent* (not just Claude Code).
+
+*** Review correction (2026-06-05) — the human/agent line is at edit-time, not commit
+Two critiques (jt) reshaped this proposal:
+1. *pre-commit cannot tell human from agent* — at =git commit= git only sees
+   staged diffs; it cannot enforce "agent must not, human may".  Correct.
+2. The goal is *not* freeze.  The agent MAY edit human-owned sections, but
+   *every such edit must be surfaced to the human to review + confirm before
+   it lands*.
+
+Consequence: the enforcement point is the agent's *edit-time* gate, not
+commit-time.  Claude Code's =PreToolUse= hook *only fires for the agent's own
+Edit/Write/MultiEdit* — a human editing in Emacs never triggers it — so it is
+exactly the place that distinguishes agent from human, and it can show the
+proposed diff for approval BEFORE writing.  Mechanism = =PreToolUse= returning
+=ask= (or =permissions.ask=) scoped to human-owned targets; the prompt surfaces
+in this repo's Emacs permission UI, where the human sees the old→new diff and
+accepts/rejects.
+
+=pre-commit= is *demoted*: it fits only a different requirement ("frozen for
+everyone", or a backstop against non-Claude agents), and even then blocks
+wholesale with no per-edit approval — so it is NOT the mechanism for
+"agent-edit-with-my-approval".
+
+Stability holes found on review (must close in v1):
+| Hole | Why unstable | Close it |
+|------+--------------+----------|
+| Bash-write escape | agent writes via =sed -i= / =>= / heredoc, skipping Edit/Write | also =ask=/=deny= Bash that writes protected paths |
+| Region detection fragile | org section line-range × Edit old_string overlap is error-prone | ship *file-level* v1; section-range is v2 |
+| Bypass silently allows | under headless / =--dangerously-skip-permissions= an =ask= cannot prompt | hook *fails closed* (=deny=) when no confirm channel |
+| Guard gets disabled | agent edits the =:HUMAN_OWNED:= drawer / hook / settings | put those three in the protected set too |
+| Pi out of jurisdiction | =PreToolUse= is Claude-Code-only | give Pi its own gate, or scope Pi out explicitly |
+
+*** Headline finding — what works vs what doesn't
+| Mechanism | Layer | Reliable? | Bypass |
+|-----------+-------+-----------+--------|
+| Rules in CLAUDE.md ("don't edit X") | advisory | *No* — agent acknowledges then violates | n/a |
+| In-file "DO NOT EDIT" marker (alone) | advisory | *No* — agents don't reliably respect | n/a |
+| =PreToolUse= hook =deny= / =ask= | Claude edit-time | *Yes* — blocks even under =--dangerously-skip-permissions= | edit the hook |
+| =permissions.deny= glob (settings.json) | Claude edit-time | *Yes* — deny>ask>allow precedence | settings change |
+| git pre-commit guard (path or region diff) | *cross-agent* commit-time | *Yes* — blocks the commit whoever made it | =--no-verify= |
+| CODEOWNERS + branch protection | merge-time (team/remote) | Yes at merge, *not* local edit | admin override |
+
+The load-bearing result: *advisory rules + markers do NOT work* — CLAUDE.md
+rules are advisory and lost to context compaction (issues #7777 / #32193 /
+#15443); "DO NOT EDIT" comments are not reliably respected.  Only
+*code-enforced* layers (hooks / permissions / pre-commit) actually block.
+So "always confirm" must be a =PreToolUse= =ask= gate, not a polite request.
+
+*** Recommended defense-in-depth (matches: both + region/ownership + cross-agent)
+1. *Claude edit-time, hard* — =PreToolUse= hook + =permissions.deny=:
+   =deny= for "never touch"; =ask= for "confirm first" (surfaces the Emacs
+   permission UI).  Reliable for Claude Code, but Claude-only.
+2. *Region / org-ownership, hard* — =PreToolUse= hook reads the Edit's
+   target range and the section's org property; denies/asks when the edit
+   overlaps a protected section.  Org property is a cleaner structural
+   anchor than free-text markers.
+3. *Cross-agent, commit-time, hard* — custom git pre-commit guard (added to
+   =.pre-commit-config.yaml=) that fails if a commit modifies a protected
+   path or the content of a protected org section.  Catches Pi, other
+   agents, and human mistakes — agent-agnostic.  Close the =--no-verify=
+   escape for the agent via =permissions.deny= on =Bash(git commit:*--no-verify*)=.
+4. *Soft, supporting (not enforcement)* — the marker + a CLAUDE.md rule
+   document intent so the agent usually self-avoids and a human reading
+   sees ownership.  Treated as a signal, never the wall.
+- *(optional, team/remote)* CODEOWNERS + branch protection "require code
+  owner review" — a merge gate, irrelevant to solo-local editing.
+
+*** Org-native ownership (the LP-fit mechanism)
+Mark a section with a property drawer — =:HUMAN_OWNED: yes= (or reuse the
+existing lp-resync =:LITERATE_ORG_PIN: yes=).  Both the =PreToolUse= hook
+(region overlap → deny/ask) and the pre-commit guard (section content
+changed → fail) parse the property drawer, so protection maps onto the
+org structure rather than fragile line ranges or free-text comments.
+
+*** Guard the guard
+Protection is only as strong as its own protection: add the hook scripts,
+=settings.json= deny rules, =CODEOWNERS=, and =git commit --no-verify= to the
+protected/denied set — otherwise the agent can simply disable them.
+
+*** Current emacs-agent state (2026-06-05)
+- =.claude/hooks/= holds only =_env.sh= — *no local block hooks*; tangled-file
+  protection comes from the =literate-agent= plugin hooks (=block-tangled-edit.sh=).
+- =.pre-commit-config.yaml= is active (gitleaks, check-merge-conflict,
+  =lp-protocol-verify=, …) — the natural home for a protected-region guard.
+- Precedent markers already present: =code-agent.org= tangled-output note
+  "DO NOT EDIT DIRECTLY"; lp-resync =:LITERATE_ORG_PIN:=.  No =CODEOWNERS=,
+  no =:HUMAN_OWNED:= yet.
+
+*** Proposed minimal landing (revised; propose-before-edit; Risk: med)
+Centred on the edit-time =ask= gate per the Review-correction above:
+1. Mark human-owned at *file level* first — a =PROTECTED_PATHS= list and/or
+   file-level =#+PROPERTY: HUMAN_OWNED yes=.
+2. =PreToolUse= hook returns =ask= for Edit/Write/MultiEdit on protected paths
+   → human reviews the diff in Emacs and confirms/rejects.  Fail closed
+   (=deny=) when there is no prompt channel.
+3. Also =ask=/=deny= Bash commands that write protected paths (close the
+   =sed=/redirect escape).
+4. Treat edits to the =HUMAN_OWNED= marker, the hook script, and
+   =settings.json= as protected too (guard the guard).
+5. (v2) refine to org section-range overlap, so only the protected *section*
+   asks, not the whole file.
+6. (separate requirement, optional) a pre-commit "frozen region" guard, only
+   if a no-edit-by-anyone class is ever wanted.
+
+*** v1 landed (2026-06-05)
+Section-level =:HUMAN_OWNED:= gate, both agents, one shared detector.
+| Artifact | Role |
+|----------+------|
+| =human-owned-guard.org= → =scripts/human_owned_guard.py= | shared detector (parses =:HUMAN_OWNED:= sections, decides =ask=/=deny=) |
+| =.claude/settings.json= =PreToolUse= (=Edit\vert Write\vert MultiEdit=) | Claude adapter → execs the guard |
+| =lp/backend/code-agent-pi-extensions.org= =attachHumanOwnedGate= → =emacs-mcp.ts= | Pi adapter: =tool_call= on =edit=/=write= → guard → =ctx.ui.confirm= / =!hasUI= ⇒ =block= |
+| =tests/fixtures/human-owned-test.org= | one =:HUMAN_OWNED:= section for validation |
+
+Validated: guard 7/7 detection cases (protected/normal/after/marker-touch/Write/MultiEdit/non-org); Pi ext bun-transpiles clean; both adapters wired.  Each takes effect at the *next* Claude / Pi session (configs load at start) — no live cross-agent E2E yet.
+
+Remaining (v1.1):
+- *Bash-write escape* still open — gate =Bash= (=sed -i= / =>=) on protected paths (plugin already does this for tangled files via =block-bash-tangle-write.sh=; mirror it).
+- *Guard the guard* — =settings.json= hook, =scripts/human_owned_guard.py= / =human-owned-guard.org=, and the Pi extension are not yet self-protected.
+- *Live E2E* — confirm a real Claude edit prompts, and a Pi =edit= raises =yes-or-no-p=, in fresh sessions.
+- Nothing committed.
+
+*** Protection-topic references
+- Claude Code permissions + hook precedence: [[https://code.claude.com/docs/en/permissions][permissions docs]]
+- Rules are advisory / hooks enforce: [[https://dev.to/minatoplanb/i-wrote-200-lines-of-rules-for-claude-code-it-ignored-them-all-4639]["200 lines of rules, ignored"]]; CC issues [[https://github.com/anthropics/claude-code/issues/32193][#32193]], [[https://github.com/anthropics/claude-code/issues/7777][#7777]]
+- Markers not reliably respected / use config: [[https://www.agentrulegen.com/guides/how-to-protect-files-from-ai-agents][protecting files from AI agents]]
+- CODEOWNERS is review-routing (needs branch protection to gate): [[https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners][GitHub about-code-owners]]
+- git pre-commit protected-file/region guard: [[https://blacksheepcode.com/posts/quick_tip_protect_committing_file_modifications][blacksheepcode]]
+
+** References
+- llms.txt: [[https://llmstxt.org][llmstxt.org]]; [[https://codersera.com/blog/llms-txt-complete-guide-2026/][2026 guide]]
+- AGENTS.md vs CLAUDE.md + ETH AGENTbench: [[https://codersera.com/blog/agents-md-vs-claude-md-vs-cursor-rules-comparison-2026/][codersera]]; [[https://bestagent.dev/claude-md-vs-agents-md-2026/][Claude Code reads CLAUDE.md]]
+- Aider repo map: [[https://aider.chat/2023/10/22/repomap.html][repomap blog]]; [[https://aider.chat/docs/repomap.html][docs]]
+- Self-documenting Makefile: [[https://marmelab.com/blog/2016/02/29/auto-documented-makefile.html][marmelab]]; [[https://www.thapaliya.com/en/writings/well-documented-makefiles/][thapaliya]]

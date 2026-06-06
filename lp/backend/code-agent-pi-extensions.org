@@ -582,6 +582,89 @@ function attachConfirmGate(pi: ExtensionAPI): void {
 }
 #+end_src
 
+*** Confirm gate for human-owned sections
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-human-owned
+:END:
+
+The same boundary the Claude =PreToolUse= hook enforces — *the agent may
+edit a section marked =:HUMAN_OWNED: yes=, but only after the human reviews
+and confirms* — must also hold when Pi is the backend.  Pi's =edit= /
+=write= tool calls are intercepted here and routed through the *one shared
+detector* =scripts/human_owned_guard.py= (so the region logic never forks
+between agents); a hit raises =ctx.ui.confirm= (→ Emacs =yes-or-no-p=), and
+=!ctx.hasUI= fails closed with =block: true=, mirroring the emacs_eval gate.
+
+The gate is *project-scoped by the guard's presence*: this extension is
+global (=~/.pi/agent/extensions/=), so when =scripts/human_owned_guard.py=
+is absent from =process.cwd()= the gate is a no-op.  Pi's =edit= input is
+=({path, edits:[{oldText,newText}]})= and =write= is =({path, content})=;
+both are mapped to the guard's Claude-shaped JSON before piping.
+
+#+begin_src typescript
+async function runHumanOwnedGuard(
+	toolName: string,
+	input: Record<string, unknown>,
+): Promise<string | null> {
+	const { existsSync } = await import("node:fs");
+	const { join } = await import("node:path");
+	const { execFileSync } = await import("node:child_process");
+	const script = join(process.cwd(), "scripts", "human_owned_guard.py");
+	if (!existsSync(script)) return null;
+
+	let event: Record<string, unknown> | null = null;
+	if (toolName === "edit") {
+		const edits = (input.edits as Array<Record<string, unknown>> | undefined) ?? [];
+		event = {
+			tool_name: "MultiEdit",
+			tool_input: {
+				file_path: input.path,
+				edits: edits.map((e) => ({ old_string: e.oldText, new_string: e.newText })),
+			},
+		};
+	} else if (toolName === "write") {
+		event = {
+			tool_name: "Write",
+			tool_input: { file_path: input.path, content: input.content },
+		};
+	}
+	if (!event) return null;
+
+	try {
+		const out = execFileSync("python3", [script], {
+			input: JSON.stringify(event),
+			encoding: "utf8",
+		}).trim();
+		if (!out) return null;
+		const decision = JSON.parse(out).hookSpecificOutput;
+		return (
+			(decision?.permissionDecisionReason as string) ??
+			"This edit touches a :HUMAN_OWNED: section."
+		);
+	} catch {
+		// Guard could not run → do not hard-block (Claude layer + human review
+		// still apply); a broken guard must not freeze every Pi edit.
+		return null;
+	}
+}
+
+function attachHumanOwnedGate(pi: ExtensionAPI): void {
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "edit" && event.toolName !== "write") return;
+		const reason = await runHumanOwnedGuard(
+			event.toolName,
+			event.input as Record<string, unknown>,
+		);
+		if (!reason) return;
+		if (!ctx.hasUI) {
+			return { block: true, reason: "Human-owned section edit blocked: no UI to confirm." };
+		}
+		const ok = await ctx.ui.confirm("Edit a :HUMAN_OWNED: section?", reason);
+		if (!ok) return { block: true, reason: "User declined edit to a human-owned section." };
+	});
+}
+#+end_src
+
 ** Extension entry point
 :PROPERTIES:
 :CUSTOM_ID: pi-ext-entry
@@ -601,6 +684,7 @@ export default function emacsMcpExtension(pi: ExtensionAPI): void {
 	registerReportInvocationTool(pi);
 	attachHealthCheck(pi);
 	attachConfirmGate(pi);
+	attachHumanOwnedGate(pi);
 }
 #+end_src
 
