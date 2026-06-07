@@ -106,6 +106,36 @@ the *third* time, write a new entry here.
 - followup: if OpenCode adds a `--system-prompt-file` flag (or
   similar), switch to truly ephemeral path and unbase AGENTS.md.
 
+## 6. No third-party token-saving tool — rely on native spill + `concise` output-style
+
+- decision-date: 2026-06-05 (3-round eval in the `emacs-claude-dev1` session)
+- alternative considered: Headroom (proxy/CCR, *touches the API key* →
+  subscription-ban risk), RTK (PreToolUse hook, known data-loss bugs
+  #2271/#2253 + sec hole #2262), ecotokens (hook, unverified single
+  maintainer), chop (PreToolUse hook, lossy-by-design), or a self-written
+  lossless PostToolUse hook
+- reason: measured against a real 2.48M-tool-token transcript, the numbers
+  remove the case for *any* added tool —
+  - Claude Code (v2.1.163) already spills tool output over
+    `maxResultSizeChars` (Bash = 30000 chars; global default = 50000) to
+    `<transcript>/tool-results/*.txt` **losslessly** — full output on disk +
+    ~2KB preview + `Read` to recover. 187 spill files already on disk. The
+    one place big *lossless* savings live is already covered, first-party, free.
+  - After spill, the residual is the 2–30KB mid-band (~58% of tool-output).
+    A provably-lossless hook (trailing-ws trim + fold-repeats + collapse-blanks)
+    caps at ~5% (2–10KB) / ~15% (10–30KB) → **~3% of total context** — not
+    worth a hook in the request path plus maintenance.
+  - The "50–90%" of RTK/chop is **all lossy** (truncation / fingerprint dedup /
+    per-command summary) — exactly the regression this project rejects.
+  - tool-output is 51.7% of context; the agent's own output is 44.6% — the
+    bigger half is already cut by the active `concise` output-style. The
+    biggest lever is already installed.
+- followup: revisit only if a task profile becomes dominated by
+  high-volume-low-info commands (test runners, verbose logs) where a *vetted
+  per-command* summarizer (chop's error-float + no-gain-fallback rails) earns
+  its regression surface. Note: Claude Code hooks don't cover the Pi backend
+  (separate RPC) regardless.
+
 ---
 
 ## How to add a new entry

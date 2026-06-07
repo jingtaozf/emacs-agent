@@ -32,9 +32,9 @@ git merge vX.Y.Z -m "Merge tag 'vX.Y.Z' into jt"
 If `git fetch` rejects the `nightly` tag with `would clobber existing tag`,
 that's harmless — the version tags still come through.
 
-## Three build pitfalls (apply to BOTH dev and release)
+## Four build pitfalls (apply to BOTH dev and release)
 
-These three reliably bite a fresh build on this machine; bake them into
+These reliably bite a fresh build on this machine; bake them into
 every xcodebuild invocation.
 
 ### 1. Zig version mismatch — Ghostty requires v0.15.2
@@ -107,6 +107,30 @@ CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS=""
 The resulting `cmux.app` is unsigned — Gatekeeper will warn on first
 launch via `open`, right-click → Open to override. (Debug config also
 needs this if you invoke xcodebuild directly; `reload.sh` handles it.)
+
+### 4. Metal Toolchain — required since v0.64.12
+
+v0.64.12 onward compiles Metal shaders (`.metal`) during the build. A
+machine whose Xcode lacks the downloadable Metal Toolchain component
+fails (BOTH dev and release) with:
+
+```
+error: cannot execute tool 'metal' due to missing Metal Toolchain;
+       use: xcodebuild -downloadComponent MetalToolchain
+```
+
+Install it once (~688 MB, no sudo — downloads to the system asset
+cache, not the Xcode bundle):
+
+```bash
+xcodebuild -downloadComponent MetalToolchain
+# verify:  xcrun -f metal   →  .../Metal.xctoolchain/usr/bin/metal
+```
+
+Verified bite on 2026-06-02 building v0.64.12 — the v0.64.11 build did
+not need it. The `CoreSimulator is out of date` line that appears in
+the same log is a separate, harmless warning (iOS-simulator support
+only; the macOS build is unaffected).
 
 ## Build dev app (safe — does not affect running dev app)
 
