@@ -665,6 +665,79 @@ function attachHumanOwnedGate(pi: ExtensionAPI): void {
 }
 #+end_src
 
+*** Cmux response bridge
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-cmux-bridge
+:END:
+
+When Pi runs as the agent *inside a cmux workspace* (cmux multiplexer +
+pi agent, launched by =pi-workspace=), its final answer must land in the
+org buffer the same way Claude's does — but Pi has no Claude =Stop= hook
+and the cmux pane carries no =stream-json=.  Pi's =agent_end= event is the
+clean equivalent of Claude's Stop: it fires once when the assistant loop
+finishes (verified in pi's =interactive-mode.ts=).  On it we extract the
+last assistant message and push it through the *same* Emacs entry point
+Claude uses — =code-agent-org-workspace-bridge-insert-response= — over the
+MCP channel this extension already owns.  The instruction it answers is
+resolved Emacs-side via =…-latest-instruction-custom-id= (no need to thread
+state from the prompt side).
+
+This is *env-gated on =WORKSPACE_ORG_FILE==: that var is exported only by
+the =pi-workspace= launcher, so the plain ``pi --mode rpc`` backend (which
+returns responses over RPC) never triggers this bridge.
+
+#+begin_src typescript
+function piAssistantText(msg: unknown): string {
+	const m = msg as { content?: unknown; text?: unknown } | null;
+	if (!m) return "";
+	const c = m.content;
+	if (typeof c === "string") return c;
+	if (Array.isArray(c)) {
+		return c
+			.map((p) => (typeof p === "string" ? p : ((p as { text?: string })?.text ?? "")))
+			.join("");
+	}
+	return typeof m.text === "string" ? m.text : "";
+}
+
+async function evalElispSafe(code: string): Promise<string> {
+	try {
+		return (await evalElisp(code)).trim();
+	} catch {
+		return "";
+	}
+}
+
+function attachCmuxResponseBridge(pi: ExtensionAPI): void {
+	const org = process.env.WORKSPACE_ORG_FILE;
+	if (!org) return; // cmux-workspace mode only; the RPC backend has no such env
+	const sess =
+		process.env.WORKSPACE_CUSTOM_ID || process.env.WORKSPACE_SESSION_ID || "";
+	const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+	pi.on("agent_end", async (event) => {
+		try {
+			const msgs = ((event as { messages?: unknown[] }).messages ?? []) as unknown[];
+			let text = "";
+			for (let i = msgs.length - 1; i >= 0; i--) {
+				if ((msgs[i] as { role?: string })?.role === "assistant") {
+					text = piAssistantText(msgs[i]);
+					break;
+				}
+			}
+			if (!text.trim()) return;
+			const instr = await evalElispSafe(
+				`(code-agent-org-workspace-bridge-latest-instruction-custom-id "${esc(org)}" "${esc(sess)}")`,
+			);
+			await evalElispSafe(
+				`(code-agent-org-workspace-bridge-insert-response "${esc(org)}" "${esc(sess)}" "${esc(text)}" ${instr ? `"${esc(instr)}"` : "nil"})`,
+			);
+		} catch {
+			// best-effort; never break the turn
+		}
+	});
+}
+#+end_src
+
 ** Extension entry point
 :PROPERTIES:
 :CUSTOM_ID: pi-ext-entry
@@ -685,6 +758,7 @@ export default function emacsMcpExtension(pi: ExtensionAPI): void {
 	attachHealthCheck(pi);
 	attachConfirmGate(pi);
 	attachHumanOwnedGate(pi);
+	attachCmuxResponseBridge(pi);
 }
 #+end_src
 

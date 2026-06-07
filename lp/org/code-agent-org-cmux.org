@@ -108,7 +108,7 @@ and to `AgentKind' in code-agent-python.org (the enum's
 `from_string' tolerates unknown values by defaulting to CLAUDE,
 so a one-sided change degrades gracefully but loses the per-agent
 CLI-session-property dispatch)."
-  :type '(choice (const nil) (const claude) (const copilot) (const opencode) string)
+  :type '(choice (const nil) (const claude) (const copilot) (const opencode) (const pi) string)
   :group 'code-agent-org)
 
 (defcustom code-agent-org-cmux-extra-args nil
@@ -171,6 +171,20 @@ Defaults to `uv run --project <pkg>/python copilot-workspace'."
   "Command to launch the opencode-workspace launcher.
 Used when `code-agent-org-cmux-agent-type' is `opencode'.
 Defaults to `uv run --project <pkg>/python opencode-workspace'."
+  :type 'string
+  :group 'code-agent-org)
+
+(defcustom code-agent-org-cmux-pi-workspace-script
+  (let* ((pkg-dir (if (boundp 'claude-code-directory)
+                      claude-code-directory
+                    (file-name-directory
+                     (or load-file-name buffer-file-name ""))))
+         (uv-cmd (format "uv run --project %s pi-workspace"
+                         (expand-file-name "python" pkg-dir))))
+    uv-cmd)
+  "Command to launch the pi-workspace launcher.
+Used when `code-agent-org-cmux-agent-type' is `pi'.
+Defaults to `uv run --project <pkg>/python pi-workspace'."
   :type 'string
   :group 'code-agent-org)
 #+END_SRC
@@ -1253,6 +1267,34 @@ Claude Code-specific flags are automatically filtered from extra args."
       (setq parts (append parts (list extra))))
     (mapconcat #'identity parts " ")))
 
+(defun code-agent-org-cmux--build-pi-launch-command
+    (org-file workspace-session-id project-root)
+  "Build Pi launch command for a cmux workspace (interactive pi TUI).
+Reads PI_SESSION_ID for --resume (separate from CLAUDE_CLI_SESSION so
+switching agent types does not clobber sessions).  Claude-only flags are
+stripped, like the opencode/copilot launchers."
+  (ignore project-root)
+  (let* ((prop-args (code-agent-org-terminal-find-session-property "CLAUDE_EXTRA_ARGS"))
+         (raw-extra (append code-agent-org-cmux-extra-args
+                            (when prop-args (split-string prop-args))))
+         (all-extra (code-agent-org-cmux--filter-copilot-args raw-extra))
+         (extra (mapconcat #'shell-quote-argument all-extra " "))
+         (cli-session
+          (ignore-errors
+            (save-excursion
+              (code-agent-org-terminal-goto-session-heading)
+              (org-entry-get nil "PI_SESSION_ID" nil))))
+         (workspace-script code-agent-org-cmux-pi-workspace-script)
+         (parts (list workspace-script
+                      (shell-quote-argument (or org-file ""))
+                      (shell-quote-argument (or workspace-session-id "")))))
+    (when cli-session
+      (setq parts (append parts (list "--resume" (shell-quote-argument cli-session)))))
+    (when (and extra (not (string-empty-p extra)))
+      (unless cli-session (setq parts (append parts (list "--"))))
+      (setq parts (append parts (list extra))))
+    (mapconcat #'identity parts " ")))
+
 ;; Populate agent profile registry now that the launch-fn helpers are defined.
 ;; Profiles are set here (not at defvar time) because the launch functions
 ;; are defined after the profile struct in the same file.
@@ -1283,6 +1325,15 @@ Claude Code-specific flags are automatically filtered from extra args."
         :ready-patterns '("❯" "opencode>" "│ ❯")
         :busy-patterns  '("thinking" "running" "Generating" "Tool:")
         :cancel-keys    '("C-c")
+        :supports-resume t
+        :supports-ide    nil
+        :supports-system-prompt t)
+       (make-code-agent-org-cmux--agent-profile
+        :name 'pi
+        :launch-fn #'code-agent-org-cmux--build-pi-launch-command
+        :ready-patterns '("tok" "(auto)" "❯" "› ")
+        :busy-patterns  '("Thinking" "esc to interrupt" "Esc to interrupt")
+        :cancel-keys    '("escape")
         :supports-resume t
         :supports-ide    nil
         :supports-system-prompt t)))

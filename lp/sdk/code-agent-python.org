@@ -133,6 +133,7 @@ dev = [
 claude-workspace = "code_agent.claude_workspace:main"
 copilot-workspace = "code_agent.copilot_workspace:main"
 opencode-workspace = "code_agent.opencode_workspace:main"
+pi-workspace = "code_agent.pi_workspace:main"
 workspace-bridge = "code_agent.workspace_bridge:main"
 otel-bridge = "code_agent.otel_bridge:run_server"
 
@@ -4193,6 +4194,124 @@ Entry-point guard — the =if __name__ == "__main__":= clause below wires the mo
 if __name__ == "__main__":
     main()
 
+#+end_src
+
+** Pi Workspace
+:PROPERTIES:
+:CUSTOM_ID: python-pi-workspace
+:header-args: :tangle ../../python/code_agent/pi_workspace.py :mkdirp yes
+:END:
+
+Launches the Pi TUI inside a cmux pane (cmux multiplexer + pi agent),
+the counterpart to the ``pi --mode rpc`` backend.  Unlike OpenCode it
+needs *no per-project file injection*: the Emacs MCP bridge is Pi's
+global extension at ``~/.pi/agent/extensions/emacs-mcp.ts``, which reads
+``EMACS_MCP_URL`` (exported by the base ``export_env_vars``).  The same
+extension carries the final response back to the org buffer on Pi's
+``agent_end`` event (``code-agent-org-workspace-bridge-insert-response``
+over MCP) — so there is no screen-scraping and no transcript file.
+
+Resume uses ``--resume <id>`` keyed off ``PI_SESSION_ID`` (Emacs owns
+the id, separate from ``CLAUDE_CLI_SESSION``).  The workspace system
+prompt is *not* injected in v1 — Pi's ``--system`` flag semantics are
+unverified, and the basic prompt→response loop works without it; this is
+a flagged v1.1 follow-up.
+
+*** import
+
+#+begin_src python
+"""Pi workspace launcher.
+
+Subclass of ``WorkspaceLauncher`` that runs the Pi TUI in a cmux pane.
+The Emacs MCP bridge + response return are handled by Pi's global
+``emacs-mcp`` extension (env-gated on ``WORKSPACE_ORG_FILE``), so this
+launcher only needs to set env, optionally resume, and exec ``pi``.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from code_agent.workspace_launcher import (
+    WorkspaceLauncher,
+    filter_claude_args,
+    split_positional_args,
+)
+#+end_src
+
+*** =PiWorkspaceLauncher=
+
+Fills in only the Pi-specific steps: identity, ``--resume`` parsing, and
+``build_args`` (interactive ``pi`` — no ``--mode rpc``).  Everything else
+(MCP ping, metadata, env export, tab title) comes from the base.
+
+#+begin_src python
+class PiWorkspaceLauncher(WorkspaceLauncher):
+    """WorkspaceLauncher subclass for the Pi TUI."""
+
+    agent_name = "pi"
+    agent_binary = "pi"
+    agent_type_env_value = "pi"
+
+    def __init__(
+        self,
+        org_file: str,
+        session_id: str,
+        extra_args: list[str],
+        resume_id: str | None = None,
+    ):
+        super().__init__(org_file, session_id, extra_args)
+        self.resume_id = resume_id
+
+    @classmethod
+    def from_argv(cls, argv: list[str]) -> "PiWorkspaceLauncher":
+        """Parse ``[--resume <id>]`` and an optional ``--`` separator."""
+        org_file, session_id, rest = split_positional_args(argv)
+        resume_id: str | None = None
+        if len(rest) >= 2 and rest[0] == "--resume":
+            resume_id = rest[1]
+            rest = rest[2:]
+        if rest and rest[0] == "--":
+            rest = rest[1:]
+        return cls(org_file, session_id, rest, resume_id=resume_id)
+
+    def build_args(self) -> list[str]:
+        # Interactive Pi TUI (no --mode rpc). System prompt deferred to v1.1.
+        args = ["pi"]
+        if self.resume_id:
+            args.extend(["--resume", self.resume_id])
+        args.extend(filter_claude_args(self.extra_args))
+        return args
+
+    def print_banner(self, args: list[str]) -> None:
+        print(f"Starting {self.agent_binary}...")
+        print(f"  Org file:   {self.org_file}")
+        print(f"  Session ID: {self.session_id or 'none'}")
+        print(f"  Resume ID:  {self.resume_id or 'none (fresh session)'}")
+        print(f"  Story:      {self.story_name or 'unknown'}")
+        print(f"  MCP bridge: {self.mcp_ok}")
+        print(f"  Extra args: {self.extra_args}")
+        print(f"  Final cmd:  {' '.join(args)}")
+        print()
+#+end_src
+
+*** Entry point
+
+#+begin_src python
+def main() -> None:
+    argv = sys.argv[1:]
+    if not argv:
+        print(
+            "Usage: pi-workspace <org-file> [session-id] "
+            "[--resume <id>] [-- extra-args...]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    PiWorkspaceLauncher.from_argv(argv).run()
+
+
+if __name__ == "__main__":
+    main()
 #+end_src
 
 * Tests
