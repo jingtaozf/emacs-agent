@@ -22,14 +22,17 @@ PROP_RE = re.compile(r"^\s*:HUMAN_OWNED:\s*(\S+)", re.IGNORECASE)
 MARKER = ":HUMAN_OWNED:"
 TRUTHY = {"yes", "true", "t", "1", "on"}
 
-# Guard-the-guard: the protection's own files always ask, even when they
-# are not Org (you cannot mark a JSON file with an Org property).  Matched
-# by path suffix / basename.
+# Guard-the-guard: the protection's own *source* files always ask, even
+# when they are not Org (you cannot mark a JSON file with an Org property).
+# Matched by path suffix / basename.  Files that merely *use* the gate —
+# e.g. the Pi extension — are NOT listed here: they carry a section-scoped
+# :HUMAN_OWNED: property on just the gate section, so the rest of the file
+# (tools, bridges) stays freely editable.  Listing a whole multi-purpose
+# .org here was the 2026-06-07 over-block bug: every unrelated edit asked.
 SELF_PROTECTED = (
     ".claude/settings.json",
     "scripts/human_owned_guard.py",
     "human-owned-guard.org",
-    "lp/backend/code-agent-pi-extensions.org",
 )
 
 # Best-effort shell write indicators for the Bash path (file-level — a

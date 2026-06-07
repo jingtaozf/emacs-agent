@@ -585,6 +585,7 @@ function attachConfirmGate(pi: ExtensionAPI): void {
 *** Confirm gate for human-owned sections
 :PROPERTIES:
 :CUSTOM_ID: pi-ext-human-owned
+:HUMAN_OWNED: yes
 :END:
 
 The same boundary the Claude =PreToolUse= hook enforces — *the agent may
@@ -675,12 +676,18 @@ pi agent, launched by =pi-workspace=), its final answer must land in the
 org buffer the same way Claude's does — but Pi has no Claude =Stop= hook
 and the cmux pane carries no =stream-json=.  Pi's =agent_end= event is the
 clean equivalent of Claude's Stop: it fires once when the assistant loop
-finishes (verified in pi's =interactive-mode.ts=).  On it we extract the
-last assistant message and push it through the *same* Emacs entry point
-Claude uses — =code-agent-org-workspace-bridge-insert-response= — over the
-MCP channel this extension already owns.  The instruction it answers is
-resolved Emacs-side via =…-latest-instruction-custom-id= (no need to thread
-state from the prompt side).
+finishes (verified in pi's =interactive-mode.ts=).  On it we extract both
+the last user message (the typed prompt) and the last assistant message
+(the response) and hand them to the *same canonical handler* Claude and
+Copilot use — =workspace-bridge response= with =last_user_message= +
+=last_assistant_message=.  With no transcript and an empty queue that
+handler mints an instruction from =last_user_message= (inserting the typed
+prompt) and inserts the response under it, reusing the =.from-emacs= dedup,
+custom-id correlation, complete-hook, and telemetry.  So a prompt typed
+*directly in the cmux pane* round-trips without a separate prompt-side hook
+and without any risk of re-executing the prompt — and the path entirely
+bypasses the cmux CLI (no =capture-pane=/=send=), so it works even when the
+running cmux build mislabels a fresh surface as "not a terminal".
 
 This is *env-gated on =WORKSPACE_ORG_FILE==: that var is exported only by
 the =pi-workspace= launcher, so the plain ``pi --mode rpc`` backend (which
@@ -700,37 +707,61 @@ function piAssistantText(msg: unknown): string {
 	return typeof m.text === "string" ? m.text : "";
 }
 
-async function evalElispSafe(code: string): Promise<string> {
-	try {
-		return (await evalElisp(code)).trim();
-	} catch {
-		return "";
-	}
-}
-
 function attachCmuxResponseBridge(pi: ExtensionAPI): void {
 	const org = process.env.WORKSPACE_ORG_FILE;
 	if (!org) return; // cmux-workspace mode only; the RPC backend has no such env
 	const sess =
 		process.env.WORKSPACE_CUSTOM_ID || process.env.WORKSPACE_SESSION_ID || "";
-	const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 	pi.on("agent_end", async (event) => {
 		try {
 			const msgs = ((event as { messages?: unknown[] }).messages ?? []) as unknown[];
-			let text = "";
+			let response = "";
+			let prompt = "";
 			for (let i = msgs.length - 1; i >= 0; i--) {
-				if ((msgs[i] as { role?: string })?.role === "assistant") {
-					text = piAssistantText(msgs[i]);
-					break;
-				}
+				const role = (msgs[i] as { role?: string })?.role;
+				if (!response && role === "assistant") response = piAssistantText(msgs[i]);
+				if (!prompt && role === "user") prompt = piAssistantText(msgs[i]);
+				if (response && prompt) break;
 			}
-			if (!text.trim()) return;
-			const instr = await evalElispSafe(
-				`(code-agent-org-workspace-bridge-latest-instruction-custom-id "${esc(org)}" "${esc(sess)}")`,
-			);
-			await evalElispSafe(
-				`(code-agent-org-workspace-bridge-insert-response "${esc(org)}" "${esc(sess)}" "${esc(text)}" ${instr ? `"${esc(instr)}"` : "nil"})`,
-			);
+			if (!response.trim()) return;
+			// Reuse the canonical workspace-bridge response handler. With no
+			// transcript + an empty queue it mints an instruction from
+			// last_user_message (inserts the typed prompt) and inserts
+			// last_assistant_message (the response) — the same .from-emacs
+			// dedup, custom-id correlation, complete-hook, and telemetry as
+			// the Claude/Copilot hook paths. No reimplementation in TS, no
+			// risk of re-executing the prompt.
+			const payload = JSON.stringify({
+				last_user_message: prompt,
+				last_assistant_message: response,
+				session_id: sess,
+			});
+			const { spawn } = await import("node:child_process");
+			const { existsSync } = await import("node:fs");
+			const { join } = await import("node:path");
+			const root = process.env.CLAUDE_PLUGIN_ROOT || "";
+			const venvBin = root
+				? join(root, "python", ".venv", "bin", "workspace-bridge")
+				: "";
+			const [cmd, args]: [string, string[]] =
+				venvBin && existsSync(venvBin)
+					? [venvBin, ["response"]]
+					: [
+							"uv",
+							[
+								"run",
+								"--project",
+								root ? join(root, "python") : "python",
+								"workspace-bridge",
+								"response",
+							],
+						];
+			const child = spawn(cmd, args, {
+				stdio: ["pipe", "ignore", "ignore"],
+				env: process.env,
+			});
+			child.stdin?.write(payload);
+			child.stdin?.end();
 		} catch {
 			// best-effort; never break the turn
 		}
