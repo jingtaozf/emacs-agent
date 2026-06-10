@@ -190,6 +190,38 @@ launcher prefixed only by the always-on `unset VIRTUAL_ENV;' guard
                   "/tmp/fake.org" "sdd-fake" "/tmp")))
         (should (equal "unset VIRTUAL_ENV; STUB_LAUNCHER" cmd))))))
 
+;; --- CLAUDE_EXTRA_ARGS quoting (2026-06 edo-dev3 restart regression) -----
+
+(ert-deftest test-cmux-extra-args/quoted-json-survives-as-one-token ()
+  "CLAUDE_EXTRA_ARGS with a quoted value containing spaces — e.g.
+`--settings '{\"ultracode\": true}'' — must reach the launch command as a
+single shell token, not split at the space.
+
+Regression for the 2026-06 edo-dev3 restart failure: `(split-string
+prop-args)' broke the JSON into `'{\"ultracode\":' + `true}'', so Claude
+saw `--settings '{\"ultracode\":' and aborted with \"Settings file not
+found\".  Fixed via `split-string-shell-command' (quote-aware)."
+  :tags '(:cmux-env-injection :fast)
+  (test-cmux-env--with-org-file
+      (concat "#+TITLE: t\n* Story\n:PROPERTIES:\n"
+              ":CLAUDE_BACKEND: cmux\n"
+              ":CLAUDE_SESSION_ID: sdd-extra-args-001\n"
+              ":CLAUDE_EXTRA_ARGS: --settings '{\"ultracode\": true}'\n"
+              ":END:\n")
+    (goto-char (point-max))
+    (let ((code-agent-org-cmux-launch-command 'claude-workspace)
+          (code-agent-org-cmux-extra-args nil))
+      (cl-letf (((symbol-function 'code-agent-org-cmux--get-agent-profile)
+                 (lambda () nil)))
+        (let* ((cmd (code-agent-org-cmux--build-claude-legacy-launch-command
+                     (buffer-file-name) "sdd-extra-args-001" "/tmp"))
+               (toks (split-string-shell-command cmd)))
+          (should (member "--settings" toks))
+          ;; The JSON value survives intact as ONE token.
+          (should (member "{\"ultracode\": true}" toks))
+          ;; The broken split would leave a token literally starting with a quote.
+          (should-not (cl-find-if (lambda (s) (string-prefix-p "'{" s)) toks)))))))
+
 ;; --- ENV_FILE → CLI flag surfacing --------------------------------------
 
 (ert-deftest test-cmux-env-cli/empty-when-no-env-file ()

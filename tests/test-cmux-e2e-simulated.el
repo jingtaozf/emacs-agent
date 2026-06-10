@@ -99,11 +99,23 @@ Records the call and returns fixture-based responses."
                      test-cmux--mock-calls))
 
 (defmacro test-cmux--with-mock (&rest body)
-  "Execute BODY with cmux CLI gateway mocked."
+  "Execute BODY with cmux CLI gateway mocked.
+
+Also stubs `code-agent-org-cmux--wait-for-shell' (→ t) and `sleep-for'
+(→ no-op): the default capture fixture is a live Claude TUI, and the real
+wait-for-shell now correctly refuses to treat a Claude `❯' input line as a
+shell prompt — so any incidental restart pre-flight (e.g. the execute path
+relaunching when bridge hooks look missing) would otherwise loop to a 15s
+timeout and abort.  These tests assert on the mock CALL stream, not on the
+exit-polling; the polling logic has dedicated pure-function regressions
+(`--surface-state' / `--shell-ready-p')."
   (declare (indent 0))
   `(let ((test-cmux--mock-calls nil)
          (test-cmux--mock-responses nil))
-     (cl-letf (((symbol-function 'code-agent-org-cmux--call) #'test-cmux--mock-call))
+     (cl-letf (((symbol-function 'code-agent-org-cmux--call) #'test-cmux--mock-call)
+               ((symbol-function 'code-agent-org-cmux--wait-for-shell)
+                (lambda (&rest _) t))
+               ((symbol-function 'sleep-for) (lambda (&rest _) nil)))
        ,@body)))
 
 ;;; ============================================================================
@@ -2160,6 +2172,8 @@ pressing R on a workspace whose CLAUDE_CLI_SESSION had drifted."
   (let ((file (make-temp-file "test-cmux-restart-resume-" nil ".org"))
         (calls nil)
         (capture-count 0)
+        (resume-launched nil)
+        (fresh-launched nil)
         (org-content
          "* Test Story
 :PROPERTIES:
@@ -2202,16 +2216,33 @@ Test
                 (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
+                             ;; Track launch sends so capture-pane is
+                             ;; content-driven, not coupled to an exact poll
+                             ;; count (wait-for-shell's poll count is an
+                             ;; implementation detail that changed in 2026-06).
+                             (when (string= subcmd "send")
+                               (let ((txt (car (last args))))
+                                 (when (and (stringp txt)
+                                            (string-match-p "--resume[ ]+stale-uuid-deadbeef" txt))
+                                   (setq resume-launched t))
+                                 (when (and (stringp txt)
+                                            (string-match-p "claude-workspace\\|claude " txt)
+                                            (not (string-match-p "--resume" txt)))
+                                   (setq fresh-launched t))))
                              (cond
                               ((string= subcmd "tree")
                                "workspace workspace:mock-1 \"Test\"")
                               ((string= subcmd "capture-pane")
                                (setq capture-count (1+ capture-count))
                                (cond
+                                ;; Initial state detection: Claude running.
                                 ((= capture-count 1) "  Claude Code\n  -- INSERT --")
-                                ((= capture-count 2) "jingtao@mac ~/p $ ")
-                                ((= capture-count 3)
+                                ;; After the stale --resume launch but before the
+                                ;; recovery relaunch: Claude bounced off the bad
+                                ;; id, printing the banner above the shell.
+                                ((and resume-launched (not fresh-launched))
                                  "No conversation found with session ID: stale-uuid-deadbeef\njingtao@mac ~/p $ ")
+                                ;; Otherwise a plain shell prompt.
                                 (t "jingtao@mac ~/p $ ")))
                               (t "ok"))))
                           ((symbol-function 'sleep-for) (lambda (&rest _) nil))
@@ -2280,6 +2311,7 @@ Test
   (let ((file (make-temp-file "test-cmux-restart-good-" nil ".org"))
         (calls nil)
         (capture-count 0)
+        (launched nil)
         (org-content
          "* Test Story
 :PROPERTIES:
@@ -2313,17 +2345,27 @@ Test
                 (cl-letf (((symbol-function 'code-agent-org-cmux--call)
                            (lambda (subcmd &rest args)
                              (push (cons subcmd args) calls)
+                             ;; Content-driven (not poll-count-coupled): the
+                             ;; post-launch screen depends on whether the launch
+                             ;; command has been sent, not on an exact capture #.
+                             (when (and (string= subcmd "send")
+                                        (let ((txt (car (last args))))
+                                          (and (stringp txt)
+                                               (string-match-p "claude-workspace\\|claude " txt))))
+                               (setq launched t))
                              (cond
                               ((string= subcmd "tree")
                                "workspace workspace:mock-1 \"Test\"")
                               ((string= subcmd "capture-pane")
                                (setq capture-count (1+ capture-count))
                                (cond
+                                ;; Initial state detection: Claude running.
                                 ((= capture-count 1) "  Claude Code\n  -- INSERT --")
-                                ((= capture-count 2) "jingtao@mac ~/p $ ")
-                                ;; 3rd = post-launch — healthy TUI, no
-                                ;; "No conversation found" banner.
-                                (t "  Claude Code\n  -- INSERT -- bypass permissions on")))
+                                ;; Post-launch: resume SUCCEEDED → healthy Claude
+                                ;; TUI, no "No conversation found" banner.
+                                (launched "  Claude Code\n  -- INSERT -- bypass permissions on")
+                                ;; Between /exit and launch: a shell prompt.
+                                (t "jingtao@mac ~/p $ ")))
                               (t "ok"))))
                           ((symbol-function 'sleep-for) (lambda (&rest _) nil))
                           ((symbol-function 'run-at-time) (lambda (&rest _) nil)))
@@ -3106,6 +3148,55 @@ test
       (should calls)
       (should (member "0.5" (cdar calls)))
       (should (member "Building..." (cdar calls))))))
+
+;;; ============================================================================
+;;; Restart robustness regressions (2026-06 edo-dev2 failure)
+;;; ============================================================================
+
+(ert-deftest test-cmux-surface-call-includes-workspace ()
+  "`--surface-call' MUST pass --workspace.
+
+Root cause of the 2026-06 edo-dev2 restart failure: send/send-key with
+only --surface fail (\"Surface is not a terminal\") on a workspace cmux
+is not currently rendering, so the /exit Return never submitted and the
+launch command piled into the running agent's input."
+  :tags '(:cmux-e2e :fast)
+  (test-cmux--with-mock
+    (code-agent-org-cmux--surface-call "workspace:6" "send-key" "surface:9" "Return")
+    (let* ((call (car test-cmux--mock-calls))
+           (subcommand (car call))
+           (args (cdr call)))
+      (should (equal subcommand "send-key"))
+      (should (member "--workspace" args))
+      (should (member "workspace:6" args))
+      (should (member "--surface" args))
+      (should (member "surface:9" args))
+      (should (member "Return" args)))))
+
+(ert-deftest test-cmux-surface-state-stale-frame-reads-as-shell ()
+  "After Claude exits, its TUI frame lingers in the buffer above the shell
+prompt.  Classifying the LIVE BOTTOM (short capture) must read 'shell, not
+'claude — the 2026-06 false-abort came from an 8-line capture re-including
+the lingering `bypass permissions' line."
+  :tags '(:cmux-e2e :fast)
+  ;; Live bottom after /exit: exit banner + shell prompt, no TUI markers.
+  (should (eq 'shell
+              (code-agent-org-cmux--surface-state
+               "Resume this session with:\nclaude --resume \"x\"\n  ~/p  on  jt   ❯ ")))
+  ;; Live Claude TUI bottom -> 'claude.
+  (should (eq 'claude
+              (code-agent-org-cmux--surface-state
+               "  5h[..]\n  -- INSERT -- ⏵⏵ bypass permissions on · 1 shell"))))
+
+(ert-deftest test-cmux-shell-ready-p-via-exit-banner ()
+  "`--shell-ready-p' recognises Claude's exit banner as a shell signal even
+when the starship `❯' input line is trimmed from the capture; and never
+reports a live Claude TUI as shell-ready."
+  :tags '(:cmux-e2e :fast)
+  (should (code-agent-org-cmux--shell-ready-p
+           "❯ /exit\n  ⎿  Bye!\nResume this session with:\nclaude --resume \"x\""))
+  (should-not (code-agent-org-cmux--shell-ready-p
+               "  -- INSERT -- ⏵⏵ bypass permissions on · 1 shell")))
 
 (provide 'test-cmux-e2e-simulated)
 

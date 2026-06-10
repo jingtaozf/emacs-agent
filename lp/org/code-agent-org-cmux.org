@@ -1056,7 +1056,7 @@ PROJECT-ROOT the working directory."
   (ignore project-root)
   (let* ((prop-args (code-agent-org-terminal-find-session-property "CLAUDE_EXTRA_ARGS"))
          (user-extra-args (append code-agent-org-cmux-extra-args
-                                  (when prop-args (split-string prop-args))))
+                                  (when prop-args (split-string-shell-command prop-args))))
          ;; Surface ENV_FILE-derived ANTHROPIC_MODEL / CLAUDE_CODE_EFFORT_LEVEL
          ;; as CLI flags — env-only injection loses to ~/.claude/settings.json,
          ;; CLI flags beat settings.json.  See `--env-cli-fallback-args'.
@@ -1127,7 +1127,7 @@ Used when `code-agent-org-cmux-agent-type' is `claude'."
   (ignore project-root)
   (let* ((prop-args (code-agent-org-terminal-find-session-property "CLAUDE_EXTRA_ARGS"))
          (user-extra-args (append code-agent-org-cmux-extra-args
-                                  (when prop-args (split-string prop-args))))
+                                  (when prop-args (split-string-shell-command prop-args))))
          ;; ENV_FILE → CLI flag fallback (see legacy builder above).
          (cli-flag-args (code-agent-org-cmux--env-cli-fallback-args
                          user-extra-args))
@@ -1207,7 +1207,7 @@ etc.) are automatically filtered from CLAUDE_EXTRA_ARGS and
   (ignore project-root)
   (let* ((prop-args (code-agent-org-terminal-find-session-property "CLAUDE_EXTRA_ARGS"))
          (raw-extra (append code-agent-org-cmux-extra-args
-                            (when prop-args (split-string prop-args))))
+                            (when prop-args (split-string-shell-command prop-args))))
          ;; Strip Claude-only flags before passing to Copilot
          (all-extra (code-agent-org-cmux--filter-copilot-args raw-extra))
          (extra (mapconcat #'shell-quote-argument all-extra " "))
@@ -1244,7 +1244,7 @@ Claude Code-specific flags are automatically filtered from extra args."
   (ignore project-root)
   (let* ((prop-args (code-agent-org-terminal-find-session-property "CLAUDE_EXTRA_ARGS"))
          (raw-extra (append code-agent-org-cmux-extra-args
-                            (when prop-args (split-string prop-args))))
+                            (when prop-args (split-string-shell-command prop-args))))
          ;; Reuse copilot's filter — same Claude-only flags to strip
          (all-extra (code-agent-org-cmux--filter-copilot-args raw-extra))
          (extra (mapconcat #'shell-quote-argument all-extra " "))
@@ -1276,7 +1276,7 @@ stripped, like the opencode/copilot launchers."
   (ignore project-root)
   (let* ((prop-args (code-agent-org-terminal-find-session-property "CLAUDE_EXTRA_ARGS"))
          (raw-extra (append code-agent-org-cmux-extra-args
-                            (when prop-args (split-string prop-args))))
+                            (when prop-args (split-string-shell-command prop-args))))
          (all-extra (code-agent-org-cmux--filter-copilot-args raw-extra))
          (extra (mapconcat #'shell-quote-argument all-extra " "))
          (cli-session
@@ -2630,28 +2630,77 @@ Used by ``restart'' to decide between three states:
            (string-match-p "shift+tab to cycle" screen)
            (string-match-p "✻ Welcome to Claude" screen))))
 
+(defun code-agent-org-cmux--shell-ready-p (screen)
+  "Non-nil when SCREEN's live bottom is a shell, not the Claude TUI.
+
+Two complications drive this:
+  * Claude Code does not clear the screen on exit, so its last TUI frame
+    (=-- INSERT --=, =bypass permissions on=) lingers in the captured
+    buffer ABOVE the new shell prompt — =--claude-tui-p= alone would keep
+    matching it.  Callers must pass a SHORT capture (live bottom ~4 lines)
+    so the lingering frame is out of view.
+  * The starship prompt's =❯= input line is often an empty trailing line
+    the capture trims, so =--shell-prompt-p= may miss it.  Claude's exit
+    banner =Resume this session with:= is a reliable positive signal that
+    it just dropped to a shell."
+  (and screen
+       (not (code-agent-org-cmux--claude-tui-p screen))
+       (or (code-agent-org-cmux--shell-prompt-p screen)
+           (string-match-p "Resume this session with:" screen))))
+
 (defun code-agent-org-cmux--surface-state (screen)
   "Classify SCREEN content as ='claude=, ='shell=, or ='unknown=.
 
-Order matters: a screen that ends in =$= but also contains
-=-- INSERT --= is most likely the *previous* shell line scrolled
-above a freshly-started Claude — checking the TUI markers first
-catches that case correctly."
+Order matters: check the Claude TUI markers first — a freshly-started
+Claude can have a stale shell =$=/=❯= line scrolled above it.  Pass a
+SHORT capture (live bottom ~4 lines) so an exited agent's lingering TUI
+frame doesn't read as ='claude=."
   (cond
    ((code-agent-org-cmux--claude-tui-p screen) 'claude)
-   ((code-agent-org-cmux--shell-prompt-p screen) 'shell)
+   ((code-agent-org-cmux--shell-ready-p screen) 'shell)
    (t 'unknown)))
 
+(defun code-agent-org-cmux--surface-call (ws-ref subcommand surface-id &rest rest)
+  "Run cmux SUBCOMMAND (\"send\" / \"send-key\") on SURFACE-ID, scoped to
+WS-REF via --workspace.
+
+`send-key' fails with \"Surface is not a terminal\" when the target
+surface lives in a workspace cmux is not currently rendering — the key
+event has no focused webview to deliver to.  Passing --workspace routes
+it to the right workspace's surface regardless of GUI focus.  (`send' of
+literal text tolerates the omission; `send-key' does not — so the
+restart's /exit Return silently no-op'd on a background workspace and the
+launch command piled into the running agent's input.  See the 2026-06
+edo-dev2 restart failure.)"
+  (apply #'code-agent-org-cmux--call
+         subcommand
+         (append (when ws-ref (list "--workspace" ws-ref))
+                 (list "--surface" surface-id)
+                 rest)))
+
 (defun code-agent-org-cmux--wait-for-shell (surface-id max-seconds)
-  "Poll SURFACE-ID once per second until a shell prompt appears or MAX-SECONDS elapse.
-Returns t when the prompt was seen, nil on timeout."
+  "Poll SURFACE-ID once per second until the Claude TUI has left the live
+bottom for two consecutive checks, or MAX-SECONDS elapse.  Returns t when
+the agent is gone (we're at a shell), nil on timeout.
+
+Why \"TUI gone\", not \"shell prompt seen\": Claude's exit messages vary
+(=Bye!=/=Goodbye!=/=See ya!=) and the =Resume this session with:= banner
+can scroll out of a small window, while the starship =❯= input line is
+often an empty trailing line the capture trims — so positively matching a
+shell prompt is flaky.  The *absence* of the Claude TUI markers from the
+live bottom (captured small, 3 lines, so the exited agent's lingering
+frame is out of view) is the robust signal.  Two consecutive clear polls
+guard against the transient flicker while the slash-command menu closes."
   (let ((attempts 0)
+        (clear-streak 0)
         (seen nil))
     (while (and (not seen) (< attempts max-seconds))
       (sleep-for 1)
-      (when (code-agent-org-cmux--shell-prompt-p
-             (code-agent-org-cmux--capture-screen surface-id 3))
-        (setq seen t))
+      (let ((screen (code-agent-org-cmux--capture-screen surface-id 3)))
+        (if (and screen (not (code-agent-org-cmux--claude-tui-p screen)))
+            (progn (cl-incf clear-streak)
+                   (when (>= clear-streak 2) (setq seen t)))
+          (setq clear-streak 0)))
       (cl-incf attempts))
     seen))
 
@@ -2679,11 +2728,12 @@ captured window if the user's prompt occupies multiple lines."
   (let ((screen (code-agent-org-cmux--capture-screen surface-id 15)))
     (and screen (string-match-p "No conversation found" screen))))
 
-(defun code-agent-org-cmux--recover-from-resume-failure (surface-id launch-cmd)
+(defun code-agent-org-cmux--recover-from-resume-failure (surface-id launch-cmd ws-ref)
   "When the just-issued LAUNCH-CMD with =--resume= bounced off a stale
 session id, drop the stale property and re-send a resume-free command.
 
-SURFACE-ID is the cmux surface to drive.  Only call this after sending
+SURFACE-ID is the cmux surface to drive; WS-REF scopes the send so it
+reaches a surface in a non-focused workspace.  Only call this after sending
 LAUNCH-CMD and waiting long enough for Claude to print its
 =No conversation found= banner if applicable (~3s in practice).
 
@@ -2701,11 +2751,15 @@ property delete in some org versions."
     (code-agent-org-cmux--wait-for-shell surface-id 5)
     (let ((fresh-cmd (code-agent-org-cmux--launch-cmd-without-resume
                       launch-cmd)))
-      (code-agent-org-cmux--call "send" "--surface" surface-id
-                                 (concat fresh-cmd "\n")))))
+      (code-agent-org-cmux--surface-call ws-ref "send" surface-id
+                                         (concat fresh-cmd "\n")))))
 
-(defun code-agent-org-cmux--post-restart-ide-setup (surface-id workspace-session-id)
+(defun code-agent-org-cmux--post-restart-ide-setup (surface-id workspace-session-id ws-ref)
   "Wire the IDE server + send =/ide= to SURFACE-ID after a restart.
+
+WS-REF scopes the delayed =/ide= send; it is captured into the timer
+closure because by the time the 10s timer fires, point has left the
+session heading and `--session-workspace-ref' could no longer resolve it.
 
 Does nothing when WORKSPACE-SESSION-ID is nil (no IDE bridge expected).
 The =/ide= send is delayed 10s so Claude finishes booting before it
@@ -2718,12 +2772,12 @@ function's body — this is one of its larger conceptual phases."
      (or (code-agent-org-get-project-root) default-directory)
      workspace-session-id)
     (run-at-time 10 nil
-      (lexical-let ((sid surface-id))
+      (lexical-let ((sid surface-id) (wsr ws-ref))
         (lambda ()
           (condition-case nil
               (progn
-                (code-agent-org-cmux--call "send" "--surface" sid "/ide")
-                (code-agent-org-cmux--call "send-key" "--surface" sid "Return"))
+                (code-agent-org-cmux--surface-call wsr "send" sid "/ide")
+                (code-agent-org-cmux--surface-call wsr "send-key" sid "Return"))
             (error nil)))))))
 
 (defun code-agent-org-cmux-restart ()
@@ -2755,8 +2809,11 @@ must drive the fresh surface rather than the stale one."
                         (buffer-file-name)
                         workspace-session-id
                         (or (code-agent-org-get-project-root) default-directory)))
-           (screen (code-agent-org-cmux--capture-screen surface-id 8))
-           (state  (code-agent-org-cmux--surface-state screen)))
+           (screen (code-agent-org-cmux--capture-screen surface-id 4))
+           (state  (code-agent-org-cmux--surface-state screen))
+           ;; Resolved once here while point is on the session heading; threaded
+           ;; into every send/send-key so they reach a non-focused workspace.
+           (ws-ref (code-agent-org-cmux--session-workspace-ref)))
       ;; 1. Classify the surface — claude TUI, shell prompt, or
       ;; unknown.  Only the shell-prompt case skips the /exit step.
       ;; Unknown defaults to "treat as claude" so we err toward
@@ -2770,25 +2827,42 @@ must drive the fresh surface rather than the stale one."
 sending /exit as a conservative default.  If something else is in the \
 foreground (vim, less, …) this may be a no-op."
            surface-id))
+        ;; Interrupt any in-progress stream and clear stray input first, so the
+        ;; /exit slash command is actually submitted instead of piling into the
+        ;; agent's multiline input buffer (the 2026-06 edo-dev2 failure mode).
+        ;; ctrl+u clears the input line so a stray char can't prefix "/exit"
+        ;; (the 2026-06 edo-dev2 root cause: input held "t", so "/exit"
+        ;; submitted as the prompt "t/exit" and was never recognised as a
+        ;; command).  Do NOT send Escape first — empirically ESC immediately
+        ;; before ctrl+u corrupts the Claude TUI input (injects a stray char
+        ;; and the /exit no longer registers).
+        (code-agent-org-cmux--surface-call ws-ref "send-key" surface-id "ctrl+u")
+        (sleep-for 1)
         ;; Claude Code (or unknown) — send /exit and wait
         (message "Sending /exit to Claude Code...")
         (condition-case nil
             (progn
-              (code-agent-org-cmux--call "send" "--surface" surface-id "/exit")
-              (code-agent-org-cmux--call "send-key" "--surface" surface-id "Return"))
+              (code-agent-org-cmux--surface-call ws-ref "send" surface-id "/exit")
+              (code-agent-org-cmux--surface-call ws-ref "send-key" surface-id "Return"))
           (error nil))
-        (code-agent-org-cmux--wait-for-shell surface-id 15))
+        ;; Do NOT launch into a still-running agent: if /exit didn't drop us to a
+        ;; real shell within the window, abort instead of typing the launch
+        ;; command into the agent's prompt.
+        (unless (code-agent-org-cmux--wait-for-shell surface-id 15)
+          (user-error
+           "Restart aborted: surface %s never reached a shell after /exit (agent busy or wouldn't quit).  Not launching — exit it manually, then retry."
+           surface-id)))
       ;; 2. Launch new Claude Code in the same tab
       (message "Launching fresh Claude Code...")
-      (code-agent-org-cmux--call "send" "--surface" surface-id
-                             (concat launch-cmd "\n"))
+      (code-agent-org-cmux--surface-call ws-ref "send" surface-id
+                                         (concat launch-cmd "\n"))
       ;; 2a. Resume-failure recovery — see helper docstring.  Claude
       ;; exits within ~1s on a bad session id, so a 2-3s settle is
       ;; enough for the banner.  Only kick the recovery path when we
       ;; actually used --resume; otherwise skip the round trip.
       (when (string-match-p " --resume " launch-cmd)
         (sleep-for 3)
-        (code-agent-org-cmux--recover-from-resume-failure surface-id launch-cmd))
+        (code-agent-org-cmux--recover-from-resume-failure surface-id launch-cmd ws-ref))
       ;; 3. Rename tab to active story (cmux may reset title on relaunch)
       (let ((ws-ref (code-agent-org-cmux--session-workspace-ref))
             (tab-title (code-agent-org-terminal--tab-title)))
@@ -2803,7 +2877,7 @@ foreground (vim, less, …) this may be a no-op."
         (code-agent-org-session-put sk :verbose-surface-id nil)
         (code-agent-org-cmux--start-verbose surface-id sk))
       ;; 5. Ensure IDE server and send /ide after ready
-      (code-agent-org-cmux--post-restart-ide-setup surface-id workspace-session-id)
+      (code-agent-org-cmux--post-restart-ide-setup surface-id workspace-session-id ws-ref)
       (message "Claude Code restarting in surface %s" surface-id))))
 
 (defun code-agent-org-cmux-cancel ()

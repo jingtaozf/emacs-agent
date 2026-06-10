@@ -30,6 +30,21 @@
 
 ## Recent lessons(逆序)
 
+### 2026-06-10 — restart 在非聚焦 cmux workspace 上不重启(send-key/输入/检测三连 + 测试 count 耦合)
+
+- mistake: 以为修好命令内容(#1/#2)+ build-launch E2E 就够了,误报 "verified end-to-end";实际在**非聚焦** workspace 上 restart 根本没退出 Claude——干净命令被打进运行中的 agent。用户纠正 "it doesn't restart"。
+- context: edo dev2(非 GUI 聚焦)。三个叠加 bug:(a) restart 的 send-key 不带 `--workspace` → 非聚焦 workspace 上 `Surface is not a terminal`,`/exit` 的 Return 没提交(send 文本可省、send-key 不可);(b) 输入行残留字符使 `/exit` 拼成 `t/exit` 不被识别(需 `ctrl+u` 清行);(c) 退出检测被 stale TUI 帧骗(Claude 退出不清屏,`bypass permissions` 残留 scrollback;`❯` 既是 shell 也是 Claude 输入框)。另:`Escape` 在 ctrl+u 前会污染 Claude 输入。
+- rule: 驱动 cmux 终端 TUI——send-key 必带 `--workspace`;清输入用 `ctrl+u` 不是 Escape;判"退到 shell"用"Claude TUI 连续 N 次从**底部**消失"(小窗 capture 避开残帧),别正向匹配 prompt(starship `❯` 会被截、退出语多变);检测失败时 **abort 而非盲发**命令。
+- test trap: e2e mock 用精确 `capture-count` 编排,会被轮询次数变化打破 → 改**内容/状态驱动**(按是否已发 launch 命令决定屏幕)。
+- fix shipped (2026-06-10): `--surface-call`(注入 --workspace)、`ctrl+u`、去 Escape、`--wait-for-shell` 改 2-连续-clear-poll、`--shell-ready-p`+exit-banner、capture 8→4、abort-if-not-shell。回归测试 3 个 + 修 2 个 count-coupled 测试。live E2E(edo dev2):旧 Claude 退出 → 全新 Claude 启动 → /ide 连上 Emacs。
+
+### 2026-06-09 — restart 启动命令被两个 bug 污染(propertized system-prompt + EXTRA_ARGS 裸切)
+
+- mistake: 报 bug 后倾向直接写 batch unit test + 修;但其中一个 bug(系统提示带文本属性,序列化成 `#("..." props)`)**只在 fontify 过的 live org buffer 里发作**,批处理 ert 复现不出来。用户纠正:先基于 `tests/e2e/org` 在 live Emacs E2E 复现再修。
+- context: edo dev3 `R Restart`;`code-agent-org--collect-system-prompts` 用 `match-string`(在 fontified buffer 里带 face/org-indent 属性),经 MCP evalElisp 序列化进 `--system-prompt`;并 `code-agent-org-cmux.org` 五处 `(split-string prop-args)` 把 `--settings '{"ultracode": true}'` 按空格切断 → Claude "Settings file not found" 退出。
+- rule: 依赖 buffer 渲染状态(fontify/org-indent)的 bug,先用 `tests/e2e/org` + evalElisp 在 live Emacs E2E 复现;批处理 ert 用 `put-text-property` 模拟 fontify 才能锁回归。凡从 org buffer 取出、要外传(MCP/shell)的文本,一律 `*-no-properties` / `substring-no-properties`。
+- fix shipped (2026-06-09): `match-string`→`match-string-no-properties` + `--build-system-prompt` 末尾 `substring-no-properties`;`(split-string prop-args)`→`(split-string-shell-command prop-args)`(×5)。回归测试 3 个 + fixture `tests/e2e/org/restart-extra-args-test.org`。
+
 ### 2026-04-30 — `AGENTS.md` 被错误 commit
 
 - mistake: `AGENTS.md` 是 `opencode_workspace.py` 的 ephemeral session inject(头有 `auto-removed on exit`),但 `atexit` cleanup 把"被污染的 original"写回去,导致 self-perpetuating 污染 + 被 git commit。文件长到 736 行(30K),严重 context rot。

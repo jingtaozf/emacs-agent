@@ -128,8 +128,8 @@ Usage in org file:
             (heading-re "^\\(\\*+\\) +\\(.*\\):system_prompt:"))
         ;; Use regex search instead of org-map-entries to avoid cache issues
         (while (re-search-forward heading-re nil t)
-          (let* ((stars (match-string 1))
-                 (heading-text (match-string 2))
+          (let* ((stars (match-string-no-properties 1))
+                 (heading-text (match-string-no-properties 2))
                  (heading (string-trim (replace-regexp-in-string ":.*$" "" heading-text)))
                  (beg (save-excursion
                         (forward-line 1)
@@ -185,7 +185,13 @@ Combines:
     (let ((parts (append file-prompts
                          (delq nil (list elisp-hint org-prompts line-width-hint)))))
       (when parts
-        (string-join parts "\n\n"))))))
+        ;; Strip text properties: when this runs in a fontified live org
+        ;; buffer, heading/body fragments can carry font-lock + org-indent
+        ;; properties.  The launcher fetches this string over MCP evalElisp,
+        ;; which serialises propertized strings as `#("..." props)` — that
+        ;; read-syntax then leaks verbatim into the `--system-prompt` argv,
+        ;; corrupting the shell command.  Plain text is the contract here.
+        (substring-no-properties (string-join parts "\n\n")))))))
 #+END_SRC
 
 * Provide

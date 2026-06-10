@@ -1,0 +1,49 @@
+#+TITLE: E2E: restart launch-command integrity
+
+Regression fixture for two restart bugs found 2026-06 on the edo dev3
+cmux workspace (see =lp/org/code-agent-org-cmux.org= restart + the
+=code-agent-org--collect-system-prompts= leak).
+
+The user-visible symptom: =code-agent-menu R= (restart) produced a
+corrupted launch command on the cmux surface —
+
+: ... --system-prompt #("...system prompt..." 5893 5908 (face org-level-1) ...) --resume <id> --settings '{"ultracode": true}' --ide --chrome
+
+→ Claude rejected =--settings= ("Settings file not found: '{"ultracode:")
+and never started; the follow-up =/ide= landed on the shell.
+
+Two independent root causes, both reproduced E2E against this fixture:
+
+1. *CLAUDE_EXTRA_ARGS split* — the launch builders parsed the property
+   with plain =(split-string prop-args)=, which splits the quoted JSON
+   =--settings '{"ultracode": true}'= at the space into three tokens.
+   Fixed by =split-string-shell-command= (quote-aware).
+
+2. *system-prompt property leak* — =--collect-system-prompts= built the
+   heading from =(match-string 2)=, which carries font-lock + org-indent
+   text properties in a live fontified buffer.  The launcher fetches the
+   prompt over MCP =evalElisp=, which serialises a propertized string as
+   =#("..." props)=; that read-syntax leaked into =--system-prompt=.
+   Fixed by =match-string-no-properties= + a =substring-no-properties=
+   guard on the build result.
+
+* E2E Restart Extra-Args
+:PROPERTIES:
+:CMUX_WORKSPACE: e2e-restart-extra-args
+:CLAUDE_SESSION_ID: sdd-e2e-restart-args-001
+:CLAUDE_BACKEND: cmux
+:CLAUDE_EXTRA_ARGS: --settings '{"ultracode": true}'
+:END:
+
+** regression story
+
+*** System Prompt :system_prompt:
+You are a regression-test fixture for restart launch-command integrity.
+Keep responses short.
+
+*** Workflow :sdd:
+
+**** Probe :claude_chat:
+#+begin_src ai
+echo regression
+#+end_src

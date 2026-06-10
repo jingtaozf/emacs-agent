@@ -408,6 +408,48 @@ Response sections are at the same level as instructions (siblings)."
       ;; Should include line width hint
       (should (string-match-p "170 characters" prompt)))))
 
+(ert-deftest test-code-agent-org-collect-system-prompts-strips-properties ()
+  "`--collect-system-prompts' must return property-free text even when the
+source buffer carries font-lock / org-indent text properties on headings.
+
+A propertized result serialises over MCP `evalElisp' as `#(\"...\" props)',
+which leaked verbatim into the launcher's `--system-prompt' argv and
+corrupted the restart launch command (2026-06 edo-dev3 failure).
+Regression for the `match-string' -> `match-string-no-properties' fix."
+  :tags '(:unit :fast :stable :isolated :org :context)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Guidelines :system_prompt:\nUse absolute imports.\n")
+    ;; Batch buffers are not fontified, so simulate it: put a face on the
+    ;; heading line so a leaky `match-string' would carry it through.
+    (goto-char (point-min))
+    (put-text-property (line-beginning-position) (line-end-position)
+                       'face 'org-level-1)
+    (let ((sp (code-agent-org--collect-system-prompts)))
+      (should (stringp sp))
+      (should (string-match-p "Guidelines" sp))
+      ;; No text properties anywhere -> serialises as a plain "..." string.
+      (let ((clean t))
+        (dotimes (i (length sp))
+          (when (text-properties-at i sp) (setq clean nil)))
+        (should clean))
+      (should-not (string-match-p "#(" (format "%S" sp))))))
+
+(ert-deftest test-code-agent-org-build-system-prompt-is-property-free ()
+  "`--build-system-prompt' result must be property-free (the
+`substring-no-properties' guard) so the MCP-transported system prompt
+never serialises as `#(...)' into the launcher's `--system-prompt'."
+  :tags '(:unit :fast :stable :isolated :org :context)
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Guidelines :system_prompt:\nBe concise.\n")
+    (goto-char (point-min))
+    (put-text-property (line-beginning-position) (line-end-position)
+                       'face 'org-level-1)
+    (let ((sp (code-agent-org--build-system-prompt)))
+      (should (stringp sp))
+      (should-not (string-match-p "#(" (format "%S" sp))))))
+
 ;;; Permission Mode Tests
 
 (ert-deftest test-code-agent-org-get-permission-mode ()
