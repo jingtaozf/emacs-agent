@@ -2805,10 +2805,11 @@ must drive the fresh surface rather than the stale one."
          (workspace-session-id (code-agent-org-terminal-find-session-property "CLAUDE_SESSION_ID")))
     (unless surface-id
       (user-error "No cmux session for this story"))
-    (let* ((launch-cmd (code-agent-org-cmux--build-launch-command
+    (let* ((project-root (or (code-agent-org-get-project-root) default-directory))
+           (launch-cmd (code-agent-org-cmux--build-launch-command
                         (buffer-file-name)
                         workspace-session-id
-                        (or (code-agent-org-get-project-root) default-directory)))
+                        project-root))
            (screen (code-agent-org-cmux--capture-screen surface-id 4))
            (state  (code-agent-org-cmux--surface-state screen))
            ;; Resolved once here while point is on the session heading; threaded
@@ -2852,10 +2853,20 @@ foreground (vim, less, …) this may be a no-op."
           (user-error
            "Restart aborted: surface %s never reached a shell after /exit (agent busy or wouldn't quit).  Not launching — exit it manually, then retry."
            surface-id)))
-      ;; 2. Launch new Claude Code in the same tab
+      ;; 2. Launch new Claude Code in the same tab.
+      ;; Prepend ``cd <project-root>'' so the launcher resolves the right
+      ;; working directory.  Unlike the initial launch (which sets cwd via
+      ;; ``new-workspace --cwd project-root''), restart sends the command
+      ;; into the surface's *existing* shell, whose cwd may have drifted —
+      ;; e.g. a cmux app restart restores the surface at $HOME.  The python
+      ;; launcher takes ``project_root = os.getcwd()'', so a drifted shell
+      ;; silently starts the agent in the wrong directory.  The ``cd'' makes
+      ;; restart cwd-correct regardless of the shell's current directory.
       (message "Launching fresh Claude Code...")
-      (code-agent-org-cmux--surface-call ws-ref "send" surface-id
-                                         (concat launch-cmd "\n"))
+      (code-agent-org-cmux--surface-call
+       ws-ref "send" surface-id
+       (concat "cd " (shell-quote-argument (expand-file-name project-root))
+               " && " launch-cmd "\n"))
       ;; 2a. Resume-failure recovery — see helper docstring.  Claude
       ;; exits within ~1s on a bad session id, so a 2-3s settle is
       ;; enough for the banner.  Only kick the recovery path when we
