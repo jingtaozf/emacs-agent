@@ -10,13 +10,12 @@ git clone https://github.com/jingtaozf/literate-agent.git ~/projects/literate-ag
 claude --plugin-dir ~/projects/literate-agent ...
 ```
 
-The `@`-import below pulls in 23 rules + language hints +
-build-command conventions from literate-agent:
-
-@~/projects/literate-agent/CLAUDE.md
-
-Override `LITERATE_AGENT_HOME` if cloned elsewhere. Project-specific
-overrides + code-agent-only rules continue below.
+LP rules load via `.claude/rules/literate-agent` — a gitignored,
+machine-local symlink to `~/projects/literate-agent/rules/` (set up once:
+`ln -s ~/projects/literate-agent/rules .claude/rules/literate-agent`).
+Path-scoped rules load only when editing matching files; the rest every
+session. Override `LITERATE_AGENT_HOME` if cloned elsewhere.
+Project-specific overrides + code-agent-only rules continue below.
 
 ## Commands
 
