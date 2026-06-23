@@ -1060,6 +1060,267 @@ blockers, but each is worth revisiting when the relevant pain shows up.
    =~/.claude/mcp.json=, and verifies =OTel ↔ Phoenix= connectivity would
    shorten the first-time setup from a checklist to one =M-x=.
 
+* Multi-Backend Trace Export — Future Design
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-design
+:END:
+
+*Status: design only — no code written yet.* This section is the
+proposal for making the OTLP destination a *configurable backend*
+chosen from a registry, so the same Emacs↔bridge↔collector stack can
+ship spans to local Arize Phoenix (auto-started) /or/ an external
+Langfuse instance (authenticated), with *exactly one backend active at
+a time*, selected by Emacs configuration.
+
+It supersedes the single hard-coded =http://localhost:6006/v1/traces=
+assumption baked into =otel_setup.py= and the lone
+=code-agent-trace--phoenix-service= singleton.
+
+** Goal and locked decisions
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-decisions
+:END:
+
+| Decision | Choice | Why |
+|----------+--------+-----|
+| Concurrency | *One active backend at a time*, config-selected — NOT fan-out | User requirement; avoids double-export latency on =span.end()= |
+| Config owner | *Emacs* — a =defcustom= registry + an active-backend symbol | "OTEL config in the Emacs end"; one authoring surface |
+| Phoenix | Local, lifecycle-managed (keep auto-start) | It is a local single process we own |
+| Langfuse | External, *no* lifecycle (only endpoint + auth) | It already runs as a shared/remote service |
+| Span semantics | Unchanged — OpenInference attrs kept | Langfuse ingests =input.value= / =output.value= verbatim; =openinference.*= attrs are harmless if unmapped |
+
+Non-goals: simultaneous multi-export, per-block backend switching,
+managing Langfuse's lifecycle, rewriting the OpenInference tagging.
+
+** The crux: how config reaches *both* Python entry points
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-config-delivery
+:END:
+
+The OTLP export (endpoint + auth header) lives Python-side in
+=otel_setup.create_exporter()=. *Two* Python processes call it, and
+they have different launchers:
+
+| Process | Launched by | Flow |
+|---------+-------------+------|
+| =otel_bridge.py= | Emacs (=code-agent-trace--bridge-service=) | A (=C-c C-c=) |
+| =workspace_bridge.py= | the Claude CLI hook chain (cmux / terminal) — *not Emacs* | B (terminal-direct) |
+
+So Emacs cannot deliver config purely by injecting environment into
+the bridge subprocess — the Flow-B hook chain never inherits that env.
+The design therefore has Emacs *materialize* the active backend to a
+small JSON sidecar in the already-shared status dir
+(=code-agent-trace-context-dir= = =STATUS_DIR= = =/tmp/code-agent-status/=),
+and =otel_setup.py= resolves the active backend through a precedence
+chain that any Python process can evaluate independently:
+
+#+begin_example
+otel_setup.resolve_active_backend() precedence (first hit wins):
+
+  1. CLAUDE_OTEL_ENDPOINT (+ CLAUDE_OTEL_HEADERS)   ← explicit env override (CI, debugging)
+  2. /tmp/code-agent-status/active-backend.json      ← written by Emacs (Flow A + B when Emacs ran)
+  3. LANGFUSE_HOST / _PUBLIC_KEY / _SECRET_KEY env    ← terminal-only session, Emacs never ran, langfuse desired
+  4. builtin default: phoenix @ localhost:6006        ← preserves today's behaviour
+#+end_example
+
+Layer 3 is what keeps a pure-terminal Flow-B session working with
+Langfuse even though Emacs (which owns the registry) never executed to
+write the sidecar.
+
+** Architecture (post-change)
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-arch
+:END:
+
+#+begin_example
+Emacs                                       Python                         Collector
+─────                                       ──────                         ─────────
+code-agent-trace-backends  (registry)
+code-agent-trace-active-backend = 'langfuse
+        │
+        │ on activation / before bridge spawn
+        ▼
+  writes  /tmp/code-agent-status/active-backend.json
+        │                                   ▲
+        │                                   │ resolve_active_backend()
+        │ POST span/start|end ─────────────▶│
+        └──────────────────────────▶ otel_bridge.py ──OTLP+auth──▶  Phoenix :6006   (if active=phoenix, local, auto-start)
+                                     workspace_bridge.py ──OTLP+auth──▶  Langfuse /api/public/otel/v1/traces  (if active=langfuse, external)
+#+end_example
+
+The bridge (=:7331=) is *always local* regardless of backend — only
+its downstream OTLP target changes.
+
+** Elisp backend registry (the authoring source)
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-registry
+:END:
+
+Two new defcustoms replace =code-agent-trace-phoenix-url= and the
+hard-coded phoenix service. Secrets are referenced by *env-var name*
+(resolved via =getenv= at sidecar-write time), never stored literally
+— per =.claude/rules/secrets.md=.
+
+#+begin_example
+(defcustom code-agent-trace-backends
+  '((phoenix
+     :otlp-endpoint "http://localhost:6006/v1/traces"
+     :ui-url        "http://localhost:6006"
+     :health-url    "http://localhost:6006/health"
+     :remote        nil
+     :autostart     ("uv" "run" "--extra" "phoenix"
+                     "python" "-m" "phoenix.server.main" "serve")
+     :port          6006)
+    (langfuse
+     ;; endpoint = <host>/api/public/otel/v1/traces, host from env
+     :otlp-endpoint-host-env "LANGFUSE_HOST"
+     :otlp-endpoint-path     "/api/public/otel/v1/traces"
+     :ui-url-env             "LANGFUSE_HOST"
+     :public-key-env         "LANGFUSE_PUBLIC_KEY"
+     :secret-key-env         "LANGFUSE_SECRET_KEY"
+     :remote                 t
+     :autostart              nil      ; external — Emacs never starts it
+     :port                   nil))
+  "Registry of available trace backends. Exactly one is active.")
+
+(defcustom code-agent-trace-active-backend 'phoenix
+  "Symbol naming the active backend in `code-agent-trace-backends'.")
+#+end_example
+
+Per-entry slot meaning:
+
+| Slot | Meaning |
+|------+---------|
+| =:otlp-endpoint= / =:otlp-endpoint-host-env= + =:otlp-endpoint-path= | OTLP =/v1/traces= URL, literal or env-derived |
+| =:public-key-env= / =:secret-key-env= | env-var *names*; Emacs builds =Basic base64(pk:sk)= |
+| =:ui-url= / =:ui-url-env= | what =open-active-backend= browses to |
+| =:remote= | t → use =BatchSpanProcessor= (network); nil → =SimpleSpanProcessor= (local) |
+| =:autostart= | command list for local lifecycle; nil → external, never spawned |
+| =:port= | liveness probe + double-spawn guard (existing =code-agent-trace-service= slot) |
+
+** The materialized sidecar
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-sidecar
+:END:
+
+Emacs writes this when the active backend changes and again right
+before spawning the bridge (so a fresh boot is correct):
+
+#+begin_example
+/tmp/code-agent-status/active-backend.json
+{
+  "name": "langfuse",
+  "otlp_endpoint": "https://langfuse.example.internal/api/public/otel/v1/traces",
+  "headers": { "Authorization": "Basic cGstbGYtLi4uOnNrLWxmLS4uLg==" },
+  "remote": true
+}
+#+end_example
+
+Secret hygiene: the file contains a resolved Basic header, so it is
+sensitive. Mitigations in the design — write with =0600=
+permissions, keep it under the already-private =/tmp/code-agent-status/=,
+and treat it like the existing =.trace-context= files (never committed,
+swept on the same TTL as Open Question #1). The defcustom itself holds
+only env-var *names*, so =custom.el= stays secret-free.
+
+** Python changes (=otel_setup.py=, =otel_bridge.py=)
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-python
+:END:
+
+- =resolve_active_backend() -> Backend= — implements the 4-layer
+  precedence above; returns a small value object carrying
+  =endpoint=, =headers=, =remote=, and optional =autostart= / =health_url=.
+- =create_exporter()= — build
+  =OTLPSpanExporter(endpoint=backend.endpoint, headers=backend.headers)=.
+  The =headers== kwarg is the only functional code delta for Langfuse.
+- *Processor choice* — =setup_tracer()= and =OtelBridgeServer.setup()=
+  pick =BatchSpanProcessor= when =backend.remote= else
+  =SimpleSpanProcessor=. Today's unconditional =SimpleSpanProcessor=
+  would block =span.end()= on a remote round-trip and stall the bridge.
+- =PhoenixLifecycle= → generalised =BackendLifecycle= driven by
+  =backend.autostart=; =None= (Langfuse) makes =ensure()= a no-op.
+  Best-effort semantics preserved for the terminal-only phoenix case.
+- =otel_bridge.py= / =workspace_bridge.py= — *no change beyond the new
+  =create_exporter()=*; both already route through =otel_setup=.
+
+** Elisp changes (=code-agent-trace.org=)
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-elisp
+:END:
+
+- Add the two defcustoms above; *remove* =code-agent-trace-phoenix-url=
+  (its job moves to the registry's =:ui-url=).
+- =code-agent-trace--active-backend-plist= — look up the active entry.
+- =code-agent-trace--write-active-backend= — resolve env refs, build the
+  Basic header, write the =0600= sidecar.
+- Generalise the lifecycle: build a =code-agent-trace-service= from the
+  active backend's =:autostart= / =:port=. =code-agent-trace--ensure-active-backend=
+  is a no-op when =:autostart= is nil (Langfuse). The bridge service
+  singleton is unchanged (always local); call =--write-active-backend=
+  just before =--ensure-bridge=.
+- =code-agent-trace-open-active-backend= replaces
+  =code-agent-trace-open-phoenix= — reads =:ui-url=, ensures lifecycle only
+  if local, then =browse-url=. Keep =open-phoenix= as a thin alias for
+  muscle memory.
+
+** Touchpoint summary
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-touchpoints
+:END:
+
+| File | Change | Risk |
+|------+--------+------|
+| =lp/trace/code-agent-trace.org= | registry defcustoms, sidecar writer, generic lifecycle + UI open | L3 (tangles elisp) |
+| =python/code_agent/otel_setup.py= | =resolve_active_backend=, headers, Batch/Simple, =BackendLifecycle= | L3 |
+| =python/code_agent/otel_bridge.py= | inherits new exporter; processor choice in =setup()= | L3 |
+| =python/pyproject.toml= | keep =phoenix= extra (local still needs it); no Langfuse dep (OTLP exporter already core) | L4 |
+| =Makefile= | note: Langfuse is external (no start/stop target); keep =phoenix-start/stop= | L4 |
+| =tests/e2e/trace_health.py= + doc curl snippets | Phoenix REST/GraphQL → Langfuse =/api/public/traces= (Basic auth) when active | separate task |
+| =ARCHITECTURE.org= / this file's diagrams | reflect pluggable backend | L4 |
+
+** Backward compatibility
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-compat
+:END:
+
+Default =code-agent-trace-active-backend = 'phoenix= and precedence
+layer 4 reproduce today's behaviour exactly. Existing
+=CLAUDE_OTEL_ENDPOINT= override still wins (layer 1). No existing
+Phoenix user has to change anything.
+
+** Open questions and risks
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-open-questions
+:END:
+
+1. *Flow-B + Langfuse + no sidecar.* A terminal session where Emacs
+   never ran relies on precedence layer 3 (=LANGFUSE_*= env). If those
+   env vars are absent, export silently falls back to phoenix (layer 4)
+   — acceptable, but worth a one-line warning in =resolve_active_backend=.
+2. *Langfuse readiness probe.* =/api/public/health= is assumed for the
+   =open-active-backend= wait; *verify against the deployed version*
+   before relying on it. For a remote backend the wait may be dropped
+   entirely (just =browse-url=).
+3. *Sidecar staleness / multi-Emacs.* Two Emacs with different active
+   backends race on one sidecar. Low priority (single-user assumption),
+   but note it; a per-Emacs sidecar keyed on PID is the escape hatch.
+4. *=x-langfuse-ingestion-version= header.* Optional; pin it in
+   =:headers= if a Langfuse upgrade changes ingestion semantics.
+
+** Verification plan
+:PROPERTIES:
+:CUSTOM_ID: multi-backend-verify
+:END:
+
+- =active-backend = phoenix= → =make test-otel= + the existing
+  =/v1/projects/emacs-agent/spans= curl pass unchanged.
+- =active-backend = langfuse= → run one AI block, then
+  =curl -H "Authorization: Basic <b64>" <host>/api/public/traces= and
+  assert the trace appears with =input=/=output= populated.
+- Switch backends via =M-x customize-variable code-agent-trace-active-backend=,
+  re-run, confirm the sidecar updates and spans land in the new target.
+
 * Package Footer
 
 Closing =provide= + package boilerplate.

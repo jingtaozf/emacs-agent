@@ -358,3 +358,403 @@ Remaining (v1.1):
 - AGENTS.md vs CLAUDE.md + ETH AGENTbench: [[https://codersera.com/blog/agents-md-vs-claude-md-vs-cursor-rules-comparison-2026/][codersera]]; [[https://bestagent.dev/claude-md-vs-agents-md-2026/][Claude Code reads CLAUDE.md]]
 - Aider repo map: [[https://aider.chat/2023/10/22/repomap.html][repomap blog]]; [[https://aider.chat/docs/repomap.html][docs]]
 - Self-documenting Makefile: [[https://marmelab.com/blog/2016/02/29/auto-documented-makefile.html][marmelab]]; [[https://www.thapaliya.com/en/writings/well-documented-makefiles/][thapaliya]]
+
+* 2026-06-19-pi-vs-claude-code-stability
+:PROPERTIES:
+:CUSTOM_ID: pi-vs-claude-code-stability
+:STATUS: Tier-1 shipped + E2E-verified 2026-06-19; Tier-2/3 pending
+:OWNER: jt
+:END:
+
+** Motivation
+Pi (=:CLAUDE_BACKEND: pi=) is observably less stable and gets less
+done than Claude Code *even when both drive the same model*.  The gap
+is therefore not the model — it is the *agent harness around* the
+model.  Source dive (2026-06-19) across =reference/pi/= and
+=~/projects/claude-code/src= located the cause in three compounding
+layers, each fixable at a different blast radius:
+
+1. *Core engineering resilience* — pi's core loop lacks two guardrails
+   Claude Code has (per-tool-call timeout, in-stream reconnect) and a
+   third (turn/loop cap) that pi only enforces via an *optional
+   extension*, not the core.  Any single transient fault can topple
+   the whole session.  Lives in pi source ⇒ upstream ask (Tier 3).
+2. *Configuration* — =~/.pi/agent/= ships its compaction feature
+   *switched off*, blinds observability (otel =metadata_only=), and
+   defaults to a weaker model (DeepSeek) — while coding discipline
+   lives only in the optional presets.  Ours to fix today (Tier 1).
+3. *Thin default prompt* — pi's *default* system prompt carries only a
+   few generic guidelines; Claude Code injects a rich conditional
+   prompt + per-tool-result =<system-reminder>= guardrails.  pi *does*
+   expose injection points (=appendSystemPrompt=, =promptGuidelines=,
+   preset =instructions=), so the lever is partly ours via
+   =APPEND_SYSTEM.md= (Tier 1), partly upstream (Tier 3).
+
+** Evidence note (independently verified 2026-06-19)
+Every file:line below was read first-hand (not taken from the research
+subagents).  Four subagent claims were *corrected* on verification and
+are NOT carried into the proposal:
+
+- =elispString= "multiline injection bug" — *not a bug*.  =emacs-mcp.ts:76=
+  escapes =\= and ="=; a literal newline inside an Elisp =\"…\"= string
+  literal is *legal* Elisp, so values with newlines do not break.  Dropped
+  from Tier 2.
+- =execFileSync= "no try/catch, crashes the chain" — *wrong*.
+  =runHumanOwnedGuard= already wraps it in =try/catch= (=emacs-mcp.ts:334=,
+  comment: "a broken guard must not freeze every Pi edit").  The real
+  (lesser) issue is synchronous *blocking*, not a crash.  Downgraded.
+- "pi has no turn cap" — true of *core* (=agent-loop.ts:170= =while(true)=)
+  but the *deployed* =settings.json loopGuard= IS enabled
+  (=maxTurnsPerWindow:50 / windowMinutes:10= + content-loop detection),
+  so the runaway is already mitigated in config.  Re-scoped.
+- "overflow recovery only once per session / 2nd overflow kills it" —
+  =_overflowRecoveryAttempted= resets every turn (=agent-session.ts:491,543=).
+  Accurate statement: *one* compact-and-retry *per overflow episode*; a
+  back-to-back overflow fails that turn, then resets.  Re-worded.
+
+** Root-cause comparison (research, 2026-06-19)
+Each row: the resilience dimension, Claude Code's mechanism (file:line
+in =~/projects/claude-code/src=), pi's state (file:line in
+=reference/pi/packages=), and the failure mode pi exhibits.
+
+| Dimension | Claude Code | pi | pi failure mode |
+|-----------+-------------+----+-----------------|
+| Default system prompt | =constants/prompts.ts:131= conditional modules + =<system-reminder>= per tool-result | =coding-agent/.../system-prompt.ts:130= — a few generic guidelines ("Be concise" :125, "Show file paths" :126, bash file-ops :114); injection points exist (=appendSystemPrompt= :48, =promptGuidelines=, preset =instructions=) | default / non-preset path has no confirm-before-delete / read-before-write discipline |
+| Retry / backoff | =services/api/withRetry.ts:52= — =MAX_RETRIES=10=, exp backoff + jitter (cap 32s), respects =Retry-After=, 3×529→cheap-model fallback, persistent 30s heartbeat | =agent-session.ts= retry exists (=settings.maxRetries= gate :562, =_prepareRetry= :965); SDK retry *off* =anthropic.ts:525= (=maxRetries: 0=) | mid-stream 429 / HTTP-2 RST throws "stream ended before message_stop" (=anthropic.ts:449=) ⇒ whole turn dies, no in-stream reconnect |
+| Context compaction | =query.ts:396= three-layer: snip → Haiku microcompact → autocompact (=autoCompact.ts:75=); 413 triggers reactive in-turn compaction | =_checkCompaction= =agent-session.ts:1812= exists *but* =settings.json compaction.enabled:false=; one compact-retry per overflow episode (=:1849=, resets per turn =:491,543=) | built-in compaction OFF ⇒ window fills → overflow; a back-to-back overflow fails that turn |
+| Large tool results | =utils/toolResultStorage.ts= — spill to disk, model gets =<persisted-output>= pointer | no disk-spill equivalent found — results stay inline | big Bash/Read output inflates the context window |
+| Tool-call timeout | AbortController cascades to every parallel tool =query.ts:664= | =AbortSignal= threaded through the loop (=agent-loop.ts:159=) but *nothing fires it on a deadline* | a hung =bash= never auto-aborts; session stalls |
+| Turn / loop cap | explicit exit reasons =query.ts:307= (=blocking_limit= etc.) | core =while(true)= no cap =agent-loop.ts:170=; deployed =loopGuard= ON (=maxTurnsPerWindow:50/10min= + content-loop detection) | core unbounded — runaway prevented *only* by the loopGuard extension config |
+| Abort handling | synthesizes =tool_result= for orphan =tool_use= =query.ts:1013= | — | orphan =tool_use= block corrupts message history |
+| Extension error boundary | n/a | =emitToolCall= =runner.ts:862-883= has *no* =try/catch= (cf =emitUserBash:893=) | a throwing =tool_call= handler pierces the chain — every handler must self-guard |
+
+** Why "same model, worse results"
+The model is the engine; pi is a car whose airbag is unplugged at the
+factory (compaction off) and whose seatbelts are an *optional* dealer
+add-on (discipline only in presets).  Claude Code spends thousands of
+lines on the *harness* — ten-deep retry with capacity fallback,
+three-layer compaction, disk-spilled tool results, abort cascades, and
+a prompt that re-teaches coding discipline on every turn.  pi *can* do
+much of this (preset =instructions= carry real discipline; loopGuard is
+on; an extension API exists), but its *default* path ships the thin
+prompt and the disabled compaction.  On a clean short task the two look
+similar; the gap opens exactly when a real coding session gets long,
+hits a 429, or runs a slow command — the cases the harness exists to
+survive.
+
+** Proposal — Tier 1: =~/.pi/agent/= config (zero-code, ship today)
+Highest leverage-per-effort: every item is a config edit, no pi source
+change.  Ranked by stability impact.
+
+1. *Enable compaction* — =settings.json= → =compaction.enabled: true=
+   (=keepRecentTokens: 30000= already set but inert with the flag
+   off).  Removes the single largest session-death cause (window-full
+   → overflow).  =auto-continue-compaction.ts= is *also* installed —
+   verify whether it is a separate post-compaction continuation
+   helper or gated by the same flag, so the two don't double-fire.
+2. *Un-blind observability* — =settings.json otel.captureContent=
+   =metadata_only= → =full= (or =content=).  Today Phoenix spans carry
+   no input/output, so diagnosing a pi failure is blind.  We *have* a
+   Phoenix workflow; let it see pi.
+3. *Thicken =APPEND_SYSTEM.md== (≈10 lines → real discipline) — this
+   is the *global* lever for the thin-default-prompt problem: presets
+   carry discipline in their =instructions=, but the =default= /
+   =cheap= / =research= presets and any no-preset session do not.
+   =appendSystemPrompt= injects into *every* session.  Add: confirm
+   before destructive ops, read-before-write, risk-tier self-disclose,
+   preset-switch hint (=/preset plan|implement|research=).  (The 中文
+   language rule already rides in via the CLAUDE.md symlink + the
+   =research= preset; no need to duplicate it here.)
+4. *Trust =literate-agent== — =trust.json= add
+   =/Users/jingtao/projects/literate-agent: true=.  Currently only 3
+   paths are trusted (=emacs-agent=, =edo-literate=, =edo-literate/repos/mega-cli=);
+   =literate-agent= absent ⇒ tool permissions may degrade when its LP
+   rules load.
+5. *Pin dynamic-agent model* — =agents/worker.md= frontmatter has only
+   =name= + =description=, no =model:=, so it inherits the DeepSeek
+   default, violating the global =use-sonnet-for-dynamic-agents= rule.
+   Set =model: claude-sonnet-4-5= (or deepseek-v4-flash for cheap
+   mechanical work).  Check =scout/planner/reviewer.md= for the same
+   gap.
+6. *Raise =maxTokens== for cloud reasoning models — =models.json=
+   =mimo-v2.5-pro= 16384 → 32768 (=contextWindow= is 1 M, so headroom
+   is ample); the low cap truncates long-codebase output (looks like
+   "pi gave up early").
+7. *Audit =presets.json default== — points at =openai-codex/gpt-5.5=.
+   Verify that ID resolves through the =openai-codex= OAuth provider
+   in a real session; a stale alias would silently fail every default
+   session.
+8. *Reconsider =defaultModel== — =deepseek-v4-pro= is weaker on this
+   repo's Elisp/LP/中文 surface than the Claude models already in the
+   =models= whitelist.  Keep DeepSeek for cheap turns, but make the
+   stability-critical path default to Claude (the =implement= / =plan=
+   presets already do).
+
+** Proposal — Tier 2: pi extensions (code we own in =~/.pi/agent/extensions/=)
+The extension API (=loader.ts:520=, 28 events + =registerTool=) lets us
+*compensate for core gaps without forking pi*.  No "real bug" in
+=emacs-mcp.ts= survived verification (the two the research flagged were
+a non-bug and an already-guarded blocking call — see Evidence note), so
+this tier is compensating guards + ergonomics, ranked by value.
+
+1. *Add a tool-timeout guard extension* — the highest-value item.  Wrap
+   tool execution (via the =tool_call= hook / =registerTool=) with a
+   deadline + =AbortSignal= fire, compensating for the missing core
+   timeout (Tier 3 #2).  This is the extension-layer fix for "a hung
+   =bash= stalls the session".
+2. *Self-guard every =tool_call= handler* — because =emitToolCall=
+   (=runner.ts:862=) has *no* error boundary, a throwing handler pierces
+   the chain.  The emacs human-owned gate already self-guards
+   (=emacs-mcp.ts:334=); audit the other installed extensions
+   (=pi-permissions=, =git-ai=, =cost-tracker=…) for unguarded
+   =tool_call= handlers and wrap each.  (Systemic fix is Tier 3 #1.)
+3. *Make the human-owned gate async* (=emacs-mcp.ts:335=): =execFileSync=
+   synchronously blocks pi's event loop for the duration of the Python
+   guard call on *every* =edit= / =write=.  Switch to async =execFile= +
+   Promise.  Already =try/catch=-guarded, so this is latency, not a
+   crash risk.
+4. *Gate tool registration on MCP health* (=emacs-mcp.ts:268=): the
+   health probe currently only emits a "warning" notification (:281)
+   while the =emacs_*= tools register unconditionally, so a dead MCP
+   server surfaces as per-call failures.  Disable/withhold the tools
+   on a failed probe.
+5. *Confirm =loopGuard= covers the hang case* — =loopGuard= is already
+   on (=settings.json=, =maxTurnsPerWindow:50=, content-loop detection
+   via =pi-loop-guard.ts=).  Verify it also trips on a *single* stuck
+   turn (no progress), not only on repetition — that overlaps with #1.
+6. *Optional: dedicated Emacs write tools* — =emacs_eval= already allows
+   arbitrary writes (gated by =ctx.ui.confirm= :301), so this is
+   ergonomics, not a capability gap: structured =emacs_org_set_property=
+   / =emacs_buffer_insert= would be safer + clearer than free-form eval.
+7. *Register a =session_shutdown= cleanup hook* — reset =nextRpcId=,
+   log MCP state on reload for debuggability.
+
+** Proposal — Tier 3: pi core (upstream asks / known limitations)
+Lives in =reference/pi/= source; can't patch locally without forking.
+File as upstream issues / track as known limits.  Several are
+*mitigated* by Tier 1/2 (noted), so Tier 3 is the "proper fix" backlog.
+
+1. =emitToolCall= needs a =try/catch= error boundary (=runner.ts:871=,
+   inside the :862 method) — it is the one emit path without one
+   (=emitUserBash:893= shows the correct shape).  *Partly mitigated* by
+   Tier 2 #2 (per-handler self-guard).
+2. Per-tool-call timeout in the loop (=agent-loop.ts:159+= threads the
+   =AbortSignal= but nothing fires it on a deadline).  *Mitigated* by
+   Tier 2 #1.
+3. Turn / loop iteration cap in core =while(true)= (=agent-loop.ts:170=).
+   *Mitigated* by the =loopGuard= extension (Tier 2 #5); core has no
+   built-in cap.
+4. In-stream reconnect + raise SDK =maxRetries= above 0
+   (=anthropic.ts:525=); make retry stream-level, not post-=agent_end=
+   (=agent-session.ts:965=).
+5. Allow more than one compact-and-retry within a single overflow
+   episode (=agent-session.ts:1849=) before giving up the turn.
+6. Thicken the default system prompt (=system-prompt.ts:130=).
+   *Mitigated* by Tier 1 #3 (=APPEND_SYSTEM.md=) for our own setup.
+
+** Verification / rollout
+- Tier 1: edit config, start a *fresh* pi session (configs load at
+  start), run a long AI block that previously died on window-fill;
+  confirm a compaction event fires and the session survives.  Check
+  Phoenix now shows span input/output.  Confirm =/preset implement=
+  resolves Claude and =default= resolves a live =gpt-5.5=.
+- Tier 2: drive a deliberately slow tool (e.g. =sleep 600=) and confirm
+  the timeout guard aborts it instead of hanging; throw inside a test
+  =tool_call= handler and confirm the self-guard contains it.
+- Tier 3: open upstream issues with the file:line evidence above;
+  re-test the mitigated items once Tier 1/2 land.
+
+** E2E verification — Tier 1 shipped (2026-06-19)
+All 7 Tier-1 edits landed in =~/.pi/agent/= (backups =*.bak-20260619=):
+=compaction.enabled:true=, =otel.captureContent:full=, mimo
+=maxTokens:32768=, =trust.json= + =literate-agent=, four subagents
+pinned to =anthropic/claude-sonnet-4-5=, =APPEND_SYSTEM.md= thickened
+with destructive-op / read-before-write / risk-declaration discipline.
+(=defaultModel=, =presets.default gpt-5.5= left untouched — cost /
+verify-first.)
+
+*Auto-compaction mechanism (verified)*: =compaction.enabled= IS the
+auto-compaction gate — =setAutoCompactionEnabled= / RPC
+=set_auto_compaction= just call =setCompactionEnabled=
+(=agent-session.ts:2073=), and =_checkCompaction= early-returns on
+=!settings.enabled= (=:1814=).  Two post-turn triggers: *overflow*
+(compact + auto-retry) and *threshold* (=shouldCompact= =compaction.ts:220=:
+=contextTokens > contextWindow − reserveTokens=) which compacts but does
+*not* auto-retry — it stops.  The installed =auto-continue-compaction.ts=
+closes exactly that stop: on =session_compact=, if the agent is idle
+(threshold, not overflow) it injects a "continue" turn (circuit-breaker
+=MAX=5=, 800 ms defer, skips =/compact= + extension-driven).  It was
+*dormant* while compaction was off (no =session_compact= events fire);
+flipping the one flag activated built-in + extension together.
+=reserveTokens= left at the default 16384: a bump to 32768 (to cover
+mimo's =maxTokens=) was reverted because =reserveTokens= is *global* and
+mimo's 1 M =contextWindow= makes its mid-turn-overflow zone (~983 K)
+practically unreachable + caught by the overflow path — so the bump only
+penalised the small-window models (deepseek ~128 K, claude ~200 K) that
+actually compact, shaving usable window for no real gain.  Residual gap
+vs Claude Code (Tier 3): pi still compacts *after* a turn + nudges, not
+*before* each model call.
+
+E2E ran =pi -p= in cmux =surface:53= (=~/projects/emacs-agent=, a
+trusted path), prompt exercising read + discipline recall.  Evidence:
+
+| Check | Result | Proof |
+|-------+--------+-------|
+| pi starts on new config | pass | =PI_EXIT=0=; all 3 JSON re-parse clean |
+| =APPEND_SYSTEM= discipline live | pass | reply recited "在执行 =rm -rf=、=git push --force=… 前必须先确认"; Phoenix =llm.input_messages=, =token_count.prompt=13070= |
+| =otel.captureContent:full= | pass | Phoenix =default= project spans @14:39 now carry =llm.input_messages=, =llm.output_messages=, =pi.tool.input/output=, =output.value= — absent under the old =metadata_only= |
+| 中文 language rule | pass | reply in 简体中文 (CLAUDE.md symlink) |
+| trust (no prompt) | pass | emacs-agent ran with no trust gate |
+| compaction fires | not stress-tested | enabled + valid; needs a window-filling session to trigger |
+
+*Side-finding (orthogonal to config)*: pi answered "README.org has no
+=#+TITLE=" though line 8 has one.  The =pi.tool.rg= span shows
+=matchCount:0= for pattern =^#\+TITLE:=; system =rg= matches it
+(=exit 0=) but =rg -F= (fixed-string) does not (=exit 1=) — pi's rg
+tool treats the regex as a literal.  A pi tool-layer bug, not a model
+or config issue; log as a Tier-2/3 follow-up.
+
+** Anti-patterns (what NOT to do)
+- *Don't fork pi to fix Tier 3 inline* — the extension API + config
+  cover most of the real-world pain; a fork forfeits upstream updates
+  (=lp-cowork-boundary-object-evolution= reasoning: pi is a boundary
+  object, adapt via the override surface, not a fork).
+- *Don't "fix" instability by only swapping to a stronger model* — the
+  harness gaps bite every model; a better model just delays the cliff.
+- *Don't enable compaction without the otel fix* — if compaction
+  misbehaves you need the trace content to see it.
+- *Don't blanket-raise =maxTokens== on local Gemma4* (4096/6144) — that
+  starves *VRAM*, a different failure; only raise the cloud reasoning
+  models.
+
+* 2026-06-19-claude-code-to-pi-migration
+:PROPERTIES:
+:CUSTOM_ID: claude-code-to-pi-migration
+:STATUS: Phase-1 + Phase-2-web shipped + E2E-verified 2026-06-19; Phase-2 MCP pending
+:OWNER: jt
+:END:
+
+** Motivation
+The sibling proposal ([[#pi-vs-claude-code-stability][§ pi-vs-claude-code-stability]])
+closed the *stability* gap.  This one asks the harder question: can pi
+*replace* Claude Code as the daily driver?  That is a *capability-parity*
+question, not a resilience one.  Source dive (2026-06-19) inventoried
+both agents' user-facing surfaces (=~/projects/claude-code/src= vs
+=reference/pi/= + =~/.pi/agent/extensions/=).  Verdict: pi's *in-session*
+layer (hooks, steering, permissions, subagents, multimodal, context) is
+already at or near parity; the *external-integration* layer (MCP, web)
+is the real wall.
+
+** Capability parity matrix (research, 2026-06-19)
+Grouped by migration difficulty.  CC mechanism (file:line in
+=claude-code/src=) vs pi state (file:line in =reference/pi= or
+=~/.pi/agent/=).
+
+*** Native parity — works today (config-only)
+| Capability | Claude Code | pi | Note |
+|-----------+-------------+----+------|
+| CLAUDE.md hierarchy | =context.ts:170= | =system-prompt.ts:60= loads CLAUDE.md+AGENTS.md | symlink already wired |
+| Skills + =/skill:= | =loadSkillsDir.ts:431= (~/.claude/skills) | =settings-manager.ts:973= reads =settings.skills=; user has =skills:["~/.claude/skills"]= | *verified working for this user* — NOT a gap |
+| Permissions | =types/permissions.ts= | =pi-permissions.ts= reads =.claude/settings.json= | full |
+| Mid-turn steering | =query.ts:1547= | =agent-session.ts:1218= =steer()=/=followUp()= | full |
+| Image input | =attachments.ts:1062= | =cli/initial-message.ts:7= =pi @img.png= | full |
+| Subagent model pin | =AgentTool.tsx:86= | =subagent/agents.ts:67= (pinned to sonnet in Tier-1) | full, *no worktree isolation* |
+| Output modes | — | =modes/index.ts:5= tui/print/rpc/json | full |
+
+*** Portable — pi equivalent exists, needs porting work
+| Capability | Claude Code | pi | Migration action |
+|-----------+-------------+----+------------------|
+| Hooks | 27 events + =exit 2= gate + JSON inject (=coreTypes.ts:26=, =hooks.ts:236=) | =tool_call= (block+modify), =tool_result=, =input= (transform), =session_start=, =session_shutdown= (=types.ts:985=) | rewrite =~/.claude/hooks= shell → TS extension handlers; =pi.exec()= runs the shell |
+| Plan mode | =EnterPlanModeTool.ts:36= (platform-native) | =examples/extensions/plan-mode/= (not default) | install + adapt the example extension |
+| TodoWrite | =TodoWriteTool.ts:31= (native) | =examples/extensions/todo.ts= | install the example extension |
+| Output styles | =loadOutputStylesDir.ts:25= | none | extension: read =~/.claude/output-styles/*.md=, inject into =systemPrompt= at =before_agent_start= |
+| Auto-memory | memdir =paths.ts:92= (MEMORY.md) | none | extension: load =MEMORY.md= into context + a save command |
+| Checkpoint/rewind | per-turn =fileHistory.ts:40= snapshots | =git-checkpoint.ts:54= (git-stash style) | *semantics differ* — git-stash ≠ per-turn rewind; accept or extend |
+| Slash commands | =.claude/commands/*.md= | =registerCommand()= | port one by one |
+
+*** Blockers — no pi equivalent, real engineering
+| Capability | Claude Code | pi | Why it blocks |
+|-----------+-------------+----+---------------|
+| *MCP client* | stdio/sse/http/ws (=services/mcp/utils.ts:313=), =mcpServers= config | no transport in core, *but a community MCP-wrapper extension exists* (per jt) — usable directly | downgraded from blocker: Phase 2 = install + configure the wrapper, not build from scratch |
+| Web search / fetch | =WebSearchTool.ts=, =WebFetchTool.ts= | *SHIPPED* =web-tools.ts= (=web_fetch= + =web_search=) | resolved Phase-2 — no key, no deps; see Phase 2 below |
+| Subagent worktree isolation | =isolation:"worktree"= (=AgentTool.tsx:99=) | subagent has no worktree mode | parallel agents share the tree (contention risk) |
+
+** Why the blockers are the whole story
+Everything *inside* a turn — gating tool calls, injecting context,
+steering, permissions, multimodal, subagents — pi already does (the
+=tool_call= hook alone covers most CC =PreToolUse= automation).  What pi
+*cannot* do is reach *outward*: it has no MCP client and no web tools, so
+the moment a workflow depends on an =mcp__*= server or a web lookup, pi
+hits a wall a config can't fix.  For this user specifically, skills are
+already wired (=settings.skills=), so the migration reduces to: *port the
+hooks, install three example extensions, and build one MCP bridge.*
+
+** Phased migration plan
+- *Phase 0 — stability align* (DONE 2026-06-19): Tier-1 config from the
+  sibling proposal; E2E-verified.
+- *Phase 1 — wire the existing equivalents* (DONE 2026-06-19):
+  1. *Output style + auto-memory* → shipped as one extension
+     =~/.pi/agent/extensions/claude-bridge.ts=: on =before_agent_start=
+     it appends the active =~/.claude= output style (=settings.outputStyle=
+     → =output-styles/<name>.md=) and the project =MEMORY.md= to the
+     system prompt.
+     - *Memory — hard-proven*: =pi -p "what number + colour should you
+       remember?"= → "42, 蓝色" (the MEMORY.md values, unreachable to a
+       default pi); the marker also appears in the Phoenix span content.
+     - *Output style — load-proven, effect inconclusive*: an A/B on a
+       3-way comparison prompt (=CLAUDE_BRIDGE=0= control) gave ON 983
+       chars / OFF 1411, *both* with a table + verdict.  CLAUDE.md is
+       loaded natively in *both* arms (symlink, independent of the
+       bridge) and already carries the concise discipline, so the
+       style injection cannot be isolated behaviourally — it is
+       *largely redundant* with CLAUDE.md for this user.  Clean signals:
+       ON ~30 % shorter + more answer-first.  Net: the *memory* half is
+       the real win; the *style* half only adds the precise form rules
+       CLAUDE.md defers to the style (table thresholds, 120-word cap).
+  2. *plan-mode* → installed (=examples/extensions/plan-mode/= copied).
+     *E2E A/B*: =pi --plan -p "write /tmp/pm-plan.txt"= refused ("plan
+     mode … =write= 工具不可用", naming the read-only toolset) and the
+     file was *not* created; the same prompt without =--plan= wrote
+     =/tmp/pm-normal.txt=.  Tool-swap (=setActiveTools=) proven active.
+  3. *todo* → *already present* via =agent-stuff/todos.ts= (62 KB); the
+     example duplicate was removed (tool-name conflict).
+  4. *Hooks* → no port needed: the only global hook
+     (=~/.claude/hooks/emacs-agent-hook.sh=) is *Claude-backend-specific*
+     (emacsclient SessionStart/Stop notify); pi drives Emacs over RPC, and
+     the edit safety-gate is already covered by =pi-permissions.ts= +
+     emacs-mcp's human-owned gate.
+- *Phase 2 — break the wall*:
+  1. *Web* → *SHIPPED* =~/.pi/agent/extensions/web-tools.ts=: registers
+     =web_fetch= (fetch + dependency-free HTML→text) and =web_search=
+     (keyless DuckDuckGo HTML scrape; best-effort).  No API key, no new
+     deps.  *E2E*: =web_fetch https://example.com= → "Example Domain";
+     =web_search "Anthropic Claude"= → 3 real results with =uddg=-decoded
+     URLs (claude.com / anthropic.com).  Upgrade path: drop in a Brave/
+     Tavily key for a sturdier =web_search= than the DDG scrape.
+  2. *MCP* — install + configure the existing community MCP-wrapper
+     extension (per jt) instead of building =mcp-bridge.ts= from scratch.
+     Verify it reads an =mcpServers=-style config and registers external
+     servers' tools.  (Deferred at jt's request.)
+- *Phase 3 — polish*: subagent worktree isolation, checkpoint/rewind
+  semantics, the CC-only hook events with no pi equivalent
+  (=PreCompact=, =PermissionRequest=, =SubagentStop=, =PostToolUseFailure=)
+  — decide per-event whether they carry weight.
+
+*Decision gate*: pi becomes a viable daily driver for this user after
+*Phase 1 + the MCP bridge*.  Web and auto-memory are the next-most-missed;
+everything else is parity polish.
+
+** Anti-patterns (what NOT to do)
+- *Don't cut over before the MCP bridge* — losing every =mcp__*= server
+  is a silent capability cliff, not a degraded mode.
+- *Don't rewrite all hooks at once* — port the safety gates first and
+  verify each =tool_call= block fires before moving on.
+- *Don't treat =git-checkpoint= as rewind* — git-stash semantics differ
+  from CC's per-turn =FileHistorySnapshot=; a "restore" won't behave the
+  same.
+- *Don't assume skills are broken on pi* — they load via =settings.skills=
+  (verified =settings-manager.ts:973=); the only requirement is the
+  explicit path entry, which is already present.
+- *Don't fork pi for the blockers* — MCP/web belong in extensions
+  (=registerTool= + =pi.exec=/=fetch=), keeping upstream updates intact
+  (=lp-cowork-boundary-object-evolution=).
