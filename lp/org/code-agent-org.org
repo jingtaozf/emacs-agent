@@ -2426,7 +2426,18 @@ Tries cmux (checks hash table, then falls back to request-id file)."
    ((and (fboundp 'code-agent-org-cmux--query-completed)
          (gethash workspace-session-id code-agent-org-terminal--workspace-to-session-key))
     (code-agent-org-cmux--query-completed workspace-session-id))
-   ;; cmux: hash table empty but request-id file exists (module reload / race)
+   ;; cmux: hash empty but the org section still exists (Emacs restart /
+   ;; session eviction) — recover the mapping by scanning loaded buffers,
+   ;; then dispatch.  This must precede the request-id fallback: that path
+   ;; re-enters with the hash still empty, so the session goes out of sync
+   ;; (busy never clears, loop never continues) unless the mapping is first
+   ;; rebuilt from the authoritative org section.
+   ((and (fboundp 'code-agent-org-cmux--query-completed)
+         (fboundp 'code-agent-org-cmux--recover-session)
+         (code-agent-org-cmux--recover-session workspace-session-id))
+    (code-agent-org-cmux--query-completed workspace-session-id))
+   ;; cmux: hash empty, recovery failed, but request-id file exists
+   ;; (module reload / race) — last-resort dispatch.
    ((and (fboundp 'code-agent-org-cmux--query-completed)
          (code-agent-org-terminal--read-request-id workspace-session-id))
     (code-agent-org-cmux--query-completed workspace-session-id))
@@ -2439,6 +2450,11 @@ Tries cmux (checks hash table, then falls back to request-id file)."
          (boundp 'code-agent-org-terminal--workspace-to-session-key)
          (gethash workspace-session-id code-agent-org-terminal--workspace-to-session-key))
     (code-agent-org-cmux--permission-needed workspace-session-id tool-name))
+   ;; Recover a lost mapping (Emacs restart / eviction) before dropping.
+   ((and (fboundp 'code-agent-org-cmux--permission-needed)
+         (fboundp 'code-agent-org-cmux--recover-session)
+         (code-agent-org-cmux--recover-session workspace-session-id))
+    (code-agent-org-cmux--permission-needed workspace-session-id tool-name))
    (t (message "code-agent-org: no terminal backend loaded for permission-needed"))))
 
 (defun code-agent-org--terminal-permission-resolved (workspace-session-id)
@@ -2447,6 +2463,11 @@ Tries cmux (checks hash table, then falls back to request-id file)."
    ((and (fboundp 'code-agent-org-cmux--permission-resolved)
          (boundp 'code-agent-org-terminal--workspace-to-session-key)
          (gethash workspace-session-id code-agent-org-terminal--workspace-to-session-key))
+    (code-agent-org-cmux--permission-resolved workspace-session-id))
+   ;; Recover a lost mapping (Emacs restart / eviction) before dropping.
+   ((and (fboundp 'code-agent-org-cmux--permission-resolved)
+         (fboundp 'code-agent-org-cmux--recover-session)
+         (code-agent-org-cmux--recover-session workspace-session-id))
     (code-agent-org-cmux--permission-resolved workspace-session-id))
    (t (message "code-agent-org: no terminal backend loaded for permission-resolved"))))
 #+END_SRC

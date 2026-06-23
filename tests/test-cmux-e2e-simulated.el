@@ -1002,6 +1002,48 @@ cmux workspace by heading name, and repopulates hash tables."
   :tags '(:unit :stable)
   (should-not (code-agent-org-cmux--recover-session "nonexistent-session-999")))
 
+(ert-deftest test-cmux-terminal-query-completed-recovers-on-hash-miss ()
+  "Dispatcher recovers a lost workspace->session-key mapping on a hash miss.
+After an Emacs restart (or session eviction) the hash table is empty for
+a workspace that has not been re-launched this session, even though its
+org section still exists on disk.  The query-completed dispatcher must
+recover the mapping via `code-agent-org-cmux--recover-session' and route
+the event, instead of dropping it (which leaves the workspace out of
+sync: busy never clears, loops never continue)."
+  :tags '(:unit :stable)
+  (let ((file (make-temp-file "test-recover-dispatch-" nil ".org")))
+    (unwind-protect
+        (test-cmux--with-mock
+          ;; Workspace resolvable by the fixture heading title ("Test Story").
+          (push (cons "list-workspaces" "  workspace:mock-1  Test Story\n")
+                test-cmux--mock-responses)
+          (let ((buf (find-file-noselect file))
+                (dispatched nil))
+            (with-current-buffer buf
+              (org-mode)
+              (let ((code-agent-org-auto-start-mcp-server nil))
+                (code-agent-org-mode 1))
+              (insert test-cmux--org-content-with-surface)
+              (save-buffer))
+            ;; Simulate Emacs restart: clear all mappings for this session.
+            (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+            (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
+            (unwind-protect
+                (cl-letf (((symbol-function 'code-agent-org-cmux--query-completed)
+                           (lambda (sid) (setq dispatched sid))))
+                  (code-agent-org--terminal-query-completed "test-cmux-session-003")
+                  ;; The dispatcher must have rebuilt the mapping ...
+                  (should (gethash "test-cmux-session-003"
+                                   code-agent-org-terminal--workspace-to-session-key))
+                  ;; ... and routed the event to the cmux backend.
+                  (should (equal dispatched "test-cmux-session-003")))
+              (remhash "test-cmux-session-003" code-agent-org-terminal--workspace-to-session-key)
+              (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-surface)
+              (remhash "test-cmux-session-003" code-agent-org-cmux--workspace-to-cmux-id)
+              (kill-buffer buf))))
+      (delete-file file))))
+
 ;;; ============================================================================
 ;;; Tests: Focus Terminal (P1)
 ;;; ============================================================================
