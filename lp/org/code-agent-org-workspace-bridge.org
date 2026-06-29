@@ -81,7 +81,7 @@ Two entry points reach this file's =insert-prompt= / =insert-response=:
 terminal. Both must result in the same Emacs-side state — same
 =active-queries= entry, same exec-status property, same complete-hook
 firing — otherwise downstream features (mode-line spinner, Query
-Manager, "Jump to AI block" via =goto-story=, telemetry persistence)
+Manager, telemetry persistence)
 silently break for the terminal-typed path.
 
 The shipped strategy: =workspace-bridge-insert-prompt= fires
@@ -225,30 +225,16 @@ Signals error if neither match is found."
     (org-back-to-heading t)))
 
 (defun code-agent-org-workspace-bridge--find-workflow (session-id)
-  "Find the Workflow subsection under the active story for SESSION-ID.
-Uses ACTIVE_STORY to narrow to the correct story, falls back to any Workflow.
+  "Find the Workflow subsection for SESSION-ID.
+Searches directly under the workspace heading.
 Returns the position of the Workflow heading, or signals error."
   (code-agent-org-workspace-bridge--goto-session session-id)
   (let* ((workspace-end (save-excursion (org-end-of-subtree t t) (point)))
-         (active-story (org-entry-get nil "ACTIVE_STORY"))
-         (search-start (point))
-         (search-end workspace-end)
          (found nil))
-    ;; If ACTIVE_STORY is set, narrow search to that story's subtree
-    (when active-story
-      (save-excursion
-        (let ((ws-level (org-current-level)))
-          (when (re-search-forward
-                 (format "^\\*\\{%d\\} +%s" (1+ ws-level) (regexp-quote active-story))
-                 workspace-end t)
-            (goto-char (line-beginning-position))
-            (setq search-start (point))
-            (setq search-end (save-excursion (org-end-of-subtree t t) (point)))))))
-    ;; Find Workflow heading (with or without :sdd: tag)
+    ;; Find Workflow heading under workspace
     (save-excursion
-      (goto-char search-start)
       (while (and (not found)
-                  (re-search-forward "^\\*+ +Workflow\\b" search-end t))
+                  (re-search-forward "^\\*+ +Workflow\\b" workspace-end t))
         (setq found (line-beginning-position))))
     (unless found
       (error "Workflow section not found under session %s" session-id))
@@ -270,7 +256,7 @@ Navigates to the workspace section and reuses existing prompt-building logic."
         (widen)
         (code-agent-org-workspace-bridge--goto-session session-id)
         ;; Narrow to the workspace subtree so collect-system-prompts finds
-        ;; only this story's system prompt section
+        ;; only this workspace's system prompt section
         (org-narrow-to-subtree)
         (code-agent-org--build-system-prompt)))))
 #+END_SRC

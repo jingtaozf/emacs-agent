@@ -67,7 +67,7 @@ File-scope =defcustom= block — every user-facing option this module exposes li
 (defcustom code-agent-org-cmux-cli-path "cmux"
   "Path to the cmux CLI executable.
 Can be an absolute path or just the command name (found via PATH).
-Override per-file/per-story with the CMUX_CLI_PATH org property."
+Override per-file with the CMUX_CLI_PATH org property."
   :type 'string
   :group 'code-agent-org)
 
@@ -75,7 +75,7 @@ Override per-file/per-story with the CMUX_CLI_PATH org property."
   "Global cmux Unix socket path override.
 When nil, checks the CMUX_SOCKET_PATH org property (with inheritance).
 When both are nil, cmux CLI auto-detects (production).
-Use org property for per-file/per-story socket selection."
+Use org property for per-file socket selection."
   :type '(choice (const nil) string)
   :group 'code-agent-org)
 
@@ -213,7 +213,7 @@ parallel branches threaded through unrelated code:
 | Ready detection | ="type a message"= / ="-- INSERT --"= | ="> "= / ="copilot>"= |
 
 The rest of the cmux integration (workspace creation, send/capture, mode
-line, verbose buffer, status file plumbing, loop / story-changed hook,
+line, verbose buffer, status file plumbing, loop hook,
 sidebar feedback) is genuinely agent-agnostic and never had to change.
 Five thin agent-specific layers became five fields on the profile struct
 plus a single dispatcher.
@@ -496,7 +496,7 @@ discoverable:
 | =new-workspace= | Create workspace launching Claude Code |
 | =new-window= | Fallback when TabManager is unavailable |
 | =list-pane-surfaces= | Resolve workspace → surface ref |
-| =rename-workspace= | Set the tab title to the story name |
+| =rename-workspace= | Set the tab title to the workspace name |
 | =set-status= / =clear-status= | Sidebar agent status |
 | =set-progress= | Sidebar progress bar |
 | =notify= | Send a notification |
@@ -571,7 +571,7 @@ If ARGS contains :stdin KEY, that value is piped as stdin.
 
 Three phases under one ``cmux-call'' span:
 1. Split ``:stdin VAL'' out of ARGS.
-2. Resolve socket + CLI path (per-story properties override
+2. Resolve socket + CLI path (per-file properties override
    defcustoms).
 3. Assemble flat argv and exec — when a custom socket is in use
    we clear ``CMUX_WORKSPACE_ID'' from the environment so the CLI
@@ -1410,14 +1410,8 @@ refs are regenerated.  Returns nil if no workspace matches NAME."
 
 (defun code-agent-org-cmux--session-workspace-title ()
   "Return the stable cmux workspace name for the current session.
-The workspace name is the session heading title, truncated to 50 chars
-(matching `launch-workspace' when it calls `rename-workspace').  Point
-must be somewhere inside the session subtree."
-  (save-excursion
-    (save-restriction
-      (code-agent-org-terminal-goto-session-heading)
-      (truncate-string-to-width
-       (or (org-get-heading t t t t) "untitled") 50))))
+Delegates to `code-agent-org-terminal--workspace-heading-name'."
+  (code-agent-org-terminal--workspace-heading-name))
 
 (defun code-agent-org-cmux--session-workspace-ref ()
   "Return the current session's cmux workspace ref, resolved by heading name.
@@ -1440,7 +1434,7 @@ When the cmux app restarts (=Cmd-Q= + relaunch), the per-surface env
 =WORKSPACE_SESSION_ID=, =WORKSPACE_CUSTOM_ID=, =CMUX_WORKSPACE= — is
 *lost*.  cmux only preserves =CMUX_AGENT_LAUNCH_ARGV_B64= + =CMUX_AGENT_LAUNCH_CWD=
 and re-injects =--name <current-cmux-workspace-title>= on every claude
-respawn (slug rule lives in =claude_workspace._normalize_story_slug=:
+respawn (slug rule lives in =claude_workspace._normalize_name_slug=:
 lowercase, non-alphanumeric → =-=, strip edges).
 
 The bridge therefore can no longer trust env vars across restart.  Its
@@ -1454,7 +1448,7 @@ Emacs are usually unique by construction), =cwd= is the tiebreaker.
 (defun code-agent-org-cmux--normalize-name-slug (name)
   "Return the cmux =--name= slug for NAME.
 
-Mirrors `claude_workspace._normalize_story_slug' exactly:
+Mirrors `claude_workspace._normalize_name_slug' exactly:
 lowercases, collapses runs of non-alphanumeric to single =-=, and
 strips leading/trailing dashes.  Any divergence between the two
 implementations breaks cross-restart recovery — keep them in sync."
@@ -1578,7 +1572,7 @@ No property → ungrouped workspace, exactly as before.
                                                           tab-title workspace-ref)
   "Restore in-memory state for a cmux workspace that already exists.
 SAVED-SURFACE is the surface ref; WORKSPACE-SESSION-ID the org session
-identifier; TAB-TITLE the active-story label; WORKSPACE-REF the cmux
+identifier; TAB-TITLE the workspace label; WORKSPACE-REF the cmux
 workspace ref (resolved by name in `ensure-session').  Rebuilds hash
 tables, re-applies color, renames the tab, and starts verbose streaming.
 Returns SAVED-SURFACE."
@@ -1599,7 +1593,7 @@ Returns SAVED-SURFACE."
                            :workspace-session-id workspace-session-id)
   (when workspace-ref
     (code-agent-org-cmux--apply-color workspace-ref)
-    ;; Rename tab to match active story (Claude Code overrides terminal title)
+    ;; Rename tab to match workspace (Claude Code overrides terminal title)
     (condition-case nil
         (code-agent-org-cmux--call "rename-tab" "--workspace" workspace-ref tab-title)
       (error nil)))
@@ -1752,7 +1746,7 @@ returns the surface ref."
          (surface-id (if (string-prefix-p "workspace:" workspace-ref)
                          (code-agent-org-cmux--get-workspace-surface workspace-ref)
                        workspace-ref)))
-    ;; Rename workspace to heading name, tab to active story
+    ;; Rename workspace to heading name
     (when (string-prefix-p "workspace:" workspace-ref)
       (condition-case nil
           (progn
@@ -1782,7 +1776,7 @@ returns the surface ref."
     surface-id))
 
 (defun code-agent-org-cmux--ensure-session ()
-  "Ensure a cmux workspace/surface exists for the current workspace story.
+  "Ensure a cmux workspace/surface exists for the current workspace.
 Returns the cmux surface ref (e.g. \"surface:1\").
 Launches if needed, reuses by saved ref.
 Auto-starts the Emacs MCP server if not running."
@@ -2049,9 +2043,8 @@ advances past iteration 1."
 Five phases:
 1. Read the prompt and resolve session/surface/status.
 2. Refuse to send when the surface is busy.
-3. Auto-update ACTIVE_STORY (so Channel B routing stays in sync).
-4. Seed session state for cancel/queue/loop/telemetry paths.
-5. Type the prompt, register active query, start verbose mirror —
+3. Seed session state for cancel/queue/loop/telemetry paths.
+4. Type the prompt, register active query, start verbose mirror —
    all under one `cmux-execute' span that async cmux-query-completed
    callbacks attach to via the cached trace context."
   (let* ((prompt (code-agent-org-cmux--prompt-at-point))
@@ -2070,8 +2063,6 @@ Five phases:
     ;; the launcher when hooks are missing.  No-op when claude is
     ;; already correctly wired (the common case after a fresh launch).
     (code-agent-org-cmux--ensure-hooks-wired surface-id)
-    (when-let* ((story (code-agent-org--find-story-heading)))
-      (code-agent-org--set-active-story (car story)))
     ;; Root trace context: cache BEFORE entering the child span so async
     ;; callbacks join at the root, not under the cmux-execute span itself.
     (when sk
@@ -2283,7 +2274,7 @@ buffers."
         (code-agent-org-cmux-verbose-mode)
         (setq-local code-agent-org-cmux--verbose-prev-text "")
         (setq-local code-agent-org-cmux--verbose-surface-id surface-id)
-        ;; Sticky header with story name and keybindings
+        ;; Sticky header with workspace name and keybindings
         (setq-local header-line-format
           (list "  "
                 (propertize workspace-id 'face 'bold)
@@ -2502,25 +2493,6 @@ Creates a lockfile at ~/.claude/ide/ that Claude Code discovers via --ide flag."
         (error nil)))))
 #+END_SRC
 
-* Story Change Hook
-
-Hook fired when the user switches stories within a workspace — refreshes the cmux tab title, re-wires the session-id, repaints the sidebar.
-
-#+BEGIN_SRC elisp
-(defun code-agent-org-cmux--on-story-changed (ws-session-id story-name)
-  "Rename cmux tab when active story changes.
-Registered on `code-agent-org-active-story-changed-hook'."
-  (let ((ws-uuid (gethash ws-session-id code-agent-org-cmux--workspace-to-cmux-id)))
-    (when ws-uuid
-      (condition-case nil
-          (code-agent-org-cmux--call "rename-tab"
-            "--workspace" ws-uuid
-            (truncate-string-to-width story-name 50))
-        (error nil)))))
-
-(add-hook 'code-agent-org-active-story-changed-hook #'code-agent-org-cmux--on-story-changed)
-#+END_SRC
-
 * User Commands
 
 Interactive commands bound on the user-facing keymap; each carries =;;;###autoload=.
@@ -2576,7 +2548,7 @@ matching workspace exists.  Always re-applies WORKSPACE_COLOR pill
      (surface-id
       (code-agent-org-cmux--activate-app)
       (message "cmux surface: %s (focused app)" surface-id))
-     (t (user-error "No cmux session for this story")))))
+     (t (user-error "No cmux session for this workspace")))))
 
 (defun code-agent-org-cmux--capture-screen (surface-id lines)
   "Capture LINES of SURFACE-ID's screen as a string, or empty on failure.
@@ -2804,7 +2776,7 @@ must drive the fresh surface rather than the stale one."
   (let* ((surface-id (code-agent-org-cmux--ensure-session))
          (workspace-session-id (code-agent-org-terminal-find-session-property "CLAUDE_SESSION_ID")))
     (unless surface-id
-      (user-error "No cmux session for this story"))
+      (user-error "No cmux session for this workspace"))
     (let* ((project-root (or (code-agent-org-get-project-root) default-directory))
            (launch-cmd (code-agent-org-cmux--build-launch-command
                         (buffer-file-name)
@@ -2874,7 +2846,7 @@ foreground (vim, less, …) this may be a no-op."
       (when (string-match-p " --resume " launch-cmd)
         (sleep-for 3)
         (code-agent-org-cmux--recover-from-resume-failure surface-id launch-cmd ws-ref))
-      ;; 3. Rename tab to active story (cmux may reset title on relaunch)
+      ;; 3. Rename tab to workspace name (cmux may reset title on relaunch)
       (let ((ws-ref (code-agent-org-cmux--session-workspace-ref))
             (tab-title (code-agent-org-terminal--tab-title)))
         (when ws-ref
@@ -2903,7 +2875,7 @@ C-c for GitHub Copilot CLI)."
                           (code-agent-org-cmux--agent-profile-cancel-keys profile)
                         '("escape"))))
     (unless surface-id
-      (user-error "No cmux session for this story"))
+      (user-error "No cmux session for this workspace"))
     (dolist (key cancel-keys)
       (code-agent-org-cmux--call "send-key" "--surface" surface-id key))
     (message "Cancel sent to agent (waiting for hook...)"))))
@@ -2952,20 +2924,6 @@ the Python side would land it:
 - =report_meta_block "current_query"= with markdown for richer
   presentation — supports prompt/status/timing in one card.
 
-** Future: open the current story's design notes in the sidebar
-
-=cmux markdown open <path>= raises a live-reloading markdown panel
-with H1–H6 / code blocks / tables / blockquotes and atomic-rename-safe
-auto-reload. Wiring it to the current SDD story would surface the
-relevant design context next to the terminal:
-
-#+begin_src elisp
-(defun code-agent-org-cmux-open-design-notes ()
-  "Open the current story's design doc in cmux's sidebar panel."
-  (interactive)
-  (when-let* ((story-file (code-agent-org--current-story-doc-path)))
-    (code-agent-org-cmux--call "markdown" "open" story-file)))
-#+end_src
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux-set-status (key value)

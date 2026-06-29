@@ -75,11 +75,6 @@
   (let ((backend (test-p3--fresh-claude-code-backend)))
     (should-not (code-agent-org-backend-query-completed backend "sk"))))
 
-(ert-deftest test-p3-on-story-changed-default-is-noop ()
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-on-story-changed backend "old" "new"))))
-
 (ert-deftest test-p3-recover-session-default-is-noop ()
   :tags '(:unit :fast :stable :protocol-3)
   (let ((backend (test-p3--fresh-claude-code-backend)))

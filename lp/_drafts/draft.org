@@ -758,3 +758,391 @@ everything else is parity polish.
 - *Don't fork pi for the blockers* — MCP/web belong in extensions
   (=registerTool= + =pi.exec=/=fetch=), keeping upstream updates intact
   (=lp-cowork-boundary-object-evolution=).
+
+* 2026-06-29-remove-story-concept
+:PROPERTIES:
+:CUSTOM_ID: remove-story-concept
+:STATUS: proposal
+:OWNER: jt
+:END:
+
+** Motivation
+
+The current org-mode structure has 4 layers:
+
+: Workspace → Story → System Prompt + Workflow → Instruction + Response
+
+Story was designed to let users run multiple tasks under one Claude Code session
+via ACTIVE_STORY switching. In practice, the indirection adds complexity without
+clear value:
+
+1. ACTIVE_STORY is always set to the last-executed story — switching is automatic,
+   not deliberate. Users rarely have multiple stories alive simultaneously.
+2. Stories carry zero properties (everything inherits from workspace). The extra
+   heading level is pure hierarchy ceremony.
+3. The bridge, cmux, and session-context modules all need story-awareness code
+   (find-story-heading, collect-stories, ACTIVE_STORY property, story-changed hook).
+   Removing the layer eliminates ~15 functions and 2 hooks.
+4. One workspace = one topic is the natural mental model. If you want a different
+   topic, create a new workspace.
+
+** Proposed structure (3 layers)
+
+: Workspace → System Prompt + Workflow → Instruction + Response
+
+#+begin_example
+,* My Project
+:PROPERTIES:
+:CUSTOM_ID: xxx
+:CMUX_WORKSPACE: my-project
+:CLAUDE_SESSION_ID: sdd-20260629-120000
+:CLAUDE_CLI_SESSION: <UUID>
+:CMUX_SURFACE_ID: surface:N
+:CLAUDE_BACKEND: cmux
+:END:
+
+,** System Prompt :system_prompt:
+:PROPERTIES:
+:CUSTOM_ID: xxx
+:END:
+Content...
+
+,** Workflow :sdd:
+:PROPERTIES:
+:CUSTOM_ID: xxx
+:END:
+
+,*** Instruction 1 :claude_chat:
+:PROPERTIES:
+:CUSTOM_ID: xxx
+:END:
+#+begin_src ai
+query...
+#+end_src
+
+,*** Response 1 (2026-06-29 12:00) :ai_output:
+:PROPERTIES:
+:QUERY_ID: xxx
+:END:
+#+end_example
+
+*** What changes (complete inventory)
+
+857 references to "story" across the codebase. No backward compatibility.
+Every reference gets deleted or rewritten.
+
+| Item | Before | After |
+|------+--------+-------|
+| Workspace child depth | Story (level+1) → System Prompt (level+2) | System Prompt (level+1) |
+| ACTIVE_STORY property | on workspace heading | removed |
+| code-agent-org-active-story-changed-hook | fires on story switch | removed |
+| cmux tab naming | =workspace: story= | =workspace= only |
+| insert-workspace | creates workspace + First Story + SP + WF | creates workspace + SP + WF |
+| insert-story | creates story under workspace | removed |
+| header-line badge | =workspace / story= | =workspace= only |
+| Python story_name | workspace_launcher.story_name, _normalize_story_slug | removed |
+| backend protocol | =on-story-changed= generic method | removed |
+| System Prompt body | =The current workspace story is "X"= | removed |
+
+*** What stays the same
+
+- Workspace heading detection (code-agent-org--workspace-heading-p)
+- PROJECT_ROOT resolution (inherits from file or workspace)
+- Session management (CLAUDE_SESSION_ID, CLAUDE_CLI_SESSION)
+- CUSTOM_ID generation (workspace prefix for terminal sections)
+- Workflow archive + fresh workflow creation
+- Instruction + Response structure
+- Two channels: C-c C-c and direct terminal input
+- :system_prompt: tag scanning (project-prompts.org) — unrelated to story
+
+*** Complete removal list — Elisp functions + hooks + variables (workspace.org)
+
+| Symbol | Type | Lines |
+|--------|------|-------|
+| code-agent-org--find-story-heading | defun | 178-202 |
+| code-agent-org-active-story-changed-hook | defvar | 210 |
+| add-hook org-property-changed-functions | hook registration | 260 |
+| code-agent-org--set-active-story | defun | 214-228 |
+| code-agent-org-get-active-story | defun | 230-237 |
+| code-agent-org--on-org-property-changed | defun | 239-261 |
+| code-agent-org--collect-stories | defun | 286-302 |
+| code-agent-org--find-last-ai-block | defun | 304-315 |
+| code-agent-org--goto-story-jump | defun | 317-323 |
+| code-agent-org--goto-story-make-key | defun | 325 |
+| code-agent-org--goto-story-make-action | defun | 333 |
+| code-agent-org--goto-story-build-items | defun | 338 |
+| code-agent-org-goto-story | defun | 349-366 |
+| code-agent-org--goto-story-select | defun | 368-382 |
+| code-agent-org--goto-story-show-menu | defun | 384-400 |
+
+*** Complete removal list — code-agent-org.org
+
+| Symbol | Type | Lines |
+|--------|------|-------|
+| code-agent-org-insert-story | defun | 358-403 |
+| insert-story keybinding (C-c C-s) | keymap entry | 338 |
+
+*** Complete removal list — cmux.org
+
+| Symbol | Type | Lines |
+|--------|------|-------|
+| code-agent-org-cmux--on-story-changed | defun | 2510-2518 |
+| add-hook active-story-changed-hook | hook registration | 2521 |
+| ACTIVE_STORY auto-update in execute path | code block | 2073-2074 |
+| rename-workspace "story name" comment | comment | 499 |
+| "per-story" prose references | prose | 70, 78, 574 |
+
+*** Complete removal list — workspace-bridge.org
+
+| Symbol | Type | Lines |
+|--------|------|-------|
+| ACTIVE_STORY lookup in --find-workflow | code block | 228-242 |
+| "active story" prose | prose | 84, 229, 237, 273 |
+
+*** Complete removal list — header-line.org
+
+| Symbol | Type | Lines |
+|--------|------|-------|
+| code-agent-org--header-story-name | defvar-local | 57-58 |
+| story name update in --update-cached-names | code block | 149-155 |
+| story badge in --location-badge | code block | 276-284 |
+| "story" in prose | prose | 10, 20, 127, 143 |
+
+*** Complete removal list — terminal-base.org
+
+| Symbol | Type | Lines |
+|--------|------|-------|
+| ACTIVE_STORY read in tab-title function | code block | 127-132 |
+| fallback: use workspace heading name instead | code change | — |
+
+*** Complete removal list — backend protocol (code-agent-backend.org)
+
+| Symbol | Type | Lines |
+|--------|------|-------|
+| code-agent-org-backend-on-story-changed | cl-defgeneric | 4247-4248 |
+| on-story-changed row in protocol table | table row | 3999 |
+| test-p3-on-story-changed-default-is-noop | test | 3999 |
+
+*** Complete removal list — Python code
+
+| Symbol | File | Action |
+|--------|------|--------|
+| _normalize_story_slug | claude_workspace.py:38 | delete function |
+| story_name usage in build_args | claude_workspace.py:236-237 | delete slug logic |
+| self.story_name | workspace_launcher.py:355 | delete attribute |
+| story_name in _query_emacs_for_session_info | workspace_launcher.py:396-427 | remove from MCP query + parsing |
+| story_name fallback in cmux workspace | workspace_launcher.py:460-467 | use cmux_ws or "" only |
+| story_name in _set_terminal_tab_title | workspace_launcher.py:516-518 | use session_id or agent_name |
+| story_name in print_status | workspace_launcher.py:533 | delete line |
+| story_name in pi_workspace.py | pi_workspace.py:62 | delete line |
+| story_name in opencode_workspace.py | opencode_workspace.py:222 | delete line |
+| TestNormalizeStorySlug | test_claude_workspace.py:172-196 | delete class |
+| story_name in _make_launcher | test_claude_workspace.py:31,39 | delete param |
+
+*** Complete removal list — documentation
+
+| File | Action |
+|------|--------|
+| README.org | Remove "Story section" keybinding row (line 597); remove SDD per-story docs section (lines 693-718); remove per-story override section (line 755); rewrite "story" references in system prompt examples |
+| CLAUDE.md | Remove "story they're serving" line (181); remove "per-story" in research line (283) |
+| .github/AGENTS.md | Remove story references (~5 lines) |
+| lp/INDEX.org | Update workspace.org description (line 60): remove "ACTIVE_STORY lifecycle" |
+| lp/org/README.org | Update workspace.org description |
+| lp/org/code-agent-org.org | Remove story-related prose (~40 lines): insert-story section, story level alignment, story CUSTOM_ID prefix doc; remove transient menu entries: =("s" "Story section" ...)= and =("j" "Go to story" ...)= (lines 2538, 2541); remove =C-c C-s= keybinding (line 338) |
+| lp/org/code-agent-org-workspace.org | Rewrite entirely: remove all story prose, story navigation section, ACTIVE_STORY section, per-story system prompt section; fix overview table (lines 22-23) — functions listed =--current-story-heading=, =--find-story-by-name=, =--story-system-prompt=, =--archive-active-story= don't exist as defuns |
+| lp/org/code-agent-org-session-context.org | Remove "recovery story" prose (line 41); update conversation history docs |
+| lp/backend/code-agent-multiplexer.org | Remove "focus story" prose (line 136) |
+| lp/backend/code-agent-pi-extensions.org | Remove "inspect a story" prose (line 338) |
+| lp/sdk/code-agent-permission.org | Remove "session/story identifier" references (lines 389, 409, 441) |
+| lp/sdk/PROTOCOL-MAP.org | Remove =on-story-changed= row (line 95) |
+| lp/trace/code-agent-trace.org | Update "SDD story" to "SDD session" (line 47) |
+| lp/chat/code-agent.org | Update =*cmux: <story>*= verbose buffer name (line 453) |
+| .claude/skills/e2e-trace/SKILL.md | Remove "Insert an SDD story" instruction (line 23) |
+| .claude/rules/e2e-harness-dev-env.md | Remove "test workspace/story" (line 26) |
+| tasks/docs-alignment.md | Remove story references (lines 60, 90) |
+| .refactor-queue.md | Historical — leave as-is (records what happened) |
+| CODEBASE-REVIEW.org | "extraction history" — English prose, leave as-is |
+| research/*.org, research/*.md | Historical research docs — leave as-is |
+
+*** Complete removal list — tests (~300+ lines across 25+ files)
+
+**** Tests to delete entirely (story-only features)
+
+| File | What to delete |
+|------|---------------|
+| test-code-agent-org-workspace.el | =test-workspace-insert-sets-active-story= (lines 106-116) |
+| test-cmux-e2e-simulated.el | E14 story switch test (lines 2883-2943); ACTIVE_STORY property tests (lines 1522-1588); tab-title ACTIVE_STORY tests (lines 1640-1669) |
+| test-backend-protocol3.el | =test-p3-on-story-changed-default-is-noop= (lines 78-81) |
+| test-structural.el | =code-agent-org-get-active-story= symbol check (line 628) |
+| test-cmux-env-injection.el | story name env injection tests (~16 lines) |
+| test-e2e-pi-backend.el | story-related E2E tests (~41 lines) |
+
+**** Tests to update — heading level adjustments
+
+After removing the story layer, heading levels drop by 1:
+
+| Pattern | Before (story layer present) | After (flat) |
+|---------|------------------------------|--------------|
+| System Prompt | =*** System Prompt :system_prompt:= (level 3) | =** System Prompt :system_prompt:= (level 2) |
+| Workflow | =*** Workflow :sdd:= (level 3) | =** Workflow :sdd:= (level 2) |
+| Instruction | =**** Instruction 1 :claude_chat:= (level 4) | =*** Instruction 1 :claude_chat:= (level 3) |
+| Response | =**** Response= (level 4) | =*** Response= (level 3) |
+
+Files with level-dependent assertions/fixtures to update:
+
+| File | Lines | Change |
+|------|-------|--------|
+| test-code-agent-org-workspace.el:35 | =^\\*\\*\\* System Prompt= | → =^\\*\\* System Prompt= |
+| test-code-agent-org-workspace.el:41 | =^\\*\\*\\* Workflow= | → =^\\*\\* Workflow= |
+| test-code-agent-org-workspace.el:73 | =^\\*\\*\\* System Prompt= | → =^\\*\\* System Prompt= |
+| test-code-agent-org-workspace.el:77 | =^\\*\\*\\* Workflow= | → =^\\*\\* Workflow= |
+| test-code-agent-org-workspace.el:82 | =^\\*\\*\\*\\* Instruction= | → =^\\*\\*\\* Instruction= |
+| test-code-agent-org-workspace.el:130 | =** First Story\n*** Workflow= | → =** Workflow= |
+| test-code-agent-org-workspace.el:436 | level 3 CUSTOM_ID check | → level 2 |
+| test-code-agent-org-workspace.el:441 | level 3 CUSTOM_ID check | → level 2 |
+| test-cmux-e2e-simulated.el:1322 | =*** System Prompt= | → =** System Prompt= |
+| test-cmux-e2e-simulated.el:1329 | =*** Workflow= | → =** Workflow= |
+| test-cmux-e2e-simulated.el:1334 | =**** Instruction= | → =*** Instruction= |
+| test-cmux-e2e-simulated.el:1526,1572,1654 | =*** Workflow= | → =** Workflow= |
+| test-cmux-e2e-simulated.el:2900 | =*** Workflow= | → =** Workflow= |
+| test-cmux-e2e-simulated.el:2905 | =**** Instruction= | → =*** Instruction= |
+
+**** Tests to update — fixture structure flattening
+
+| File | Before | After |
+|------|--------|-------|
+| test-code-agent-org-workspace.el:55-90 | =test-workspace-insert-creates-story-and-notebook-sections= — rename to =test-workspace-insert-creates-system-prompt-and-workflow=; remove "First Story" assertion; update level assertions |
+| test-code-agent-org-refactor-phase1.el:81 | =* Development\n** Story\n*** Task= | =* Development\n** Task= |
+| test-code-agent-org-refactor-phase1.el:187 | =* Top\n** Story\n*** Task= | =* Top\n** Task= |
+| test-workspace-bridge-response.el:40 | =* Story= heading | =* Test Workspace= |
+| test-cmux-e2e-agent-profiles.el | =* Test Story= headings + =story-ap-*= CUSTOM_IDs | =* Test Workspace= + =workspace-ap-*= |
+| test-code-agent-org-content-loss-repro.el | Flatten story-level fixtures | Flatten to workspace → WF → instruction |
+| test-code-agent-org-wrong-position-repro.el | Flatten story-level fixtures | Flatten to workspace → WF → instruction |
+| test-code-agent-org-loop-detection.el | Flatten story fixtures | Flatten to workspace → WF → instruction |
+| fixtures/pi-cmux-e2e.org:8 | =* Pi cmux test story= | =* Pi cmux Test Workspace= |
+| test-workspace-bridge-e2e.sh:401 | =--title "my story"= | =--title "test-workspace"= |
+| test-cmux-agent-name-lookup.el:12 | Comment referencing =_normalize_story_slug= | Remove or rewrite |
+| support/pi-test-helpers.el:7 | "story tests" comment | "workspace tests" |
+
+**** Tests to add — verify new flat structure works
+
+| Test | File | What it verifies |
+|------|------|-----------------|
+| =test-workspace-insert-creates-flat-structure= | test-code-agent-org-workspace.el | insert-workspace produces =* WS → ** SP + ** WF → *** Instruction= (no story heading) |
+| =test-workspace-no-active-story-property= | test-code-agent-org-workspace.el | workspace heading has no ACTIVE_STORY property |
+| =test-workflow-found-directly-under-workspace= | test-code-agent-org-workspace.el | =--find-active-workflow-pos= finds WF as direct child of workspace |
+| =test-bridge-finds-workflow-without-story= | test-workspace-bridge-response.el | bridge inserts prompt/response into workspace's WF without ACTIVE_STORY |
+| =test-cmux-tab-title-workspace-only= | test-cmux-e2e-simulated.el | tab title is workspace name only, no story suffix |
+| =test-header-line-workspace-badge-only= | test-code-agent-org-workspace.el | header line shows workspace badge, no story badge |
+| =test-workspace-structure-levels= | test-code-agent-org-workspace.el | SP at level 2, WF at level 2, Instruction at level 3 |
+
+**** E2E fixtures and instructions (code/prose changes)
+
+| File | Action |
+|------|--------|
+| tests/e2e/org/workspace-test.org | Strip all ACTIVE_STORY properties (~15 occurrences); flatten multi-story workspaces to separate workspaces; adjust heading levels |
+| tests/e2e/living-workspace-test.org | Delete T12/T13/T21/E14 story tests (~79 lines); update structure descriptions; adjust level assertions |
+| tests/e2e/org/pi-backend-test.org | Flatten story references (~9 lines) |
+| tests/e2e/org/pi-streaming-behavior-test.org | Rename "Story 1" / "Story 2" section headers to "Prompt 1" / "Prompt 2" (lines 46, 61) |
+| tests/e2e/org/pi-tool-response-routing-test.org | Rename "Story — trigger several tool calls" heading (line 23) |
+| tests/e2e/org/restart-extra-args-test.org | Rename "regression story" heading (line 38) |
+| tests/e2e/org/supersede-response-test.org | "history of type systems" — English prose, leave as-is |
+| tests/e2e/org/tmux-test.org | Strip ACTIVE_STORY property (line 24) |
+| tests/e2e/E2E_TASKS.org | Remove story-related task entries (~8 lines) |
+| tests/e2e/quality-loop-prompt.org | Remove E14 story switch entry (~7 lines) |
+| tests/e2e/e2e-loop-prompt.org | Remove story switch prompt (~10 lines) |
+| tests/e2e/e2e-quality-team-proposal.md | Remove E12/E31/E51 story test rows (lines 55, 86, 126); update "workspace/story" (line 152) |
+
+**** Test prompts with "story" as English word (leave as-is)
+
+| File | Line | Content | Action |
+|------|------|---------|--------|
+| test-code-agent-integration.el | 272 | "Write a very long story about numbers..." | leave |
+| test-code-agent-mock.el | 169 | same | leave |
+| test-code-agent-org-cancel.el | 197, 270 | "Tell me a story" | leave |
+| test-code-agent-org-mock.el | 162, 238, 365, 991 | "Write a very long story..." | leave |
+| test-code-agent-sentinel.el | 141 | "Write a very long story..." | leave |
+| mock-claude-cli.sh | 81 | "long story" pattern | leave |
+| mock-claude-cli-v2.py | 84 | "long story" pattern | leave |
+| test-e2e-pi-multiblock.el | 186 | "The single ERT story" (English prose) | leave |
+| test-code-agent-org-unit.el | 749, 783 | `:history` tag (not story) | leave |
+
+*** Functions to simplify (not remove)
+
+| Function | File | Change |
+|----------+------+--------|
+| code-agent-org-insert-workspace | code-agent-org.org | Remove "First Story" child; create workspace + SP + WF directly |
+| code-agent-org--find-active-workflow-pos | code-agent-org.org | Walk from workspace heading, not from story |
+| code-agent-org--workspace-heading-p | workspace.org | Remove story-related comments |
+| workspace-bridge --find-workflow | workspace-bridge.org | Find WF directly under workspace (no ACTIVE_STORY) |
+| workspace-bridge-insert-prompt | workspace-bridge.org | No story routing; always workspace's single WF |
+| terminal-base tab-title fn | terminal-base.org | Use workspace heading name, not ACTIVE_STORY |
+| header-line --update-cached-names | header-line.org | Remove story name caching |
+| header-line --location-badge | header-line.org | Show workspace badge only |
+| Python build_args | claude_workspace.py | Remove story_name slug logic |
+| Python _query_emacs_for_session_info | workspace_launcher.py | Remove story from query + parsing |
+
+*** Migration for existing org files
+
+Existing org files with the old 4-layer structure need a one-time migration.
+A =code-agent-org--migrate-remove-stories= function handles this interactively:
+
+1. For each workspace with exactly one story: promote story children to workspace
+   children (System Prompt and Workflow move up one level). Delete the story heading.
+2. For each workspace with multiple stories: each story becomes a separate workspace.
+   The new workspace inherits PROJECT_ROOT and CLAUDE_BACKEND from the parent.
+   A new CLAUDE_SESSION_ID is generated for each.
+3. Strip all ACTIVE_STORY properties.
+4. Strip the =The current workspace story is "X"= line from System Prompt bodies.
+
+No automated migration for Python — the story_name attribute simply disappears.
+Callers that used it fall back to cmux_ws or session_id.
+
+*** Design rationale
+
+The story concept was an optimization for a workflow that rarely materializes:
+running multiple concurrent tasks in one session. In practice:
+
+1. Users create one workspace per project/topic
+2. Each workspace has exactly one active workflow at a time
+3. Archive + fresh workflow (already supported) handles task switching within a workspace
+4. The extra indirection layer adds cognitive load and code complexity
+
+Removing stories makes the org structure flatter, the code simpler, and the mental
+model cleaner: one workspace = one persistent Claude Code session = one topic.
+
+*** Verification
+
+1. Create new workspace with the simplified structure
+2. Execute ai blocks and verify responses insert correctly
+3. Verify bridge routing works (direct terminal input → correct WF)
+4. Verify cmux tab naming shows workspace name only (no story suffix)
+5. Verify header line shows workspace badge only
+6. Run migration on existing test org file and verify structure
+7. Verify Python launcher no longer references story_name
+8. Run full test suite: =make test-unit= + =make test-python=
+9. Verify =grep -rn "story" --include="*.org" --include="*.el" --include="*.py"= returns only
+   prose/history references (commit messages, research docs), zero code references
+10. New tests pass: flat structure, no ACTIVE_STORY, direct WF lookup, workspace-only badges
+
+*** Anti-patterns
+
+- Don't keep ACTIVE_STORY as a "just in case" — dead code breeds bugs
+- Don't create a compatibility shim for old story functions — break cleanly
+- Don't change the Workflow/Instruction/Response structure — that stays
+- Don't rename workspace concepts — CMUX_WORKSPACE, CLAUDE_SESSION_ID stay as-is
+- Don't leave story references in prose that describes current behavior — rewrite or delete
+
+*** References
+
+- lp/org/code-agent-org-workspace.org — current workspace + story model (88 refs)
+- lp/org/code-agent-org.org — insert-workspace, insert-story (40 refs)
+- lp/org/code-agent-org-workspace-bridge.org — terminal-to-org bridge (9 refs)
+- lp/org/code-agent-org-cmux.org — cmux backend (32 refs)
+- lp/org/code-agent-org-header-line.org — header line badges (14 refs)
+- lp/org/code-agent-org-terminal-base.org — tab title (2 refs)
+- lp/sdk/code-agent-backend.org — backend protocol (7 refs)
+- lp/sdk/code-agent-python.org — Python launcher (32 refs)
+- python/code_agent/workspace_launcher.py — story_name attribute
+- python/code_agent/claude_workspace.py — _normalize_story_slug
+- tests/ — ~200+ lines across 12 test files

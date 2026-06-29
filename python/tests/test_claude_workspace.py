@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 from code_agent.claude_workspace import (
     ClaudeWorkspaceLauncher,
     _cleanup_ide_server,
-    _normalize_story_slug,
+    _normalize_name_slug,
 )
 from code_agent.workspace_launcher import (
     is_valid_session,
@@ -28,7 +28,6 @@ def _make_launcher(
     org_file="/tmp/test.org",
     session_id="",
     extra_args=None,
-    story_name="",
     system_prompt="",
     mcp_url="http://localhost:9999/mcp",
 ):
@@ -36,7 +35,6 @@ def _make_launcher(
     launcher = ClaudeWorkspaceLauncher(org_file, session_id, extra_args or [])
     launcher.plugin_dir = str(plugin_dir)
     launcher.mcp_url = mcp_url
-    launcher.story_name = story_name
     launcher.system_prompt = system_prompt
     return launcher
 
@@ -167,30 +165,3 @@ class TestCleanupIdeServer:
         mcp = MagicMock()
         _cleanup_ide_server(mcp, "")
         assert not mcp.eval_elisp.called
-
-
-class TestNormalizeStorySlug:
-    def test_simple_ascii(self):
-        assert _normalize_story_slug("my story") == "my-story"
-
-    def test_mixed_case(self):
-        assert _normalize_story_slug("My Story Name") == "my-story-name"
-
-    def test_special_chars(self):
-        assert _normalize_story_slug("fix: bug #123!") == "fix-bug-123"
-
-    def test_all_unicode_returns_empty(self):
-        """All-unicode name normalises to empty string."""
-        assert _normalize_story_slug("混合中文") == ""
-
-    def test_empty_slug_not_passed_to_cli(self, tmp_path):
-        """Empty normalised name must NOT produce --name ''."""
-        launcher = _make_launcher(tmp_path, story_name="混合中文")
-        args = launcher.build_args()
-        assert "--name" not in args
-
-    def test_valid_slug_passed_to_cli(self, tmp_path):
-        launcher = _make_launcher(tmp_path, story_name="My Story")
-        args = launcher.build_args()
-        idx = args.index("--name")
-        assert args[idx + 1] == "my-story"

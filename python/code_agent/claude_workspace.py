@@ -35,8 +35,8 @@ from code_agent.workspace_launcher import (
 # ======================================================================
 
 
-def _normalize_story_slug(name: str) -> str:
-    """Convert a story heading to a valid ``--name`` slug.
+def _normalize_name_slug(name: str) -> str:
+    """Convert a heading name to a valid ``--name`` slug.
 
     Lowercases, collapses runs of non-alphanumeric to single hyphens,
     and trims stray leading/trailing hyphens.
@@ -232,11 +232,6 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
 
         hooks_file = ClaudeHooksFile(self.plugin_dir).write()
         args.extend(["--settings", hooks_file])
-
-        if self.story_name:
-            slug = _normalize_story_slug(self.story_name)
-            if slug:
-                args.extend(["--name", slug])
 
         if is_valid_session(self.system_prompt):
             args.extend(["--system-prompt", self.system_prompt])

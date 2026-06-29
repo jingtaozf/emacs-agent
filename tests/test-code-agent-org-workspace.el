@@ -22,39 +22,28 @@
 ;;; Unit Tests - Structure Creation
 
 (ert-deftest test-workspace-insert-creates-system-prompt-first ()
-  "Test that code-agent-org-insert-workspace creates System Prompt as the first subsection.
-The default content should indicate the current workspace story name."
+  "Test that code-agent-org-insert-workspace creates System Prompt as the first subsection."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     (setq buffer-file-name "/tmp/test-sdd.org")
-    (cl-letf (((symbol-function 'read-string) (lambda (_) "My SDD Story")))
+    (cl-letf (((symbol-function 'read-string) (lambda (_) "My Workspace")))
       (code-agent-org-insert-workspace))
-    ;; Verify System Prompt exists with :system_prompt: tag (level 3, under story)
+    ;; Verify System Prompt exists with :system_prompt: tag (level 2, direct child of workspace)
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:" nil t))
+    (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
     ;; Verify it has CUSTOM_ID
     (should (org-entry-get nil "CUSTOM_ID"))
-    ;; Verify it comes BEFORE Workflow (first subsection under story)
+    ;; Verify it comes BEFORE Workflow (first subsection under workspace)
     (let ((system-prompt-pos (point)))
       (goto-char (point-min))
-      (should (re-search-forward "^\\*\\*\\* Workflow :sdd:" nil t))
+      (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
       (let ((workflow-pos (point)))
-        (should (< system-prompt-pos workflow-pos))))
-    ;; Verify default content contains the workspace story name
-    (goto-char (point-min))
-    (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:")
-    (forward-line 1)
-    ;; Skip past PROPERTIES drawer
-    (when (looking-at ":PROPERTIES:")
-      (re-search-forward ":END:" nil t)
-      (forward-line 1))
-    ;; Should find the default content with the story name
-    (should (re-search-forward "The current workspace story is \"My SDD Story\"" nil t))))
+        (should (< system-prompt-pos workflow-pos))))))
 
-(ert-deftest test-workspace-insert-creates-story-and-notebook-sections ()
-  "Test that code-agent-org-insert-workspace creates story heading, System Prompt, and Workflow.
-The workspace has: * Workspace > ** Story > *** System Prompt + *** Workflow."
+(ert-deftest test-workspace-insert-creates-flat-structure ()
+  "Test that code-agent-org-insert-workspace creates System Prompt and Workflow.
+The workspace has: * Workspace > ** System Prompt + ** Workflow."
   :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
   (with-temp-buffer
     (org-mode)
@@ -65,29 +54,26 @@ The workspace has: * Workspace > ** Story > *** System Prompt + *** Workflow."
     (goto-char (point-min))
     ;; Top-level workspace heading
     (should (re-search-forward "^\\* Test Feature" nil t))
-    ;; Story sub-heading
+    ;; System Prompt section (level 2, direct child of workspace)
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\* First Story" nil t))
-    ;; System Prompt section (level 3, under story)
-    (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:" nil t))
+    (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
     (should (org-entry-get nil "CUSTOM_ID"))
-    ;; Workflow section with :sdd: tag and CUSTOM_ID (level 3, under story)
+    ;; Workflow section with :sdd: tag and CUSTOM_ID (level 2, direct child)
     (goto-char (point-min))
-    (should (re-search-forward "^\\*\\*\\* Workflow :sdd:" nil t))
+    (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
     (should (org-entry-get nil "CUSTOM_ID"))
-    ;; AI block under Workflow (level 4)
+    ;; AI block under Workflow (level 3)
     (goto-char (point-min))
     (let ((tag-pattern (format ":%s:" code-agent-org-heading-tag)))
-      (should (re-search-forward (format "^\\*\\*\\*\\* Instruction 1 .*%s" tag-pattern) nil t))
+      (should (re-search-forward (format "^\\*\\*\\* Instruction 1 .*%s" tag-pattern) nil t))
       (should (re-search-forward "^#\\+begin_src ai" nil t)))
-    ;; MUST NOT have Research Output, Spec, or Features sections
+    ;; No story heading
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\*\\* Research Output" nil t))
+    (should-not (re-search-forward "^\\*\\* First Story" nil t))
+    ;; No ACTIVE_STORY property
     (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\*\\* Spec" nil t))
-    (goto-char (point-min))
-    (should-not (re-search-forward "^\\*\\*\\* Features" nil t))))
+    (re-search-forward "^\\* Test Feature")
+    (should-not (org-entry-get nil "ACTIVE_STORY"))))
 
 (ert-deftest test-workspace-insert-sets-session-id ()
   "Test that workspace structure has unique CLAUDE_SESSION_ID."
@@ -103,44 +89,30 @@ The workspace has: * Workspace > ** Story > *** System Prompt + *** Workflow."
       (should session-id)
       (should (string-prefix-p "sdd-" session-id)))))
 
-(ert-deftest test-workspace-insert-sets-active-story ()
-  "Test that workspace heading has ACTIVE_STORY property set to workspace name."
-  :tags '(:unit :fast :stable :isolated :org :sdd :tdd)
-  (with-temp-buffer
-    (org-mode)
-    (setq buffer-file-name "/tmp/test-sdd.org")
-    (cl-letf (((symbol-function 'read-string) (lambda (_) "Test Feature")))
-      (code-agent-org-insert-workspace))
-    (goto-char (point-min))
-    (re-search-forward "^\\* Test Feature")
-    (should (equal "First Story" (org-entry-get nil "ACTIVE_STORY"))))
-)
-
 (ert-deftest test-collect-workspaces-finds-session-id-only-workspace ()
   "Workspaces marked only by CLAUDE_SESSION_ID (the SDD/cmux creation path,
 no CMUX_WORKSPACE) must be found by code-agent-org--collect-workspaces.
-Regression: such workspaces were invisible to goto-story, which reported
-\"No workspaces found in buffer\"."
+Regression: such workspaces were invisible to navigation."
   :tags '(:unit :fast :stable :isolated :org :sdd)
   (with-temp-buffer
     (org-mode)
     ;; Workspace A: SDD/cmux layout — only CLAUDE_SESSION_ID, no CMUX_WORKSPACE.
     (insert "* dev1\n:PROPERTIES:\n:CLAUDE_SESSION_ID: sdd-20260327-194735\n"
             ":CMUX_SURFACE_ID: surface:15\n:END:\n"
-            "** First Story\n*** Workflow :sdd:\n**** Instruction 1 :ai:\n"
+            "** Workflow :sdd:\n*** Instruction 1 :ai:\n"
             "#+begin_src ai\nhi\n#+end_src\n\n")
     ;; Workspace B: named layout — CMUX_WORKSPACE present.
     (insert "* dev2\n:PROPERTIES:\n:CMUX_WORKSPACE: dev2\n:CLAUDE_SESSION_ID: sdd-x\n:END:\n"
-            "** First Story\n")
+            "** Workflow :sdd:\n")
     (let ((wss (code-agent-org--collect-workspaces)))
       (should (= 2 (length wss)))
       (should (equal "dev1" (car (nth 0 wss))))
       (should (equal "dev2" (car (nth 1 wss))))
       (should (equal "sdd-20260327-194735" (nth 2 (nth 0 wss)))))
-    ;; A story heading inherits the session id but has none of its own, so it
+    ;; A sub-section inherits the session id but has none of its own, so it
     ;; must NOT be classified as a workspace root.
     (goto-char (point-min))
-    (re-search-forward "^\\*\\* First Story")
+    (re-search-forward "^\\*\\* Workflow")
     (should-not (code-agent-org--workspace-heading-p))))
 
 (ert-deftest test-workspace-level-alignment ()
@@ -354,7 +326,7 @@ were not inherited because org-get-tags was called with LOCAL=t."
 ;;; End-to-End Tests - Full Workspace Workflow
 
 (ert-deftest test-workspace-e2e-create-and-verify-structure ()
-  "End-to-end: Create workspace, verify notebook structure with story heading."
+  "End-to-end: Create workspace, verify flat notebook structure."
   :tags '(:e2e :slow :org :sdd :tdd)
   (let ((test-dir (make-temp-file "sdd-e2e-" t)))
     (unwind-protect
@@ -374,22 +346,16 @@ were not inherited because org-get-tags was called with LOCAL=t."
             ;; Verify context
             (should (equal "E2E Test Feature" (code-agent-org--find-workspace-root)))
             (should (member "sdd" (code-agent-org--get-current-tags)))
-            ;; Verify structure: workspace > story > system prompt + workflow
+            ;; Verify structure: workspace > system prompt + workflow
             (goto-char (point-min))
             (should (re-search-forward "^\\* E2E Test Feature" nil t))
             (goto-char (point-min))
-            (should (re-search-forward "^\\*\\* First Story" nil t))
+            (should (re-search-forward "^\\*\\* System Prompt :system_prompt:" nil t))
             (goto-char (point-min))
-            (should (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:" nil t))
+            (should (re-search-forward "^\\*\\* Workflow :sdd:" nil t))
+            ;; No story heading
             (goto-char (point-min))
-            (should (re-search-forward "^\\*\\*\\* Workflow :sdd:" nil t))
-            ;; Verify NO Research Output/Spec/Features in notebook
-            (goto-char (point-min))
-            (should-not (re-search-forward "^\\*\\*\\* Research Output" nil t))
-            (goto-char (point-min))
-            (should-not (re-search-forward "^\\*\\*\\* Spec" nil t))
-            (goto-char (point-min))
-            (should-not (re-search-forward "^\\*\\*\\* Features" nil t))))
+            (should-not (re-search-forward "^\\*\\* First Story" nil t))))
       ;; Cleanup
       (delete-directory test-dir t))))
 
@@ -433,14 +399,14 @@ were not inherited because org-get-tags was called with LOCAL=t."
     (goto-char (point-min))
     (re-search-forward "^\\* Test Feature")
     (should (org-entry-get nil "CUSTOM_ID"))
-    ;; Verify CUSTOM_ID on System Prompt (level 3, under story)
+    ;; Verify CUSTOM_ID on System Prompt (level 2, direct child of workspace)
     (goto-char (point-min))
-    (re-search-forward "^\\*\\*\\* System Prompt :system_prompt:")
+    (re-search-forward "^\\*\\* System Prompt :system_prompt:")
     (should (org-entry-get nil "CUSTOM_ID"))
     (should (string-match-p "^test-custom-id-system-prompt-sdd-" (org-entry-get nil "CUSTOM_ID")))
-    ;; Verify CUSTOM_ID on Workflow section (level 3, under story)
+    ;; Verify CUSTOM_ID on Workflow section (level 2, direct child of workspace)
     (goto-char (point-min))
-    (re-search-forward "^\\*\\*\\* Workflow :sdd:")
+    (re-search-forward "^\\*\\* Workflow :sdd:")
     (should (org-entry-get nil "CUSTOM_ID"))
     (should (string-match-p "^test-custom-id-workflow-sdd-" (org-entry-get nil "CUSTOM_ID")))
     ;; MUST NOT have Research Output, Spec, or Features sections at all

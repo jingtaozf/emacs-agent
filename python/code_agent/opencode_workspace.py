@@ -219,7 +219,6 @@ class OpencodeWorkspaceLauncher(WorkspaceLauncher):
         print(f"  Org file:   {self.org_file}")
         print(f"  Session ID: {self.session_id or 'none'}")
         print(f"  Resume ID:  {self.resume_id or 'none (fresh session)'}")
-        print(f"  Story:      {self.story_name or 'unknown'}")
         print(f"  MCP bridge: {self.mcp_ok}")
         print(f"  Extra args: {self.extra_args}")
         if self.model:

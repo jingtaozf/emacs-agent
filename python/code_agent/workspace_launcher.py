@@ -352,7 +352,6 @@ class WorkspaceLauncher:
         self.mcp = McpClient(url=self.mcp_url, read_timeout=30.0)
         # Populated during run().
         self.mcp_ok: bool = False
-        self.story_name: str = ""
         self.system_prompt: str = ""
         # ``workspace_custom_id`` is the org heading's ``:CUSTOM_ID:`` for
         # the workspace section.  Populated by ``fetch_session_metadata``
@@ -393,40 +392,38 @@ class WorkspaceLauncher:
             )
 
     def fetch_session_metadata(self) -> None:
-        """Ask Emacs for the story name + system prompt for this session.
+        """Ask Emacs for the system prompt and CUSTOM_ID for this session.
 
         Identical in all three agents — the Emacs side owns the shape.
-        Populates ``self.story_name``, ``self.system_prompt``, and
-        ``self.workspace_custom_id`` (the workspace heading's
-        ``:CUSTOM_ID:`` — used as the routing key by the bridge so
-        renaming the heading or cmux workspace cannot misroute prompts).
+        Populates ``self.system_prompt`` and ``self.workspace_custom_id``
+        (the workspace heading's ``:CUSTOM_ID:`` — used as the routing
+        key by the bridge so renaming the heading or cmux workspace
+        cannot misroute prompts).
         """
         if not (self.mcp_ok and self.session_id):
             return
         print(f"Building session metadata for {self.session_id}...")
         esc_org = _escape_elisp_string(self.org_file)
         esc_sid = _escape_elisp_string(self.session_id)
-        # One round-trip pulls three values separated by NULs: heading
-        # text, CUSTOM_ID, and the system prompt body.  NUL is safe
-        # because none of the three can legitimately contain it.
+        # One round-trip pulls two values separated by NULs: CUSTOM_ID
+        # and the system prompt body.  NUL is safe because neither can
+        # legitimately contain it.
         elisp = (
             "(let ((debug-on-error nil) (debug-on-quit nil))"
             f'  (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer "{esc_org}")'
             "    (save-excursion (save-restriction (widen)"
             f'      (code-agent-org-workspace-bridge--goto-session "{esc_sid}")'
-            "      (let ((story (substring-no-properties (org-get-heading t t t t)))"
-            '            (cid (or (org-entry-get nil "CUSTOM_ID") ""))'
+            '      (let ((cid (or (org-entry-get nil "CUSTOM_ID") ""))'
             "            (prompt (code-agent-org-workspace-bridge-system-prompt "
             f'              "{esc_org}" "{esc_sid}")))'
-            r'        (format "%s\0%s\0%s" story cid prompt))))))'
+            r'        (format "%s\0%s" cid prompt))))))'
         )
         result = self.mcp.eval_elisp(elisp)
         if not result:
             return
-        parts = result.split("\0", 2)
-        self.story_name = parts[0] if len(parts) > 0 else ""
-        self.workspace_custom_id = parts[1] if len(parts) > 1 else ""
-        self.system_prompt = parts[2] if len(parts) > 2 else ""
+        parts = result.split("\0", 1)
+        self.workspace_custom_id = parts[0] if len(parts) > 0 else ""
+        self.system_prompt = parts[1] if len(parts) > 1 else ""
         if not is_valid_session(self.system_prompt):
             print(
                 "  WARNING: Could not build system prompt — launching without it",
@@ -457,14 +454,13 @@ class WorkspaceLauncher:
         * ``CMUX_WORKSPACE``        — cmux workspace title at launch
           time (display + sanity check only, not a routing key)
 
-        ``CMUX_WORKSPACE`` falls back to ``self.story_name`` when cmux
-        cannot be reached (CI / direct invocation), which matches the
-        existing tab-title convention.
+        ``CMUX_WORKSPACE`` falls back to empty string when cmux
+        cannot be reached (CI / direct invocation).
         """
         os.environ["WORKSPACE_ORG_FILE"] = self.org_file
         os.environ["WORKSPACE_SESSION_ID"] = self.session_id or ""
         os.environ["WORKSPACE_CUSTOM_ID"] = self.workspace_custom_id or ""
-        cmux_ws = self._detect_cmux_workspace_title() or self.story_name or ""
+        cmux_ws = self._detect_cmux_workspace_title() or ""
         if cmux_ws:
             os.environ["CMUX_WORKSPACE"] = cmux_ws
         os.environ["EMACS_MCP_URL"] = self.mcp_url
@@ -476,9 +472,7 @@ class WorkspaceLauncher:
         """Best-effort: ask cmux for the current workspace title.
 
         Returns an empty string if cmux is not reachable (CI sandbox,
-        non-cmux terminal).  The caller falls back to ``story_name``;
-        the bridge's fail-loud check then refuses to route only when
-        BOTH are empty — which is itself a useful invariant.
+        non-cmux terminal).
         """
         try:
             ident = subprocess.run(
@@ -513,9 +507,9 @@ class WorkspaceLauncher:
         return ""
 
     def set_tab_title(self) -> None:
-        """Set the terminal-tab title so cmux pane name shows the story."""
+        """Set the terminal-tab title so cmux pane name shows the workspace."""
         file_base = os.path.splitext(os.path.basename(self.org_file))[0]
-        suffix = self.story_name or self.session_id or self.agent_name
+        suffix = self.session_id or self.agent_name
         tab_title = f"{file_base}:{suffix}"
         os.environ["WARP_DISABLE_AUTO_TITLE"] = "true"
         sys.stdout.write(f"\033]0;{tab_title}\007")
@@ -530,7 +524,6 @@ class WorkspaceLauncher:
         print(f"Starting {self.agent_binary}...")
         print(f"  Org file:   {self.org_file}")
         print(f"  Session ID: {self.session_id or 'none'}")
-        print(f"  Story:      {self.story_name or 'unknown'}")
         print(f"  MCP bridge: {self.mcp_ok}")
         print(f"  Extra args: {self.extra_args}")
         if self.model:

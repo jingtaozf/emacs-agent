@@ -1,4 +1,4 @@
-#+TITLE: Code Agent Org — Living Workspace + Story Navigation
+#+TITLE: Code Agent Org — Living Workspace
 #+PROPERTY: literate-load yes
 
 * Overview
@@ -8,30 +8,22 @@
 
 Implements the "Living Workspace" model: the org file is a
 persistent REPL where a top-level workspace heading hosts a
-long-lived Claude Code session and child story headings hang off
-it. Owns workspace-root detection, =ACTIVE_STORY= tracking, story
-navigation, archival, and =CUSTOM_ID= generation for both
-workspaces and the ai blocks that live under them.
+long-lived Claude Code session. Owns workspace-root detection,
+=CUSTOM_ID= generation for both workspaces and the ai blocks
+that live under them, and inline context collection for prompts.
 
 ** Concerns owned
 
 | Concern | Functions |
 |---------+-----------|
 | Workspace detection | =--find-workspace-heading= / =--find-workspace-root= |
-| =ACTIVE_STORY= read/write | =--get-active-story= / =--set-active-story= / hook firing |
-| Story navigation | =--current-story-heading= / =--find-story-by-name= / =--story-system-prompt= |
-| Story archival | =--archive-active-story= / =--workspace-archive-workflow= |
 | =CUSTOM_ID= generation | =--generate-custom-id= / =--generate-instruction-custom-id= |
 | Inline context for prompts | =--collect-current-context= (the file-position summariser sent with every query) |
 
 ** The Living Workspace mental model
 
 The org file is a *Lisp image*. A workspace is a persistent
-process that outlives any individual story; stories are
-incremental modifications under the workspace heading; =C-c C-c=
-is the REPL =eval=, always available. You don't restart Claude
-Code between stories — you switch =ACTIVE_STORY= and the same
-session keeps going.
+process; =C-c C-c= is the REPL =eval=, always available.
 
 #+begin_example
 ,* code-agent-dev                        ← workspace heading
@@ -40,17 +32,14 @@ session keeps going.
 :CLAUDE_SESSION_ID: sdd-20260326-dev       ← session identity
 :CLAUDE_CLI_SESSION: abc-def-123           ← auto-set: for --resume
 :CMUX_SURFACE_ID: surface:5                ← auto: cached surface ref
-:ACTIVE_STORY: Fix parser bug              ← auto: persists after completion
 :END:
 
-,** Fix parser bug                         ← story (lightweight, no properties)
-,*** System Prompt                         ← optional, sent on story switch
-,*** Workflow                              ← all prompts + responses go here
+,** System Prompt :system_prompt:         ← project context
+,** Workflow :sdd:                        ← all prompts + responses go here
+,*** Instruction 1 :claude_chat:
 ,#+begin_src ai
 …
 ,#+end_src
-
-,** Add new API endpoint                   ← another story, same workspace
 #+end_example
 
 | Property | Who Sets | Purpose |
@@ -59,10 +48,6 @@ session keeps going.
 | =CLAUDE_SESSION_ID= | User or auto | Session identity for routing and inheritance |
 | =CLAUDE_CLI_SESSION= | Auto | Claude Code SDK UUID for =--resume= |
 | =CMUX_SURFACE_ID= | Auto | Cached surface ID, avoids re-detection |
-| =ACTIVE_STORY= | Auto | Current story heading, *persists after completion* |
-
-Stories have *zero required properties* — everything inherits
-from the workspace heading.
 
 ** Two Channels, Same Session
 
@@ -71,34 +56,7 @@ Both routes through the same workspace's Claude Code:
 | Channel | Trigger | Routing |
 |---------+---------+---------|
 | A — ai block | =C-c C-c= inside an =ai= block | Auto-selects nearest ancestor =CMUX_WORKSPACE=; per-session =:marker= identifies insert point |
-| B — direct cmux input | User types in the cmux terminal directly | =workspace-bridge= reads =ACTIVE_STORY= via MCP, navigates to that story's =Workflow= subsection, inserts at end |
-
-If =ACTIVE_STORY= is nil, Channel B has no org routing —
-terminal-only interaction.
-
-** =ACTIVE_STORY= Lifecycle
-
-The property *persists* across the busy → ready transition. It
-only changes on:
-
-- A =C-c C-c= execution from a /different/ story under the same
-  workspace → auto-switch (fires =active-story-changed-hook=).
-- =org-archive-subtree= on the active story → cleared.
-- Manual user clear.
-
-Concurrency is handled by the busy-state machine: =C-c C-c= on a
-*different* story while the workspace is busy raises a wait/queue/
-interrupt prompt rather than silently switching mid-flight.
-
-** Per-Story System Prompt
-
-When =ACTIVE_STORY= changes, =active-story-changed-hook= runs.
-The default handlers (1) inject the new story's =System Prompt=
-subsection into the workspace's Claude Code as the next message,
-and (2) rename the cmux pane to =workspace: story=. The injection
-happens *once* on story switch — not on every ai block — so
-per-story context loads at the natural seam without repeating on
-each prompt.
+| B — direct cmux input | User types in the cmux terminal directly | =workspace-bridge= navigates to the workspace's =Workflow= subsection, inserts at end |
 
 ** Dependencies
 
@@ -138,18 +96,16 @@ A workspace root is recognised by its *own* (non-inherited) =CMUX_WORKSPACE=
 or =CLAUDE_SESSION_ID= property. =CMUX_WORKSPACE= is the human-readable name
 =code-agent-org-insert-workspace= stamps, but the SDD/cmux creation paths
 stamp only =CLAUDE_SESSION_ID= — the universal marker every backend (cmux
-launch, the Python bridge) already keys on. Keying on =CMUX_WORKSPACE= alone
-made those SDD-created workspaces invisible to navigation (=goto-story=
-reported "No workspaces found in buffer"); matching either fixes that. Both
-reads are non-inherited so a story or sub-section — which merely *inherits*
-the session id — is never mistaken for a workspace root.
+launch, the Python bridge) already keys on. Both reads are non-inherited so
+a sub-section — which merely *inherits* the session id — is never mistaken
+for a workspace root.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org--workspace-heading-p ()
   "Non-nil if the heading at point is a workspace root.
 Matches a heading carrying its OWN `CMUX_WORKSPACE' (named layout) or
 `CLAUDE_SESSION_ID' (the session marker every backend keys on), read
-non-inherited so a story/sub-section that only inherits the session id is
+non-inherited so a sub-section that only inherits the session id is
 not counted as a workspace."
   (or (org-entry-get nil "CMUX_WORKSPACE")
       (org-entry-get nil "CLAUDE_SESSION_ID")))
@@ -175,95 +131,11 @@ Returns (name . position) or nil. Works from any point inside a workspace."
                   (cl-return nil)))))
         (error nil)))))
 
-(defun code-agent-org--find-story-heading ()
-  "Find the story heading containing point.
-A story is a direct child of the workspace heading.
-Returns (name . position) or nil."
-  (save-excursion
-    (save-restriction
-      (let ((ws (code-agent-org--find-workspace-heading)))
-        (when ws
-          (let ((ws-level (save-excursion
-                            (goto-char (cdr ws))
-                            (org-current-level))))
-            ;; Walk up from current position to find heading at ws-level + 1
-            (condition-case nil
-                (progn
-                  (unless (org-at-heading-p) (org-back-to-heading t))
-                  (let ((found nil))
-                    (while (and (not found)
-                                (> (point) (cdr ws)))
-                      (when (= (org-current-level) (1+ ws-level))
-                        (setq found (cons (org-get-heading t t t t) (point))))
-                      (unless found
-                        (unless (org-up-heading-safe)
-                          (goto-char (point-min)))))
-                    found))
-              (error nil))))))))
 #+END_SRC
 
-** ACTIVE_STORY Tracking
+** Workspace Collection
 
-Tracks active_story across the session — table + maintenance helpers.
-
-#+BEGIN_SRC elisp
-(defvar code-agent-org-active-story-changed-hook nil
-  "Hook called when ACTIVE_STORY changes on a workspace heading.
-Each function receives (workspace-session-id new-story-name).")
-
-(defun code-agent-org--set-active-story (story-name)
-  "Set ACTIVE_STORY on the workspace heading. Fire hook if changed.
-Must be called with point inside the workspace."
-  (save-excursion
-    (save-restriction
-      (let ((ws (code-agent-org--find-workspace-heading)))
-        (when ws
-          (goto-char (cdr ws))
-          (let ((old-story (org-entry-get nil "ACTIVE_STORY"))
-                (ws-session-id (org-entry-get nil "CLAUDE_SESSION_ID")))
-            (unless (equal old-story story-name)
-              (org-set-property "ACTIVE_STORY" story-name)
-              (when ws-session-id
-                (run-hook-with-args 'code-agent-org-active-story-changed-hook
-                                    ws-session-id story-name)))))))))
-
-(defun code-agent-org-get-active-story ()
-  "Read ACTIVE_STORY from workspace heading at point. For Python bridge."
-  (save-excursion
-    (save-restriction
-      (let ((ws (code-agent-org--find-workspace-heading)))
-        (when ws
-          (goto-char (cdr ws))
-          (org-entry-get nil "ACTIVE_STORY"))))))
-
-(defun code-agent-org--on-org-property-changed (property value)
-  "Fire `code-agent-org-active-story-changed-hook' when ACTIVE_STORY
-is set via `org-set-property' on a workspace heading.
-Registered on `org-property-changed-functions'.
-
-Without this, only the internal `code-agent-org--set-active-story'
-helper fires the hook — programmatic property edits (and a user
-typing C-c C-x p) silently bypass the cmux tab rename and any other
-hook subscribers."
-  (when (and (stringp property) (equal property "ACTIVE_STORY"))
-    (condition-case nil
-        (let ((ws-session-id
-               (save-excursion
-                 (save-restriction
-                   (org-back-to-heading t)
-                   (org-entry-get-with-inheritance "CLAUDE_SESSION_ID")))))
-          (when (and ws-session-id (stringp value) (not (string-empty-p value)))
-            (run-hook-with-args 'code-agent-org-active-story-changed-hook
-                                ws-session-id value)))
-      (error nil))))
-
-(add-hook 'org-property-changed-functions
-          #'code-agent-org--on-org-property-changed)
-#+END_SRC
-
-** Story Navigation
-
-Movement primitives for story — wraps =org-goto-*= so callers express intent, not point arithmetic.
+Collects all workspace headings in the buffer.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org--collect-workspaces ()
@@ -283,121 +155,6 @@ Returns list of (NAME POS SESSION-ID) ordered by position."
                   result)))
         (nreverse result)))))
 
-(defun code-agent-org--collect-stories (workspace-pos)
-  "Collect story headings under workspace at WORKSPACE-POS.
-Stories are direct children (level = workspace-level + 1).
-Returns list of (NAME POS) ordered by position."
-  (save-excursion
-    (save-restriction
-      (widen)
-      (goto-char workspace-pos)
-      (let* ((ws-level (org-current-level))
-             (story-level (1+ ws-level))
-             (ws-end (save-excursion (org-end-of-subtree t t) (point)))
-             result)
-        (while (and (outline-next-heading)
-                    (< (point) ws-end))
-          (when (= (org-current-level) story-level)
-            (push (list (org-get-heading t t t t) (point)) result)))
-        (nreverse result)))))
-
-(defun code-agent-org--find-last-ai-block (subtree-pos)
-  "Find the last ai block within the subtree starting at SUBTREE-POS.
-Returns position inside the block (after #+begin_src ai line), or nil."
-  (save-excursion
-    (save-restriction
-      (widen)
-      (goto-char subtree-pos)
-      (let ((subtree-end (save-excursion (org-end-of-subtree t t) (point)))
-            (last-pos nil))
-        (while (re-search-forward "^[ \t]*#\\+begin_src[ \t]+ai\\b" subtree-end t)
-          (setq last-pos (1+ (line-end-position))))
-        last-pos))))
-
-(defun code-agent-org--goto-story-jump (story-pos)
-  "Jump to the last ai block in the story at STORY-POS.
-Falls back to the story heading if no ai block found."
-  (let ((target (code-agent-org--find-last-ai-block story-pos)))
-    (goto-char (or target story-pos))
-    (org-reveal)
-    (recenter)))
-
-(defun code-agent-org--goto-story-make-key (index)
-  "Generate a single-key binding for INDEX (0-based). Uses 1-9 then a-z, skips q."
-  (if (< index 9)
-      (char-to-string (+ ?1 index))
-    (let ((c (+ ?a (- index 9))))
-      (when (>= c ?q) (setq c (1+ c)))  ; skip q (used for quit)
-      (char-to-string c))))
-
-(defun code-agent-org--goto-story-make-action (fn pos)
-  "Create a transient action that calls FN with POS."
-  (lexical-let ((f fn) (p pos))
-    (lambda () (interactive) (funcall f p))))
-
-(defun code-agent-org--goto-story-build-items (entries jump-fn)
-  "Build transient suffix specs from ENTRIES.
-ENTRIES is a list of (NAME POS ...).  JUMP-FN is the function to call with POS."
-  (apply #'vector
-         (cl-loop for (name pos) in entries
-                  for i from 0
-                  collect (list (code-agent-org--goto-story-make-key i)
-                                (code-agent-org--goto-story-make-action jump-fn pos)
-                                :description (truncate-string-to-width
-                                              (substring-no-properties name) 50)))))
-
-(defun code-agent-org-goto-story ()
-  "Navigate to the last ai block in a story.
-Auto-skips workspace/story selection when only one candidate exists.
-Shows single-key transient menu when multiple candidates."
-  (interactive)
-  (let ((workspaces (code-agent-org--collect-workspaces)))
-    (cond
-     ((null workspaces)
-      (message "No workspaces found in buffer"))
-     ;; One workspace → skip to story selection
-     ((= 1 (length workspaces))
-      (code-agent-org--goto-story-select (cadr (car workspaces))))
-     ;; Multiple → show workspace picker
-     (t
-      (code-agent-org--goto-story-show-menu
-       "Select Workspace"
-       workspaces
-       #'code-agent-org--goto-story-select)))))
-
-(defun code-agent-org--goto-story-select (workspace-pos)
-  "Select a story under workspace at WORKSPACE-POS, then jump."
-  (let ((stories (code-agent-org--collect-stories workspace-pos)))
-    (cond
-     ((null stories)
-      (message "No stories found in workspace"))
-     ;; One story → jump directly
-     ((= 1 (length stories))
-      (code-agent-org--goto-story-jump (cadr (car stories))))
-     ;; Multiple → show story picker
-     (t
-      (code-agent-org--goto-story-show-menu
-       "Select Story"
-       stories
-       #'code-agent-org--goto-story-jump)))))
-
-(defun code-agent-org--goto-story-show-menu (title entries jump-fn)
-  "Show a dynamic transient menu with TITLE for ENTRIES.
-JUMP-FN is the function to call with the selected POS."
-  (declare-function code-agent-org--goto-story-dynamic "code-agent-org")
-  (let ((menu-items (code-agent-org--goto-story-build-items entries jump-fn)))
-    (transient-define-prefix code-agent-org--goto-story-dynamic ()
-      "Dynamic story/workspace selector."
-      [:description (lambda () title)
-       :setup-children
-       (lambda (_)
-         (mapcar (lambda (item)
-                   (transient-parse-suffix
-                    (oref transient--prefix command)
-                    item))
-                 (append menu-items nil)))]
-      [("q" "Quit" transient-quit-one)])
-    (code-agent-org--goto-story-dynamic)))
 #+END_SRC
 
 ** CUSTOM_ID Utilities
@@ -477,7 +234,7 @@ Returns a slug like \"code-agent-dev-research-output-sdd-20251227-180147\"."
 
 * Collect Current Context
 
-Gathers the workspace, story, buffer, file, region, IDE context into one plist — the input to every backend-query call.
+Gathers the workspace, buffer, file, region, IDE context into one plist — the input to every backend-query call.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org--get-heading-tags ()

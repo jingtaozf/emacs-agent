@@ -7,17 +7,17 @@
 :END:
 
 Buffer-local header-line for =code-agent-org-mode= buffers.  Shows
-the current file name plus a chain of badges: workspace / story
-location, Docker-sandbox flag, permission mode, activity (number
-of thinking sessions + queued blocks), project root, and IDE
-context (current file + selection).  Click the activity badge to
-open the session manager.
+the current file name plus a chain of badges: workspace location,
+Docker-sandbox flag, permission mode, activity (number of thinking
+sessions + queued blocks), project root, and IDE context (current
+file + selection).  Click the activity badge to open the session
+manager.
 
 Layered on top of [[file:code-agent-org.org][code-agent-org.org]]'s session / queue / project
 / permission helpers — so this module loads *after*
 [[file:code-agent-org.org][code-agent-org.org]], not before.  A single 0.2-second timer
 refreshes all buffers; a separate 0.2-second debounced timer
-recomputes the cached workspace/story name on cursor movement.
+recomputes the cached workspace name on cursor movement.
 
 * Dependencies
 
@@ -53,9 +53,6 @@ Module-private state — external readers go through the accessor functions furt
 
 (defvar-local code-agent-org--header-workspace-name nil
   "Cached workspace name for header line (updated on cursor movement).")
-
-(defvar-local code-agent-org--header-story-name nil
-  "Cached story name for header line (updated on cursor movement).")
 
 (defvar-local code-agent-org--header-cursor-timer nil
   "Debounce timer for cursor-position-driven header updates.")
@@ -124,7 +121,7 @@ Lifecycle helpers for timer — create / inspect / dispose.
 
 * Cursor-Position Tracking
 
-The header line shows which workspace and story the cursor is in.
+The header line shows which workspace the cursor is in.
 These update on a 0.2-second debounce after cursor movement — fast
 enough to feel responsive, slow enough to avoid unnecessary org tree
 walks on every keystroke.
@@ -140,20 +137,16 @@ Added to `post-command-hook' by `code-agent-org-mode'."
                      (current-buffer))))
 
 (defun code-agent-org--update-cursor-header (buf)
-  "Update cached workspace/story names from cursor position in BUF."
+  "Update cached workspace name from cursor position in BUF."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq code-agent-org--header-cursor-timer nil)
       (when (bound-and-true-p code-agent-org-mode)
-        (let ((ws (ignore-errors (code-agent-org--find-workspace-heading)))
-              (story (ignore-errors (code-agent-org--find-story-heading))))
-          (let ((new-ws (and ws (substring-no-properties (car ws))))
-                (new-story (and story (substring-no-properties (car story)))))
-            (unless (and (equal new-ws code-agent-org--header-workspace-name)
-                         (equal new-story code-agent-org--header-story-name))
-              (setq code-agent-org--header-workspace-name new-ws
-                    code-agent-org--header-story-name new-story)
-              (code-agent-org-refresh-header-line))))))))
+        (let* ((ws (ignore-errors (code-agent-org--find-workspace-heading)))
+               (new-ws (and ws (substring-no-properties (car ws)))))
+          (unless (equal new-ws code-agent-org--header-workspace-name)
+            (setq code-agent-org--header-workspace-name new-ws)
+            (code-agent-org-refresh-header-line)))))))
 #+END_SRC
 
 * Tooltip Formatting
@@ -273,18 +266,12 @@ Shows thinking count and queue depth when sessions are active."
     (concat file-str sel-str)))
 
 (defun code-agent-org--header-location-badge ()
-  "Return workspace/story location badge for header line.
+  "Return workspace location badge for header line.
 Reads from cached values updated by `code-agent-org--update-cursor-header'."
-  (let ((ws code-agent-org--header-workspace-name)
-        (story code-agent-org--header-story-name))
-    (cond
-     ((and ws story)
-      (concat (propertize (format " %s" ws) 'face 'font-lock-type-face)
-              (propertize " / " 'face 'font-lock-comment-face)
-              (propertize story 'face 'font-lock-constant-face)))
-     (ws
-      (propertize (format " %s" ws) 'face 'font-lock-type-face))
-     (t ""))))
+  (let ((ws code-agent-org--header-workspace-name))
+    (if ws
+        (propertize (format " %s" ws) 'face 'font-lock-type-face)
+      "")))
 
 (defun code-agent-org--header-line ()
   "Generate the header line content for Claude Org buffer.

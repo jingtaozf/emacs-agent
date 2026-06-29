@@ -31,7 +31,7 @@ no other module activates the minor mode.  Cross-buffer state
 this file or by sub-modules whose functions are called *only* via the
 single-dash public API surface exported here.  The =:CUSTOM_ID:=
 schema (=workspace-= prefix for terminal sections, =sdd-= prefix for
-story sections) is fixed; consumers MUST NOT invent new prefixes.
+workflow sections) is fixed; consumers MUST NOT invent new prefixes.
 
 ** Features
 
@@ -326,23 +326,16 @@ If that ID already exists in the buffer, appends -2, -3, etc. until unique."
   (code-agent-org--do-insert-block nil))
 #+END_SRC
 
-** Session and Story Blocks
+** Session Blocks
 
 These create blocks with isolated conversation context. Session blocks use the
-=:claude_session:= tag for section-scoped isolation. Story blocks use
-=CLAUDE_SESSION_ID= property for named, persistent sessions.
+=:claude_session:= tag for section-scoped isolation.
 
 | Command | Keybinding | Level Behavior |
 |---------+------------+----------------|
 | =code-agent-org-insert-session-block= | | Uses current section level |
-| =code-agent-org-insert-story= | =C-c C-s= | Aligns with previous story, or top level if none |
 
-Story level alignment: When inserting a new story, the function searches backwards
-for an existing story section (heading with =CLAUDE_SESSION_ID= starting with "story-").
-If found, the new story uses the same level. If no previous story exists, it defaults
-to top level (=*=), keeping stories at a consistent hierarchy.
-
-#+NAME: block-insert-session-story
+#+NAME: block-insert-session
 #+BEGIN_SRC elisp
 (defun code-agent-org-insert-session-block ()
   "Insert an AI query block with independent section-scoped session.
@@ -354,53 +347,6 @@ The :claude_session: tag creates a new conversation context for this subtree."
     (insert stars " Session " (number-to-string num) " :" code-agent-org-session-tag ":\n\n")
     (insert "#+begin_src ai\n\n#+end_src")
     (forward-line -1)))
-
-(defun code-agent-org-insert-story ()
-  "Insert a new story under the current workspace.
-Prompts for story title and creates a sub-heading with Workflow and
-an empty ai block. The story inherits CLAUDE_SESSION_ID from the
-workspace heading — no per-story session ID needed.
-Sets ACTIVE_STORY on the workspace heading."
-  (interactive)
-  (let ((ws (code-agent-org--find-workspace-heading)))
-    (unless ws
-      (user-error "Not inside a workspace. Create one first with code-agent-org-insert-workspace"))
-    (let* ((title (read-string "Story title: "))
-           (ws-level (save-excursion
-                       (goto-char (cdr ws))
-                       (org-current-level)))
-           (story-level (1+ ws-level))
-           (wf-level (1+ story-level))
-           (instr-level (1+ wf-level))
-           (stars-story (make-string story-level ?*))
-           (stars-wf (make-string wf-level ?*))
-           (stars-instr (make-string instr-level ?*))
-           (file-base (when buffer-file-name (file-name-base buffer-file-name)))
-           (session-id (save-excursion
-                         (goto-char (cdr ws))
-                         (or (org-entry-get nil "CLAUDE_SESSION_ID") "new"))))
-      ;; Go to end of workspace subtree to insert new story
-      (save-excursion
-        (goto-char (cdr ws))
-        (org-end-of-subtree t t)
-        (insert "\n" stars-story " " title "\n")
-        (insert stars-wf " Workflow :sdd:\n")
-        (insert ":PROPERTIES:\n")
-        (insert ":CUSTOM_ID: " (code-agent-org-generate-custom-id session-id "Workflow" file-base) "\n")
-        (insert ":END:\n\n")
-        (insert stars-instr " Instruction 1 :" code-agent-org-heading-tag ":\n")
-        (insert ":PROPERTIES:\n")
-        (insert ":CUSTOM_ID: " (code-agent-org--generate-instruction-custom-id file-base 1 session-id) "\n")
-        (insert ":END:\n\n")
-        (insert "#+begin_src ai\n\n#+end_src\n"))
-      ;; Set ACTIVE_STORY
-      (code-agent-org--set-active-story title)
-      ;; Jump to the new ai block
-      (goto-char (cdr ws))
-      (org-end-of-subtree t t)
-      (re-search-backward "^#\\+begin_src ai" nil t)
-      (forward-line 1)
-      (message "Created story '%s' under workspace '%s'" title (car ws)))))
 
 (defun code-agent-org--find-previous-workspace-level ()
   "Find the level of the nearest workspace heading (CLAUDE_SESSION_ID starts
@@ -429,13 +375,12 @@ Set to nil to omit the property (uses whatever backend the file/section inherits
   :group 'code-agent-org)
 
 (defun code-agent-org-insert-workspace ()
-  "Insert a workspace with one default story.
+  "Insert a workspace with System Prompt and Workflow.
 Structure:
   * Workspace Name          (workspace heading with CMUX_WORKSPACE)
-  ** First Story            (story sub-heading, name = workspace name)
-  *** System Prompt         (story-specific AI guidance)
-  *** Workflow :sdd:        (contains AI blocks and responses)
-  **** Instruction 1        (empty AI block, cursor positioned here)
+  ** System Prompt          (project context, :system_prompt: tag)
+  ** Workflow :sdd:         (contains AI blocks and responses)
+  *** Instruction 1         (empty AI block, cursor positioned here)
 
 Prompts for workspace name and sets up CLAUDE_SESSION_ID.
 Aligns level with previous workspace if any exists."
@@ -445,38 +390,32 @@ Aligns level with previous workspace if any exists."
          (file-base (when buffer-file-name (file-name-base buffer-file-name)))
          (level (or (code-agent-org--find-previous-workspace-level) 1))
          (stars1 (make-string level ?*))           ; workspace
-         (stars2 (make-string (1+ level) ?*))      ; story
-         (stars3 (make-string (+ 2 level) ?*))     ; system prompt, workflow
-         (stars4 (make-string (+ 3 level) ?*)))    ; instruction
+         (stars2 (make-string (1+ level) ?*))      ; system prompt, workflow
+         (stars3 (make-string (+ 2 level) ?*)))    ; instruction
     ;; 1. Workspace heading
     (insert stars1 " " name "\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (code-agent-org-generate-custom-id session-id name file-base) "\n")
     (insert ":CMUX_WORKSPACE: " (code-agent-org--workspace-name-to-slug name) "\n")
     (insert ":CLAUDE_SESSION_ID: " session-id "\n")
-    (insert ":ACTIVE_STORY: First Story\n")
     (when code-agent-org-workspace-default-backend
       (insert ":CLAUDE_BACKEND: " code-agent-org-workspace-default-backend "\n"))
     (insert ":END:\n\n")
 
-    ;; 2. Default story
-    (insert stars2 " First Story\n")
-
-    ;; 3. System Prompt under story
-    (insert stars3 " System Prompt :system_prompt:\n")
+    ;; 2. System Prompt (direct child of workspace)
+    (insert stars2 " System Prompt :system_prompt:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (code-agent-org-generate-custom-id session-id "System Prompt" file-base) "\n")
     (insert ":END:\n\n")
-    (insert (format "The current workspace story is \"%s\"\n\n" name))
 
-    ;; 4. Workflow under story
-    (insert stars3 " Workflow :sdd:\n")
+    ;; 3. Workflow (direct child of workspace)
+    (insert stars2 " Workflow :sdd:\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (code-agent-org-generate-custom-id session-id "Workflow" file-base) "\n")
     (insert ":END:\n\n")
 
-    ;; 5. First instruction with empty AI block
-    (insert stars4 " Instruction 1 :" code-agent-org-heading-tag ":\n")
+    ;; 4. First instruction with empty AI block
+    (insert stars3 " Instruction 1 :" code-agent-org-heading-tag ":\n")
     (insert ":PROPERTIES:\n")
     (insert ":CUSTOM_ID: " (code-agent-org--generate-instruction-custom-id file-base 1 session-id) "\n")
     (insert ":END:\n\n")
@@ -2535,10 +2474,8 @@ Top-level =code-agent-org-menu= transient — the keybinding surface every inter
    ["Insert"
     ("i" "New AI block" code-agent-org-insert-block)
     ("t" "Template" code-agent-org-insert-template)
-    ("s" "Story section" code-agent-org-insert-story)
     ("w" "Workspace" code-agent-org-insert-workspace)]
    ["Navigate"
-    ("j" "Go to story" code-agent-org-goto-story)
     ("T" "Toggle line wrap" toggle-truncate-lines)]
    ["Session"
     ("n" "Session info" code-agent-org-show-session-info)
@@ -2615,7 +2552,7 @@ Key bindings:
         (setq truncate-lines nil)
         ;; Set up header line
         (code-agent-org-refresh-header-line)
-        ;; Track cursor position for workspace/story badge
+        ;; Track cursor position for workspace badge
         (add-hook 'post-command-hook
                   #'code-agent-org--schedule-cursor-header-update nil t)
         ;; Register exclusion
