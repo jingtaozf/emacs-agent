@@ -68,7 +68,6 @@ FIX: Add (when (buffer-live-p buf) ...) inside the timer lambda in
 code-agent-org--schedule-fontlock. See ARCHITECTURE.org Invariants."
   :tags '(:unit :fast :stable :hardening)
   (when test-hardening--project-root
-    (let* ((file (expand-file-name "lp/org/code-agent-org-response.org" test-hardening--project-root))
            (content (with-temp-buffer
                       (insert-file-contents file)
                       (buffer-string))))

@@ -422,7 +422,6 @@ test-org-unit:
 		-l tests/test-mcp-eval-handler.el \
 		-l tests/test-mcp-http.el \
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
-		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
 		-l tests/test-code-agent-input-validation.el \
 		--eval "(ert-run-tests-batch-and-exit '(or (not (tag :integration)) (tag :unit)))"

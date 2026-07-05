@@ -576,11 +576,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-copilot-title-generator-ensure-instance"
     "code-agent-org-copilot-title-generator-generate"
     ;; code-agent-org: response streaming (per-query state carrier)
-    "code-agent-org-response-stream-handle-token"
-    "code-agent-org-response-stream-handle-message"
-    "code-agent-org-response-stream-handle-error"
-    "code-agent-org-response-stream-handle-complete"
-    "code-agent-org-response-stream-callbacks"
     ;; code-agent-org: execute command (input bundle for one run)
     "code-agent-org-execute-command-run"
     "code-agent-org-execute-command-from-block-info"
@@ -596,14 +591,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-schedule-cancel"
     "code-agent-org-schedule-list"
     "code-agent-org-schedule-clear-all"
-    "code-agent-org-scheduled-list"
-    "code-agent-org-scheduled-list-goto"
-    "code-agent-org-scheduled-list-refresh"
-    "code-agent-org-scheduled-scan-all"
-    "code-agent-org-scheduled-start"
-    "code-agent-org-scheduled-stop"
-    "code-agent-org-scheduled-run"
-    "code-agent-org-scheduled-cancel"
     ;; code-agent-org: header line & mode
     "code-agent-org-header-line"
     "code-agent-org-header-line-mode"
@@ -623,7 +610,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-cmux-set-progress"
     "code-agent-org-cmux-set-status"
     ;; code-agent-org: workspace bridge (terminal workflow)
-    "code-agent-org-workspace-archive-workflow"
     ;; code-agent-org: company completion
     "code-agent-org-company-slash-commands"
     ;; claude-ide: WebSocket IDE server (migrated from monet)
@@ -716,10 +702,7 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
     ("code-agent-ide"        . 1)
     ("code-agent"            . 2)   ; core
     ("code-agent-org-session"      . 3)   ; org sub-modules
-    ("code-agent-org-queue"        . 3)
-    ("code-agent-org-response"     . 3)
     ("code-agent-org"              . 4)   ; top-level org
-    ("code-agent-org-scheduled"    . 5)
     ("code-agent-org-terminal-base" . 2)) ; shared terminal, needs agent
   "Module layer assignments from ARCHITECTURE.org.
 Higher layers may depend on same or lower layers, but not upward.")
@@ -1579,7 +1562,6 @@ body itself changes — forces re-audit before unrelated commits land."
      . ("321b189430ab"        ; pcase @ ~L415
         "9bd00db90951"        ; pcase @ ~L641
         "7ad5df9f7bf9"))      ; pcase @ ~L888
-    ("code-agent-org-scheduled.org"
      . ("3c02623232db"))      ; pcase @ ~L214
     ("emacs-mcp-server.org"
      . ("4581a3ac1541")))     ; pcase @ ~L703
