@@ -119,68 +119,6 @@ multiplexer base — the registry constructor passes :session-key."
 
 ;;; tmux backend — Protocol 2b smoke tests (mocked tmux CLI)
 
-(ert-deftest test-p3-tmux-shell-quote-embeds-single-quotes ()
-  "`code-agent-tmux--shell-quote' correctly escapes embedded quotes."
-  :tags '(:unit :fast :stable :protocol-3 :tmux)
-  (should (equal "'/tmp/x'" (code-agent-tmux--shell-quote "/tmp/x")))
-  (should (equal "'/tmp/a b'" (code-agent-tmux--shell-quote "/tmp/a b")))
-  (should (equal "'/tmp/a'\\''b'"
-                 (code-agent-tmux--shell-quote "/tmp/a'b"))))
-
-(ert-deftest test-p3-tmux-send-text-invokes-tmux-send-keys-dashl ()
-  "`send-text' calls `tmux send-keys -l' against the backend's pane target."
-  :tags '(:unit :fast :stable :protocol-3 :tmux)
-  (let* ((backend (test-p3--fresh-tmux-backend))
-         (calls '()))
-    (setf (code-agent-multiplexer-backend-pane-id backend) "sess:0.0")
-    (cl-letf (((symbol-function 'code-agent-tmux--call)
-               (lambda (_b &rest args)
-                 (push args calls)
-                 "ok")))
-      (code-agent-mux-send-text backend "hello"))
-    (should (= (length calls) 1))
-    (should (equal (car calls)
-                   '("send-keys" "-t" "sess:0.0" "-l" "hello")))))
-
-(ert-deftest test-p3-tmux-send-key-maps-keyword-to-tmux-name ()
-  :tags '(:unit :fast :stable :protocol-3 :tmux)
-  (let* ((backend (test-p3--fresh-tmux-backend))
-         (calls '()))
-    (setf (code-agent-multiplexer-backend-pane-id backend) "sess:0.0")
-    (cl-letf (((symbol-function 'code-agent-tmux--call)
-               (lambda (_b &rest args) (push args calls) "ok")))
-      (code-agent-mux-send-key backend :enter)
-      (code-agent-mux-send-key backend :ctrl-c))
-    (should (equal (cadr (nth 1 calls)) "-t")) ; enter call
-    (should (member "Enter" (car (last calls))))
-    (should (member "C-c" (car calls)))))
-
-(ert-deftest test-p3-tmux-start-follower-emits-single-quoted-sink ()
-  "`start-follower' passes the sink wrapped in single quotes to pipe-pane."
-  :tags '(:unit :fast :stable :protocol-3 :tmux)
-  (let* ((backend (test-p3--fresh-tmux-backend))
-         (calls '()))
-    (setf (code-agent-multiplexer-backend-pane-id backend) "sess:0.0")
-    (cl-letf (((symbol-function 'code-agent-tmux--call)
-               (lambda (_b &rest args) (push args calls) "ok")))
-      (code-agent-mux-start-follower backend "/tmp/sink.log"))
-    (let ((args (car calls)))
-      (should (equal (car args) "pipe-pane"))
-      ;; Final arg should be "cat >> '/tmp/sink.log'"
-      (should (string-match "cat >> '/tmp/sink\\.log'"
-                            (car (last args)))))
-    (should (eq :active
-                (code-agent-multiplexer-backend-follower-proc backend)))))
-
-(ert-deftest test-p3-tmux-stop-follower-is-noop-when-inactive ()
-  "`stop-follower' does not call tmux when no follower is active."
-  :tags '(:unit :fast :stable :protocol-3 :tmux)
-  (let* ((backend (test-p3--fresh-tmux-backend))
-         (called nil))
-    (cl-letf (((symbol-function 'code-agent-tmux--call)
-               (lambda (&rest _) (setq called t) "ok")))
-      (code-agent-mux-stop-follower backend))
-    (should-not called)))
 
 (ert-deftest test-p3-tmux-session-status-missing-when-sid-nil ()
   :tags '(:unit :fast :stable :protocol-3 :tmux)

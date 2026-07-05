@@ -17,10 +17,10 @@ typed =cl-defstruct=, but it keeps the keyword API
 =--session-get= / =--session-put= as the *sole* read/write surface so
 the 600+ call sites need no change while gaining slot-level checking.
 
-Invariant: the four sub-structs (=lifecycle=, =render=, =loop=,
-=identity=) cover every typed slot; anything not yet promoted to a
-sub-struct lives in =extras= (a plist hatch).  Slot reads MUST go
-through =--session-get= — direct accessor calls (e.g.
+Invariant: the two sub-structs (=lifecycle=, =identity=) cover
+every typed slot; anything not yet promoted to a sub-struct lives
+in =extras= (a plist hatch).  Slot reads MUST go through
+=--session-get= — direct accessor calls (e.g.
 =(code-agent-org--session-lifecycle-busy state)=) are reserved for
 the module itself and bypass the keyword API's normalisation.
 
@@ -31,11 +31,11 @@ the module itself and bypass the keyword API's normalisation.
 :END:
 
 Per-buffer session state for a Claude query in an org-mode AI block.
-A session-state is a =cl-defstruct= composed of four sub-structs —
-=lifecycle=, =render=, =loop=, =identity= — plus an =extras= plist
-for properties that have not (yet) earned a typed slot. Callers reach
-slots through the keyword API =--session-get= / =--session-put= so
-the receiver-only typed shape stays decoupled from the 600+ call sites.
+A session-state is a =cl-defstruct= composed of two sub-structs —
+=lifecycle= and =identity= — plus an =extras= plist for properties
+that have not (yet) earned a typed slot. Callers reach slots through
+the keyword API =--session-get= / =--session-put= so the
+receiver-only typed shape stays decoupled from the 600+ call sites.
 
 ** Setup
 
@@ -52,9 +52,8 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 
 ** State Shape
 
-The four sub-structs (=lifecycle=, =render=, =loop=,
-=identity=) and the composed parent struct + its field-spec
-declarative table.
+The two sub-structs (=lifecycle=, =identity=) and the composed
+parent struct + its field-spec declarative table.
 
 *** Sub-Structs
 
@@ -68,45 +67,9 @@ Lifecycle slots — busy / recovering / start-time / pending-queue / backend han
                (:copier nil))
   "Query lifecycle state."
   busy                    ; Boolean: query in progress
-  recovering              ; Non-nil during session recovery
   start-time              ; float-time of request start
-  original-prompt         ; Original prompt for recovery context
-  recovery-count          ; Count of recovery attempts
   query-handle            ; Opaque handle from backend-query (for cancellation)
-  backend                 ; code-agent-backend struct (dispatches protocol)
-  pending-queue)          ; List of queued blocks awaiting execution
-#+END_SRC
-
-*** Render Sub-Struct
-
-Render slots — section-level / response-has-content / current-line-length / marker / spinner.  Owns the response-side mutable state.
-
-#+BEGIN_SRC elisp
-(cl-defstruct (code-agent-org--session-render
-               (:constructor code-agent-org--make-session-render)
-               (:copier nil))
-  "Response rendering state."
-  section-level           ; Heading level (integer) for response adjustment
-  response-has-content    ; Boolean: response has received content
-  current-line-length     ; Tracks line length for auto-breaking
-  last-assistant-query-id ; Query ID of last assistant message
-  marker                  ; Insertion point marker
-  spinner)                ; Spinner frame index (0-3)
-#+END_SRC
-
-*** Loop Sub-Struct
-
-Loop iteration slots — loop-max / loop-current / loop-interval / instruction-num.  Drives the per-iteration scheduled re-execution.
-
-#+BEGIN_SRC elisp
-(cl-defstruct (code-agent-org--session-loop
-               (:constructor code-agent-org--make-session-loop)
-               (:copier nil))
-  "Iteration/loop execution state."
-  loop-max                ; Total loop iterations
-  loop-current            ; Current iteration (1-based)
-  loop-interval           ; Seconds between loop iterations
-  instruction-num)        ; Instruction number in sequence
+  backend)                ; code-agent-backend struct (dispatches protocol)
 #+END_SRC
 
 *** Identity Sub-Struct
@@ -118,8 +81,7 @@ Identity slots — query-id, custom-id, block-id, sdk-uuid.  These ride alongsid
                (:constructor code-agent-org--make-session-identity)
                (:copier nil))
   "Session identification and tracking."
-  query-id                ; UUID identifying the current query
-  custom-id               ; Custom ID of heading for recovery
+  custom-id               ; Custom ID of heading for workspace identity
   block-id                ; Block identifier
   sdk-uuid)               ; SDK UUID for tracking
 #+END_SRC
@@ -133,10 +95,8 @@ The umbrella =cl-defstruct= composing all sub-structs.  =--session-get/put= disp
                (:constructor code-agent-org--make-session-state--internal)
                (:copier nil))
   "Typed session state for an org-mode Claude session.
-Composed of sub-structs: lifecycle, render, loop, identity."
+Composed of sub-structs: lifecycle, identity."
   (lifecycle (code-agent-org--make-session-lifecycle) :documentation "Lifecycle sub-struct")
-  (render (code-agent-org--make-session-render) :documentation "Render sub-struct")
-  (loop (code-agent-org--make-session-loop) :documentation "Loop sub-struct")
   (identity (code-agent-org--make-session-identity) :documentation "Identity sub-struct")
   extras)                 ; Plist for arbitrary additional properties
 
@@ -159,27 +119,10 @@ specification from which the routing tables below are generated.
 (defconst code-agent-org--session-field-specs
   '(;; Lifecycle fields
     (busy . lifecycle)
-    (recovering . lifecycle)
     (start-time . lifecycle)
-    (original-prompt . lifecycle)
-    (recovery-count . lifecycle)
     (query-handle . lifecycle)
     (backend . lifecycle)
-    (pending-queue . lifecycle)
-    ;; Render fields
-    (section-level . render)
-    (response-has-content . render)
-    (current-line-length . render)
-    (last-assistant-query-id . render)
-    (marker . render)
-    (spinner . render)
-    ;; Loop fields
-    (loop-max . loop)
-    (loop-current . loop)
-    (loop-interval . loop)
-    (instruction-num . loop)
     ;; Identity fields
-    (query-id . identity)
     (custom-id . identity)
     (block-id . identity)
     (sdk-uuid . identity))
@@ -251,8 +194,6 @@ Registration surface — maps the incoming identity to the local handler / state
 
 Initialized to a new hash table when `code-agent-org-mode' is enabled.")
 
-(defvar-local code-agent-org--fontlock-timer nil
-  "Timer for debounced font-lock during streaming.")
 #+END_SRC
 
 *** Session State Accessors
@@ -271,10 +212,7 @@ Replaces stale non-struct entries (e.g. plists from pre-refactor code)."
   (let ((existing (gethash session-key code-agent-org--sessions)))
     (if (code-agent-org--session-state-p existing)
         existing
-      (let ((state (code-agent-org--make-session-state
-                    :spinner 0
-                    :section-level nil
-                    :current-line-length 0)))
+      (let ((state (code-agent-org--make-session-state)))
         (puthash session-key state code-agent-org--sessions)
         state))))
 
@@ -314,11 +252,8 @@ Unknown properties fall through to the extras plist."
 
 (defun code-agent-org--reset-session-state (session-key)
   "Reset transient session state flags for SESSION-KEY.
-Clears :busy, :recovering, and :last-assistant-query-id.
-Used after query completion, error handling, and recovery failure."
-  (code-agent-org-session-put session-key :busy nil)
-  (code-agent-org-session-put session-key :recovering nil)
-  (code-agent-org-session-put session-key :last-assistant-query-id nil))
+Clears :busy. Used after query completion, error handling."
+  (code-agent-org-session-put session-key :busy nil))
 
 (defun code-agent-org--find-heading-by-property (property value &optional buffer)
   "Find heading with PROPERTY matching VALUE in BUFFER.

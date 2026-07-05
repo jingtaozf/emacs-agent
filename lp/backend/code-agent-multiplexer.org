@@ -93,10 +93,6 @@ not the abstract base."
    :documentation "Pane / surface identifier within that session.")
   (status-dir             "/tmp/code-agent-status"
    :documentation "On-disk rendezvous dir for Python bridge side-channel.")
-  (stream-sink            nil
-   :documentation "File the follower writes live pane output to.")
-  (follower-proc          nil
-   :documentation "Subprocess streaming pane output (nil when stopped).")
   (agent-profile          nil
    :documentation "Agent profile struct (claude/copilot/opencode)."))
 #+END_SRC
@@ -118,8 +114,6 @@ to the abstract defaults); cmux currently implements none.
 | =mux-send-text= | abstract | yes | no | 3 |
 | =mux-send-key= | abstract | yes | no | 5 |
 | =mux-capture-screen= | abstract | yes | no | 1 |
-| =mux-start-follower= | abstract | yes | no | yes |
-| =mux-stop-follower= | abstract | yes | no | yes |
 | =mux-session-status= | abstract | yes | no | 3 |
 | =mux-rename= | abstract | yes | no | *0* — not yet wired |
 | =mux-focus= | abstract | yes | no | *0* — not yet wired |
@@ -207,43 +201,6 @@ Return the current pane text as a string (no scrollback).
   "Return current pane text for BACKEND as a string."
   (ignore backend)
   "")
-#+END_SRC
-
-*** Start Follower
-:PROPERTIES:
-:CUSTOM_ID: multiplexer-start-follower
-:END:
-
-Begin streaming pane output to =stream-sink= (a file). cmux uses
-=capture-pane --follow=; tmux uses =pipe-pane -o "cat>>FILE"=. No
-default — concrete multiplexers override with their native streaming
-primitive.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-mux-start-follower (backend sink)
-  "Begin streaming BACKEND's pane output to SINK (a file path).
-Concrete multiplexers override."
-  (ignore backend sink)
-  nil)
-#+END_SRC
-
-*** Stop Follower
-:PROPERTIES:
-:CUSTOM_ID: multiplexer-stop-follower
-:END:
-
-Tear down the follower subprocess.  The default body is sufficient
-for all subclasses because =follower-proc= lives on the abstract base
-— the generic just kills the process and clears the slot.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-mux-stop-follower (backend)
-  "Stop BACKEND's pane output follower, if any.
-Default kills `follower-proc' and clears the slot — works unchanged
-for every subclass since the slot is declared on the abstract base."
-  (when-let* ((proc (code-agent-multiplexer-backend-follower-proc backend)))
-    (when (process-live-p proc) (delete-process proc))
-    (setf (code-agent-multiplexer-backend-follower-proc backend) nil)))
 #+END_SRC
 
 *** Session status

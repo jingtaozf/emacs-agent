@@ -301,49 +301,6 @@ Protocol 2b method =mux-capture-screen=, dispatched on the multiplexer backend r
       ""))
 #+END_SRC
 
-*** Protocol 2b — Start / Stop Follower
-
-tmux's =pipe-pane "cat >> FILE"= redirects the pane's output to a
-shell command.  The =-o= flag means "only pipe if no pipe is already
-active" — idempotent start.  A subsequent =pipe-pane= with no command
-argument toggles the pipe off.  We track the expected status via the
-=follower-proc= slot as a sentinel (not an actual process object —
-tmux owns the pipe).  The shared =stop-follower= method on the
-abstract base handles takedown via =delete-process= on
-=follower-proc=, but since we don't have a process here, we override.
-
-#+BEGIN_SRC elisp
-(defun code-agent-tmux--shell-quote (s)
-  "Quote S for inclusion in a single-quoted shell string.
-tmux passes the =pipe-pane= command through =sh -c=, so the sink
-path must be safely embeddable.  Wraps in single quotes and escapes
-any single quotes inside.  Prefer this to `shell-quote-argument'
-which produces shell-token quoting rather than in-string quoting."
-  (concat "'" (replace-regexp-in-string "'" "'\\\\''" s) "'"))
-
-(cl-defmethod code-agent-mux-start-follower
-  ((backend code-agent-tmux-backend) sink)
-  "Begin piping BACKEND's pane output to SINK (a file path).
-SINK is embedded inside a single-quoted shell string — the helper
-`code-agent-tmux--shell-quote' escapes any single quotes in the
-path, so sink paths with spaces or unusual characters work safely."
-  (when-let* ((target (code-agent-multiplexer-backend-pane-id backend)))
-    (code-agent-tmux--call
-     backend "pipe-pane" "-o" "-t" target
-     (format "cat >> %s" (code-agent-tmux--shell-quote sink)))
-    (setf (code-agent-multiplexer-backend-stream-sink backend) sink
-          ;; Sentinel non-nil so stop-follower knows a pipe is active.
-          (code-agent-multiplexer-backend-follower-proc backend) :active)))
-
-(cl-defmethod code-agent-mux-stop-follower
-  ((backend code-agent-tmux-backend))
-  "Toggle tmux's pipe-pane off for BACKEND."
-  (when-let* ((target (code-agent-multiplexer-backend-pane-id backend))
-              ((eq (code-agent-multiplexer-backend-follower-proc backend) :active)))
-    (code-agent-tmux--call backend "pipe-pane" "-t" target)
-    (setf (code-agent-multiplexer-backend-follower-proc backend) nil
-          (code-agent-multiplexer-backend-stream-sink backend) nil)))
-#+END_SRC
 
 *** Protocol 2b — Session Status
 

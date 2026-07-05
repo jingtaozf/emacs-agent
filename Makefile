@@ -5,13 +5,13 @@ EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch
 
 # Source files
-SOURCES = code-agent.org code-agent-org.org code-agent-trace.org
+SOURCES = code-agent-trace.org
 
 # Test files
 # Note: actual test loading is in target recipes below, not this variable
-UNIT_TESTS = tests/test-code-agent-unit.el tests/test-code-agent-org-unit.el tests/test-code-agent-json-protocol.el tests/test-code-agent-backend.el tests/test-code-agent-backend-protocol.el
-MOCK_TESTS = tests/test-code-agent-mock.el tests/test-code-agent-org-mock.el
-INTEGRATION_TESTS = tests/test-code-agent-integration.el tests/test-code-agent-org-integration.el tests/test-code-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
+UNIT_TESTS = tests/test-code-agent-unit.el tests/test-code-agent-json-protocol.el tests/test-code-agent-backend.el tests/test-code-agent-backend-protocol.el
+MOCK_TESTS = tests/test-code-agent-mock.el
+INTEGRATION_TESTS = tests/test-code-agent-integration.el tests/test-code-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
 ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
@@ -30,8 +30,6 @@ LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/lp/trace/code-agent-trace.org
 LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-chat.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-translate.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-title.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-refine.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-multiplexer.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-cmux-backend.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-tmux-backend.org\")"
@@ -72,12 +70,10 @@ help:
 	@echo "  make test-integration-seq     - Run integration tests sequentially"
 	@echo "  make test-integration PARALLEL_JOBS=N  - Custom parallelism"
 	@echo "  make test-agent-unit  - Run code-agent unit tests"
-	@echo "  make test-org-unit    - Run code-agent-org unit tests"
 	@echo "  make test-permissions - Run permission functions tests"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
 	@echo "  make test-mock        - Run mock CLI tests (no API, fast)"
 	@echo "  make test-agent-mock  - Run agent mock CLI tests"
-	@echo "  make test-org-mock    - Run org mock CLI tests"
 	@echo "  make test-docker      - Run Docker unit tests (path translation)"
 	@echo "  make test-docker-sandbox - Run Docker sandbox tests (requires container)"
 	@echo "  make test-workspace-bridge  - E2E tests for terminal workspace bridge (requires MCP)"
@@ -162,17 +158,15 @@ test-smoke:
 
 # Unit test targets are independent — use 'make -j4 test-unit' for parallel
 .PHONY: test-unit
-test-unit: test-agent-unit test-org-unit test-backend-unit test-acp-unit test-cmux
+test-unit: test-agent-unit test-backend-unit test-acp-unit test-cmux
 
 .PHONY: test-cmux
 test-cmux:
 	@echo "Running cmux backend E2E tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-cmux.org\")" \
-		-l tests/test-cmux-e2e-simulated.el \
 		-l tests/test-cmux-e2e-agent-profiles.el \
 		-l tests/test-cmux-env-injection.el \
 		-l tests/test-cmux-agent-name-lookup.el \
@@ -227,10 +221,6 @@ _run-sharded-tests-parallel:
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-code-agent-integration.el \
-			-l tests/test-code-agent-org-integration.el \
-			-l tests/test-code-agent-org-cancel-active-queries.el \
-			-l tests/test-code-agent-org-cancel-race.el \
-			-l tests/test-code-agent-org-exec-status.el \
 			--eval "(test-claude-run-shard $(TOTAL_SHARDS) {})"'
 
 # Internal: run shards using bash background jobs (portable fallback)
@@ -245,10 +235,6 @@ _run-sharded-tests-bash:
 			-l tests/fixtures/test-config.el \
 			-l tests/fixtures/test-parallel.el \
 			-l tests/test-code-agent-integration.el \
-			-l tests/test-code-agent-org-integration.el \
-			-l tests/test-code-agent-org-cancel-active-queries.el \
-			-l tests/test-code-agent-org-cancel-race.el \
-			-l tests/test-code-agent-org-exec-status.el \
 			--eval "(test-claude-run-shard $(TOTAL_SHARDS) $$i)" \
 			> .test-results/shard-$$i.log 2>&1; \
 			echo $$? > .test-results/shard-$$i.exit ) & \
@@ -310,7 +296,6 @@ test-agent-unit:
 		-l tests/test-json-parser-property.el \
 		-l tests/test-harness-phase2.el \
 		-l tests/test-permission-round-trip.el \
-		-l tests/test-verbose-formatter.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-backend-unit
@@ -423,34 +408,11 @@ test-org-unit:
 	$(BATCH) $(LOAD_PATH) -L tests/support \
 		$(LOAD_ALL) \
 		-l tests/support/test-helpers.el \
-		-l tests/test-code-agent-org-unit.el \
-		-l tests/test-code-agent-org-refine.el \
-		-l tests/test-code-agent-org-scheduled.el \
-		-l tests/test-code-agent-org-response.el \
-		-l tests/test-code-agent-org-queue.el \
-		-l tests/test-code-agent-org-cancel.el \
-		-l tests/test-code-agent-org-refactor-phase1.el \
-		-l tests/test-code-agent-org-refactor-phase2.el \
-		-l tests/test-code-agent-org-refactor-phase4.el \
 		-l tests/support/org-fixtures.el \
-		-l tests/test-code-agent-org-refactor-phase5.el \
-		-l tests/test-code-agent-org-heading-level.el \
-		-l tests/test-code-agent-org-content-loss-repro.el \
-		-l tests/test-code-agent-org-wrong-level-repro.el \
-		-l tests/test-code-agent-org-wrong-position-repro.el \
-		-l tests/test-code-agent-org-loop.el \
-		-l tests/test-code-agent-org-marker-lifecycle.el \
-		-l tests/test-code-agent-org-query-id.el \
-		-l tests/test-code-agent-org-query-id-issues.el \
 		-l tests/test-code-agent-org-workspace.el \
 		-l tests/test-mcp-report-invocation.el \
 		-l tests/test-plugin-discovery.el \
-		-l tests/test-code-agent-org-edge-cases.el \
-		-l tests/test-code-agent-org-resolve-backend.el \
 		-l tests/test-slash-completion.el \
-		-l tests/test-code-agent-org-loop-detection.el \
-		-l tests/test-code-agent-org-pre-completion.el \
-		-l tests/test-code-agent-org-telemetry.el \
 		-l tests/test-structural.el \
 		-l tests/test-mcp-eval-state.el \
 		-l tests/test-agent-workflow.el \
@@ -459,9 +421,6 @@ test-org-unit:
 		-l tests/test-mcp-lifecycle.el \
 		-l tests/test-mcp-eval-handler.el \
 		-l tests/test-mcp-http.el \
-		-l tests/test-code-agent-org-cleanup.el \
-		-l tests/test-code-agent-org-cleanup-r2.el \
-		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
 		-l tests/test-workspace-bridge-response.el \
 		-l tests/test-ide-open-editors.el \
@@ -498,7 +457,6 @@ test-org-mock:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
-		-l tests/test-code-agent-org-mock.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-agent-integration
@@ -517,10 +475,6 @@ test-org-integration:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
-		-l tests/test-code-agent-org-integration.el \
-		-l tests/test-code-agent-org-cancel-active-queries.el \
-		-l tests/test-code-agent-org-cancel-race.el \
-		-l tests/test-code-agent-org-exec-status.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-permissions
@@ -637,7 +591,6 @@ test-interactive:
 	$(EMACS) -Q $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/test-code-agent-unit.el \
-		-l tests/test-code-agent-org-unit.el \
 		--eval "(ert t)"
 
 # Coverage (requires undercover or similar)
@@ -733,7 +686,6 @@ test-e2e-local:
 	@echo "Running local E2E tests (requires Phoenix + OTel bridge)..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
-		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-workspace-bridge.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-cmux.org\")" \
 		-l tests/test-e2e-local-trace.el \
