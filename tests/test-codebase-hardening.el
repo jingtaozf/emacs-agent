@@ -62,20 +62,6 @@ prevent JSON parse errors from propagating through process filter."
 
 ;;; Bug #6 regression: Font-lock timer checks buffer liveness
 
-(ert-deftest test-hardening-fontlock-timer-checks-buffer-live ()
-  "The debounced font-lock timer checks (buffer-live-p) before operating.
-FIX: Add (when (buffer-live-p buf) ...) inside the timer lambda in
-code-agent-org--schedule-fontlock. See ARCHITECTURE.org Invariants."
-  :tags '(:unit :fast :stable :hardening)
-  (when test-hardening--project-root
-           (content (with-temp-buffer
-                      (insert-file-contents file)
-                      (buffer-string))))
-      (should (or (string-match-p "buffer-live-p" content)
-                  (error "Font-lock timer missing buffer-live-p check.\nFIX: Add (when (buffer-live-p buf) ...) in schedule-fontlock timer lambda."))))))
-
-;;; Verify the invariant: timer callbacks check liveness
-
 (ert-deftest test-hardening-invariant-timer-liveness-checks ()
   "All run-at-time/run-with-timer callbacks in source .org files
 that reference process-send-eof or font-lock-flush include a liveness guard.

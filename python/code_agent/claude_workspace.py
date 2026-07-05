@@ -22,9 +22,9 @@ import sys
 from pathlib import Path
 
 from code_agent.mcp_client import McpClient
-from code_agent.workspace_bridge import _escape_elisp_string
 from code_agent.workspace_launcher import (
     WorkspaceLauncher,
+    _escape_elisp_string,
     is_valid_session,
     split_positional_args,
 )
@@ -116,57 +116,6 @@ class ClaudeHooksFile:
         return settings_file
 
 
-def _list_sessions(mcp: McpClient, org_file: str) -> str | None:
-    """Return a tab-separated session listing from Emacs (None on failure)."""
-    elisp = (
-        "(let ((debug-on-error nil) (debug-on-quit nil)) "
-        f'(code-agent-org-workspace-bridge-list-sessions "{_escape_elisp_string(org_file)}"))'
-    )
-    return mcp.eval_elisp(elisp)
-
-
-def _select_session_interactive(sessions_text: str, org_file: str) -> str:
-    """Print the session list and prompt the user to pick one."""
-    print(f"\nAvailable workspace sessions in {os.path.basename(org_file)}:")
-
-    session_ids: list[str] = []
-    current_parent = "__unset__"
-    for line in sessions_text.split("\n"):
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        sid, heading = parts[0], parts[1]
-        parent = parts[2] if len(parts) > 2 else ""
-        if parent != current_parent:
-            print()
-            print(f"  [{parent}]" if parent else "  [top-level]")
-            current_parent = parent
-        session_ids.append(sid)
-        print(f"    {len(session_ids)}) {heading}  ({sid})")
-
-    if not session_ids:
-        print(f"No workspace sessions found in {org_file}", file=sys.stderr)
-        sys.exit(1)
-
-    print()
-    try:
-        choice = int(input(f"Select session [1-{len(session_ids)}]: "))
-    except (EOFError, KeyboardInterrupt):
-        sys.exit(1)
-    except ValueError:
-        choice = 0
-
-    if not 1 <= choice <= len(session_ids):
-        print("Invalid selection", file=sys.stderr)
-        sys.exit(1)
-
-    selected = session_ids[choice - 1]
-    print(f"Selected: {selected}\n")
-    return selected
-
-
 def _cleanup_ide_server(mcp: McpClient, session_id: str) -> None:
     """Tell Emacs to stop the IDE WebSocket server for SESSION_ID."""
     if not session_id:
@@ -198,16 +147,16 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
     # ------------------------------------------------------------------
 
     def fetch_session_metadata(self) -> None:
-        # Offer the interactive picker before running the base flow.
+        # The workspace-bridge session listing functions are dead code —
+        # this subclass no longer supports the interactive session picker.
         if self.mcp_ok and not self.session_id:
-            sessions = _list_sessions(self.mcp, self.org_file)
-            if not sessions:
-                print(
-                    f"No workspace sessions found in {self.org_file}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            self.session_id = _select_session_interactive(sessions, self.org_file)
+            print(
+                "WARNING: Interactive session listing is unavailable — "
+                "the required workspace-bridge Elisp functions have been removed. "
+                "Pass a session-id explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         super().fetch_session_metadata()
 
     # ------------------------------------------------------------------

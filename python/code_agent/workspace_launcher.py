@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import ClassVar
 
 from code_agent.mcp_client import McpClient
-from code_agent.workspace_bridge import _escape_elisp_string
 
 
 # ======================================================================
@@ -290,6 +289,18 @@ def split_positional_args(argv: list[str]) -> tuple[str, str, list[str]]:
     return org_file, session_id, rest
 
 
+def _escape_elisp_string(s: str) -> str:
+    """Escape STR so it can be embedded in an elisp double-quoted literal."""
+    return (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace("\x00", "")
+    )
+
+
 # ======================================================================
 # WorkspaceLauncher — the template-method base class
 # ======================================================================
@@ -399,43 +410,15 @@ class WorkspaceLauncher:
         (the workspace heading's ``:CUSTOM_ID:`` — used as the routing
         key by the bridge so renaming the heading or cmux workspace
         cannot misroute prompts).
+
+        NOTE: The workspace-bridge Elisp functions this method called
+        (code-agent-org-workspace-bridge--ensure-buffer,
+        code-agent-org-workspace-bridge--goto-session,
+        code-agent-org-workspace-bridge-system-prompt) no longer exist.
+        The method is kept as a no-op for the call in ``run()`` to avoid
+        a TypeError — it can be fully deleted once all callers are updated.
         """
-        if not (self.mcp_ok and self.session_id):
-            return
-        print(f"Building session metadata for {self.session_id}...")
-        esc_org = _escape_elisp_string(self.org_file)
-        esc_sid = _escape_elisp_string(self.session_id)
-        # One round-trip pulls two values separated by NULs: CUSTOM_ID
-        # and the system prompt body.  NUL is safe because neither can
-        # legitimately contain it.
-        elisp = (
-            "(let ((debug-on-error nil) (debug-on-quit nil))"
-            f'  (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer "{esc_org}")'
-            "    (save-excursion (save-restriction (widen)"
-            f'      (code-agent-org-workspace-bridge--goto-session "{esc_sid}")'
-            '      (let ((cid (or (org-entry-get nil "CUSTOM_ID") ""))'
-            "            (prompt (code-agent-org-workspace-bridge-system-prompt "
-            f'              "{esc_org}" "{esc_sid}")))'
-            r'        (format "%s\0%s" cid prompt))))))'
-        )
-        result = self.mcp.eval_elisp(elisp)
-        if not result:
-            return
-        parts = result.split("\0", 1)
-        self.workspace_custom_id = parts[0] if len(parts) > 0 else ""
-        self.system_prompt = parts[1] if len(parts) > 1 else ""
-        if not is_valid_session(self.system_prompt):
-            print(
-                "  WARNING: Could not build system prompt — launching without it",
-                file=sys.stderr,
-            )
-        if not self.workspace_custom_id:
-            print(
-                "  WARNING: Workspace heading has no :CUSTOM_ID: — bridge "
-                "will fall back to :CLAUDE_SESSION_ID: routing. Add "
-                ":CUSTOM_ID: to the heading for name-based routing.",
-                file=sys.stderr,
-            )
+        return
 
     # ------------------------------------------------------------------
     # Env + terminal setup

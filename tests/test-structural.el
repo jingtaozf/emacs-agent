@@ -1562,7 +1562,6 @@ body itself changes — forces re-audit before unrelated commits land."
      . ("321b189430ab"        ; pcase @ ~L415
         "9bd00db90951"        ; pcase @ ~L641
         "7ad5df9f7bf9"))      ; pcase @ ~L888
-     . ("3c02623232db"))      ; pcase @ ~L214
     ("emacs-mcp-server.org"
      . ("4581a3ac1541")))     ; pcase @ ~L703
   "Known pcase string-pattern violations indexed by content fingerprint.
