@@ -624,16 +624,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-cmux-set-status"
     ;; code-agent-org: workspace bridge (terminal workflow)
     "code-agent-org-workspace-archive-workflow"
-    "code-agent-org-workspace-bridge-get-cli-session"
-    "code-agent-org-workspace-bridge-insert-prompt"
-    "code-agent-org-workspace-bridge-insert-response"
-    "code-agent-org-workspace-bridge-latest-instruction-custom-id"
-    "code-agent-org-workspace-bridge-list-sessions"
-    "code-agent-org-workspace-bridge-mark-cancelled"
-    "code-agent-org-workspace-bridge-save-cli-session"
-    "code-agent-org-workspace-bridge-send-prompt"
-    "code-agent-org-workspace-bridge-system-prompt"
-    "code-agent-org-workspace-bridge-update-todos"
     ;; code-agent-org: company completion
     "code-agent-org-company-slash-commands"
     ;; claude-ide: WebSocket IDE server (migrated from monet)
@@ -730,7 +720,6 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
     ("code-agent-org-response"     . 3)
     ("code-agent-org"              . 4)   ; top-level org
     ("code-agent-org-scheduled"    . 5)
-    ("code-agent-org-workspace-bridge" . 5) ; workspace bridge, needs org
     ("code-agent-org-terminal-base" . 2)) ; shared terminal, needs agent
   "Module layer assignments from ARCHITECTURE.org.
 Higher layers may depend on same or lower layers, but not upward.")

@@ -218,7 +218,6 @@ top-level .org into a subdir.  Falls back to .git, then cwd."
   '("lp/trace/code-agent-trace.org"
     "lp/chat/code-agent.org"
     "lp/org/code-agent-org.org"
-    "lp/org/code-agent-org-workspace-bridge.org"
     "lp/org/code-agent-org-terminal-base.org"
     "lp/org/code-agent-org-cmux.org"
     "lp/sdk/emacs-mcp-server.org")

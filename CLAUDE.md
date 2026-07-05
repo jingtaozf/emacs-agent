@@ -73,8 +73,8 @@ The full environment stack:
 - Session state, variables, function calls
 - Reload code: `(literate-elisp-load "file.org")`
 
-**Phoenix** — trace every AI block execution:
-- Every execution produces spans: execute-ai-block, cmux-execute, send-text
+**Phoenix** — trace every execution:
+- Every execution produces spans: workspace-execute, cmux-execute, send-text
 - Query traces: `curl -s -X POST http://localhost:6006/graphql ...`
 - Use `/phoenix-span` skill or check Phoenix UI at `http://localhost:6006`
 - Traces are the experience store — inspect them to diagnose failures
@@ -148,17 +148,16 @@ LP source lives in `.org` files loaded via `literate-elisp`:
 | Layer | File | Purpose |
 |-------|------|---------|
 | Core SDK | `code-agent.org` | CLI subprocess, JSON stream parsing |
-| Org Integration | `code-agent-org.org` | `#+begin_src ai` blocks, response sections |
+| Org Integration | `code-agent-org.org` | Workspace management: launch/restart/cancel cmux sessions, transient menu |
 | MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude / Pi |
 | Pi (default-loaded; ext opt-in) | `code-agent-pi-{backend,extension}.org` | pi.dev RPC backend (auto-load) + TS extension tangling to `~/.pi/agent/extensions/emacs-mcp.ts`; `:CLAUDE_BACKEND: pi` |
 | Entry Point | `code-agent.el` | Package requires, autoloads |
 
-Load with: `(literate-elisp-load "code-agent.org")`. Data flow:
-user writes a query in `#+begin_src ai`, hits `C-c C-c` →
-`code-agent-org-execute` validates + creates a session →
-`code-agent-query` spawns the CLI with `--output-format stream-json`
-→ process filter parses newline-delimited JSON → tokens stream into
-the response section below the AI block.
+Load with: `(literate-elisp-load "code-agent.org")`. The org integration
+provides workspace management: `C-c C-/` opens a transient menu for
+launch/restart/cancel/status/IDE-server/permission-mode operations on
+cmux sessions identified by org section properties (`CMUX_WORKSPACE`,
+`CLAUDE_SESSION_ID`).
 
 ### Session Management
 
@@ -216,7 +215,7 @@ with Elisp src blocks. Project-specific addendum:
   curl -s -X POST http://localhost:6006/graphql -H "Content-Type: application/json" \
     -d '{"query": "query { node(id: \"UHJvamVjdDoy\") { ... on Project { spans(first: 10, sort: {col: startTime, dir: desc}) { edges { node { name spanId parentId spanKind statusCode startTime latencyMs attributes } } } } } }"}' | jq '.'
   ```
-- Every AI block execution produces a trace with spans for: execute-ai-block,
+- Every execution produces a trace with spans for: workspace-execute,
   cmux-execute, send-text, permission events, response handling
 - Span attributes include input.value, output.value, session IDs, tool names
 - Use traces to verify: correct parent-child relationships, timing, errors
