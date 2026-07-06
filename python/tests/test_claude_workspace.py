@@ -126,15 +126,6 @@ class TestBuildArgs:
         config = json.loads(args[args.index("--mcp-config") + 1])
         assert config["mcpServers"]["emacs"]["url"] == "http://custom:8080/mcp"
 
-    def test_writes_workspace_hooks_json(self, tmp_path):
-        _make_launcher(tmp_path).build_args()
-        hooks_file = tmp_path / "workspace-hooks.json"
-        assert hooks_file.exists()
-        data = json.loads(hooks_file.read_text())
-        assert "Stop" in data["hooks"]
-        assert "UserPromptSubmit" in data["hooks"]
-        assert "SessionStart" in data["hooks"]
-
 
 class TestBuildArgsIde:
     def test_ide_flag_always_present(self, tmp_path):

@@ -23,7 +23,7 @@ Standard Python project configuration using =hatchling= and =uv=.
 :header-args: :tangle ../../hooks/hooks.json :mkdirp yes
 :END:
 
-This configuration is loaded by Claude Code as a plugin or workspace-hooks.json.
+This configuration is loaded by Claude Code as a plugin hooks.json.
 
 The permission / permission-clear hooks match =AskUserQuestion= only — *not*
 =ExitPlanMode=. Both are interactive tools, but =ExitPlanMode= fires its
@@ -35,22 +35,8 @@ the plan-mode false positives.
 
 #+begin_src json
 {
-  "description": "Emacs Claude Agent hooks for workspace bridge",
+  "description": "Emacs Claude Agent hooks — permission handling only",
   "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge session-start",
-        "timeout": 5
-      }]
-    }],
-    "UserPromptSubmit": [{
-      "hooks": [{
-        "type": "command",
-        "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge prompt",
-        "timeout": 10
-      }]
-    }],
     "PreToolUse": [{
       "matcher": "AskUserQuestion",
       "hooks": [{
@@ -59,29 +45,12 @@ the plan-mode false positives.
         "timeout": 5
       }]
     }],
-    "PostToolUse": [
-      {
-        "matcher": "TodoWrite",
-        "hooks": [{
-          "type": "command",
-          "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge tool",
-          "timeout": 5
-        }]
-      },
-      {
-        "matcher": "AskUserQuestion",
-        "hooks": [{
-          "type": "command",
-          "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge permission-clear",
-          "timeout": 5
-        }]
-      }
-    ],
-    "Stop": [{
+    "PostToolUse": [{
+      "matcher": "AskUserQuestion",
       "hooks": [{
         "type": "command",
-        "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge response",
-        "timeout": 10
+        "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge permission-clear",
+        "timeout": 5
       }]
     }]
   }
@@ -197,7 +166,7 @@ receive instructions via CLI args + env vars and exit after one event.
 The launcher classes inside =* Workspace Layer= are the most-edited
 surface — they own the launch contract that Emacs depends on
 (=CLAUDE_PROJECT_DIR=, =WORKSPACE_CUSTOM_ID=, =CMUX_WORKSPACE=,
-=CLAUDE_PLUGIN_ROOT= env vars + the resolved =--settings= path).
+=CLAUDE_PLUGIN_ROOT= env vars + the =--plugin-dir= flag).
 
 
 * MCP Client Layer
@@ -2238,7 +2207,7 @@ Module docstring — defines the file's identity for runtime and IDE inspection.
 
 Thin subclass of ``WorkspaceLauncher`` that fills in the Claude-Code
 specifics: interactive session picker when ``session_id`` is not
-supplied, ``--plugin-dir`` + ``--mcp-config`` + ``--settings`` flags
+supplied, ``--plugin-dir`` + ``--mcp-config`` flags
 built from the plugin tree, ``--ide`` / ``--chrome`` for the built-in
 IDE bridge, and a ``pre_launch`` hook that starts the Emacs-side
 WebSocket IDE server before the CLI takes over.
@@ -2283,80 +2252,6 @@ def _normalize_name_slug(name: str) -> str:
     """
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower())
     return slug.strip("-")
-
-#+end_src
-=cl-defclass=-like Python class — =ClaudeHooksFile= holds the state described in the docstring and exposes the methods below as its public surface.
-
-#+begin_src python
-# ======================================================================
-# ClaudeHooksFile — owns the workspace-hooks.json contract
-# ======================================================================
-#
-# Claude Code reads a ``--settings`` file at startup that wires three
-# hook events back into the workspace-bridge subprocess:
-#
-#   - Stop              → workspace-bridge response   (30s timeout)
-#   - UserPromptSubmit  → workspace-bridge prompt     (10s timeout)
-#   - SessionStart      → workspace-bridge session-start (10s timeout)
-#
-# Co-locate the bridge-path discovery + JSON template + write step in
-# one class so the contract is auditable in one read. Class constants
-# expose the timeouts so a deployment with slow MCP can override
-# without forking the hook generation.
-
-
-class ClaudeHooksFile:
-    """Writer for the per-plugin ``workspace-hooks.json`` settings file."""
-
-    HOOKS_FILENAME = "workspace-hooks.json"
-    STOP_TIMEOUT_SECS = 30
-    PROMPT_TIMEOUT_SECS = 10
-    SESSION_START_TIMEOUT_SECS = 10
-
-    def __init__(self, plugin_dir: str):
-        self.plugin_dir = plugin_dir
-
-    @staticmethod
-    def find_bridge_path() -> str:
-        """Return the absolute path to the ``workspace-bridge`` console script.
-
-        Prefers the script installed in the same venv as this launcher so
-        the hook and the launcher stay in lockstep; falls back to PATH.
-        """
-        venv_bin = Path(sys.executable).parent
-        bridge = venv_bin / "workspace-bridge"
-        if bridge.exists():
-            return str(bridge)
-        return "workspace-bridge"
-
-    def _hook_block(self, command: str, timeout: int) -> dict:
-        return {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": command, "timeout": timeout}],
-        }
-
-    def write(self) -> str:
-        """Render and write the hooks JSON. Returns the settings file path."""
-        bridge = self.find_bridge_path()
-        hooks = {
-            "hooks": {
-                "Stop": [
-                    self._hook_block(f"{bridge} response", self.STOP_TIMEOUT_SECS),
-                ],
-                "UserPromptSubmit": [
-                    self._hook_block(f"{bridge} prompt", self.PROMPT_TIMEOUT_SECS),
-                ],
-                "SessionStart": [
-                    self._hook_block(
-                        f"{bridge} session-start", self.SESSION_START_TIMEOUT_SECS
-                    ),
-                ],
-            }
-        }
-        settings_file = os.path.join(self.plugin_dir, self.HOOKS_FILENAME)
-        with open(settings_file, "w") as f:
-            json.dump(hooks, f)
-        return settings_file
 
 #+end_src
 Internal helper =_cleanup_ide_server= — called only by the public functions in this module, kept here for visibility next to its callers.
@@ -2427,9 +2322,6 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
             f'{{"mcpServers":{{"emacs":{{"type":"http","url":"{self.mcp_url}"}}}}}}'
         )
         args.extend(["--mcp-config", mcp_config])
-
-        hooks_file = ClaudeHooksFile(self.plugin_dir).write()
-        args.extend(["--settings", hooks_file])
 
         if is_valid_session(self.system_prompt):
             args.extend(["--system-prompt", self.system_prompt])
@@ -3966,15 +3858,6 @@ class TestBuildArgs:
         args = launcher.build_args()
         config = json.loads(args[args.index("--mcp-config") + 1])
         assert config["mcpServers"]["emacs"]["url"] == "http://custom:8080/mcp"
-
-    def test_writes_workspace_hooks_json(self, tmp_path):
-        _make_launcher(tmp_path).build_args()
-        hooks_file = tmp_path / "workspace-hooks.json"
-        assert hooks_file.exists()
-        data = json.loads(hooks_file.read_text())
-        assert "Stop" in data["hooks"]
-        assert "UserPromptSubmit" in data["hooks"]
-        assert "SessionStart" in data["hooks"]
 
 #+end_src
 Pytest class scoping the test cases below — each method covers one aspect of =BuildArgsIde='s contract.

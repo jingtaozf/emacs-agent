@@ -2,7 +2,7 @@
 
 Thin subclass of ``WorkspaceLauncher`` that fills in the Claude-Code
 specifics: interactive session picker when ``session_id`` is not
-supplied, ``--plugin-dir`` + ``--mcp-config`` + ``--settings`` flags
+supplied, ``--plugin-dir`` + ``--mcp-config`` flags
 built from the plugin tree, ``--ide`` / ``--chrome`` for the built-in
 IDE bridge, and a ``pre_launch`` hook that starts the Emacs-side
 WebSocket IDE server before the CLI takes over.
@@ -43,77 +43,6 @@ def _normalize_name_slug(name: str) -> str:
     """
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower())
     return slug.strip("-")
-
-
-# ======================================================================
-# ClaudeHooksFile — owns the workspace-hooks.json contract
-# ======================================================================
-#
-# Claude Code reads a ``--settings`` file at startup that wires three
-# hook events back into the workspace-bridge subprocess:
-#
-#   - Stop              → workspace-bridge response   (30s timeout)
-#   - UserPromptSubmit  → workspace-bridge prompt     (10s timeout)
-#   - SessionStart      → workspace-bridge session-start (10s timeout)
-#
-# Co-locate the bridge-path discovery + JSON template + write step in
-# one class so the contract is auditable in one read. Class constants
-# expose the timeouts so a deployment with slow MCP can override
-# without forking the hook generation.
-
-
-class ClaudeHooksFile:
-    """Writer for the per-plugin ``workspace-hooks.json`` settings file."""
-
-    HOOKS_FILENAME = "workspace-hooks.json"
-    STOP_TIMEOUT_SECS = 30
-    PROMPT_TIMEOUT_SECS = 10
-    SESSION_START_TIMEOUT_SECS = 10
-
-    def __init__(self, plugin_dir: str):
-        self.plugin_dir = plugin_dir
-
-    @staticmethod
-    def find_bridge_path() -> str:
-        """Return the absolute path to the ``workspace-bridge`` console script.
-
-        Prefers the script installed in the same venv as this launcher so
-        the hook and the launcher stay in lockstep; falls back to PATH.
-        """
-        venv_bin = Path(sys.executable).parent
-        bridge = venv_bin / "workspace-bridge"
-        if bridge.exists():
-            return str(bridge)
-        return "workspace-bridge"
-
-    def _hook_block(self, command: str, timeout: int) -> dict:
-        return {
-            "matcher": "",
-            "hooks": [{"type": "command", "command": command, "timeout": timeout}],
-        }
-
-    def write(self) -> str:
-        """Render and write the hooks JSON. Returns the settings file path."""
-        bridge = self.find_bridge_path()
-        hooks = {
-            "hooks": {
-                "Stop": [
-                    self._hook_block(f"{bridge} response", self.STOP_TIMEOUT_SECS),
-                ],
-                "UserPromptSubmit": [
-                    self._hook_block(f"{bridge} prompt", self.PROMPT_TIMEOUT_SECS),
-                ],
-                "SessionStart": [
-                    self._hook_block(
-                        f"{bridge} session-start", self.SESSION_START_TIMEOUT_SECS
-                    ),
-                ],
-            }
-        }
-        settings_file = os.path.join(self.plugin_dir, self.HOOKS_FILENAME)
-        with open(settings_file, "w") as f:
-            json.dump(hooks, f)
-        return settings_file
 
 
 def _cleanup_ide_server(mcp: McpClient, session_id: str) -> None:
@@ -178,9 +107,6 @@ class ClaudeWorkspaceLauncher(WorkspaceLauncher):
             f'{{"mcpServers":{{"emacs":{{"type":"http","url":"{self.mcp_url}"}}}}}}'
         )
         args.extend(["--mcp-config", mcp_config])
-
-        hooks_file = ClaudeHooksFile(self.plugin_dir).write()
-        args.extend(["--settings", hooks_file])
 
         if is_valid_session(self.system_prompt):
             args.extend(["--system-prompt", self.system_prompt])
