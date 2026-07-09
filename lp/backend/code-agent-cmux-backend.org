@@ -62,9 +62,9 @@ this backend's design:
 ** Two-Module Split: Facade Here, Legacy Body Elsewhere
 
 Thin facade — the bulk of cmux-driving Elisp (launch pipeline,
-send-text path, capture/follower, verbose buffer, agent profiles,
-workspace colour, IDE server, sidebar feedback, permission-needed
-alerts, session recovery) still lives in
+send-text path, agent profiles, workspace colour, IDE server,
+sidebar feedback, permission-needed alerts, session recovery) still
+lives in
 [[file:../org/code-agent-org-cmux.org][code-agent-org-cmux.org]] (2 000+ lines).
 Protocol 2b / Protocol 3 methods below delegate to
 =code-agent-org-cmux--*=.
@@ -89,18 +89,12 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 (require 'code-agent-multiplexer)
 ;; code-agent-org-cmux is the legacy module that owns the actual
 ;; cmux-driving code today; methods here delegate to it.
-(declare-function code-agent-org-cmux--execute-ai-block
-                  "code-agent-org-cmux" ())
 (declare-function code-agent-org-cmux-cancel
                   "code-agent-org-cmux" ())
 (declare-function code-agent-org-cmux--send-text
                   "code-agent-org-cmux" (surface-id text &optional socket-path))
 (declare-function code-agent-org-cmux--ensure-session
                   "code-agent-org-cmux" ())
-(declare-function code-agent-org-cmux--start-verbose
-                  "code-agent-org-cmux" (surface-id session-key))
-(declare-function code-agent-org-cmux--stop-verbose
-                  "code-agent-org-cmux" (session-key))
 #+END_SRC
 
 *** Class
@@ -182,28 +176,16 @@ a cmux workspace for the current session heading)."
 
 *** Protocol 3 — cmux-specific overrides
 
-*** Execute Block
-
-Delegate to the legacy =code-agent-org-cmux--execute-ai-block= which
-handles the full cmux launch/send/register/verbose-start pipeline.
-Unlike agent-family backends where Protocol 3 =execute-block=
-unpacks =block-info= explicitly, cmux's legacy function reads the
-block from point — =block-info= is effectively redundant for now
-(the caller has already navigated to the block).
-
-#+BEGIN_SRC elisp
-(cl-defmethod code-agent-org-backend-execute-block
-  ((_backend code-agent-cmux-backend) _block-info)
-  "Execute the AI block at point via the cmux legacy pipeline.
-Ignores BLOCK-INFO; reads the block from `point' because that's what
-the legacy function does.  Returns no cancel handle — cancellation
-goes through `cancel-from-org' which dispatches to
-`code-agent-org-cmux-cancel'."
-  (code-agent-org-cmux--execute-ai-block)
-  ;; No meaningful cancel handle for multiplexer backends today —
-  ;; cancellation flows through send-key :escape / :ctrl-c instead.
-  nil)
-#+END_SRC
+No cmux-specific =execute-block= override today — org is the control
+plane (define/launch/monitor workspaces via the transient menu);
+prompt typing happens directly in the agent's terminal tab (=I=).
+The legacy Emacs→cmux prompt-dispatch pipeline
+(=code-agent-org-cmux--execute-ai-block= and its helpers) was
+unreachable dead code (no keybinding, no menu entry, no caller of this
+generic) and was removed along with =code-agent-org-block.org='s
+=--find-instruction-number= / =--get-section-level= it depended on.
+A future org→terminal dispatch would be rebuilt on =new-workspace= +
+=cmux send=, not by resurrecting this method.
 
 *** Cancel From Org
 

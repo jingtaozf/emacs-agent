@@ -292,46 +292,6 @@ an auth error since CLI ignores the environment variable."
              (lambda () (= 0 (code-agent-active-query-count)))
              5))))
 
-;;; Translation Tests
-
-(ert-deftest test-integration-translate-basic ()
-  "Test basic translation functionality with actual API call.
-Translates 'Hello, world!' to Chinese and verifies output contains Chinese characters."
-  :tags '(:integration :slow :api :stable)
-  (test-claude-skip-unless-cli-available)
-
-  ;; Clean up any previous translation state — each run now allocates its
-  ;; own buffer, so we just clear the "latest" pointer.
-  (setq code-agent-translate--active-state nil)
-  (when (buffer-live-p code-agent-translate--last-buffer)
-    (kill-buffer code-agent-translate--last-buffer))
-  (setq code-agent-translate--last-buffer nil)
-
-  ;; Run translation (with setting-sources to skip slow plugin loading)
-  (code-agent-translate "Hello, world!" "Chinese"
-                          (list :setting-sources test-claude-default-setting-sources))
-
-  ;; Wait for completion (translation should be quick with haiku model)
-  (should (test-claude-wait-until
-           (lambda ()
-             (null code-agent-translate--active-state))
-           30))
-
-  ;; Check translation buffer has content (the run-specific one)
-  (let* ((buf code-agent-translate--last-buffer)
-         (result-text (when (buffer-live-p buf)
-                        (with-current-buffer buf (buffer-string)))))
-
-    (should buf)
-    (should result-text)
-    ;; Verify translation completed
-    (should (string-match-p "Translation complete" result-text))
-    ;; Should contain some Chinese characters (Unicode range)
-    (should (string-match-p "[\u4e00-\u9fff]" result-text))
-
-    ;; Clean up
-    (kill-buffer buf)))
-
 ;;; Automatic Recovery Tests
 
 (ert-deftest test-integration-recovery-session-id-capture ()

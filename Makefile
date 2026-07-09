@@ -20,26 +20,16 @@ WEB_SERVER_DIR ?= $(HOME)/.emacs.d/straight/build/web-server
 COMPANY_DIR ?= $(HOME)/.emacs.d/straight/build/company
 WEBSOCKET_DIR ?= $(HOME)/.emacs.d/straight/build/websocket
 YASNIPPET_DIR ?= $(HOME)/.emacs.d/straight/build/yasnippet
-ACP_DIR ?= $(HOME)/.emacs.d/straight/build/acp
-LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR) -L $(YASNIPPET_DIR) -L $(ACP_DIR)
+LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR) -L $(COMPANY_DIR) -L $(WEBSOCKET_DIR) -L $(YASNIPPET_DIR)
 
 # Common literate-elisp load sequences (DRY — used by all test targets)
 # Load order: trace → agent (includes backend) → mcp → org
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
 LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/lp/trace/code-agent-trace.org\")"
 LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-chat.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent-translate.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-multiplexer.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-cmux-backend.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-tmux-backend.org\")"
-LOAD_ACP = --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-jsonrpc.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp-opencode.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp-gemini.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-acp-codex.org\")"
-LOAD_PI  = --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-pi-backend.org\")" \
-           --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-pi-ui.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/sdk/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-header-line.org\")"
@@ -158,7 +148,7 @@ test-smoke:
 
 # Unit test targets are independent — use 'make -j4 test-unit' for parallel
 .PHONY: test-unit
-test-unit: test-agent-unit test-backend-unit test-acp-unit test-cmux
+test-unit: test-agent-unit test-backend-unit test-cmux
 
 .PHONY: test-cmux
 test-cmux:
@@ -290,7 +280,6 @@ test-agent-unit:
 		-l tests/test-code-agent-json-protocol.el \
 		-l tests/test-code-agent-state-management.el \
 		-l tests/test-code-agent-background-tasks.el \
-		-l tests/test-code-agent-chat.el \
 		-l tests/test-code-agent-error-injection.el \
 		-l tests/test-code-agent-sentinel.el \
 		-l tests/test-json-parser-property.el \
@@ -305,82 +294,8 @@ test-backend-unit:
 		$(LOAD_AGENT_ONLY) \
 		-l tests/test-code-agent-backend.el \
 		-l tests/test-code-agent-backend-protocol.el \
-		-l tests/test-code-agent-chat-backend.el \
 		-l tests/test-backend-protocol3.el \
 		-f ert-run-tests-batch-and-exit
-
-.PHONY: test-acp-unit
-test-acp-unit:
-	@echo "Running ACP backend unit tests..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_ACP) \
-		-l tests/test-code-agent-acp.el \
-		-f ert-run-tests-batch-and-exit
-
-.PHONY: test-pi-backend
-test-pi-backend:
-	@echo "Running Pi backend smoke tests..."
-	$(BATCH) $(LOAD_PATH) -L tests/support \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_PI) \
-		-l tests/test-code-agent-pi-backend.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :pi-backend))"
-
-# Live tests spawn `pi --mode rpc' for real and exercise the full
-# stack against the user's configured provider (DeepSeek by default
-# via ~/.pi/agent/settings.json).  Skipped automatically if pi is
-# missing.  Roughly 30-60 seconds depending on provider latency.
-.PHONY: test-pi-backend-live
-test-pi-backend-live:
-	@echo "Running Pi backend LIVE tests (spawns real pi subprocess)..."
-	$(BATCH) $(LOAD_PATH) -L tests/support \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_PI) \
-		-l tests/test-code-agent-pi-backend.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :pi-backend-live))"
-
-# Pi UI Phase 1 — smoke (no spawn) + live (real pi RPC commands).
-.PHONY: test-pi-ui
-test-pi-ui:
-	@echo "Running Pi UI Phase 1 smoke tests..."
-	$(BATCH) $(LOAD_PATH) -L tests/support \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_PI) \
-		-l tests/test-code-agent-pi-ui.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :pi-ui))"
-
-.PHONY: test-pi-ui-live
-test-pi-ui-live:
-	@echo "Running Pi UI live tests (real pi RPC commands)..."
-	$(BATCH) $(LOAD_PATH) -L tests/support \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_PI) \
-		-l tests/test-code-agent-pi-ui.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :pi-ui-live))"
-
-# Fixture-driven E2E stories — runs each :pi-e2e: heading in
-# tests/e2e/org/pi-backend-test.org as a parameterized story.  Skips
-# stories whose prerequisites are missing (pi / mcp / extension).
-.PHONY: test-e2e-pi
-test-e2e-pi:
-	@echo "Running Pi backend fixture E2E stories..."
-	$(BATCH) $(LOAD_PATH) -L tests/support \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_PI) \
-		-l tests/test-e2e-pi-backend.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :e2e-pi))"
-
-# Multi-block same-workspace E2E.  Drives `code-agent-org-execute'
-# (the real C-c C-c path) against a 3-block fixture, asserting one Pi
-# PID across blocks 1+2 and Pi respawn after block-3 kill.  Requires
-# the full org integration stack (loaded via code-agent.el).
-.PHONY: test-e2e-pi-multiblock
-test-e2e-pi-multiblock:
-	@echo "Running Pi multi-block same-workspace E2E..."
-	$(BATCH) $(LOAD_PATH) -L tests/support \
-		-l tests/test-e2e-pi-multiblock.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :e2e-pi-multiblock))"
 
 # Tangle the Pi extensions .org → ~/.pi/agent/extensions/{emacs-mcp,doom-loop}.ts.
 # Per the user's decision, the .ts is installed at $HOME (not repo-local)
@@ -411,8 +326,6 @@ test-org-unit:
 		-l tests/support/org-fixtures.el \
 		-l tests/test-code-agent-org-workspace.el \
 		-l tests/test-mcp-report-invocation.el \
-		-l tests/test-plugin-discovery.el \
-		-l tests/test-slash-completion.el \
 		-l tests/test-structural.el \
 		-l tests/test-mcp-eval-state.el \
 		-l tests/test-agent-workflow.el \
@@ -623,7 +536,7 @@ test-otel:
 .PHONY: test-python
 test-python:
 	@echo "Running Python package tests..."
-	cd python && uv run pytest -v
+	cd python && uv run --extra dev pytest -v
 
 # Dead-code scan via vulture (lens #6 of AI codebase mastery research).
 # Confidence 80 = high-signal only; lower thresholds get noisy because the
@@ -643,13 +556,14 @@ vulture:
 		exit 1; \
 	fi
 
-# Release checks - runs lint + unit tests + python tests
+# Release checks - runs lint + unit tests + org-surface tests + python tests
 .PHONY: check
-check: lint test-unit test-python
+check: lint test-unit test-org-unit test-python
 	@echo ""
 	@echo "Pre-release checks completed:"
 	@echo "  - Static analysis: PASSED"
 	@echo "  - Unit tests: PASSED"
+	@echo "  - Org-surface tests: PASSED"
 	@echo "  - Python tests: PASSED"
 
 .PHONY: package
@@ -688,26 +602,7 @@ test-e2e-local:
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-terminal-base.org\")" \
 		--eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-cmux.org\")" \
 		-l tests/test-e2e-local-trace.el \
-		-l tests/test-acp-integration.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :local-e2e))"
-
-# ACP backend E2E tests (requires opencode CLI)
-.PHONY: test-acp-local
-test-acp-local:
-	@echo "Running ACP backend E2E tests (requires opencode CLI)..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_ALL) \
-		-l tests/test-acp-integration.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :acp))"
-
-# ACP multi-agent E2E (opencode, gemini, codex — each auto-skipped if unavailable)
-.PHONY: test-acp-multi-local
-test-acp-multi-local:
-	@echo "Running multi-agent ACP E2E tests (skips agents not reachable)..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_ALL) \
-		-l tests/test-acp-integration-multi.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :acp))"
 
 # Trace health check (requires Phoenix at localhost:6006)
 .PHONY: test-trace-health

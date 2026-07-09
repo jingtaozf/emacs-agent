@@ -10,10 +10,13 @@
 :CUSTOM_ID: org-cmux-overview
 :END:
 
-cmux backend for code-agent-org.  Sends prompts to a Claude CLI
-(=claude= / =copilot= / =opencode=) running inside a cmux workspace
-via the cmux Unix socket; responses arrive through workspace-bridge
-hook events.  Part of code-agent-org, loaded after code-agent-org.org.
+cmux backend for code-agent-org.  Org is the control plane: define,
+launch, restart, cancel, and monitor a Claude CLI (=claude= / =copilot=
+/ =opencode=) running inside a cmux workspace via the cmux Unix
+socket.  The user types prompts and reads responses directly in the
+cmux terminal tab (=I=); workspace-bridge only relays permission
+events (=AskUserQuestion=/=ExitPlanMode=) back to Emacs.  Part of
+code-agent-org, loaded after code-agent-org.org.
 
 This file is the operational body of the cmux multiplexer backend.
 The matching [[file:../backend/code-agent-cmux-backend.org][code-agent-cmux-backend.org]] holds the Protocol 2b
@@ -26,16 +29,23 @@ through one of the private =code-agent-org-cmux--*= helpers here.
 The frontend ([[file:code-agent-org.org][code-agent-org.org]]) NEVER reaches into this file
 directly — it dispatches via the multiplexer-backend generics.
 
-** Reading order (matches the C-c C-c lifecycle)
+** Reading order (control-plane lifecycle: define → launch → monitor)
+
+Org is the control plane — it defines, launches, restarts, cancels,
+and monitors cmux workspaces.  Prompt typing happens directly in the
+agent's terminal tab (=I= in =code-agent-org-menu=), not through org;
+there is no Emacs→cmux prompt-dispatch pipeline (removed as
+unreachable dead code — see =code-agent-cmux-backend.org='s Execute
+Block section for why).
 
 | Section group | Sections | Role |
 |---------------+----------+------|
 | Configuration | Configuration, Agent Profiles, Internal State | What the backend can launch, what state it keeps |
 | Wire surface | CLI Gateway, Workspace Color | How calls reach the cmux daemon; per-workspace colour stamping |
-| Launch path | Wait for Ready, Send Text Helper, Launch Command | First-prompt boot + hook verification |
+| Launch path | Wait for Ready, Send Text Helper, Launch Command | First-prompt boot |
 | Session lifecycle | Session Management, Session Recovery, Status Detection, Query Completion | Workspace identity across restarts; turn-end detection |
-| Execution | Loop Support, Execution, Response Delivery | The actual C-c C-c handler |
-| Observability + UI | Verbose Output, IDE Server, Story Change Hook, Sidebar Feedback, Permission Handling | Live mirror, IDE bridge, sidebar status, permission alerts |
+| Loop | Loop Support | Re-execution for =:LOOP_MAX:=/=:LOOP_INTERVAL:= tagged blocks |
+| Observability + UI | IDE Server, Sidebar Feedback, Permission Handling | IDE bridge, sidebar status, permission alerts |
 | User entry points | User Commands | Menus, keybindings, transient |
 
 The "Agent Profiles" subsection under Configuration is the heart of
@@ -212,8 +222,8 @@ parallel branches threaded through unrelated code:
 | Ready detection | ="type a message"= / ="-- INSERT --"= | ="> "= / ="copilot>"= |
 
 The rest of the cmux integration (workspace creation, send/capture, mode
-line, verbose buffer, status file plumbing, loop hook,
-sidebar feedback) is genuinely agent-agnostic and never had to change.
+line, status file plumbing, loop hook, sidebar feedback) is genuinely
+agent-agnostic and never had to change.
 Five thin agent-specific layers became five fields on the profile struct
 plus a single dispatcher.
 
@@ -249,7 +259,7 @@ absorb. The six gaps and the way each was handled illustrate the seam:
 | MCP via =.github/mcp.json= (file, not flag) | bridge registration | Python launcher merges Emacs MCP entry into the file, registers =atexit= to restore original; documented race with subprocess-outliving-launcher accepted |
 | System prompt via =.github/AGENTS.md= | session-scoped instructions | Same pattern: prepend session block, restore on exit |
 | Different ready / busy screen patterns | =wait-for-ready-poll= regex | =ready-patterns= / =busy-patterns= slots; no structural change to the polling loop |
-| No =stream-json= structured output | per-token streaming | Response arrives once via =sessionEnd= hook → =workspace_bridge= → MCP → org insert. Live terminal echo remains available via the verbose-output mirror. |
+| No =stream-json= structured output | per-token streaming | No per-token echo into Emacs; the user reads the response directly in the cmux terminal tab (=I= in =code-agent-org-menu=). |
 | No IDE WebSocket | mode-line IDE indicators | =supports-ide nil= guards both the launcher's =--ensure-ide-server= call and the mode-line display |
 
 The pattern: agents that lack a feature pay zero indirection cost on
@@ -282,26 +292,22 @@ elisp; everything else is data.
 ** Relationship to the Tri-Protocol Refactor
 
 The profile system shipped before the tri-protocol refactor (2026-04-24)
-and is now structurally subsumed by it: agent identity has moved into
-the agent-family classes (=code-agent-acp-*=, the Protocol-1 lifecycle
-layer), and the cmux backend sees agents through the agent-profile
-slot rather than dispatching on agent type directly. The profile struct
-here remains the operational data — patterns, cancel keys, capability
-flags — that the agent-family layer hands down to the multiplexer for
-its concrete behaviour. See [[file:../sdk/code-agent-backend.org][code-agent-backend.org]] → "Tri-Protocol
+and is now structurally subsumed by it: the cmux backend sees agents
+through the agent-profile slot rather than dispatching on agent type
+directly. The profile struct here remains the operational data —
+patterns, cancel keys, capability flags — that the multiplexer needs
+for its concrete behaviour. See [[file:../sdk/code-agent-backend.org][code-agent-backend.org]] → "Tri-Protocol
 Architecture" for the upper layers.
 
-OpenCode is the clearest example of the dual-path shape this enables.
 The =opencode= cmux profile here runs OpenCode's TUI inside a cmux pane
 and uses screen-scraping + filesystem injection (=opencode.jsonc= +
 =AGENTS.md=, restored on exit) — fine for interactive use, but a
 crash-window leaves the project repo in a partially modified state.
-[[file:../backend/code-agent-acp-opencode.org][code-agent-acp-opencode.org]] is the same agent reached via a
-different wire (=opencode acp= over stdio, ACP/JSON-RPC) — no terminal,
-no file injection, structured token stream, multi-turn session via
-=session/load=. Both paths are shipped; the ACP path is preferred for
-non-interactive use and for tests, the cmux path for visual workflows
-with the live terminal in view.
+(An ACP-over-stdio path for OpenCode — no terminal, no file injection,
+structured token stream — was also shipped for a time but was removed
+along with the rest of the ACP agent family; org is a control plane
+for agents living in cmux/tmux terminals now, not an embedded-chat
+frontend.)
 
 #+BEGIN_SRC elisp
 (cl-defstruct code-agent-org-cmux--agent-profile
@@ -607,232 +613,6 @@ Polls the cmux pane for the Claude TUI readiness signal — first prompt is held
   "Max seconds to wait for Claude Code to become ready in cmux."
   :type 'integer
   :group 'code-agent-org)
-#+END_SRC
-
-** Pre-flight: workspace-bridge hook verification
-:PROPERTIES:
-:CUSTOM_ID: cmux-preflight-hooks
-:END:
-
-When the user fires =C-c C-c= (or =code-agent-menu I=) on an AI block,
-Emacs sends the prompt text into the cmux pane and assumes the
-running claude there has our workspace-bridge ~UserPromptSubmit~ and
-~Stop~ hooks loaded.  Without those hooks, the prompt vanishes —
-claude responds in the terminal, but nothing reaches the org buffer.
-
-The hooks come from a launcher-supplied flag:
-
-#+begin_example
-claude --settings <project>/workspace-hooks.json ... --resume <slug>
-#+end_example
-
-=code-agent-org-cmux-restart= (and the initial =--ensure-session=
-launch) build that flag via =--build-claude-legacy-launch-command=,
-so any claude *we* spawn has the hooks.  The hole is *cmux's own
-session-restore*: when cmux's app restarts (or the user reopens a
-saved workspace), it replays the bare =claude --resume <slug>= and
-strips our launcher's extras.  The restored claude is "alive" — its
-TUI works, the user can chat with it — but every hook fires silently
-because Claude Code never loaded our settings.
-
-** Triggering incident, 2026-05-26 (twice in one week)
-
-The user pressed =code-agent-menu I= twice on different days and
-typed prompts into =claude-agent-dev.org=; both times nothing
-appeared in the org buffer.  Both times the root cause was the
-same: the dev1 pane held a cmux-restored claude with stripped
-launcher extras.  Operational workaround (=R= → manual restart)
-worked but didn't prevent the next recurrence.
-
-** Why a pre-flight check rather than a restart hook
-
-Alternatives considered:
-
-- *Detect at restart time.*  =code-agent-org-cmux-restart= already
-  recovers from a corrupt session — but only fires when the user
-  manually invokes it.  We need automatic recovery.
-- *Detect at the workspace-bridge side.*  When the bridge sees a
-  prompt without a registered query, it could detect the
-  "hook-not-wired" pattern.  But the bridge doesn't even *run* in
-  the broken case — that's the whole problem.
-- *Reactive: wait, then check.*  After =--send-text=, poll for an
-  expected org-buffer side effect.  If absent → assume hooks dead,
-  restart.  Adds latency on every send, racy.
-- *Proactive (chosen): check before send.*  ~ps -t <tty> -o command=~
-  on the surface's tty reveals the claude argv.  Cheap (~10ms), no
-  false positives (the argv either has =workspace-hooks.json= or it
-  doesn't), no race.
-
-** Design choices
-
-| Decision | Rationale |
-|---+---|
-| Inspect via =ps -t <tty>= rather than cmux RPC | cmux has no command to fetch a pane's process argv; =ps -t= over a known tty is portable and synchronous. |
-| Hook check string = ~workspace-hooks.json~ | Stable marker the launcher always appends; no false positives on bare =claude= or shell prompts. |
-| Auto-restart on miss | The user already pressed =I=; making them press =R= first is a worse UX than just doing the restart. |
-| Defcustom opt-out | Some users may prefer the warning-only behaviour (default before this fix); honour their choice. |
-| Pre-flight at =--execute-ai-block= (not =--send-text=) | =--send-text= is also called from restart-internal flows (sending =/exit=, sending the relaunch command).  Putting the check at the outer block-execute level scopes it to the user-initiated path. |
-
-** Hook Verification Helpers
-
-Three small helpers implement the pre-flight check.  =--surface-tty=
-resolves the cmux surface to its underlying tty, =--claude-has-bridge-hooks-p=
-inspects the live ~claude~ argv on that tty for the launcher's stable
-=workspace-hooks.json= marker, and =--ensure-hooks-wired= is the
-choreography step that triggers a restart + ready-wait when the marker
-is missing.
-
-| Function | Role |
-|---+---|
-| =--surface-tty= | Look up the surface's tty via =cmux tree --json= |
-| =--claude-has-bridge-hooks-p= | =ps= the tty, search for =workspace-hooks.json= |
-| =--ensure-hooks-wired= | Pre-flight: call =restart= + =wait-for-ready= when missing |
-
-The defcustom toggle:
-
-#+BEGIN_SRC elisp
-(defcustom code-agent-org-cmux-auto-relaunch-on-missing-hooks t
-  "When non-nil, auto-relaunch the cmux pane's claude process if it lacks
-the workspace-bridge hook settings.
-
-The 2026-05-26 incident: cmux's session-restore replays the bare
-``claude --resume <slug>`` command without the ``--settings
-workspace-hooks.json`` / ``--plugin-dir`` extras our launcher adds at
-launch time.  The restored claude runs fine but has *no* bridge hooks
-loaded — every UserPromptSubmit / Stop hook silently no-ops, so
-prompts and responses never reach the org buffer.
-
-The check inspects the surface's tty via cmux + ``ps`` and looks for
-``workspace-hooks.json`` in the claude argv.  Missing → call
-``code-agent-org-cmux-restart`` and wait before sending the prompt.
-Set this to nil to disable the auto-fix and just rely on the existing
-restart flow."
-  :type 'boolean
-  :group 'code-agent-org)
-
-(defun code-agent-org-cmux--surface-tty (surface-id)
-  "Look up SURFACE-ID's tty (e.g. ``ttys008``) via ``cmux tree --json``.
-Returns nil if cmux is unreachable, the surface isn't a terminal, or
-the JSON shape changed."
-  (condition-case nil
-      (let* ((json-output (code-agent-org-cmux--call "tree" "--json"))
-             (data (with-temp-buffer
-                     (insert json-output)
-                     (goto-char (point-min))
-                     (json-parse-buffer :object-type 'plist :null-object nil
-                                        :false-object nil)))
-             (windows (plist-get data :windows))
-             (found nil))
-        (cl-loop for win across (or windows []) until found do
-                 (cl-loop for ws across (or (plist-get win :workspaces) []) until found do
-                          (cl-loop for pane across (or (plist-get ws :panes) []) until found do
-                                   (cl-loop for surface across (or (plist-get pane :surfaces) [])
-                                            until found do
-                                            (when (string= (plist-get surface :ref) surface-id)
-                                              (setq found (plist-get surface :tty)))))))
-        found)
-    (error nil)))
-
-(defun code-agent-org-cmux--claude-has-bridge-hooks-p (surface-id)
-  "Return non-nil when SURFACE-ID's running claude has our workspace-bridge hooks loaded.
-
-Heuristic: the launcher appends ``--settings <path>/workspace-hooks.json``
-to the spawned ``claude`` argv.  cmux's session-restore drops these
-extras when replaying a saved session, leaving the restored claude
-running without our bridge.  We inspect the claude process via
-``ps -t <tty> -o command=`` and search for the marker.
-
-Returns nil (treat as a missing-hooks signal) on any introspection
-failure — tty lookup fails, ps doesn't run, no claude on that tty.
-The caller then triggers a restart, which is the safe fallback in
-every case."
-  (when-let* ((tty (code-agent-org-cmux--surface-tty surface-id)))
-    (let ((cmd (with-temp-buffer
-                 (call-process "ps" nil t nil "-t" tty "-o" "command=")
-                 (buffer-string))))
-      (and (stringp cmd)
-           (string-match-p "/claude\\b" cmd)
-           (string-match-p "workspace-hooks\\.json" cmd)))))
-
-(defun code-agent-org-cmux--ensure-hooks-wired (surface-id)
-  "Pre-flight check before sending a prompt to SURFACE-ID.
-
-If the running claude has our workspace-bridge hooks loaded, return t.
-Otherwise — when ``code-agent-org-cmux-auto-relaunch-on-missing-hooks``
-is non-nil — call ``code-agent-org-cmux-restart'' to relaunch via the
-launcher (which adds the missing ``--settings workspace-hooks.json``
-and WORKSPACE_* env vars), then wait until the new claude is ready.
-
-This closes the 2026-05-26 ``recurring`` failure mode where cmux's
-session-restore lost the launcher's extras and every UserPromptSubmit
-/ Stop hook silently no-op'd, leaving the org buffer untouched."
-  (cond
-   ((code-agent-org-cmux--claude-has-bridge-hooks-p surface-id) t)
-   ((not code-agent-org-cmux-auto-relaunch-on-missing-hooks)
-    (message
-     "code-agent-org-cmux: surface %s's claude lacks workspace-bridge hooks; \
-prompts will not appear in the org buffer.  Press R in code-agent-org-menu \
-to relaunch, or set `code-agent-org-cmux-auto-relaunch-on-missing-hooks' \
-to t for auto-fix."
-     surface-id)
-    t)
-   (t
-    (message "code-agent-org-cmux: claude on %s is missing workspace-bridge \
-hooks (cmux session-restore drops them); auto-relaunching via launcher..."
-             surface-id)
-    (code-agent-org-cmux-restart)
-    ;; restart is async toward the end — wait until the freshly-launched
-    ;; claude reports ready before the caller proceeds to send a prompt.
-    (code-agent-org-cmux--wait-for-ready surface-id)
-    t)))
-
-(defun code-agent-org-cmux--wait-for-ready (surface-id)
-  "Wait for Claude Code TUI to be ready in SURFACE-ID.
-Uses cmux wait-for signal from SessionStart hook (50ms polling).
-Falls back to capture-pane polling if signal times out."
-  (code-agent-with-span "cmux-wait-for-ready"
-      (list :surface-id surface-id :timeout code-agent-org-cmux-ready-timeout) nil
-  (let ((workspace-session-id
-         (condition-case nil
-             (code-agent-org-terminal-find-session-property "CLAUDE_SESSION_ID")
-           (error nil)))
-        (timeout (number-to-string code-agent-org-cmux-ready-timeout)))
-    (if workspace-session-id
-        ;; Event-driven: wait for signal from SessionStart hook
-        (condition-case nil
-            (progn
-              (code-agent-org-cmux--call "wait-for"
-                (format "claude-ready-%s" workspace-session-id)
-                "--timeout" timeout)
-              t)
-          (error
-           ;; Fallback: poll capture-pane with shorter timeout
-           (code-agent-org-cmux--wait-for-ready-poll surface-id 10)))
-      ;; No session ID — poll only
-      (code-agent-org-cmux--wait-for-ready-poll
-       surface-id code-agent-org-cmux-ready-timeout)))))
-
-(defun code-agent-org-cmux--wait-for-ready-poll (surface-id timeout)
-  "Fallback: poll capture-pane for agent ready state every 0.5s up to TIMEOUT seconds.
-Uses ready-patterns from the active agent profile, falling back to Claude Code patterns."
-  (let* ((profile (code-agent-org-cmux--get-agent-profile))
-         (patterns (if profile
-                       (code-agent-org-cmux--agent-profile-ready-patterns profile)
-                     '("type a message" "-- INSERT --" "-- insert --")))
-         (pattern-re (mapconcat #'regexp-quote patterns "\\|"))
-         (deadline (+ (float-time) timeout))
-         (ready nil))
-    (while (and (not ready) (< (float-time) deadline))
-      (condition-case nil
-          (let ((screen (code-agent-org-cmux--call "capture-pane"
-                          "--surface" surface-id)))
-            (when (string-match-p pattern-re screen)
-              (setq ready t)))
-        (error nil))
-      (unless ready (sleep-for 0.5)))
-    (unless ready
-      (error "Timeout: agent not ready in cmux after %ds" timeout))
-    t))
 #+END_SRC
 
 ** Future: Event-Driven Ready Detection via =cmux wait-for=
@@ -1573,7 +1353,7 @@ No property → ungrouped workspace, exactly as before.
 SAVED-SURFACE is the surface ref; WORKSPACE-SESSION-ID the org session
 identifier; TAB-TITLE the workspace label; WORKSPACE-REF the cmux
 workspace ref (resolved by name in `ensure-session').  Rebuilds hash
-tables, re-applies color, renames the tab, and starts verbose streaming.
+tables, re-applies color, and renames the tab.
 Returns SAVED-SURFACE."
   ;; Restore hash table mappings (lost on Emacs restart or session expiry)
   (when workspace-session-id
@@ -1587,7 +1367,7 @@ Returns SAVED-SURFACE."
         (when ws-uuid
           (puthash workspace-session-id ws-uuid
                    code-agent-org-cmux--workspace-to-cmux-id)))))
-  ;; Store workspace-session-id for verbose tick lookup
+  ;; Backs code-agent-org-cmux-show-status / code-agent-org-ide-start lookups.
   (code-agent-org-session-put (code-agent-org-current-session-key)
                            :workspace-session-id workspace-session-id)
   (when workspace-ref
@@ -1596,8 +1376,7 @@ Returns SAVED-SURFACE."
     (condition-case nil
         (code-agent-org-cmux--call "rename-tab" "--workspace" workspace-ref tab-title)
       (error nil)))
-  ;; Start verbose and ensure IDE server (IDE only for agents that support it)
-  (code-agent-org-cmux--start-verbose saved-surface (code-agent-org-current-session-key))
+  ;; Ensure IDE server (IDE only for agents that support it)
   (when workspace-session-id
     (let ((profile (code-agent-org-cmux--get-agent-profile)))
       (when (or (null profile)
@@ -1757,14 +1536,13 @@ returns the surface ref."
     ;; Persist workspace state (org properties + in-memory hash tables)
     (code-agent-org-cmux--persist-workspace-state
      workspace-session-id workspace-ref surface-id)
-    ;; Apply color and start verbose BEFORE waiting for agent TUI.
-    ;; These are pure cmux sidebar ops that don't need Claude Code running.
-    ;; If we wait first, a slow or stuck agent launch means color/verbose
-    ;; never get applied (wait-for-ready can time out).
+    ;; Apply color BEFORE waiting for agent TUI — a pure cmux sidebar op
+    ;; that doesn't need Claude Code running.  If we wait first, a slow
+    ;; or stuck agent launch means color never gets applied (wait-for-ready
+    ;; can time out).
     (when (string-prefix-p "workspace:" workspace-ref)
       (code-agent-org-cmux--apply-color workspace-ref)
       (code-agent-org-cmux--ensure-group-membership workspace-ref group-name))
-    (code-agent-org-cmux--start-verbose surface-id (code-agent-org-current-session-key))
     (message "Agent starting in cmux (surface: %s) — waiting for TUI..." surface-id)
     ;; Wait for agent TUI to be ready before returning
     (code-agent-org-cmux--wait-for-ready surface-id)
@@ -1869,7 +1647,7 @@ Uses ready/busy patterns from the active agent profile."
 
 * Query Completion
 
-Decides when a Claude turn has ended — composite signal of =Stop= hook fire + shell prompt re-appearing in the verbose capture.
+Decides when a Claude turn has ended — driven entirely by the =Stop= hook firing over MCP; no terminal-output scraping involved.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-cmux--query-completed (workspace-session-id)
@@ -1897,8 +1675,6 @@ so an unhandled error would leave the session permanently :busy t."
           ;; resulting in every-2s sync `cmux pipe-pane` calls with discarded output).
           ;; No color to re-apply — WORKSPACE_COLOR is static per workspace and
           ;; was already applied at session-creation time.
-          ;; Verbose output (separate subsystem) keeps running — user may type
-          ;; more queries directly in cmux without going through execute-ai-block.
           (when session-key
             (code-agent-org-session-put session-key :busy nil)
             (let ((loop-current (or (code-agent-org-session-get session-key :loop-current) 1))
@@ -1951,526 +1727,6 @@ WORKSPACE-SESSION-ID and SURFACE-ID identify the session."
         (max (code-agent-org-session-get session-key :loop-max)))
     (message "Sent loop iteration %d/%d to cmux (%d chars)"
              current max (length prompt)))))
-#+END_SRC
-
-* Execution
-
-The full =C-c C-c= pipeline from AI block to running cmux query is
-eight steps; every step has a matching OTel span so the trace tree
-mirrors the prose:
-
-#+begin_example
-1. C-c C-c → code-agent-org-execute → dispatch to cmux--execute-ai-block
-2. ensure-session: reuse (capture-pane liveness) or create (new-workspace)
-3. build-launch-command: claude-sdd script + optional --resume
-4. wait-for-ready: poll capture-pane for INSERT mode (up to 30 s)
-5. write from-emacs flag + custom-id + register query
-6. send-text: ensure INSERT mode → send/paste-buffer → send-key enter
-7. SDD bridge hooks fire (Python → Emacs MCP):
-   - handle_prompt: save CLI session, insert prompt (Flow B)
-   - handle_permission: notify Emacs, return "ask"
-   - handle_response: extract transcript, insert response
-8. terminal-query-completed: unregister query, handle loops
-#+end_example
-
-Eleven OTel spans cover this flow: =cmux-call=, =cmux-ensure-session=,
-=cmux-execute=, =cmux-query-completed=, =cmux-loop-send=,
-=cmux-wait-for-ready=, =cmux-send-text=, =cmux-cancel=,
-=cmux-permission-needed=, =cmux-permission-resolved=,
-=cmux-recover-session=. See [[file:../trace/code-agent-trace.org][code-agent-trace.org]] for how those
-spans roll up into the per-AI-block root span.
-
-#+BEGIN_SRC elisp
-(defun code-agent-org-cmux--prompt-at-point ()
-  "Return the trimmed prompt string of the AI block at point, or signal user-error."
-  (let* ((element (org-element-at-point))
-         (prompt (when (and (eq (org-element-type element) 'src-block)
-                            (string= (org-element-property :language element) "ai"))
-                   (substring-no-properties
-                    (string-trim (org-element-property :value element))))))
-    (unless prompt
-      (user-error "Point is not inside a #+begin_src ai block"))
-    prompt))
-
-(defun code-agent-org-cmux--session-state-seed (sk surface-id)
-  "Populate per-query session state for SK / SURFACE-ID before dispatch.
-
-Mirrors the field-write block in `code-agent-org-execute' that the
-agent-family backends rely on.  The multiplexer path bypasses
-`code-agent-org-execute', so without this seeding cancel-from-org
-returns \"No active query\", queueing skips, and `:loop 2+' never
-advances past iteration 1."
-  (ignore surface-id)
-  (code-agent-org-session-put sk :loop-org-buffer (current-buffer))
-  (code-agent-org-session-put sk :loop-block-marker (copy-marker (point)))
-  (code-agent-org-session-put sk :backend
-                               (code-agent-cmux-backend-create :session-key sk))
-  ;; Keep `:backend-property' in sync so `code-agent-org--resolve-backend'
-  ;; treats this manual install as a fresh cache entry rather than a
-  ;; property-change miss on the next dispatch.
-  (code-agent-org-session-put sk :backend-property "cmux")
-  (let ((instr-num     (code-agent-org--find-instruction-number))
-        (custom-id     (code-agent-org--find-instruction-custom-id))
-        (section-level (code-agent-org--get-section-level))
-        (query-id      (code-agent-org--generate-query-id))
-        (block-marker  (copy-marker (point))))
-    (code-agent-org-session-put sk :busy t)
-    (code-agent-org-session-put sk :query-id query-id)
-    (code-agent-org-session-put sk :marker block-marker)
-    (code-agent-org-session-put sk :start-time (float-time))
-    (code-agent-org-session-put sk :instruction-num instr-num)
-    (code-agent-org-session-put sk :custom-id custom-id)
-    (code-agent-org-session-put sk :section-level section-level)
-    (code-agent-org-session-put sk :recovery-count 0)))
-
-(defun code-agent-org-cmux--dispatch-prompt (sk workspace-session-id surface-id prompt)
-  "Register the query, flip the from-emacs flag, type PROMPT, start verbose mirror."
-  (ignore sk)
-  (save-excursion
-    (org-back-to-heading t)
-    (when workspace-session-id
-      (code-agent-org-terminal-register-query workspace-session-id surface-id)))
-  (when workspace-session-id
-    (code-agent-org-terminal--write-from-emacs-flag workspace-session-id))
-  (code-agent-org-cmux--send-text surface-id prompt)
-  (code-agent-org-cmux--start-verbose surface-id sk)
-  (message "Sent to cmux (%d chars)" (length prompt)))
-
-(defun code-agent-org-cmux--execute-ai-block ()
-  "Execute the AI block at point via the cmux backend.
-
-Five phases:
-1. Read the prompt and resolve session/surface/status.
-2. Refuse to send when the surface is busy.
-3. Seed session state for cancel/queue/loop/telemetry paths.
-4. Type the prompt, register active query, start verbose mirror —
-   all under one `cmux-execute' span that async cmux-query-completed
-   callbacks attach to via the cached trace context."
-  (let* ((prompt (code-agent-org-cmux--prompt-at-point))
-         (surface-id (code-agent-org-cmux--ensure-session))
-         (workspace-session-id
-          (code-agent-org-terminal-find-session-property "CLAUDE_SESSION_ID"))
-         (status (code-agent-org-cmux--get-status workspace-session-id surface-id))
-         (sk (code-agent-org-current-session-key)))
-    (when (string= status "busy")
-      (user-error "Claude Code busy (status: %s). Cancel first?" status))
-    ;; Durable fix for the 2026-05-26 "prompt vanishes" failure mode.
-    ;; cmux's session-restore strips the launcher's `--settings
-    ;; workspace-hooks.json' extras, so the restored claude has no
-    ;; bridge hooks and every UserPromptSubmit fires silently.  Check
-    ;; the running claude's argv on this surface and auto-relaunch via
-    ;; the launcher when hooks are missing.  No-op when claude is
-    ;; already correctly wired (the common case after a fresh launch).
-    (code-agent-org-cmux--ensure-hooks-wired surface-id)
-    ;; Root trace context: cache BEFORE entering the child span so async
-    ;; callbacks join at the root, not under the cmux-execute span itself.
-    (when sk
-      (code-agent-org-session-put sk :trace-ctx (code-agent-trace-context)))
-    (code-agent-with-span "cmux-execute"
-        (list :session-id workspace-session-id
-              :input prompt
-              :surface-id surface-id) nil
-      (when workspace-session-id
-        (puthash workspace-session-id sk
-                 code-agent-org-terminal--workspace-to-session-key))
-      (code-agent-org-cmux--session-state-seed sk surface-id)
-      (code-agent-org-cmux--dispatch-prompt
-       sk workspace-session-id surface-id prompt))))
-#+END_SRC
-
-* Response Delivery
-
-Response text lands in the org buffer via the =Stop= hook →
-=workspace_bridge.handle_response= → =code-agent-org-workspace-bridge-insert-response=.
-No periodic polling from Emacs is needed.
-
-(Historical note: there used to be a =code-agent-org-cmux--start-streaming= timer
-that fired =cmux pipe-pane= every 2 s to mirror terminal output into the org
-buffer.  Its insertion marker was never initialised, so every tick did a
-200–1500 ms synchronous subprocess call and silently discarded the result —
-a persistent Emacs hang for the full duration of every Claude query.  The
-subsystem was removed in favour of the =Stop=-hook path, which delivers the
-full structured response exactly once.  Live terminal echo is still available
-via the async =Verbose Output= mirror below.)
-
-* Verbose Output (Live Output Mirror)
-
-Stream cmux terminal output into a read-only Emacs buffer accessible via
-=code-agent-org-menu → v → Verbose output=. The user gets Claude Code's
-live thinking — tool calls, file edits, intermediate output — without
-having to alt-tab into the cmux app, and the canonical response still
-arrives through the =Stop= hook into the org buffer. Both surfaces are
-useful: the verbose buffer is for /watching the work happen/; the org
-response is for /referring back to the final answer/.
-
-** Data-Source Choice — Why Async Polling Won the First Round
-
-Three data-source options were considered before settling on the
-current implementation. The shipped path is the middle of the road —
-it works today and the upgrade path is clean.
-
-| Option | Mechanism | Latency | Cost |
-|--------+-----------+---------+------|
-| 1. cmux =pipe-pane --follow= | persistent socket subscription from cmux side | ~0, event-driven | requires a Swift change in cmux (~30 lines + Ghostty content-update callback) |
-| 2. Async =capture-pane= polling (*shipped*) | =start-process= every ~1 s, diff against previous | ~1 s sampling | needs no cmux changes; capture cost grows with scrollback |
-| 3. FIFO + =file-notify= | =pipe-pane= writing to a log file, FSEvents on Emacs side | ~100 ms | =pipe-pane= is one-shot (needs re-invocation); log file grows unbounded |
-
-Option 2 ships because it works against the current cmux release; the
-Emacs-side buffer infrastructure is data-source-agnostic, so the
-=verbose-tick= process filter could be swapped for a
-=make-network-process= socket whenever cmux gains =pipe-pane --follow=
-without touching the buffer / mode / menu surfaces.
-
-** Two Predecessor Bugs Worth Remembering
-
-The current shape is partly defined by what came before it failing.
-
-*The =call-process= leak (commit =1f016b8=, fixed in =01b4143=).* The
-first attempt used =call-process= inside a 1 Hz timer to poll
-=capture-pane=. Two compounding bugs: (a) =call-process= is
-synchronous, so every tick blocked Emacs's main thread for 200–1500 ms;
-(b) the insertion marker was declared but never initialised, so the
-guard around the insertion was always nil and the captured text was
-silently discarded. The result: a permanent Emacs hang for every
-Claude query, doing work no user could observe. The fix replaced
-=call-process= with =start-process= + filter + sentinel; the rule
-=.claude/rules/minimize-emacs-mcp-calls.md= now forbids periodic
-timers that =call-process=.
-
-*The unbounded buffer leak (2026-04-22).* Once the follower /did/
-deliver text, it appended forever. A box left overnight accumulated
-several megabytes per chatty session — nine live =*cmux: <id>*=
-buffers held ~8 MB combined in one inspection, visibly swelling Emacs
-RSS. The fix is in the Verbose Buffer Memory Cap subsection further
-down: a configurable byte ceiling with whole-line trim from the front,
-plus a =kill-buffer-hook= that stops the follower subprocess when the
-user dismisses the buffer.
-
-** Verbose Mode
-
-A dedicated major mode for verbose output buffers with a transient menu
-to send commands to Claude Code via cmux.
-
-#+BEGIN_SRC elisp
-(defvar code-agent-org-cmux-verbose-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd ",") #'code-agent-org-cmux-verbose-menu)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "G") #'code-agent-org-cmux-verbose-follow)
-    map)
-  "Keymap for `code-agent-org-cmux-verbose-mode'.")
-
-(define-derived-mode code-agent-org-cmux-verbose-mode special-mode "cmux-verbose"
-  "Major mode for cmux verbose output buffers.
-Shows live terminal output from Claude Code.
-
-Press `,` to open the command menu for sending keys to Claude Code.
-Press `G` to jump to bottom and follow output.
-Press `q` to quit."
-  (setq-local truncate-lines t)
-  (setq-local buffer-read-only t))
-
-(defvar-local code-agent-org-cmux--verbose-surface-id nil
-  "Surface ID for sending commands from this verbose buffer.")
-
-(defvar code-agent-org-cmux--ctrl-char-map
-  '(("ctrl+a" . "\x01") ("ctrl+b" . "\x02") ("ctrl+c" . "\x03")
-    ("ctrl+d" . "\x04") ("ctrl+e" . "\x05") ("ctrl+f" . "\x06")
-    ("ctrl+g" . "\x07") ("ctrl+h" . "\x08") ("ctrl+i" . "\x09")
-    ("ctrl+j" . "\x0a") ("ctrl+k" . "\x0b") ("ctrl+l" . "\x0c")
-    ("ctrl+n" . "\x0e") ("ctrl+o" . "\x0f") ("ctrl+p" . "\x10")
-    ("ctrl+q" . "\x11") ("ctrl+r" . "\x12") ("ctrl+s" . "\x13")
-    ("ctrl+t" . "\x14") ("ctrl+u" . "\x15") ("ctrl+v" . "\x16")
-    ("ctrl+w" . "\x17") ("ctrl+x" . "\x18") ("ctrl+y" . "\x19")
-    ("ctrl+z" . "\x1a"))
-  "Map ctrl+KEY names to raw ASCII control characters.")
-
-(defun code-agent-org-cmux--verbose-send-key (key &optional label)
-  "Send KEY to the cmux surface associated with this verbose buffer.
-For ctrl+X keys, sends the raw control character via `send` (not `send-key`)
-because some TUI frameworks need the raw byte, not a key event."
-  (when code-agent-org-cmux--verbose-surface-id
-    (condition-case nil
-        (let ((ctrl-char (cdr (assoc (downcase key) code-agent-org-cmux--ctrl-char-map))))
-          (if ctrl-char
-              ;; Send raw control character via send (more reliable for TUI apps)
-              (code-agent-org-cmux--call "send" "--surface"
-                                     code-agent-org-cmux--verbose-surface-id ctrl-char)
-            ;; Named keys (enter, escape, tab, etc.) via send-key
-            (code-agent-org-cmux--call "send-key" "--surface"
-                                   code-agent-org-cmux--verbose-surface-id key))
-          (message "Sent: %s" (or label key)))
-      (error (message "Failed to send key to cmux")))))
-
-(defun code-agent-org-cmux--verbose-send-text (text &optional label)
-  "Send TEXT to the cmux surface associated with this verbose buffer."
-  (when code-agent-org-cmux--verbose-surface-id
-    (condition-case nil
-        (progn
-          (code-agent-org-cmux--call "send" "--surface"
-                                 code-agent-org-cmux--verbose-surface-id text)
-          (message "Sent: %s" (or label text)))
-      (error (message "Failed to send text to cmux")))))
-
-(defun code-agent-org-cmux-verbose-follow ()
-  "Jump to the end of the verbose buffer to follow output."
-  (interactive)
-  (goto-char (point-max))
-  (message "Following output"))
-
-;; Transient menu for sending commands to Claude Code
-(transient-define-prefix code-agent-org-cmux-verbose-menu ()
-  "Send commands to Claude Code via cmux."
-  ["Claude Code Commands"
-   ["Control"
-    ("b" "Background (Ctrl+B)" (lambda () (interactive) (code-agent-org-cmux--verbose-send-key "ctrl+b" "Ctrl+B")))
-    ("c" "Cancel (Escape)" (lambda () (interactive) (code-agent-org-cmux--verbose-send-key "escape" "Cancel")))
-    ("s" "Interrupt (Ctrl+C)" (lambda () (interactive) (code-agent-org-cmux--verbose-send-key "ctrl+c" "Ctrl+C")))
-    ("r" "Retry (Enter)" (lambda () (interactive) (code-agent-org-cmux--verbose-send-key "enter" "Enter")))]
-   ["Response"
-    ("y" "Yes / Accept" (lambda () (interactive) (code-agent-org-cmux--verbose-send-text "y" "Yes")))
-    ("n" "No / Reject" (lambda () (interactive) (code-agent-org-cmux--verbose-send-text "n" "No")))
-    ("a" "Accept all" (lambda () (interactive) (code-agent-org-cmux--verbose-send-text "a" "Accept all")))]
-   ["View"
-    ("t" "Toggle details (Ctrl+O)" (lambda () (interactive) (code-agent-org-cmux--verbose-send-key "ctrl+o" "Toggle details")))
-    ("e" "Open in editor (Ctrl+E)" (lambda () (interactive) (code-agent-org-cmux--verbose-send-key "ctrl+e" "Editor")))
-    ("h" "Help (?)" (lambda () (interactive) (code-agent-org-cmux--verbose-send-text "?" "Help")))
-    ("G" "Follow output" code-agent-org-cmux-verbose-follow)]])
-
-;; Evil: use comma as leader to open the transient menu
-(with-eval-after-load 'evil
-  (evil-define-key 'normal code-agent-org-cmux-verbose-mode-map
-    "," #'code-agent-org-cmux-verbose-menu
-    "q" #'quit-window
-    "G" #'code-agent-org-cmux-verbose-follow))
-#+END_SRC
-
-** Buffer and Streaming
-
-Verbose buffer lifecycle + token streaming primitives shared by the cmux follower and the in-band response handler.
-
-#+BEGIN_SRC elisp
-(defvar-local code-agent-org-cmux--verbose-prev-text ""
-  "Previous capture-pane output for diff-based deduplication.")
-
-(defun code-agent-org-cmux--create-verbose-buffer (session-key surface-id)
-  "Create a verbose output buffer for cmux terminal SESSION-KEY.
-Registers it so `code-agent-org-show-verbose' can find it.  Derives the
-workspace identity from SESSION-KEY itself (format `<file>::<session-id>')
-so the buffer name stays stable even if `:workspace-session-id' session
-state has been wiped by a module reload — never falls back to the ambient
-current-buffer's `CLAUDE_SESSION_ID', which would collide with unrelated
-buffers."
-  (let* ((workspace-id (or (code-agent-org-session-get session-key :workspace-session-id)
-                           (when (and session-key
-                                      (string-match "::\\([^:]+\\)\\'" session-key))
-                             (match-string 1 session-key))
-                           "cmux"))
-         (buf-name (format "*cmux: %s*" workspace-id))
-         (buf (get-buffer-create buf-name)))
-    (with-current-buffer buf
-      (unless (eq major-mode 'code-agent-org-cmux-verbose-mode)
-        (code-agent-org-cmux-verbose-mode)
-        (setq-local code-agent-org-cmux--verbose-prev-text "")
-        (setq-local code-agent-org-cmux--verbose-surface-id surface-id)
-        ;; Sticky header with workspace name and keybindings
-        (setq-local header-line-format
-          (list "  "
-                (propertize workspace-id 'face 'bold)
-                "  "
-                (propertize "[,]menu [G]follow [q]quit" 'face 'shadow))))
-      ;; Drop the global registry entry when the buffer dies so
-      ;; `code-agent-org-show-verbose' and `--create-verbose-buffer' see the
-      ;; buffer as gone.  The follow-process is stopped from
-      ;; `--start-verbose' (see `--install-verbose-kill-hook') — it knows
-      ;; the process and doesn't need buffer-local session state which is
-      ;; unreachable here (we're running inside the dying `vbuf', not the
-      ;; file buffer that owns `code-agent-org--sessions').
-      (lexical-let ((sk session-key))
-        (add-hook 'kill-buffer-hook
-                  (lambda ()
-                    (remhash sk code-agent--session-verbose-buffers))
-                  nil t)))
-    ;; Register so code-agent-org-show-verbose finds it
-    (puthash session-key buf code-agent--session-verbose-buffers)
-    buf))
-
-(defun code-agent-org-cmux--verbose-workspace-uuid (session-key)
-  "Return the cmux workspace UUID for SESSION-KEY from the in-memory cache.
-Checks `:workspace-session-id' session slot first, then parses the
-session-id out of SESSION-KEY (format `<file>::<session-id>'); both feed
-into `workspace-to-cmux-id', which is populated by `restore-workspace'
-/ `launch-workspace' / `recover-session' when the workspace is resolved
-by heading name.  Returns nil on cache miss — callers must skip the
-tick; a subsequent `ensure-session' will repopulate the cache."
-  (let ((ws-sid (or (code-agent-org-session-get session-key :workspace-session-id)
-                    (when (and session-key
-                               (string-match "::\\([^:]+\\)\\'" session-key))
-                      (match-string 1 session-key)))))
-    (when ws-sid
-      (gethash ws-sid code-agent-org-cmux--workspace-to-cmux-id))))
-#+END_SRC
-
-** Verbose Buffer Memory Cap
-
-The =--follow= filter appends chunks forever, so without a ceiling
-the =*cmux: <id>*= buffer grows unboundedly for as long as the
-session produces terminal output.  A box left running overnight
-accumulated *several megabytes per chatty session* under the
-original 1f016b8 implementation — 9 live buffers held ~8 MB of
-raw text in one inspection, visibly swelling Emacs RSS over time.
-
-Cap the buffer with a configurable ceiling and trim whole lines
-from the start when it's exceeded.  Whole-line trimming keeps the
-display readable (no half-truncated line at =point-min=).  The
-default 256 KB ≈ hundreds of scrolled screens — plenty for
-debugging, cheap to hold.
-
-The ANSI strip + ceiling defcustom both live in
-[[file:../backend/code-agent-multiplexer.org][code-agent-multiplexer.org]] (shared with tmux); this filter
-reads from there directly — no cmux-private copies.
-
-#+BEGIN_SRC elisp
-(defun code-agent-org-cmux--verbose-follow-filter (proc chunk)
-  "Append CHUNK (scrubbed) from `cmux capture-pane --follow' to the verbose buffer.
-
-Trims whole lines from the start when the buffer exceeds
-`code-agent-multiplexer-verbose-buffer-max-size' so long-running
-sessions don't accumulate unbounded memory.
-
-Auto-scrolls only windows that were already at `point-max' — a user
-reading an earlier page keeps their scroll position as new content
-lands after the visible window."
-  (let ((vbuf (process-get proc 'verbose-buffer)))
-    (when (buffer-live-p vbuf)
-      (let ((scrubbed (code-agent-multiplexer--strip-ansi chunk)))
-        (when (> (length scrubbed) 0)
-          (with-current-buffer vbuf
-            (let ((win-states nil))
-              (dolist (win (get-buffer-window-list vbuf nil t))
-                (push (cons win (= (window-point win) (point-max))) win-states))
-              (let ((inhibit-read-only t))
-                (save-excursion
-                  (goto-char (point-max))
-                  (insert scrubbed))
-                ;; Trim whole lines from the start when over cap.
-                (when (and code-agent-multiplexer-verbose-buffer-max-size
-                           (> (buffer-size)
-                              code-agent-multiplexer-verbose-buffer-max-size))
-                  (save-excursion
-                    (goto-char (- (point-max)
-                                  code-agent-multiplexer-verbose-buffer-max-size))
-                    (forward-line 1)
-                    (delete-region (point-min) (point)))))
-              (dolist (state win-states)
-                (let ((win (car state)) (was-at-end (cdr state)))
-                  (when (and (window-live-p win) was-at-end)
-                    (set-window-point win (point-max))))))))))))
-
-(defun code-agent-org-cmux--verbose-follow-sentinel (proc event)
-  "Handle `cmux capture-pane --follow' lifecycle events.
-
-On exit we drop the process reference from the session so a later
-`--start-verbose' call can restart it (either manually, or when a
-workspace is relaunched).  We deliberately DO NOT auto-restart
-here — if cmux is genuinely gone there's no workspace to follow,
-and silent reconnect loops would mask real failures."
-  (let ((sk (process-get proc 'session-key))
-        (vbuf (process-get proc 'verbose-buffer)))
-    (when (string-match-p "\\(finished\\|exited\\|killed\\|broken\\)" event)
-      (when (and sk (eq proc (code-agent-org-session-get sk :verbose-follow-process)))
-        (code-agent-org-session-put sk :verbose-follow-process nil))
-      (when (buffer-live-p vbuf)
-        (with-current-buffer vbuf
-          (let ((inhibit-read-only t))
-            (save-excursion
-              (goto-char (point-max))
-              (insert (format "\n;; cmux stream ended: %s\n"
-                              (string-trim event))))))))))
-
-(defun code-agent-org-cmux--start-verbose (surface-id session-key)
-  "Start the long-running `cmux capture-pane --follow' stream for SESSION-KEY.
-
-Replaces the earlier polling timer (one `capture-pane' fork per
-second per session).  A single subprocess per session reads the
-terminal as it changes and its filter appends into
-`*cmux: <session>*'.  The subprocess is idle-cheap — it blocks on
-read between terminal writes, so zero CPU when nothing is
-happening.  Restarts automatically when the surface id changes
-(workspace relaunched with a new terminal pane)."
-  (let ((existing (code-agent-org-session-get session-key :verbose-follow-process))
-        (old-surface (code-agent-org-session-get session-key :verbose-surface-id)))
-    ;; Restart if the surface id moved (new workspace pane replaces old).
-    (when (and existing (or (not old-surface)
-                            (not (equal old-surface surface-id))))
-      (code-agent-org-cmux--stop-verbose session-key)
-      (setq existing nil))
-    (when (and existing (not (process-live-p existing)))
-      (code-agent-org-cmux--stop-verbose session-key)
-      (setq existing nil))
-    (unless existing
-      (code-agent-org-session-put session-key :verbose-surface-id surface-id)
-      (let* ((ws-uuid (code-agent-org-cmux--verbose-workspace-uuid session-key))
-             (vbuf (code-agent-org-cmux--create-verbose-buffer session-key surface-id))
-             (sock (or code-agent-org-cmux-socket-path
-                       (condition-case nil
-                           (code-agent-org-terminal-find-session-property "CMUX_SOCKET_PATH")
-                         (error nil)))))
-        ;; No workspace resolution yet → nothing to follow.  Leave the
-        ;; buffer in place; a later call (after `ensure-session'
-        ;; populates the workspace map) will spawn the stream.
-        (when (and ws-uuid surface-id (buffer-live-p vbuf))
-          (let* ((cli (or code-agent-org-cmux-cli-path "cmux"))
-                 (args (append (when sock (list "--socket" sock))
-                               (list "capture-pane"
-                                     "--workspace" ws-uuid
-                                     "--surface" surface-id
-                                     "--follow"
-                                     "--interval" "0.5")))
-                 (proc (apply #'start-process
-                              (format "cmux-follow-%s" session-key)
-                              nil cli args)))
-            (process-put proc 'verbose-buffer vbuf)
-            (process-put proc 'session-key session-key)
-            (set-process-filter proc #'code-agent-org-cmux--verbose-follow-filter)
-            (set-process-sentinel proc #'code-agent-org-cmux--verbose-follow-sentinel)
-            (code-agent-org-session-put session-key :verbose-follow-process proc)
-            ;; Stop the follower when the user dismisses *cmux: <id>*.
-            ;; Installed here (not in --create-verbose-buffer) so the closure
-            ;; can capture the process directly.  `code-agent-org--sessions' is
-            ;; buffer-local in the FILE buffer, not reachable from inside the
-            ;; dying vbuf's kill-buffer-hook — so we also capture the owner
-            ;; buffer and clear the session slot there, otherwise the session
-            ;; would still claim a process we just deleted.  `lexical-let' is
-            ;; required because literate-elisp ignores `lexical-binding'.
-            (lexical-let ((captured-proc proc)
-                          (owner-buf (current-buffer))
-                          (sk session-key))
-              (with-current-buffer vbuf
-                (add-hook 'kill-buffer-hook
-                          (lambda ()
-                            (when (process-live-p captured-proc)
-                              (delete-process captured-proc))
-                            (when (buffer-live-p owner-buf)
-                              (with-current-buffer owner-buf
-                                (code-agent-org-session-put
-                                 sk :verbose-follow-process nil))))
-                          nil t)))))))))
-
-(defun code-agent-org-cmux--stop-verbose (session-key)
-  "Kill the verbose stream subprocess for SESSION-KEY, if any.
-
-Also clears the legacy `:verbose-timer' slot — older sessions still
-carrying a run-at-time timer (before the follow-stream refactor)
-get cleaned up the first time this is called."
-  (let ((proc (code-agent-org-session-get session-key :verbose-follow-process))
-        (timer (code-agent-org-session-get session-key :verbose-timer)))
-    (when (and proc (process-live-p proc))
-      (delete-process proc))
-    (code-agent-org-session-put session-key :verbose-follow-process nil)
-    (when timer
-      (cancel-timer timer)
-      (code-agent-org-session-put session-key :verbose-timer nil))))
 #+END_SRC
 
 * IDE Server
@@ -2854,10 +2110,6 @@ foreground (vim, less, …) this may be a no-op."
             (error nil))
           ;; 4. Re-apply color
           (code-agent-org-cmux--apply-color ws-ref)))
-      (let ((sk (code-agent-org-current-session-key)))
-        (code-agent-org-cmux--stop-verbose sk)
-        (code-agent-org-session-put sk :verbose-surface-id nil)
-        (code-agent-org-cmux--start-verbose surface-id sk))
       ;; 5. Ensure IDE server and send /ide after ready
       (code-agent-org-cmux--post-restart-ide-setup surface-id workspace-session-id ws-ref)
       (message "Claude Code restarting in surface %s" surface-id))))

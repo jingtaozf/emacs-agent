@@ -14,7 +14,7 @@ by session-key and the backend constructor registry.
 | Concern | Public surface |
 |---------+----------------|
 | Persistent client class | =code-agent-org-persistent-entry= / =-registry= structs + the 9 registry verbs (get-entry, get, alive-p, register, update-activity, disconnect, disconnect-buffer, list, count) |
-| Backend registry | =code-agent-org-backend-registry= alist + =code-agent-org--make-default-backend= + the ACP session-id persistence wiring |
+| Backend registry | =code-agent-org-backend-registry= alist + =code-agent-org--make-default-backend= |
 | Lifecycle hooks | =--on-buffer-kill= / =--on-todo-state-change= (attached to kill-buffer-hook and org-after-todo-state-change-hook in the main module) |
 
 ** Why one module
@@ -33,7 +33,7 @@ from:
 | =--session-get/put= | =session= |
 | =--current-session-key= | =session-context= |
 | =--get-org-property= | =env-permission= |
-| Backend constructors (=code-agent-claude-code-backend-create=, =code-agent-cmux-backend-create=, ACP creates) | their own modules (already required at file top of main) |
+| Backend constructors (=code-agent-claude-code-backend-create=, =code-agent-cmux-backend-create=, =code-agent-tmux-backend-create=) | their own modules (already required at file top of main) |
 
 The main module reaches *back* into this one for
 =code-agent-org--session-display-name=.
@@ -225,70 +225,14 @@ Enumerates response sections in a buffer — used when the Stop hook needs to fi
 *** Backend Registry Dispatch
 
 The backend registry maps CLAUDE_BACKEND property strings to
-constructor lambdas.  It's wired to the persistent registry only
-indirectly — ACP constructors use =code-agent-org--acp-session-persistence=
-to set up session-id auto-save on the returned backend.
+constructor lambdas.  (Pi is not one of these entries — it runs as a
+cmux agent profile via =:AGENT_TYPE: pi=, not a distinct
+=CLAUDE_BACKEND=; see =code-agent-org-cmux.org=.  The RPC-mode
+=:CLAUDE_BACKEND: pi= entry that used to live here, and the
+=code-agent-org--pi-session-persistence= helper that backed its
+session-id auto-save, were removed along with =code-agent-pi-backend.org=.)
 
 #+BEGIN_SRC elisp
-(defun code-agent-org--acp-session-persistence ()
-  "Read the stored ACP_SESSION_ID and return a (INITIAL-ID . SAVE-FN) pair.
-SAVE-FN writes the new session id back to the org entry at point.
-Captures the current marker so the save is bound to the block's heading
-even if point moves later.  `lexical-let' is required because literate-elisp
-does not honour the file header's lexical-binding directive — without it,
-`marker' would be looked up dynamically at callback time and trigger a
-void-variable error."
-  (let ((initial (code-agent-org-get-org-property "ACP_SESSION_ID" t)))
-    (lexical-let ((marker (point-marker)))
-      (cons initial
-            (lambda (session-id)
-              (when (and session-id (marker-buffer marker))
-                (condition-case err
-                    (with-current-buffer (marker-buffer marker)
-                      (save-excursion
-                        (goto-char marker)
-                        (org-entry-put nil "ACP_SESSION_ID" session-id)
-                        (save-buffer)))
-                  (error
-                   (message "code-agent-org: failed to persist ACP_SESSION_ID: %s"
-                            (error-message-string err))))))))))
-
-(defun code-agent-org--pi-session-persistence ()
-  "Read `:PI_SESSION_ID:` (inheritance-aware) and return (INITIAL-ID . SAVE-FN).
-
-SAVE-FN writes the new id back to the *session-scope* heading (the
-workspace heading, not the Instruction child) so sibling AI blocks
-inherit the same Pi session.  ACP's analogue writes to the current
-Instruction heading; that breaks inheritance across siblings.  For
-Pi we want the id to be a workspace-level fact.
-
-Captures the session-scope heading as a marker NOW (registry
-construction time) so save-fn isn't sensitive to where point is
-when Pi's handshake response lands."
-  (let* ((initial (code-agent-org-get-org-property "PI_SESSION_ID" t))
-         (scope-pos (or (code-agent-org--find-session-scope-heading)
-                        (save-excursion
-                          (when (ignore-errors (org-back-to-heading t))
-                            (point))))))
-    (lexical-let ((marker (and scope-pos (copy-marker scope-pos)))
-                  (buf (current-buffer)))
-      (cons initial
-            (lambda (session-id)
-              (when (and session-id marker (marker-buffer marker))
-                (condition-case err
-                    (with-current-buffer (marker-buffer marker)
-                      (save-excursion
-                        (goto-char marker)
-                        (org-entry-put nil "PI_SESSION_ID" session-id))
-                      ;; DELIBERATELY skip `save-buffer' here — the buffer
-                      ;; is mid-query (response section markers are live;
-                      ;; org-mode property writes interleave with token
-                      ;; insertion).  Persistence-to-disk piggy-backs on
-                      ;; the normal auto-save or the next user save.
-                      (set-buffer-modified-p (buffer-modified-p)))
-                  (error
-                   (message "code-agent-org: failed to persist PI_SESSION_ID: %s"
-                            (error-message-string err))))))))))
 
 ;; NOTE on reload semantics: `defvar' is idempotent — once
 ;; `code-agent-org-backend-registry' has a value, re-evaluating the
@@ -312,45 +256,12 @@ factory lambda actually take effect."
                           (code-agent-claude-code-backend--create
                            :session-key session-key
                            :persistent-p code-agent-org-persistent-sessions)))
-    ("opencode-acp"  . ,(lambda (session-key options)
-                          (let ((persist (code-agent-org--acp-session-persistence)))
-                            (code-agent-acp-opencode-create
-                             :session-key session-key
-                             :cwd (plist-get options :cwd)
-                             :initial-session-id (car persist)
-                             :save-session-id-fn (cdr persist)))))
-    ("gemini-acp"    . ,(lambda (session-key options)
-                          (let ((persist (code-agent-org--acp-session-persistence)))
-                            (code-agent-acp-gemini-create
-                             :session-key session-key
-                             :cwd (plist-get options :cwd)
-                             :initial-session-id (car persist)
-                             :save-session-id-fn (cdr persist)))))
-    ("codex-acp"     . ,(lambda (session-key options)
-                          (let ((persist (code-agent-org--acp-session-persistence)))
-                            (code-agent-acp-codex-create
-                             :session-key session-key
-                             :cwd (plist-get options :cwd)
-                             :initial-session-id (car persist)
-                             :save-session-id-fn (cdr persist)))))
     ("cmux"          . ,(lambda (session-key _options)
                           (code-agent-cmux-backend-create
                            :session-key session-key)))
     ("tmux"          . ,(lambda (session-key _options)
                           (code-agent-tmux-backend-create
-                           :session-key session-key)))
-    ("pi"            . ,(lambda (session-key options)
-                          ;; Default-loaded by code-agent.el.  Reads
-                          ;; provider/model from ~/.pi/agent/settings.json
-                          ;; and persists the Pi-side session id to
-                          ;; :PI_SESSION_ID: so respawn after subprocess
-                          ;; death continues the same conversation.
-                          (let ((persist (code-agent-org--pi-session-persistence)))
-                            (code-agent-pi-backend-create
-                             :session-key session-key
-                             :cwd (plist-get options :cwd)
-                             :session-id (car persist)
-                             :save-session-id-fn (cdr persist)))))))
+                           :session-key session-key)))))
 
 (defvar code-agent-org-backend-registry
   (code-agent-org--default-backend-registry)
@@ -360,11 +271,9 @@ entries here.  Re-evaluating this defvar via reload does NOT replace
 existing values (defvar semantics); a follow-up `setq' below forces
 the refresh so iterative dev on a factory lambda just works.
 
-ACP entries auto-wire the ACP_SESSION_ID org property for persistence;
-the pi entry does the same with PI_SESSION_ID.  The cmux entry is a
-facade — the legacy string-match branch in `code-agent-org-execute'
-still handles the hot path; the backend exists for symmetry and for
-future Phase 3b cut-over.")
+The cmux entry is a facade over the legacy `code-agent-org-cmux--*'
+functions in code-agent-org-cmux.org; the backend exists for
+symmetry and for a future Phase 3b cut-over.")
 
 ;; Force-refresh on every literate-elisp reload (see defun docstring).
 (setq code-agent-org-backend-registry

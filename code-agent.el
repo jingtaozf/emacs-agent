@@ -25,7 +25,6 @@
 ;;
 ;; Quick Start:
 ;;   (require 'code-agent)
-;;   M-x code-agent-chat    ; Interactive chat
 ;;   M-x code-agent-org-mode      ; Enable in org files
 ;;
 ;; For org-mode integration, add to your org file:
@@ -88,33 +87,16 @@ ad-hoc files added later), then every immediate subdir of ``lp/``."
 ;; backend instance instead of string-matching CLAUDE_BACKEND.
 (code-agent--load-module "code-agent-cmux-backend")
 (code-agent--load-module "code-agent-tmux-backend")
-;; Pi backend (pi.dev RPC) — auto-loaded so `:CLAUDE_BACKEND: pi'
-;; dispatches without the user having to add an extra `literate-elisp-load'
-;; line to their init.  Loading the module does not spawn anything; the
-;; subprocess is created lazily on first query.  Pi itself (the `pi'
-;; binary + provider/auth config in ~/.pi/agent/) is still required at
-;; runtime; absent that, dispatch fails with a clear error from the
-;; factory rather than `void-function'.
-(code-agent--load-module "code-agent-pi-backend")
-;; Pi-side UI controls (transient submenu C-c C-/ p, extension UI
-;; request handlers).  Auto-loaded so the menu binding works
-;; immediately after a fresh package install.  Independent of whether
-;; the `pi' binary is actually on PATH — the module's commands raise
-;; clear `user-error's at call time when Pi isn't reachable.
-(code-agent--load-module "code-agent-pi-ui")
-;; ACP backends (OpenCode / Gemini / Codex) remain OPT-IN — users load
-;; them explicitly in their init file if they use those agents.
-;; The `code-agent-org-backend-registry' entries reference those
-;; factories by name, so invoking them without loading will raise
-;; `void-function'.  This matches ARCHITECTURE.org's OPTIONAL tag.
+;; Pi runs as a cmux agent profile (:AGENT_TYPE: pi in
+;; code-agent-org-cmux.org), not a separate Elisp backend module — the
+;; RPC-mode :CLAUDE_BACKEND: pi route (code-agent-pi-backend.org,
+;; code-agent-pi-ui.org) was removed.  Pi's global emacs-mcp TS
+;; extension (code-agent-pi-extensions.org) still applies; it has no
+;; Elisp side to load here.
 (code-agent--load-module "code-agent")
-;; Utility / UI helpers extracted from `code-agent.org' for clarity —
-;; load right after the core SDK so any caller (code-agent-org-mode or
-;; a user-written hook) can `require' or call them without further setup.
-(code-agent--load-module "code-agent-chat")
-(code-agent--load-module "code-agent-translate")
-(code-agent--load-module "code-agent-title")
-(code-agent--load-module "code-agent-refine")
+;; code-agent-chat / -translate / -refine / -title (embedded-chat
+;; surfaces) were removed: the pivot direction is agents living in
+;; cmux/tmux terminals, not an embedded-chat frontend.
 (code-agent--load-module "code-agent-org-session")
 (code-agent--load-module "code-agent-org")
 (code-agent--load-module "code-agent-org-header-line")

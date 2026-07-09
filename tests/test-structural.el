@@ -420,15 +420,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-client-send-message"
     "code-agent-client-interrupt"
     "code-agent-get-session-id"
-    ;; code-agent: chat mode (comint-based)
-    "code-agent-chat"
-    "code-agent-chat-mode"
-    "code-agent-chat-send"
-    "code-agent-chat-interrupt"
-    "code-agent-chat-quit"
-    "code-agent-chat-clear"
-    "code-agent-chat-new-session"
-    "code-agent-chat-font-lock-keywords"
     ;; code-agent: session & state management
     "code-agent-make-session-key"
     "code-agent-get-effective-permissions"
@@ -460,67 +451,14 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-list-session-verbose-buffers"
     ;; code-agent: elapsed time helper
     "code-agent-format-elapsed-time"
-    ;; code-agent: title generation
-    "code-agent-generate-title"
-    "code-agent-generate-title-from-text"
-    ;; code-agent: refine & translate
-    "code-agent-refine-prompt"
-    "code-agent-translate"
-    "code-agent-translate-buffer"
-    "code-agent-translate-cancel"
-    "code-agent-translate-dwim"
-    "code-agent-translate-region"
-    "code-agent-translate-to-chinese"
-    "code-agent-translate-to-english"
     ;; code-agent: query management buffer
     "code-agent-queries-cancel-at-point"
     "code-agent-queries-goto-source"
     "code-agent-queries-show-verbose"
-    ;; code-agent-jsonrpc (transport public API)
-    "code-agent-jsonrpc-make-client"
-    "code-agent-jsonrpc-send-request"
-    "code-agent-jsonrpc-send-response"
-    "code-agent-jsonrpc-send-notification"
-    "code-agent-jsonrpc-add-notification-handler"
-    "code-agent-jsonrpc-add-request-handler"
-    "code-agent-jsonrpc-shutdown"
-    ;; code-agent-acp (per-agent constructors)
-    "code-agent-acp-opencode-create"
-    "code-agent-acp-gemini-create"
-    "code-agent-acp-codex-create"
     ;; code-agent-cmux-backend (Phase 3 multiplexer factory)
     "code-agent-cmux-backend-create"
     ;; code-agent-tmux-backend (Phase 4 multiplexer factory)
     "code-agent-tmux-backend-create"
-    ;; code-agent-pi-backend (pi.dev RPC factory)
-    "code-agent-pi-backend-create"
-    ;; code-agent-pi-ui (Phase 1 control panel — all interactive commands)
-    "code-agent-pi-ui-menu"
-    "code-agent-pi-ui-new-session"
-    "code-agent-pi-ui-set-session-name"
-    "code-agent-pi-ui-cycle-model"
-    "code-agent-pi-ui-pick-model"
-    "code-agent-pi-ui-cycle-thinking"
-    "code-agent-pi-ui-set-thinking"
-    "code-agent-pi-ui-steer"
-    "code-agent-pi-ui-follow-up"
-    "code-agent-pi-ui-abort"
-    "code-agent-pi-ui-compact"
-    "code-agent-pi-ui-stats"
-    "code-agent-pi-ui-export-html"
-    "code-agent-pi-ui-login"
-    "code-agent-pi-ui-resume-session"
-    "code-agent-pi-ui-session-tree"
-    ;; Phase 3 session-tree interactive commands (bound under the
-    ;; *Pi Sessions: <cwd>* buffer's keymap; user-invocable)
-    "code-agent-pi-ui-session-tree-resume-at-point"
-    "code-agent-pi-ui-session-tree-fork-at-point"
-    "code-agent-pi-ui-session-tree-refresh"
-    ;; Phase 4 widget store interactive commands
-    "code-agent-pi-ui-show-widgets"
-    "code-agent-pi-ui-clear-all-widgets"
-    ;; Phase 4 custom message renderer registration (extension API)
-    "code-agent-pi-register-renderer"
     ;; code-agent-backend public API
     "code-agent-backend-register"
     "code-agent-backend-get"
@@ -531,7 +469,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-backend-cancel"
     "code-agent-backend-filter-callbacks"
     ;; code-agent-org: core execution
-    "code-agent-org-execute"
     "code-agent-org-cancel"
     "code-agent-org-cancel-all"
     "code-agent-org-cancel-queue"
@@ -561,7 +498,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-list-persistent-clients"
     "code-agent-org-list-sessions"
     "code-agent-org-show-session-info"
-    "code-agent-org-show-verbose"
     ;; code-agent-org: persistent-client registry (class-based singleton)
     "code-agent-org-persistent-registry-get-entry"
     "code-agent-org-persistent-registry-get"
@@ -603,9 +539,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-cmux-restart"
     "code-agent-org-cmux-clear-status"
     "code-agent-org-cmux-notify"
-    "code-agent-org-cmux-verbose-mode"
-    "code-agent-org-cmux-verbose-menu"
-    "code-agent-org-cmux-verbose-follow"
     "code-agent-org-cmux-open-tab"
     "code-agent-org-cmux-set-progress"
     "code-agent-org-cmux-set-status"
@@ -1212,11 +1145,16 @@ FIX: Extract phase-specific logic into helper functions."
 (ert-deftest test-structural-no-dead-cmux-streaming-timer ()
   "Ensure the dead pipe-pane streaming subsystem stays removed.
 The stream-tick timer was synchronous, hung Emacs every 2 s, and its
-insertion marker was never wired up.  Response text arrives via the
-Stop hook (handle_response → insert-response), not polling.
+insertion marker was never wired up.  (Response text used to arrive
+via the Stop hook — handle_response → insert-response — but that
+bridge path was later removed too, commit 7980a53; this test only
+guards against reintroducing the dead polling timer.)
 FIX: Do not reintroduce `code-agent-org-cmux--start-streaming',
 `code-agent-org-cmux--stop-streaming', or `code-agent-org-cmux--stream-tick'.
-If you need live terminal echo, use the async verbose mirror."
+If you need live terminal echo, open the cmux tab directly
+\(`code-agent-org-cmux-open-tab', bound to `I' in `code-agent-org-menu')
+— the screen-scraping verbose-mirror buffer that used to offer this
+was itself removed for the same class of bug this test guards against."
   :tags '(:unit :fast :stable :structural)
   (let ((cmux-org (expand-file-name "lp/org/code-agent-org-cmux.org"
                                     test-structural--project-root)))

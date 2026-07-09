@@ -336,13 +336,11 @@ Returns list of warning/error messages."
     "code-agent-org--build-system-prompt"
     "code-agent-org--generate-instruction-custom-id"
     "code-agent-org--set-exec-status"
-    "code-agent-org--maybe-auto-generate-title"
     "code-agent-org-current-session-key"
     "code-agent-org--sessions"
     "code-agent-org-heading-tag"
     "code-agent-org-exec-status-property"
     "code-agent-org-cli-session-property"
-    "code-agent-org-auto-generate-title"
     ;; Emacs version-specific functions
     "parse-iso8601-time-string")
   "List of symbol names known to be external or forward-referenced.

@@ -367,44 +367,6 @@ Mock outputs an assistant message with tool_use block followed by text response.
     (should response)
     (should (string-match-p "Claude" response))))
 
-;;; Translation Tests
-
-(ert-deftest test-mock-translate-basic ()
-  "Test translate function with mock CLI.
-Verifies translate buffer is created with Chinese characters."
-  :tags '(:mock :fast :stable :isolated :process)
-  (let ((code-agent-cli-path test-claude-mock-cli-path)
-        (process-environment
-         (cons "MOCK_SCENARIO=translate" process-environment)))
-    ;; Clean up previous state — each run now allocates its own buffer via
-    ;; `generate-new-buffer-name', so we just clear the "latest" pointer
-    ;; instead of killing by constant name.
-    (setq code-agent-translate--active-state nil)
-    (when (buffer-live-p code-agent-translate--last-buffer)
-      (kill-buffer code-agent-translate--last-buffer))
-    (setq code-agent-translate--last-buffer nil)
-
-    ;; Run translation
-    (code-agent-translate "Hello, world!" "Chinese"
-                            (list :setting-sources test-claude-default-setting-sources))
-
-    ;; Wait for completion
-    (should (test-claude-wait-until
-             (lambda ()
-               (null code-agent-translate--active-state))
-             10))
-
-    ;; Check translation buffer (the run-specific one just created)
-    (let* ((buf code-agent-translate--last-buffer)
-           (result-text (when (buffer-live-p buf)
-                          (with-current-buffer buf (buffer-string)))))
-      (should buf)
-      (should result-text)
-      (should (string-match-p "Translation complete" result-text))
-      ;; Should contain Chinese characters
-      (should (string-match-p "[\u4e00-\u9fff]" result-text))
-      (kill-buffer buf))))
-
 ;;; Recovery Tests
 
 (ert-deftest test-mock-recovery-on-kill ()

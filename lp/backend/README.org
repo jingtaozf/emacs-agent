@@ -1,24 +1,22 @@
-#+TITLE: lp/backend — Concrete Backends (Agent + Multiplexer + Pi)
+#+TITLE: lp/backend — Concrete Backends (Multiplexer + Pi extension)
 
 Every module here is a concrete *backend* — an implementation that
 satisfies a protocol declared in =lp/sdk/code-agent-backend.org=.  The
 frontend (=lp/org/=, =lp/chat/=) NEVER branches on backend type;
 dispatch flows through =cl-defmethod= on the backend instance.
 
-Three sub-families live side-by-side: ACP agents (stdio JSON-RPC),
-multiplexer drivers (cmux / tmux), and the Pi RPC backend.
+One Elisp sub-family lives here: multiplexer drivers (cmux / tmux).
+Pi is *not* a separate Elisp backend — it runs as a cmux agent
+profile (=:AGENT_TYPE: pi= in =../org/code-agent-org-cmux.org=), the
+same way Claude Code, Copilot, and OpenCode do.  Its TypeScript-side
+extension still lives here since Pi loads it regardless of launch
+mode.  (Both the ACP agent family — =code-agent-jsonrpc.org=,
+=code-agent-acp*.org= — and the RPC-mode Pi backend —
+=code-agent-pi-backend.org=, =code-agent-pi-ui.org= — were removed:
+the pivot direction drops embedded-chat agent backends in favour of
+org as a control plane for agents living in cmux/tmux terminals.)
 
 * Modules
-
-** Agent family (ACP — JSON-RPC over stdio)
-
-| File | Role |
-|------+------|
-| [[file:code-agent-jsonrpc.org][code-agent-jsonrpc.org]] | Pure JSON-RPC 2.0 transport class.  Every ACP-derived backend builds on this. |
-| [[file:code-agent-acp.org][code-agent-acp.org]] | Generic Agent Client Protocol backend.  Drives spawn → initialize → authenticate → session/new → session/prompt for any ACP-conforming agent. |
-| [[file:code-agent-acp-gemini.org][code-agent-acp-gemini.org]] | Profile: Google Gemini CLI (=--experimental-acp= + 3 auth methods). |
-| [[file:code-agent-acp-codex.org][code-agent-acp-codex.org]] | Profile: OpenAI Codex via the =codex-acp= shim binary. |
-| [[file:code-agent-acp-opencode.org][code-agent-acp-opencode.org]] | Profile: OpenCode direct-ACP (sidesteps the cmux-profile config-mutation path). |
 
 ** Multiplexer family (terminal driver + workspace-bridge)
 
@@ -28,24 +26,20 @@ multiplexer drivers (cmux / tmux), and the Pi RPC backend.
 | [[file:code-agent-cmux-backend.org][code-agent-cmux-backend.org]] | cmux concrete backend (macOS-native, Swift+Ghostty, =cmux= CLI). |
 | [[file:code-agent-tmux-backend.org][code-agent-tmux-backend.org]] | tmux concrete backend (cross-platform, =tmux send-keys / capture-pane / pipe-pane=). |
 
-** Pi family (pi.dev RPC backend + UI bits)
+** Pi extension (TypeScript, no Elisp backend of its own)
 
 | File | Role |
 |------+------|
-| [[file:code-agent-pi-backend.org][code-agent-pi-backend.org]] | Pi RPC backend — pi.dev as an alternate LLM provider; auto-loaded. |
-| [[file:code-agent-pi-extensions.org][code-agent-pi-extensions.org]] | TypeScript Pi-side extensions tangled to =~/.pi/agent/extensions/{emacs-mcp,doom-loop}.ts= — emacs-mcp closes the MCP loop so Pi can call Emacs tools; doom-loop catches token-/tool-repetition loops natively. |
-| [[file:code-agent-pi-ui.org][code-agent-pi-ui.org]] | Optional Pi-specific UI affordances (status surface, completion bridge). |
+| [[file:code-agent-pi-extensions.org][code-agent-pi-extensions.org]] | TypeScript Pi-side extensions tangled to =~/.pi/agent/extensions/{emacs-mcp,doom-loop}.ts= — emacs-mcp closes the MCP loop so Pi can call Emacs tools; doom-loop catches token-/tool-repetition loops natively.  Loaded by Pi itself, regardless of launch mode; today's only consumer is the cmux =:AGENT_TYPE: pi= profile. |
 
 * Read order
 
-1. [[file:code-agent-multiplexer.org][code-agent-multiplexer.org]] or [[file:code-agent-acp.org][code-agent-acp.org]] first
-   depending on which family you're touching.  Both are the abstract
-   base of their branch; concrete subclasses inherit ~80% of their
-   shape from these.
-2. The concrete subclass next — cmux/tmux/Gemini/Codex/OpenCode.
-3. [[file:code-agent-jsonrpc.org][code-agent-jsonrpc.org]] when investigating ACP wire-level bugs.
-4. The Pi family stands alone — load order is independent of the
-   ACP/multiplexer branches.
+1. [[file:code-agent-multiplexer.org][code-agent-multiplexer.org]] first — the abstract base of the
+   multiplexer branch; concrete subclasses inherit ~80% of their
+   shape from it.
+2. The concrete subclass next — cmux or tmux.
+3. [[file:code-agent-pi-extensions.org][code-agent-pi-extensions.org]] stands alone — it's TypeScript tangled
+   for Pi's own runtime, not loaded into Emacs at all.
 
 * Boundaries
 

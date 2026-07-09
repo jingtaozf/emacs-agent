@@ -12,7 +12,6 @@
 ;;   - cancel sends correct keys per profile
 ;;   - restore-workspace skips IDE server for copilot
 ;;   - launch-workspace skips IDE server for copilot
-;;   - Full execute-ai-block mock flows for claude and copilot
 
 ;;; Code:
 

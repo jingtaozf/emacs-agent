@@ -40,6 +40,128 @@ extension (heading + =:CUSTOM_ID:= + =:header-args:typescript
 :tangle ...:= drawer + prose preamble + src blocks), then teach
 =Makefile= about the new output if you want CI to assert it.
 
+** Setting up Pi on a fresh machine
+:PROPERTIES:
+:CUSTOM_ID: pi-extensions-onboarding
+:END:
+
+Relocated from the now-removed =code-agent-pi-backend.org= (the RPC
+backend was deleted; org is a control plane for agents living in
+cmux/tmux terminals now).  This is the *minimum* bootstrap a new
+contributor needs before Pi can run as a cmux agent profile
+(=:AGENT_TYPE: pi=).  Skip if =pi --version= already prints under
+your shell.
+
+*** 1. Install the Pi CLI
+
+Choose one path; both end in a =pi= on PATH (current verified
+version 0.75.5):
+
+#+begin_example
+brew install pi                          # macOS, fastest
+npm install -g @earendil-works/pi-coding-agent  # any platform
+#+end_example
+
+*** 2. Track your Pi setup under version control (recommended)
+
+The agent reads its global config from =~/.pi/agent/=.  Treating
+that directory as ephemeral local state means every new machine
+re-derives provider config, permission rules, and skill paths from
+memory.  Pattern that works: keep =~/.pi= as a symlink into a
+dotfiles repo.
+
+#+begin_example
+# First machine — capture once
+mkdir -p ~/projects/dotfiles
+cp -RP ~/.pi ~/projects/dotfiles/pi
+rm -rf ~/.pi
+ln -s ~/projects/dotfiles/pi ~/.pi
+
+# Add ~/projects/dotfiles/.gitignore entries:
+/pi/agent/auth.json       # OAuth + API credentials
+/pi/agent/sessions/       # conversation transcripts
+/pi/agent/cost-history/   # usage metering
+/pi/agent/npm/            # vendored node_modules (~270 MB)
+/pi/.pi-cache/ /pi/todos/ # local caches
+
+# Other machines — clone + symlink
+git clone <dotfiles-remote> ~/projects/dotfiles
+ln -s ~/projects/dotfiles/pi ~/.pi
+#+end_example
+
+The =~/.pi/agent/auth.json= is the only file Pi must own locally
+(holds OAuth tokens minted via =pi config=); everything else
+travels through git.
+
+*** 3. Authentication
+
+Pi loads provider credentials at startup from:
+- =~/.pi/agent/auth.json= for the default Codex / Anthropic OAuth
+  flow (=pi config= opens a TUI to mint tokens)
+- =process.env.<PROVIDER>_API_KEY= for raw-key providers
+  (=~/.pi/agent/models.json= references env-var *names*, not
+  literal keys — keys never land in version control)
+
+Without credentials the cmux pane's Pi TUI reports its own
+not-authenticated error at startup — run =pi config= to fix.
+
+*** 4. Cross-harness skill + context discovery
+
+Both these settings are recommended for any contributor whose
+=~/.claude/= already holds skills and project rules:
+
+#+begin_src json :tangle no
+// ~/.pi/agent/settings.json
+{
+  "skills": ["~/.claude/skills"],
+  "enableSkillCommands": true
+}
+#+end_src
+
+#+begin_example
+# Plus a symlink so Pi's context-file loader sees CLAUDE.md:
+ln -s ~/.claude/CLAUDE.md ~/.pi/agent/CLAUDE.md
+#+end_example
+
+Pi's =resource-loader.ts= scans for =["AGENTS.md", "CLAUDE.md"]= at
+=~/.pi/agent/= and at every directory between =cwd= and root, so a
+single symlink reuses the entire Claude rule tree (CLAUDE.md +
+its 22 =@-import= rule files) inside Pi.  =settings.json=:skills
+piggybacks on the same idea for per-task SKILL.md files.
+
+*** 5. Recommended: install =pi-permission-system= for deny gates
+
+Pi's default policy is permissive.  Install the community
+=pi-permission-system= extension to bring in deterministic
+deny / ask gates for =rm -rf=, =git push --force=, =kubectl
+delete=, AWS destructive ops, etc.
+
+#+begin_example
+pi install npm:pi-permission-system
+#+end_example
+
+That records =packages: ["npm:pi-permission-system"]= in
+=settings.json= so the install travels with the repo.  Write
+=~/.pi/agent/pi-permissions.jsonc= with your global policy
+(see the dotfiles repo's =pi/agent/pi-permissions.jsonc= for a
+71-rule starter that mirrors =.claude/rules/= red lines).
+Verify with =pi list= — the extension should appear under "User
+packages".
+
+*** 6. Smoke test from Emacs
+
+#+begin_example
+# In an org buffer with a workspace section + :AGENT_TYPE: pi
+C-c C-/ r   ; Launch/Restart — launches pi in a cmux pane via
+            ; python/code_agent/pi_workspace.py
+#+end_example
+
+Failures cluster into three buckets: auth missing → Pi's own
+not-authenticated banner in the cmux pane; Pi binary missing →
+cmux pane shows a shell "command not found"; permission-system
+blocked everything → check the audit log at
+=~/.pi/agent/extensions/pi-permission-system/logs/pi-permission-system-permission-review.jsonl=.
+
 * Extension: emacs-mcp
 :PROPERTIES:
 :CUSTOM_ID: pi-extension-overview
@@ -52,16 +174,25 @@ extension (heading + =:CUSTOM_ID:= + =:header-args:typescript
 :END:
 
 A Pi-side TypeScript extension that exposes a handful of *Emacs tools*
-to whichever LLM Pi is driving. When Pi is the backend for an Emacs
-=#+begin_src ai= block (via [[file:code-agent-pi-backend.org][code-agent-pi-backend.org]]), this
-extension closes the loop:
+to whichever LLM Pi is driving.  It's a *global* Pi extension (lives at
+=~/.pi/agent/extensions/emacs-mcp.ts=, outside any single project), so
+Pi loads it regardless of how it was launched.  Today's only live
+consumer is Pi running as a cmux agent profile (=:AGENT_TYPE: pi= in
+[[file:../org/code-agent-org-cmux.org][code-agent-org-cmux.org]], launched via
+=python/code_agent/pi_workspace.py=) — the extension closes the loop
+for tool calls.  (Prompt/response round-tripping for a prompt typed
+directly in the cmux pane is a *known gap*, not currently wired — see
+the note under =Extension entry point= below.  The RPC-mode consumer,
+=code-agent-pi-backend.org='s =:CLAUDE_BACKEND: pi= route, was removed —
+org is a control plane for agents living in cmux/tmux terminals now,
+not an embedded-chat frontend.)
 
 #+begin_example
 ,#+begin_src ai      Emacs
    │                                                              ▲
    │  prompt                                            tool result│
    ▼                                                              │
-pi --mode rpc ───► LLM ───► emacs_* tool call ──► this extension ─┘
+pi (cmux pane) ──► LLM ───► emacs_* tool call ──► this extension ─┘
                                                        │
                                                        │ POST /mcp
                                                        ▼
@@ -556,7 +687,7 @@ The =tool_call= event fires *before* a tool is executed.  Returning
 Historically this gate ran by default and asked a y/n confirm on
 every =emacs_eval=.  Pre-2026-05 the gate was the only thing in
 front of arbitrary elisp; today the agent harness layers on
-=pi-permission-system= ([[file:code-agent-pi-backend.org::*Setting up Pi on a fresh machine][per-setup instructions]]) which already
+=pi-permission-system= ([[#pi-extensions-onboarding][per-setup instructions]]) which already
 runs =tools.emacs_eval= through =pi-permissions.jsonc= +
 =yoloMode=.  Two prompts on the same call was just noise, so the
 default of =ALLOW_EVAL= is flipped to *allow*; set
@@ -687,9 +818,24 @@ export default function emacsMcpExtension(pi: ExtensionAPI): void {
 	attachHealthCheck(pi);
 	attachConfirmGate(pi);
 	attachHumanOwnedGate(pi);
-	attachCmuxResponseBridge(pi);
 }
 #+end_src
+
+*Known gap (pre-dates this unit, found not fixed):* an
+=attachCmuxResponseBridge= call used to sit here, wiring
+=agent_end= → =workspace-bridge response= so a prompt typed
+directly in the cmux pane round-trips into the org buffer.  Commit
+=b029157= deleted the function body but left the call site (an
+unrelated "sync hooks.json example" commit); this left a
+=ReferenceError= on every extension load until it was removed here.
+Restoring the old implementation verbatim would not actually help —
+it shells out to a =workspace-bridge response= subcommand, and the
+Python side's =_handle_response= handler was itself deleted when
+=workspace_bridge.py= was trimmed to permission-only (commits
+=61a57d5=/=c9c0a18=; see its module docstring: "the response-insertion
+and prompt-routing logic that previously lived here has been moved
+into Elisp" — it wasn't).  Rebuilding the round-trip needs a fresh
+design on both ends, not a revert; out of scope for this unit.
 
 * Extension: doom-loop-detector
 :PROPERTIES:
