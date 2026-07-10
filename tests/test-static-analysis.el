@@ -547,6 +547,57 @@ Same-file duplicates are ignored (often example code or intentional redefs)."
                (length cross-file-duplicates)
                (mapconcat #'identity (seq-take cross-file-duplicates 10) "\n  "))))))
 
+(defun test-static--initializing-defvar-p (elisp-string symbol-name)
+  "Return non-nil if ELISP-STRING defines SYMBOL-NAME with an initial value.
+Matches `(defvar SYM VALUE ...)' / defconst / defcustom / defvar-local
+that carry a value form.  A bare `(defvar SYM)' forward declaration has
+no value form and does NOT count."
+  (with-temp-buffer
+    (insert elisp-string)
+    (goto-char (point-min))
+    (let ((sym (intern symbol-name))
+          (found nil))
+      (condition-case nil
+          (while (not found)
+            (let ((form (read (current-buffer))))
+              (when (and (listp form)
+                         (memq (car-safe form)
+                               '(defvar defconst defcustom defvar-local))
+                         (eq (cadr form) sym)
+                         ;; value form present → real definition
+                         (cddr form))
+                (setq found t))))
+        (end-of-file nil))
+      found)))
+
+(ert-deftest test-static-forward-declarations-have-definitions ()
+  "Every allowlisted forward declaration must have a real initializer.
+`test-static--known-forward-declarations' excludes symbols from the
+duplicate-definition check on the promise that a full, initializing
+definition lives in another file.  This test enforces that promise: a
+refactor that deletes the initializer — leaving only the valueless
+`(defvar SYM)' — would otherwise pass silently and crash at runtime
+with a void-variable (the 2026-07 workspace-to-session-key regression)."
+  :tags '(:static :lint)
+  (let* ((root (test-static--find-project-root))
+         (org-files (test-static--find-org-source-files root))
+         (missing nil))
+    (dolist (name test-static--known-forward-declarations)
+      (unless (seq-some
+               (lambda (file)
+                 (test-static--initializing-defvar-p
+                  (test-static--extract-elisp-from-org file) name))
+               org-files)
+        (push name missing)))
+    (when missing
+      (ert-fail
+       (format "%d allowlisted forward declaration(s) have no initializing \
+definition (only a bare `(defvar SYM)'):\n  %s\n\n\
+Add a `(defvar SYM VALUE ...)' in the owning module, or drop the symbol \
+from `test-static--known-forward-declarations'."
+               (length missing)
+               (mapconcat #'identity missing "\n  "))))))
+
 (ert-deftest test-static-no-code-outside-src-blocks ()
   "Check that no elisp definitions appear outside #+BEGIN_SRC blocks.
 This catches a common literate programming mistake where code is accidentally
