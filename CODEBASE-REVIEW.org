@@ -32,13 +32,6 @@ incidentally via other E2E tests.
 *Proposal*: Create =tests/test-claude-ide.el= with unit tests for session lifecycle, ping timer,
 deferred response handling, and lockfile management.
 
-** A10. =:org-section= Concept Leaked Into Core SDK (LOW)
-
-=code-agent-query= at =code-agent-backend.org:2263= accepts =:org-section=, an org-layer
-concept. The SDK should not know callers organize work into "org sections".
-
-*Proposal*: Rename to =:context-label= (generic opaque string).
-
 ** A11. Backend Capability Enum Undocumented (LOW)
 
 =code-agent-backend-supports-p= accepts capability symbols, but valid values are scattered across
@@ -102,13 +95,6 @@ uselessly.
 
 *Proposal*: Store timer in process state; cancel in kill/interrupt functions.
 
-** Q15. =sleep-for= Blocks Emacs 30s for Docker Startup (LOW-MEDIUM)
-
-=code-agent--ensure-docker-container= loops with =sleep-for 1= up to 30 times synchronously,
-freezing the Emacs UI.
-
-*Proposal*: Convert to timer-based async retry with progress display.
-
 ** Q16. Missing =lexical-let= in =code-agent-org--send-request= (LOW)
 
 The =mk= helper lambda is defined via plain =lambda= inside a =let*=.
@@ -119,18 +105,6 @@ refactor to async invocation would break under dynamic binding.
 
 
 * Test Harness Findings
-
-** T1. No Error Injection in Mock CLI (HIGH)
-
-=tests/mock-claude-cli.sh= only produces well-formed JSON streams. No scenarios test:
-- Mid-stream crashes (process killed during response)
-- Malformed JSON (truncated lines, invalid UTF-8)
-- Oversized messages (multi-MB tool results)
-- Rate limit responses
-- Timeout / hung processes
-
-*Proposal*: Add mock scenarios: =crash-mid-stream=, =malformed-json=, =rate-limited=,
-=oversized-message=. Add corresponding tests that verify graceful degradation.
 
 ** T2. MCP Round-Trip Has Zero Tests (HIGH)
 
@@ -143,17 +117,6 @@ error handling, timeout) are discovered only in production.
 2. Sends structured MCP requests via HTTP
 3. Verifies Emacs state changes (buffer content, properties)
 4. Covers error cases (invalid session ID, read-only buffer, missing heading)
-
-** T4. Fixture Capture Mode for Systematic Test Data (MEDIUM)
-
-Test fixtures are manually created. There is no recording mode to capture real Claude Code sessions
-for replay.
-
-*Proposal*: Add a =CLAUDE_RECORD_FIXTURE= env var that:
-1. Wraps =code-agent--process-filter= to log raw process output
-2. Wraps =code-agent--process-sentinel= to log exit status
-3. Saves timestamped fixture files to =tests/fixtures/recorded/=
-4. Includes a replay tool that feeds recorded data into the parser
 
 ** T5. Regression Tag + Dedicated =make test-regression= (MEDIUM)
 
@@ -171,9 +134,13 @@ stack today; tests/e2e/E2E_TASKS.org is human-driven via /loop.
 *Proposal*:
 1. macOS GitHub Actions runner for the cmux + Claude Code path
 2. Linux runner for the tmux primitive tests (cmux unavailable)
-3. Use =MOCK_SCENARIO= for Claude API calls (no real API key needed)
-4. Run headless Emacs with =make test-integration=
-5. Record session transcripts for debugging failures
+3. Record session transcripts for debugging failures
+
+Note: the mock-CLI subprocess scenario system (=MOCK_SCENARIO=,
+=make test-integration=) this proposal originally relied on was
+deleted 2026-07 along with the JSON-stream engine — a CI harness now
+needs a real cmux/tmux + Claude Code path (or a new mocking strategy
+at the multiplexer layer), not a subprocess-level mock.
 
 ** T10. =code-agent-chat= Has Zero Tests (MEDIUM)
 
@@ -193,13 +160,11 @@ documentation. Periodically revisit and fix.
 
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
-| P1 | T1: Error injection in mock CLI | M | Catches failure-mode bugs |
 | P1 | Q2: Structured MCP error returns | S | Prevents silent Python failures |
 | P1 | Q4: Reset status on MCP failure | S | Prevents permanent "busy" |
 | P2 | T2: MCP round-trip test harness | L | Catches bridge bugs |
 | P2 | A3: Single load path | S | Prevents double-init bugs |
 | P2 | A6: claude-ide test suite | M | Tests 2K-line module |
-| P3 | T4: Fixture capture mode | M | Systematic test data |
 | P3 | T5: Regression tag | S | Fast regression runs |
 | P3 | T10: Chat mode test suite | M | Tests zero-coverage module |
 | P3 | A2: MCP server boundary fix | S | Clean layering |

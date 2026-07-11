@@ -11,30 +11,35 @@ backend protocol abstractions, and concrete backend implementations.
 :CUSTOM_ID: backend-overview
 :END:
 
-This file is the backend layer's home — both the *protocol* (Protocol 1
+This file is the backend layer's home for the *protocol* (Protocol 1
 lifecycle generics + Protocol 3 org-integration generics, dispatched on
-the abstract =code-agent-backend= struct) and the *concrete shipped
-agent backend* (=code-agent-claude-code-backend=, the JSON-stream-
-over-stdio family). The two-family split — agent-family vs multiplexer-
-family — comes from two inheritance roots: agent backends subclass
-this file's =code-agent-backend= directly; multiplexer backends
-subclass =code-agent-multiplexer-backend= in
+the abstract =code-agent-backend= struct) plus the shared setup/session
+utilities every backend implementation builds on. The two-family split —
+agent-family vs multiplexer-family — comes from two inheritance roots:
+agent backends subclass this file's =code-agent-backend= directly;
+multiplexer backends subclass =code-agent-multiplexer-backend= in
 [[file:../backend/code-agent-multiplexer.org][code-agent-multiplexer.org]], which in turn inherits the protocols
 defined here.
+
+The concrete JSON-stream-over-stdio agent backend
+(=code-agent-claude-code-backend=, plus the one-shot =code-agent-query=
+API, the interactive client wrappers, and the process-lifecycle wiring
+that drove them) was deleted 2026-07 — three independent audits found
+zero production callers left after the org-as-control-plane pivot moved
+execution onto cmux/tmux terminal backends. What remains here is the
+protocol surface (dispatched generics + base struct) and the handful of
+session/process-state utilities that survive as live dependencies of the
+cancellation and query-context machinery.
 
 Read order if you're new to this file:
 
 1. * Tri-Protocol Architecture (high-level meta-design — why three
    protocols, two families, what the capability matrix is for).
-2. * Backend Protocol (Protocol 1 + Protocol 3 generic declarations).
-3. * JSON Stream Backend (the concrete claude-code-backend — wire,
-   completion-model invariants, design heritage).
-4. Everything else (process management, JSON parsing, control-request
-   handling, verbose buffer, query cancellation) — implementation
-   details the protocol layers consume.
-
-The file is large (~4400 lines) because the concrete JSON-stream backend
-is large; the protocol surface itself is thin (~150 lines).
+2. * Backend Protocol (Protocol 1 + Protocol 3 generic declarations,
+   plus the backend-authoring contract every implementer follows).
+3. Everything else (shared setup, session/process state, active-query
+   tracking + cancellation) — utilities the protocol layer and the
+   cmux/tmux backends consume.
 
 * Dependencies
 
@@ -47,10 +52,9 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 
 ;;; Commentary:
 
-;; Core SDK logic: customization, data structures, process management,
-;; session management, JSON protocol, core API, client API, verbose output,
-;; backend protocol (cl-defgeneric), JSON stream backend, and Claude CLI
-;; terminal backend implementations.
+;; Core SDK logic: customization, session management, process state,
+;; active-query tracking + cancellation, and the backend protocol
+;; (cl-defgeneric) that the cmux/tmux terminal backends implement.
 
 ;;; Code:
 
@@ -59,35 +63,30 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 (require 'json)
 (require 'subr-x)
 
-;; Forward declarations for cross-module dependencies
-(declare-function code-agent--run-permission-functions "code-agent-permission")
-(defvar code-agent-permission-functions)
-
 ;; Tracing support — requires code-agent-trace.org loaded before this file.
 ;; See Makefile load order and ARCHITECTURE.org for module dependencies.
 #+END_SRC
 
 * Shared Utilities
 
-The 19 depth-2 sub-sections below are the file's working bench —
-about 3400 lines of utilities the protocol layer (later in this
-file) builds on top of.  Read by conceptual cluster, not in source
-order:
+Two depth-2 clusters survive the 2026-07 JSON-stream-engine deletion —
+everything else in this file used to live here but had zero callers once
+=code-agent-query=, the process-lifecycle wiring, and the JSON-stream
+backend went away. Read by conceptual cluster, not in source order:
 
 | Cluster | Member sub-sections | Role |
 |---------+---------------------+------|
-| Setup + Config | Customization Variables, Error Definitions, Options API | =defgroup= / =defcustom= roots, the canonical error taxonomy, the public =code-agent-options= struct constructor |
-| Discovery + Environment | CLI Discovery, Permission Mode, Input Validation, Docker Management, Process Environment | Finding the right CLI binary, enforcing permission modes, validating spawn args, Docker-mode sandboxing, env-var assembly |
-| Session + Process State | Session Management, Data Structures, Argument Builder, Process State | Per-session state, the typed structs (=options=, =query-context=, =process-state=), CLI argv assembly, in-flight process tracking |
-| Process Lifecycle + Wire | Process Lifecycle, JSON Protocol, Core API, Client API | =start-process= + sentinel, newline-delimited JSON parsing, =code-agent-query= public API, interactive client wrappers |
-| Control + Cancellation + Verbose | Control Request Handling, Query Cancellation, Verbose Output | =control_request= dispatch (interrupt, set-permission-mode, set-model), cancellation taxonomy, verbose buffer machinery |
+| Setup + Config | Customization Variables, Error Definitions, Debug Logging, Elapsed Time Formatting | =defgroup= / =defcustom= roots, the canonical error taxonomy, shared debug-log + elapsed-time helpers used by the chat dashboard and org-session |
+| Session + Process State | Session Management, Query Context, Message Event Hooks, Process State, Active-States Registry, Process State Operations | Session-key construction, the =query-context= struct (chat dashboard identity display), the =process-state= struct, and =code-agent-kill-all-processes= |
+| Cancellation | Active Query Tracking, Cancellation Functions, Periodic Cleanup Timer | The =--active-queries= table, public =cancel-query= API, and the stale-query sweep timer |
 
 ** Setup + Config
 
-Three depth-3 sub-sections: the =defgroup= + =defcustom= root,
-the canonical error taxonomy, and the public =code-agent-options=
-struct constructor.  Loaded first so subsequent sections can
-reference any symbol declared here.
+Four depth-3 sub-sections: the =defgroup= + =defcustom= root, the canonical
+error taxonomy, and two small utility helpers (debug logging, elapsed-time
+formatting) relocated here from the deleted JSON-stream engine since their
+surviving callers live outside this file.  Loaded first so subsequent
+sections can reference any symbol declared here.
 
 *** Customization Variables
 
@@ -106,84 +105,9 @@ If nil, the CLI will be searched in PATH and common locations."
                  (file :tag "Explicit path"))
   :group 'code-agent)
 
-(defcustom code-agent-cli-search-paths
-  '("~/.npm-global/bin/claude"
-    "/usr/local/bin/claude"
-    "~/.local/bin/claude"
-    "~/node_modules/.bin/claude"
-    "~/.yarn/bin/claude"
-    "~/.claude/local/claude")
-  "List of paths to search for the Claude Code CLI."
-  :type '(repeat string)
-  :group 'code-agent)
-
 (defcustom code-agent-debug nil
   "When non-nil, enable debug logging."
   :type 'boolean
-  :group 'code-agent)
-
-(defcustom code-agent-auto-recovery t
-  "When non-nil, automatically resume session on abnormal CLI exit.
-Abnormal exits include signal kills (e.g., SIGKILL), non-zero exit codes,
-and exits without receiving a result message. The recovery will insert
-a warning message at the current response position and resume the session."
-  :type 'boolean
-  :group 'code-agent)
-
-(defcustom code-agent-recovery-prompt
-  "Please continue if previous task is not finished yet due to abnormal exit."
-  "Prompt to send when resuming a session after abnormal exit.
-This prompt is used instead of the original AI block instructions to avoid
-repetition and provide clear context about the recovery."
-  :type 'string
-  :group 'code-agent)
-
-(defcustom code-agent-docker-auto-start t
-  "When non-nil, auto-start Docker container if CLI path is a docker command.
-This allows seamless Docker execution without manually running docker compose up."
-  :type 'boolean
-  :group 'code-agent)
-
-(defcustom code-agent-docker-compose-dir nil
-  "Directory containing docker-compose.yml for Claude container.
-If nil, searches for .devcontainer/docker-compose.yml or docker-compose.yml
-in the project hierarchy."
-  :type '(choice (const nil :tag "Auto-detect")
-                 (directory :tag "Explicit directory"))
-  :group 'code-agent)
-
-(defcustom code-agent-docker-service-name "claude"
-  "Docker compose service name for Claude container."
-  :type 'string
-  :group 'code-agent)
-
-(defcustom code-agent-max-answer-length 10000
-  "Maximum length of user answer text.
-This prevents denial-of-service via extremely large answers in
-AskUserQuestion tool responses."
-  :type 'integer
-  :group 'code-agent)
-
-(defcustom code-agent-max-command-length 100000
-  "Maximum length of bash command strings.
-This prevents denial-of-service via extremely large commands."
-  :type 'integer
-  :group 'code-agent)
-
-(defcustom code-agent-max-json-buffer-size (* 10 1024 1024)
-  "Maximum size in bytes for the JSON accumulation buffer.
-If the CLI sends data without newlines and the buffer exceeds this
-limit, the process is killed and an error is signalled via the error
-callback.  Default is 10 MB."
-  :type 'integer
-  :group 'code-agent)
-
-(defcustom code-agent-stdin-chunk-size 4096
-  "Maximum bytes to send in one write to prevent pipe buffer blocking.
-When sending large JSON messages to the CLI, messages are chunked into
-pieces of this size with output draining between chunks. This prevents
-deadlock when the pipe buffer fills up (typically 64KB on Linux, 16KB on macOS)."
-  :type 'integer
   :group 'code-agent)
 #+END_SRC
 
@@ -199,440 +123,77 @@ Canonical error taxonomy.  Every backend reports failures by signalling one of t
   "Claude Code CLI not found"
   'code-agent-error)
 
-(define-error 'code-agent-cli-connection-error
-  "Cannot connect to Claude CLI"
-  'code-agent-error)
-
 (define-error 'code-agent-process-error
   "Claude CLI process error"
   'code-agent-error)
-
-(define-error 'code-agent-json-decode-error
-  "JSON decode error"
-  'code-agent-error)
-
-(define-error 'code-agent-message-parse-error
-  "Message parse error"
-  'code-agent-error)
 #+END_SRC
 
-*** Options API
+*** Debug Logging
 
-The options plist mirrors the Python ~ClaudeAgentOptions~ dataclass.
+Debug logging, gated by =code-agent-debug=.  Relocated here (2026-07) from the
+Process Filter section it originally lived under — its only remaining callers
+are Session Management and the trace bridge, so it belongs among shared setup
+utilities rather than inside the (now-deleted) JSON-stream process wiring.
 
 #+BEGIN_SRC elisp
-(defun code-agent-options (&rest args)
-  "Create a Claude Agent options plist.
-
-Supported keyword arguments:
-  :system-prompt      - System prompt string
-  :allowed-tools      - List of allowed tool names
-  :disallowed-tools   - List of disallowed tool names
-  :max-turns          - Maximum conversation turns (integer)
-  :max-budget-usd     - Maximum budget in USD (number)
-  :model              - Model name string
-  :permission-mode    - One of: default, accept-edits, plan, bypass-permissions
-  :continue-conversation - Boolean to continue previous conversation
-  :resume             - Session ID string to resume
-  :cwd                - Working directory for CLI
-  :cli-path           - Path to Claude CLI binary
-  :hooks              - Alist of (event . matchers)
-  :env                - Alist of environment variables
-  :setting-sources    - List of setting sources (\"user\" \"project\" \"local\")
-
-Returns a plist suitable for passing to `code-agent-query' or
-`code-agent-client-create'."
-  ;; Use `list' instead of quoted literal to avoid destructive modification
-  (let ((defaults (list :system-prompt nil
-                        :allowed-tools nil
-                        :disallowed-tools nil
-                        :max-turns nil
-                        :max-budget-usd nil
-                        :model nil
-                        :permission-mode nil
-                        :continue-conversation nil
-                        :resume nil
-                        :cwd nil
-                        :cli-path nil
-                        :hooks nil
-                        :env nil
-                        :setting-sources nil)))
-    (cl-loop for (key val) on args by #'cddr
-             do (setq defaults (plist-put defaults key val)))
-    defaults))
+(defun code-agent--debug-log (format-string &rest args)
+  "Log debug message using FORMAT-STRING and ARGS if debug mode is enabled."
+  (when code-agent-debug
+    (apply #'message (concat "[code-agent] " format-string) args)))
 #+END_SRC
 
-** Discovery + Environment
+*** Elapsed Time Formatting
 
-Five depth-3 sub-sections: locating the CLI binary, enforcing
-permission modes, validating spawn args, Docker-mode sandboxing,
-and assembling the child process's environment block.
-
-*** CLI Discovery
-
-Resolves the Claude CLI binary location.  Honours the =code-agent-cli-path= defcustom; falls back to PATH search and known install locations.  Signals on miss so callers see configuration errors at spawn time, not mid-query.
+Shared by the Session Manager dashboard ([[file:../chat/code-agent.org][code-agent.org]]) and org-session
+status display — relocated here (2026-07) alongside Debug Logging for the
+same reason: its only callers are outside the JSON-stream engine.
 
 #+BEGIN_SRC elisp
-(defun code-agent--find-cli ()
-  "Find the Claude Code CLI binary.
-Returns the path to the CLI or signals an error if not found."
-  (or code-agent-cli-path
-      (executable-find "claude")
-      (cl-find-if #'file-executable-p
-                  (mapcar #'expand-file-name
-                          code-agent-cli-search-paths))
-      (signal 'code-agent-cli-not-found-error
-              (list "Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code"))))
-#+END_SRC
+(defun code-agent-format-elapsed-time (start-time &optional format-style)
+  "Format elapsed time since START-TIME as human-readable string.
+FORMAT-STYLE can be:
+  'compact   - \"5s\", \"10m\", \"2h\" (default for mode-line)
+  'verbose   - \"started 5 seconds ago\"
+  nil        - defaults to 'compact
 
-*** Permission Mode
-
-Convert Emacs symbols to CLI-compatible permission mode strings.
-
-#+NAME: arg-builder-permission-mode
-#+BEGIN_SRC elisp
-(defun code-agent--permission-mode-to-string (mode)
-  "Convert permission MODE symbol to CLI string."
-  (pcase mode
-    ('default "default")
-    ('accept-edits "acceptEdits")
-    ('plan "plan")
-    ('bypass-permissions "bypassPermissions")
-    ((pred stringp) mode)
-    (_ nil)))
-#+END_SRC
-
-*** Input Validation
-
-Input validation layer to prevent security issues and denial-of-service attacks.
-
-*** Answer Validation
-
-Defensive guard on =AskUserQuestion= responses — the user's answer is forwarded verbatim to the LLM, so a length cap stops accidental megabyte responses (often a paste-buffer mishap) from flooding the prompt.
-
-#+BEGIN_SRC elisp
-(defun code-agent--validate-answer (answer)
-  "Validate ANSWER string for AskUserQuestion responses.
-Signals error if answer exceeds `code-agent-max-answer-length'.
-Returns t if valid, nil for nil/empty input (valid no-answer)."
-  (cond
-   ((null answer) t)
-   ((stringp answer)
-    (if (> (length answer) code-agent-max-answer-length)
-        (error "Answer exceeds maximum length of %d characters"
-               code-agent-max-answer-length)
-      t))
-   (t (error "Answer must be a string or nil"))))
-#+END_SRC
-
-*** File Path Validation
-
-Defensive guard on file paths — null-byte injection and other shell-escape patterns are rejected before reaching any tool that opens the file or shells out with it.
-
-#+BEGIN_SRC elisp
-(defun code-agent--validate-file-path (path)
-  "Validate file PATH for suspicious patterns.
-Signals error if path contains null bytes or other dangerous patterns.
-Returns t if valid."
-  (cond
-   ((null path) (error "File path cannot be nil"))
-   ((not (stringp path)) (error "File path must be a string"))
-   ;; Null bytes can truncate path security checks
-   ((string-match-p "\x00" path)
-    (error "File path contains null byte"))
-   (t t)))
-#+END_SRC
-
-*** Command Validation
-
-Defensive guard on Bash-tool commands — length cap prevents runaway prompt injection from issuing megabyte-sized shell commands.
-
-#+BEGIN_SRC elisp
-(defun code-agent--validate-command (command)
-  "Validate COMMAND string for Bash tool.
-Signals error if command exceeds `code-agent-max-command-length'.
-Returns t if valid."
-  (cond
-   ((null command) (error "Command cannot be nil"))
-   ((not (stringp command)) (error "Command must be a string"))
-   ((> (length command) code-agent-max-command-length)
-    (error "Command exceeds maximum length of %d characters"
-           code-agent-max-command-length))
-   (t t)))
-#+END_SRC
-
-*** Docker Management
-
-When =code-agent-cli-path= or the =:cli-path= option is a Docker command
-(e.g., "docker compose exec claude claude"), these functions handle automatic
-container startup and management.
-
-*** Docker Command Detection
-
-Recognises =docker run= / =docker-compose= / =docker exec= CLI shapes — drives the Docker-mode branch that routes subsequent invocations into the container.
-
-#+BEGIN_SRC elisp
-(defun code-agent--docker-command-p (cmd)
-  "Return non-nil if CMD is a Docker command.
-Detects 'docker run', 'docker-compose', and 'docker compose' patterns."
-  (and cmd
-       (stringp cmd)
-       (string-match-p
-        (rx bos (* space)
-            (or "docker run"
-                "docker-compose"
-                "docker compose"))
-        cmd)))
-
-(defun code-agent--split-command (cmd)
-  "Split CMD string into a list of arguments.
-Handles quoted strings and basic shell syntax.
-For non-Docker commands, returns a single-element list."
-  (if (code-agent--docker-command-p cmd)
-      (split-string-and-unquote cmd)
-    (list cmd)))
-
-(defun code-agent--extract-compose-file-from-command (cmd)
-  "Extract compose file path from Docker command CMD.
-Looks for -f or --file flag followed by the path.
-Returns the compose file path or nil if not found."
-  (when (and cmd (stringp cmd))
-    (let ((args (split-string-and-unquote cmd)))
-      (cl-loop for (arg next) on args
-               when (and (member arg '("-f" "--file"))
-                         next)
-               return next))))
-#+END_SRC
-
-*** Docker Compose Directory Discovery
-
-Finds the =docker-compose.yml= owning the configured CLI — needed so subsequent =docker compose= calls run with the correct working directory regardless of where Emacs was started.
-
-#+BEGIN_SRC elisp
-(defun code-agent--find-compose-dir (&optional cli-path project-root)
-  "Find directory containing docker-compose.yml for Claude.
-
-Optional CLI-PATH is the Docker command which may contain -f flag.
-Optional PROJECT-ROOT is the project directory for resolving relative paths.
-
-Search order:
-1. Extract from CLI-PATH -f flag (absolute or relative to PROJECT-ROOT)
-2. .devcontainer/ in PROJECT-ROOT
-3. .devcontainer/ in directory hierarchy from PROJECT-ROOT
-4. docker-compose.yml directly in PROJECT-ROOT
-5. docker-compose.yml in directory hierarchy from PROJECT-ROOT
-
-Returns the directory path or nil if not found."
-  (let ((search-dir (or project-root default-directory)))
-    (or
-     ;; 1. Extract from CLI command -f flag
-     (when-let* ((compose-file (code-agent--extract-compose-file-from-command cli-path)))
-       (let* ((expanded (if (file-name-absolute-p compose-file)
-                            compose-file
-                          (expand-file-name compose-file (or project-root default-directory))))
-              (dir (file-name-directory expanded)))
-         (when (file-exists-p expanded)
-           dir)))
-     ;; 2. Look for .devcontainer/docker-compose.yml from project-root
-     (when project-root
-       (let ((devcontainer (expand-file-name ".devcontainer" project-root)))
-         (when (file-exists-p (expand-file-name "docker-compose.yml" devcontainer))
-           devcontainer)))
-     ;; 3. Look for .devcontainer in directory hierarchy
-     (when-let* ((project-dir (locate-dominating-file search-dir ".devcontainer")))
-       (let ((devcontainer (expand-file-name ".devcontainer" project-dir)))
-         (when (file-exists-p (expand-file-name "docker-compose.yml" devcontainer))
-           devcontainer)))
-     ;; 4. Look for docker-compose.yml directly in project-root
-     (when (and project-root
-                (file-exists-p (expand-file-name "docker-compose.yml" project-root)))
-       project-root)
-     ;; 5. Look for docker-compose.yml in directory hierarchy
-     (locate-dominating-file search-dir "docker-compose.yml"))))
-#+END_SRC
-
-*** Container Status Check
-
-Probes the Claude container for running state — gates the container-startup branch so we don't re-=docker compose up= an already-healthy stack.
-
-#+BEGIN_SRC elisp
-(defun code-agent--docker-container-running-p (&optional cli-path project-root)
-  "Check if the Claude Docker container is running.
-Uses docker compose ps to check container status.
-
-Optional CLI-PATH is the Docker command which may contain -f flag.
-Optional PROJECT-ROOT is the project directory for resolving relative paths."
-  (let ((compose-dir (code-agent--find-compose-dir cli-path project-root)))
-    (when compose-dir
-      (let* ((default-directory compose-dir)
-             (cmd (format "docker compose ps --status running -q %s 2>/dev/null"
-                          code-agent-docker-service-name))
-             (output (shell-command-to-string cmd)))
-        (not (string-empty-p (string-trim output)))))))
-#+END_SRC
-
-*** Container Startup
-
-Brings the Claude container up if it isn't running.  Called lazily from the first Docker-mode query so cold-starts are transparent to the user.
-
-#+BEGIN_SRC elisp
-(defun code-agent--ensure-docker-container (&optional cli-path project-root)
-  "Ensure the Claude Docker container is running.
-Starts the container if not already running.
-
-Optional CLI-PATH is the Docker command which may contain -f flag.
-Optional PROJECT-ROOT is the project directory for resolving relative paths.
-
-Returns t if container is ready, signals error on failure."
-  (if (code-agent--docker-container-running-p cli-path project-root)
-      t
-    (let ((compose-dir (code-agent--find-compose-dir cli-path project-root)))
-      (unless compose-dir
-        (error "Cannot find docker-compose.yml for Claude container"))
-      (message "Starting Claude Docker container...")
-      (let* ((default-directory compose-dir)
-             (output-buffer (get-buffer-create "*docker-compose-output*"))
-             (exit-code (with-current-buffer output-buffer
-                          (erase-buffer)
-                          (call-process "docker" nil t nil "compose" "up" "-d"))))
-        (unless (zerop exit-code)
-          (error "Docker compose up failed (exit code %d). See *docker-compose-output* buffer"
-                 exit-code)))
-      ;; Wait for container to be ready (includes Claude Code installation)
-      (let ((retries 30)  ; 30 seconds max
-            (ready nil))
-        (while (and (> retries 0) (not ready))
-          (sleep-for 1)
-          (setq ready (code-agent--docker-container-running-p cli-path project-root))
-          (cl-decf retries))
-        (if ready
-            (progn
-              (message "Claude Docker container ready")
-              t)
-          (error "Failed to start Claude Docker container (timeout)"))))))
-#+END_SRC
-
-*** Process Environment
-
-=process-environment= assembly — collects =CLAUDE_*= env vars, the Bun memory cap, and per-session identifiers into the child process's environment before =start-process=.
-
-#+BEGIN_SRC elisp
-(defcustom code-agent-bun-memory-limit nil
-  "Memory limit in bytes for Bun's JSC heap via BUN_JSC_forceRAMSize.
-When non-nil, this value is injected into the subprocess environment,
-telling Bun's JavaScriptCore engine to treat available RAM as this many
-bytes.  This constrains JS heap growth and triggers GC earlier, helping
-prevent OOM kills (signal 9) on macOS.
-
-Recommended value: (* 3 1024 1024 1024) for 3 GB.
-Set to nil to disable (default)."
-  :type '(choice (integer :tag "Bytes")
-                 (const :tag "Disabled" nil))
-  :group 'code-agent)
-
-(defvar code-agent--stripped-env-vars '("CLAUDECODE")
-  "Environment variables to strip when spawning Claude CLI subprocesses.
-Claude CLI refuses to launch when CLAUDECODE is set (nested session detection).
-Our SDK must unset it so Emacs users can run queries from within a Claude Code session.")
-
-(defun code-agent--build-process-environment (env-vars cli-dir)
-  "Build process environment for a Claude CLI subprocess.
-ENV-VARS is an alist of (NAME . VALUE) pairs to add.
-CLI-DIR is the directory of the CLI binary (prepended to PATH), or nil.
-Strips variables listed in `code-agent--stripped-env-vars'.
-Injects BUN_JSC_forceRAMSize when `code-agent-bun-memory-limit' is set."
-  (let ((base-env (cl-remove-if
-                   (lambda (entry)
-                     (cl-some (lambda (var)
-                                (string-prefix-p (concat var "=") entry))
-                              code-agent--stripped-env-vars))
-                   process-environment)))
-    (append
-     (when cli-dir
-       (list (concat "PATH=" cli-dir ":" (getenv "PATH"))))
-     ;; Bun memory tuning: cap JSC heap to prevent OOM kills
-     (when code-agent-bun-memory-limit
-       (list (format "BUN_JSC_forceRAMSize=%d" code-agent-bun-memory-limit)))
-     (mapcar (lambda (pair)
-               (format "%s=%s" (car pair) (cdr pair)))
-             env-vars)
-     base-env)))
-
-(defun code-agent--kill-child-processes (pid)
-  "Kill all child processes of process with PID.
-This prevents orphaned shells from surviving after the main process exits.
-PID is guaranteed to be a number from `process-id', so shell injection is not possible."
-  (when (and pid (> pid 0))
-    (let ((child-pids (split-string
-                      (string-trim
-                       (shell-command-to-string
-                        (format "pgrep -P %d 2>/dev/null" pid)))
-                      "\n" t)))
-      (dolist (child-pid child-pids)
-        (let ((cpid (string-to-number child-pid)))
-          (when (> cpid 0)
-            (signal-process cpid 9)))))))
-
-(defun code-agent--kill-process-tree (process &optional signal)
-  "Kill PROCESS and all its descendant processes.
-SIGNAL defaults to SIGKILL (9).  On Unix, child shells (zsh, bash) create
-their own process groups via setsid/setpgid, so killing just the parent or
-its process group leaves grandchildren orphaned.  This function uses pgrep
-to find all descendants and kills them bottom-up."
-  (when (process-live-p process)
-    (let ((pid (process-id process))
-          (sig (or signal 9)))
-      (when pid
-        ;; Kill descendants first (children, grandchildren, etc.)
-        ;; pgrep -P finds direct children; we recurse via the shell
-        (let ((desc-pids (split-string
-                          (string-trim
-                           (shell-command-to-string
-                            (format "pgrep -P %d 2>/dev/null" pid)))
-                          "\n" t)))
-          (dolist (child-pid desc-pids)
-            (let ((child-pid-num (string-to-number child-pid)))
-              (when (> child-pid-num 0)
-                ;; Recursively kill grandchildren first
-                (let ((grandchild-pids
-                       (split-string
-                        (string-trim
-                         (shell-command-to-string
-                          (format "pgrep -P %s 2>/dev/null" child-pid)))
-                        "\n" t)))
-                  (dolist (gc-pid grandchild-pids)
-                    (let ((gc-pid-num (string-to-number gc-pid)))
-                      (when (> gc-pid-num 0)
-                        (signal-process gc-pid-num sig)))))
-                (signal-process child-pid-num sig)))))
-        ;; Finally kill the main process
-        (kill-process process)))))
+Returns \"unknown\" if START-TIME is nil."
+  (if (null start-time)
+      "unknown"
+    (let* ((elapsed (- (float-time) start-time))
+           (style (or format-style 'compact)))
+      (cond
+       ;; Less than 60 seconds
+       ((< elapsed 60)
+        (if (eq style 'verbose)
+            (format "started %d seconds ago" (round elapsed))
+          (format "%ds" (round elapsed))))
+       ;; Less than 1 hour
+       ((< elapsed 3600)
+        (if (eq style 'verbose)
+            (format "started %d minutes ago" (round (/ elapsed 60)))
+          (format "%dm" (round (/ elapsed 60)))))
+       ;; 1 hour or more
+       (t
+        (if (eq style 'verbose)
+            (format "started %d hours ago" (round (/ elapsed 3600)))
+          (format "%dh" (round (/ elapsed 3600)))))))))
 #+END_SRC
 
 ** Session + Process State
 
-Four depth-3 sub-sections: per-session state holders, the typed
-structs (=options=, =query-context=, =process-state=), CLI argv
-assembly, and in-flight process tracking.
+Session-key construction, the =query-context= struct (chat dashboard
+identity display), the =process-state= struct, and the active-states
+registry + operations that back =code-agent-kill-all-processes=.
 
 *** Session Management
 
-Per-session state — verbose buffer hash table, request-id tracking, the small set of session-keyed maps the rest of the file reads through.
+Builds the internal session key used to key per-session state elsewhere in
+this file (Query Context, Active Query Tracking).  =code-agent-make-session-key=
+is relocated here (2026-07) from the (now-deleted) JSON Stream Backend >
+Public Utility Wrappers section — it is a thin public wrapper over
+=code-agent--make-session-key= for the presentation layer.
 
 #+BEGIN_SRC elisp
-(defvar code-agent--session-verbose-buffers (make-hash-table :test 'equal)
-  "Map session-key to verbose output buffer.")
-
-(defcustom code-agent-verbose-buffer-auto-kill nil
-  "If non-nil, kill verbose buffer when session is cleared."
-  :type 'boolean
-  :group 'code-agent)
-
-(defvar code-agent--session-mapping (make-hash-table :test 'equal)
-  "Map internal session keys to SDK UUIDs.
-Internal keys use format: file_path::session_id or just file_path.
-SDK UUIDs are returned by Claude CLI for session resume.")
-
 (defun code-agent--make-session-key (file-path &optional session-id)
   "Create internal session key from FILE-PATH and optional SESSION-ID.
 If SESSION-ID provided: \"file-path::session-id\"
@@ -641,85 +202,10 @@ Otherwise: \"file-path\""
       (format "%s::%s" file-path session-id)
     file-path))
 
-(defun code-agent--get-sdk-uuid (session-key)
-  "Look up SDK UUID for SESSION-KEY.
-Returns nil if no mapping exists."
-  (gethash session-key code-agent--session-mapping))
-
-(defun code-agent--store-sdk-uuid (session-key sdk-uuid)
-  "Store SDK-UUID mapping for SESSION-KEY."
-  (when (and session-key sdk-uuid)
-    (puthash session-key sdk-uuid code-agent--session-mapping)
-    (code-agent--debug-log "Session stored: %s -> %s" session-key sdk-uuid)))
-
-(defun code-agent--clear-session (session-key)
-  "Clear session mapping for SESSION-KEY.
-Use when session expires or needs reset."
-  (when session-key
-    (remhash session-key code-agent--session-mapping)
-    ;; Optionally kill verbose buffer
-    (when code-agent-verbose-buffer-auto-kill
-      (when-let* ((buf (gethash session-key code-agent--session-verbose-buffers)))
-        (when (buffer-live-p buf)
-          (kill-buffer buf)))
-      (remhash session-key code-agent--session-verbose-buffers))
-    (code-agent--debug-log "Session cleared: %s" session-key)))
-
-(defun code-agent--session-expired-p (error-message)
-  "Check if ERROR-MESSAGE indicates session expiration.
-Returns non-nil if the error is about an expired/missing session."
-  (when (stringp error-message)
-    (or (string-match-p "No conversation found with session ID" error-message)
-        (string-match-p "session.*not found" error-message)
-        (string-match-p "session.*expired" error-message))))
-
-(defun code-agent--context-too-long-p (error-message)
-  "Check if ERROR-MESSAGE indicates context/prompt is too long.
-Returns non-nil if the error is about exceeding context limits."
-  (when (stringp error-message)
-    (or (string-match-p "Prompt is too long" error-message)
-        (string-match-p "prompt.*too long" error-message)
-        (string-match-p "context.*too long" error-message)
-        (string-match-p "exceeds.*context" error-message)
-        (string-match-p "token.*limit" error-message))))
-
-#+END_SRC
-
-*** Data Structures
-
-*** Content Block Types
-
-=cl-defstruct= for each ACP/SDK message content-block kind — text, tool-use, tool-result, thinking, etc.  Typed blocks replace plist-pattern-matching across the parsing surface.
-
-#+BEGIN_SRC elisp
-(cl-defstruct (code-agent-text-block
-               (:constructor code-agent-make-text-block)
-               (:copier nil))
-  "Text content block."
-  text)
-
-(cl-defstruct (code-agent-thinking-block
-               (:constructor code-agent-make-thinking-block)
-               (:copier nil))
-  "Thinking content block (extended thinking)."
-  thinking
-  signature)
-
-(cl-defstruct (code-agent-tool-use-block
-               (:constructor code-agent-make-tool-use-block)
-               (:copier nil))
-  "Tool use content block."
-  id
-  name
-  input)
-
-(cl-defstruct (code-agent-tool-result-block
-               (:constructor code-agent-make-tool-result-block)
-               (:copier nil))
-  "Tool result content block."
-  tool-use-id
-  content
-  is-error)
+(defun code-agent-make-session-key (file-path &optional session-id)
+  "Create internal session key from FILE-PATH and optional SESSION-ID.
+Public wrapper for session key generation."
+  (code-agent--make-session-key file-path session-id))
 #+END_SRC
 
 *** Query Context
@@ -767,75 +253,13 @@ Returns human-readable label:
             (format "Instruction %d (%d/%d)" num cur max)))))))
 #+END_SRC
 
-*** Message Types
-
-Message types mirror the Python SDK discriminated union.
-
-#+BEGIN_SRC elisp
-(cl-defstruct (code-agent-user-message
-               (:constructor code-agent-make-user-message)
-               (:copier nil))
-  "User message."
-  content
-  parent-tool-use-id)
-
-(cl-defstruct (code-agent-assistant-message
-               (:constructor code-agent-make-assistant-message)
-               (:copier nil))
-  "Assistant message with content blocks."
-  content      ; List of content blocks
-  model
-  parent-tool-use-id
-  error)       ; Error info if present
-
-(cl-defstruct (code-agent-system-message
-               (:constructor code-agent-make-system-message)
-               (:copier nil))
-  "System message with metadata."
-  subtype
-  data)
-
-(cl-defstruct (code-agent-result-message
-               (:constructor code-agent-make-result-message)
-               (:copier nil))
-  "Result message with cost and usage information."
-  subtype
-  duration-ms
-  duration-api-ms
-  is-error
-  num-turns
-  session-id
-  total-cost-usd
-  usage
-  result)
-#+END_SRC
-
 *** Message Event Hooks
 
-Local Emacs hooks that fire when specific message patterns are observed from
-the Claude CLI. These are NOT control protocol hooks - they're for local
-monitoring and tracking.
-
-| Message Type | Event | Hook Variable |
-|--------------+-------+---------------|
-| =assistant= (tool_use) | PreToolUse | =code-agent-pre-tool-use-functions= |
-| =user= (tool_result) | PostToolUse | =code-agent-post-tool-use-functions= |
-| =result= | Stop | =code-agent-stop-functions= |
+Local Emacs hook fired when the agent reports skill/rule invocation via the
+MCP =report_invocation= tool — for local monitoring and tracking, not part
+of the control protocol.
 
 #+BEGIN_SRC elisp
-(defvar code-agent-pre-tool-use-functions nil
-  "Hook called when assistant requests tool use.
-Each function receives (TOOL-NAME TOOL-INPUT TOOL-ID STATE).")
-
-(defvar code-agent-post-tool-use-functions nil
-  "Hook called when tool result is received.
-Each function receives (TOOL-USE-ID RESULT IS-ERROR TOOL-USE-RESULT STATE).
-TOOL-USE-RESULT contains extra fields like isAsync, agentId for background tasks.")
-
-(defvar code-agent-stop-functions nil
-  "Hook called when session ends (result message received).
-Each function receives (RESULT-MESSAGE STATE).")
-
 (defvar code-agent-invocation-hook nil
   "Hook called when agent reports skill/rule invocation via MCP tool.
 Each function receives (TYPE NAME REASON) where:
@@ -848,159 +272,9 @@ in emacs-mcp-server.org. The agent calls this tool when invoking
 skills or applying rules, enabling real-time monitoring.")
 #+END_SRC
 
-*** Event Dispatch Functions
-
-Per-event-type dispatch — translates a parsed message into the matching hook firing (PreToolUse, PostToolUse, Stop, etc.) so subscribers don't see raw JSON.
-
-#+BEGIN_SRC elisp
-(defun code-agent--dispatch-pre-tool-use (parsed state)
-  "Dispatch PreToolUse hooks for tool_use blocks in PARSED message.
-STATE is the process state struct."
-  (when-let* ((message (plist-get parsed :message))
-              (content (plist-get message :content)))
-    ;; Content must be a list of blocks, not a plain string
-    (when (and (listp content) (listp (car-safe content)))
-      (dolist (block content)
-        (when (equal (plist-get block :type) "tool_use")
-          (run-hook-with-args 'code-agent-pre-tool-use-functions
-                              (plist-get block :name)
-                              (plist-get block :input)
-                              (plist-get block :id)
-                              state))))))
-
-(defun code-agent--dispatch-post-tool-use (parsed state)
-  "Dispatch PostToolUse hooks for tool_result blocks in PARSED message.
-STATE is the process state struct."
-  (when-let* ((message (plist-get parsed :message)))
-    (let ((content (plist-get message :content))
-          (tool-use-result (plist-get parsed :tool_use_result)))
-      ;; Content must be a list of blocks, not a plain string
-      (when (and content (listp content) (listp (car-safe content)))
-        (dolist (block content)
-          (when (equal (plist-get block :type) "tool_result")
-            (run-hook-with-args 'code-agent-post-tool-use-functions
-                                (plist-get block :tool_use_id)
-                                (plist-get block :content)
-                                (plist-get block :is_error)
-                                tool-use-result
-                                state)))))))
-#+END_SRC
-
-*** Argument Builder
-
-The argument builder transforms the options plist into CLI arguments for the
-Claude Code CLI. This is split into logical groups for maintainability.
-
-*** Core Argument Builder
-
-Build the complete argument list by combining base arguments with option-specific
-flags. The function processes options in groups: execution limits, permissions,
-tool controls, session management, and output format.
-
-#+NAME: arg-builder-main
-#+BEGIN_SRC elisp
-(defun code-agent--build-args (options &optional streaming-p)
-  "Build CLI arguments from OPTIONS plist.
-If STREAMING-P is non-nil, use streaming input mode."
-  (let ((args (list "--output-format" "stream-json" "--verbose")))
-    ;; === Execution Limits ===
-    (let ((system-prompt (plist-get options :system-prompt)))
-      (when system-prompt
-        (setq args (append args (list "--system-prompt" system-prompt)))))
-    (let ((max-turns (plist-get options :max-turns)))
-      (when max-turns
-        (setq args (append args (list "--max-turns" (number-to-string max-turns))))))
-    (let ((max-budget (plist-get options :max-budget-usd)))
-      (when max-budget
-        (setq args (append args (list "--max-budget-usd" (number-to-string max-budget))))))
-
-    ;; === Permission Mode ===
-    (let ((perm-mode (plist-get options :permission-mode)))
-      (when perm-mode
-        (let ((mode-str (code-agent--permission-mode-to-string perm-mode)))
-          (when mode-str
-            (setq args (append args (list "--permission-mode" mode-str)))))))
-
-    ;; === Permission Callback (requires streaming mode for control protocol) ===
-    (when (and streaming-p code-agent-permission-functions)
-      (setq args (append args (list "--permission-prompt-tool" "stdio"))))
-
-    ;; === Tool Controls ===
-    (let ((allowed-tools (plist-get options :allowed-tools)))
-      (when allowed-tools
-        (setq args (append args (list "--allowedTools"
-                                      (string-join allowed-tools ","))))))
-    (let ((disallowed-tools (plist-get options :disallowed-tools)))
-      (when disallowed-tools
-        (setq args (append args (list "--disallowedTools"
-                                      (string-join disallowed-tools ","))))))
-    (let ((mcp-config (plist-get options :mcp-config)))
-      (when mcp-config
-        (setq args (append args (list "--mcp-config" mcp-config)))))
-
-    ;; === Session Management ===
-    (when (plist-get options :continue-conversation)
-      (setq args (append args (list "--continue"))))
-    (let ((resume (plist-get options :resume)))
-      (when resume
-        (setq args (append args (list "--resume" resume)))))
-    (let ((setting-sources (plist-get options :setting-sources)))
-      (when setting-sources
-        (setq args (append args (list "--setting-sources"
-                                      (string-join setting-sources ","))))))
-
-    ;; === Output Format ===
-    (if streaming-p
-        (setq args (append args (list "--input-format" "stream-json")))
-      (setq args (append args (list "--print"))))
-    args))
-#+END_SRC
-
 *** Process State
 
 Internal state structure for managing async process communication.
-
-*** Sub-Structs
-
-Focused sub-structs for logical grouping of process state fields.
-The main =--process-state= composes them so each concern (callbacks,
-docker, recovery, …) is a separate accessor surface.
-
-#+BEGIN_SRC elisp
-(cl-defstruct (code-agent--callback-state
-               (:constructor code-agent--make-callback-state)
-               (:copier nil))
-  "Bundle of callbacks for async query processing."
-  callback          ; Message callback function
-  token-callback    ; Token callback for streaming text
-  error-callback    ; Error callback function
-  complete-callback) ; Completion callback function
-
-(cl-defstruct (code-agent--recovery-state
-               (:constructor code-agent--make-recovery-state)
-               (:copier nil))
-  "Recovery-related state for session resumption."
-  session-id        ; Claude session ID (from result message) for resumption
-  original-prompt   ; Original prompt for recovery context
-  (got-result nil)) ; Boolean: true if result message was received
-
-(cl-defstruct (code-agent--source-state
-               (:constructor code-agent--make-source-state)
-               (:copier nil))
-  "Source location state for query origin tracking."
-  buffer            ; Buffer that initiated query (for display)
-  query-context     ; code-agent-query-context struct for display
-  location-fn       ; Function symbol to call for navigation (or nil)
-  location-args)    ; List of args for location-fn (or nil)
-
-(cl-defstruct (code-agent--docker-state
-               (:constructor code-agent--make-docker-state)
-               (:copier nil))
-  "Docker sandbox state for containerized execution."
-  mode              ; Non-nil when running in Docker sandbox
-  path-mappings     ; Path mappings for Docker mode ((host . container) ...)
-  edited-files)     ; List of files edited during query (container paths)
-#+END_SRC
 
 *** Composite State
 
@@ -1039,99 +313,73 @@ docker, recovery, …) is a separate accessor surface.
 
 #+END_SRC
 
-*** Unified Lifecycle Registry
+*** Active-States Registry
 
-Single registry struct consolidating all global tracking tables.
-Per-process cleanup via =code-agent-registry-cleanup-process= — never =clrhash=.
-
-All process-tracking state lives in =code-agent--registry=.  Access active-states
-exclusively through =code-agent-registry-active-states= or the struct accessor.
-The hash-table fields =code-agent--pending-background-tasks= and
-=code-agent--pending-control-requests= are aliases into the same hash-table
-objects stored in the registry struct.
+Registry struct tracking in-flight process states.  Slimmed down (2026-07)
+from a "unified" registry that also carried per-request queries/sessions/
+background-tasks/control-requests/verbose-buffers hash tables — all of
+those were only read by the (now-deleted) JSON-stream process-lifecycle
+code.  =code-agent-kill-all-processes= and =code-agent--purge-active-states=
+are the surviving consumers of =active-states=.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (code-agent--registry
                (:constructor code-agent--make-registry)
                (:copier nil))
-  "Unified lifecycle registry for all process tracking state."
-  (active-states nil)     ; List of active process-state objects
-  (queries (make-hash-table :test 'equal))          ; request-id -> process-state
-  (sessions (make-hash-table :test 'equal))         ; session-key -> session-id
-  (background-tasks (make-hash-table :test 'equal)) ; task-id -> owner-request-id
-  (control-requests (make-hash-table :test 'equal)) ; ctrl-req-id -> owner-request-id
-  (verbose-buffers (make-hash-table :test 'equal))) ; session-key -> buffer
+  "Lifecycle registry tracking active process states."
+  (active-states nil))    ; List of active process-state objects
 
 (defvar code-agent--registry (code-agent--make-registry)
   "Singleton lifecycle registry instance.")
 
-;;;; Registry Accessors
-;; Thin defsubst accessors — all reads/writes go through the registry struct.
-
 (defsubst code-agent-registry-active-states ()
-  "Return active states list from the unified registry."
+  "Return active states list from the registry."
   (code-agent--registry-active-states code-agent--registry))
-
-(defsubst code-agent-registry-pending-background-tasks ()
-  "Return pending background tasks hash table from the unified registry."
-  (code-agent--registry-background-tasks code-agent--registry))
-
-(defsubst code-agent-registry-pending-control-requests ()
-  "Return pending control requests hash table from the unified registry."
-  (code-agent--registry-control-requests code-agent--registry))
-
-;;;; Hash-Table Aliases
-;; For hash-table fields, the standalone vars hold the SAME hash-table
-;; object that lives in the registry struct.  Mutations via
-;; puthash/remhash/clrhash are visible through both names.
-(defvar code-agent--pending-background-tasks
-  (code-agent--registry-background-tasks code-agent--registry)
-  "Backward-compatible alias into `code-agent--registry' background-tasks.
-Same hash-table object — mutations are visible through both names.")
-
-(defvar code-agent--pending-control-requests
-  (code-agent--registry-control-requests code-agent--registry)
-  "Backward-compatible alias into `code-agent--registry' control-requests.
-Same hash-table object — mutations are visible through both names.")
-
-(defun code-agent--remove-hash-entries-by-value (table value)
-  "Remove all entries from TABLE whose value equals VALUE.
-Collects keys first to avoid modify-during-iterate."
-  (let (keys)
-    (maphash (lambda (k v)
-               (when (equal v value) (push k keys)))
-             table)
-    (dolist (k keys) (remhash k table))))
-
-(defun code-agent-registry-cleanup-process (state)
-  "Per-process cleanup for STATE. Removes only entries owned by this process.
-Never calls clrhash — preserves parallel sessions.
-Also unregisters from `code-agent--active-queries' to ensure the
-*Claude Queries* buffer and mode-line reflect the terminal state."
-  (let* ((req-id (code-agent--process-state-request-id state))
-         (reg code-agent--registry))
-    ;; Remove from active-states list (registry is sole owner)
-    (setf (code-agent--registry-active-states reg)
-          (delq state (code-agent--registry-active-states reg)))
-    ;; Remove owned entries from all registry tables
-    (when req-id
-      (code-agent--remove-hash-entries-by-value
-       (code-agent--registry-background-tasks reg) req-id)
-      (code-agent--remove-hash-entries-by-value
-       (code-agent--registry-control-requests reg) req-id)
-      (remhash req-id (code-agent--registry-queries reg))
-      ;; Also unregister from active-queries hash table.
-      ;; This is critical for the abnormal exit (recovery) path where
-      ;; sentinel-cleanup is NOT called, so without this the old dead
-      ;; entry would persist in active-queries indefinitely.
-      (code-agent--unregister-query req-id))))
 #+END_SRC
 
 *** Process State Operations
 
 Functions that operate on process state for query lifecycle management.
+=code-agent--kill-process-tree= is relocated here (2026-07) from the
+(now-deleted) Discovery + Environment > Process Environment section — it is
+=code-agent-kill-all-processes='s only remaining dependency from that tree.
 
 #+BEGIN_SRC elisp
+(defun code-agent--kill-process-tree (process &optional signal)
+  "Kill PROCESS and all its descendant processes.
+SIGNAL defaults to SIGKILL (9).  On Unix, child shells (zsh, bash) create
+their own process groups via setsid/setpgid, so killing just the parent or
+its process group leaves grandchildren orphaned.  This function uses pgrep
+to find all descendants and kills them bottom-up."
+  (when (process-live-p process)
+    (let ((pid (process-id process))
+          (sig (or signal 9)))
+      (when pid
+        ;; Kill descendants first (children, grandchildren, etc.)
+        ;; pgrep -P finds direct children; we recurse via the shell
+        (let ((desc-pids (split-string
+                          (string-trim
+                           (shell-command-to-string
+                            (format "pgrep -P %d 2>/dev/null" pid)))
+                          "\n" t)))
+          (dolist (child-pid desc-pids)
+            (let ((child-pid-num (string-to-number child-pid)))
+              (when (> child-pid-num 0)
+                ;; Recursively kill grandchildren first
+                (let ((grandchild-pids
+                       (split-string
+                        (string-trim
+                         (shell-command-to-string
+                          (format "pgrep -P %s 2>/dev/null" child-pid)))
+                        "\n" t)))
+                  (dolist (gc-pid grandchild-pids)
+                    (let ((gc-pid-num (string-to-number gc-pid)))
+                      (when (> gc-pid-num 0)
+                        (signal-process gc-pid-num sig)))))
+                (signal-process child-pid-num sig)))))
+        ;; Finally kill the main process
+        (kill-process process)))))
+
 (defun code-agent--query-active-p (state)
   "Return t if STATE represents a truly active query.
 Checks both closed state and process liveness."
@@ -1141,26 +389,6 @@ Checks both closed state and process liveness."
        ;; Process must be nil (not yet started) or alive
        (let ((proc (code-agent--process-state-process state)))
          (or (null proc) (process-live-p proc)))))
-
-(defun code-agent-query-interrupt (state)
-  "Interrupt an ongoing query by STATE.
-STATE is the process state returned by `code-agent-query'.
-Sets the cancelled flag to prevent automatic recovery."
-  (setf (code-agent--process-state-cancelled state) t)
-  (when-let* ((process (code-agent--process-state-process state)))
-    (when (process-live-p process)
-      (interrupt-process process))))
-
-(defun code-agent-query-kill (state)
-  "Kill an ongoing query by STATE.
-Unlike `code-agent-query-interrupt', this sends SIGKILL which cannot be ignored.
-Kills the entire process tree to prevent orphaned shell processes.
-Sets the cancelled flag to prevent automatic recovery.
-STATE is the process state returned by `code-agent-query'."
-  (setf (code-agent--process-state-cancelled state) t)
-  (when-let* ((process (code-agent--process-state-process state)))
-    (when (process-live-p process)
-      (code-agent--kill-process-tree process))))
 
 (defun code-agent-kill-all-processes ()
   "Kill all active Claude agent processes and their children.
@@ -1188,1920 +416,12 @@ Returns the number of processes killed."
       (message "Killed %d Claude process(es)" killed))
     killed))
 
-(defun code-agent-query-request-id (state)
-  "Get the request ID from query STATE.
-Returns the unique request-id that can be used with `code-agent-cancel-query'."
-  (code-agent--process-state-request-id state))
-
-(cl-defun code-agent-update-state-callbacks (state &key callback error-callback
-                                                     token-callback complete-callback)
-  "Update callbacks on STATE.
-This is the public API for external modules to modify process state callbacks
-without reaching into private struct internals.
-Only provided non-nil keyword arguments are updated."
-  (when (and state (code-agent--process-state-p state))
-    (when callback
-      (setf (code-agent--process-state-callback state) callback))
-    (when error-callback
-      (setf (code-agent--process-state-error-callback state) error-callback))
-    (when token-callback
-      (setf (code-agent--process-state-token-callback state) token-callback))
-    (when complete-callback
-      (setf (code-agent--process-state-complete-callback state) complete-callback))))
-
-(defun code-agent-close-process-state (state)
-  "Mark STATE as closed and unregister its query from active tracking.
-This is the public API for external modules (e.g., code-agent-org) to signal
-that a process state is terminated without reaching into private internals."
-  (when (and state (code-agent--process-state-p state))
-    (setf (code-agent--process-state-closed state) t)
-    (when-let* ((req-id (code-agent--process-state-request-id state)))
-      (code-agent--unregister-query req-id))))
 #+END_SRC
 
-** Process Lifecycle + Wire
+** Cancellation
 
-Four depth-3 sub-sections: =start-process= + sentinel, newline-
-delimited JSON parsing, the =code-agent-query= public API, and
-the interactive client wrappers.
-
-*** Process Lifecycle
-
-*** Process Filter
-
-The process filter accumulates JSON data and parses complete messages — the
-core of the streaming protocol. Data arrives in chunks which we buffer until
-complete JSON lines are available.
-
-**** Debug Logging
-
-#+NAME: filter-debug-log
-#+BEGIN_SRC elisp
-(defun code-agent--debug-log (format-string &rest args)
-  "Log debug message if `code-agent-debug' is non-nil."
-  (when code-agent-debug
-    (apply #'message (concat "[code-agent] " format-string) args)))
-#+END_SRC
-
-**** Token Extraction
-
-Extract text tokens from assistant messages for real-time streaming display.
-This enables showing response text as it arrives rather than waiting for
-complete messages.
-
-#+NAME: filter-extract-tokens
-#+BEGIN_SRC elisp
-(defun code-agent--extract-tokens (json callback)
-  "Extract text tokens from JSON and call CALLBACK with each.
-Handles assistant messages by extracting text from content blocks."
-  (let ((type (plist-get json :type)))
-    (when (string= type "assistant")
-      (let* ((message (plist-get json :message))
-             (content (plist-get message :content)))
-        (when content
-          (dolist (block content)
-            (when (string= (plist-get block :type) "text")
-              (let ((text (plist-get block :text)))
-                (when (and text (not (string-empty-p text)))
-                  (funcall callback text))))))))))
-#+END_SRC
-
-**** JSON Boolean Handling
-
-Emacs JSON parser represents =false= as =:json-false= and =true= as =t=.
-This helper ensures we correctly interpret boolean values from the API.
-
-#+NAME: filter-json-true
-#+BEGIN_SRC elisp
-(defun code-agent--json-true-p (value)
-  "Check if JSON VALUE represents true.
-Emacs JSON parser converts false to :json-false and true to t.
-This function returns non-nil only for actual true values."
-  (and value (not (eq value :json-false))))
-#+END_SRC
-
-**** Error Detection
-
-Detect and extract error messages from various JSON response formats.
-The Claude CLI can signal errors in multiple ways - result messages with
-=is_error=true=, assistant messages with error fields, etc.
-
-#+NAME: filter-extract-error
-#+BEGIN_SRC elisp
-(defconst code-agent--known-error-subtypes
-  '(("error_during_execution" . "Execution error (Claude encountered an issue during tool use)")
-    ("invalid_request" . "Invalid request error")
-    ("rate_limit" . "Rate limit exceeded"))
-  "Alist mapping known error subtype strings to human-readable messages.")
-
-(defun code-agent--extract-result-error (parsed)
-  "Extract error from a result message in PARSED JSON.
-Checks :errors array, known subtypes, error_details, field values,
-and deep-search as fallback.  Returns error string or nil."
-  (let ((subtype (plist-get parsed :subtype))
-        (errors (plist-get parsed :errors)))
-    (cond
-     ;; :errors array with specific error messages
-     ((and errors (listp errors) (car errors) (stringp (car errors)))
-      (car errors))
-     ;; Known subtype with human-readable message
-     ((cdr (assoc subtype code-agent--known-error-subtypes)))
-     ;; error_details field
-     ((plist-get parsed :error_details)
-      (let ((details (plist-get parsed :error_details)))
-        (if (stringp details) details (format "%S" details))))
-     ;; Try :result, :error, :message — skip values that duplicate subtype names
-     ((let ((subtype-values (mapcar #'car code-agent--known-error-subtypes)))
-        (or (let ((v (plist-get parsed :result)))
-              (and v (not (member v subtype-values)) v))
-            (let ((v (plist-get parsed :error)))
-              (and v (not (member v subtype-values)) v))
-            (let ((v (plist-get parsed :message)))
-              (and v (not (member v subtype-values)) v)))))
-     ;; Other subtype values — format nicely
-     ((and subtype (not (string= subtype "")))
-      (format "Error: %s" subtype))
-     ;; Deep search for meaningful error strings
-     (t
-      (or
-       (cl-labels ((find-error-string (obj)
-                     (cond
-                      ((stringp obj)
-                       (when (and (> (length obj) 20)
-                                  (string-match-p "\\(?:error\\|Error\\|failed\\|not found\\)" obj))
-                         obj))
-                      ((listp obj)
-                       (cl-some #'find-error-string obj))
-                      (t nil))))
-         (find-error-string parsed))
-       (format "Error (fields: %s)"
-               (mapcar #'car (seq-partition (cdr parsed) 2))))))))
-
-(defun code-agent--extract-assistant-error (parsed)
-  "Extract error from an assistant message in PARSED JSON.
-Checks for :message with non-empty :error field, extracts text
-content or falls back to error string.  Returns error string or nil."
-  (let* ((msg (plist-get parsed :message))
-         (err (plist-get msg :error)))
-    (when (and err (stringp err) (not (string-empty-p err)))
-      (let* ((content (plist-get msg :content))
-             (text-block (car-safe (seq-filter
-                                    (lambda (b) (string= (plist-get b :type) "text"))
-                                    content))))
-        (or (plist-get text-block :text)
-            err
-            "API error")))))
-
-(defun code-agent--extract-json-error (parsed)
-  "Extract error message from PARSED JSON if it indicates an error.
-Returns the error message string if an error is detected, nil otherwise.
-Delegates to sub-extractors for result and assistant message types."
-  (let ((type (plist-get parsed :type)))
-    (cond
-     ((and (string= type "result")
-           (code-agent--json-true-p (plist-get parsed :is_error)))
-      (code-agent--extract-result-error parsed))
-     ((string= type "assistant")
-      (code-agent--extract-assistant-error parsed))
-     (t nil))))
-#+END_SRC
-
-**** Normal Message Processing
-
-Routes a non-control message (assistant / user / system / result) into the matching callback path — content blocks feed token streaming, structured events feed hooks.
-
-#+BEGIN_SRC elisp
-(defun code-agent--process-normal-message (parsed state)
-  "Process a normal (non-control) message.
-PARSED is the JSON plist, STATE is process state.
-Callbacks and process are extracted from STATE."
-  (let ((callback (code-agent--process-state-callback state))
-        (token-callback (code-agent--process-state-token-callback state))
-        (error-callback (code-agent--process-state-error-callback state))
-        (process (code-agent--process-state-process state))
-        (json-error (code-agent--extract-json-error parsed))
-        (is-result (string= (plist-get parsed :type) "result")))
-    ;; Set got-result flag for ANY result message (error or success)
-    ;; This prevents infinite recovery loops when CLI returns error results
-    (when is-result
-      (setf (code-agent--process-state-got-result state) t))
-    (if json-error
-        ;; Error detected in JSON - call error callback
-        (progn
-          (code-agent--debug-log "JSON error detected: %s" json-error)
-          (when error-callback
-            (funcall error-callback
-                     (list 'code-agent-api-error
-                           :message json-error
-                           :parsed parsed))))
-      ;; Normal message processing (else-branch is implicit progn)
-      ;; Extract text for token callback (streaming)
-      (when token-callback
-        (code-agent--extract-tokens parsed token-callback))
-      ;; Call message callback with parsed message
-      (let ((message (code-agent--parse-message parsed)))
-        (when message
-          ;; Capture session-id from system/init message (available at start)
-          ;; This is critical for recovery - result message comes too late
-          (when (and (code-agent-system-message-p message)
-                     (equal (code-agent-system-message-subtype message) "init"))
-            (when-let* ((sid (plist-get (code-agent-system-message-data message) :session_id)))
-              (setf (code-agent--process-state-session-id state) sid)))
-          ;; Set got-result flag when result message received
-          (when (code-agent-result-message-p message)
-            (setf (code-agent--process-state-got-result state) t))
-          ;; Write to verbose buffer if session-key is set
-          (code-agent--verbose-write-message
-           (code-agent--process-state-session-key state) message)
-          ;; Call user callback
-          (when callback
-            (funcall callback message))))
-      ;; Close stdin when result is received (streaming mode)
-      (code-agent--maybe-close-stdin process parsed))))
-#+END_SRC
-
-**** JSON Validation
-
-Validate JSON messages before processing. This catches malformed responses
-early and prevents invalid data from propagating through the system.
-
-#+NAME: filter-json-validation
-#+BEGIN_SRC elisp
-(defun code-agent--validate-json-message (parsed)
-  "Validate that PARSED is a well-formed JSON message.
-Returns PARSED if valid, nil if invalid.
-
-A valid message must:
-- Be a plist (or alist convertible to plist)
-- Have a :type key with a non-empty string value
-
-Unknown message types are considered valid (forward compatibility)."
-  (and parsed
-       (listp parsed)
-       (let ((msg-type (plist-get parsed :type)))
-         (and msg-type
-              (stringp msg-type)
-              (not (string-empty-p msg-type))))
-       parsed))
-
-(defun code-agent--is-cli-text-output-p (line)
-  "Check if LINE is plain CLI text output (not JSON).
-Returns t for plain text, nil for attempted JSON.
-
-Plain text includes CLI startup messages, error messages, etc.
-Attempted JSON has opening braces or brackets."
-  (or (null line)
-      (string-empty-p line)
-      (not (string-match-p "^[[:space:]]*[{[]" line))))
-#+END_SRC
-
-**** Rate Limit Support
-
-Throttles rate-limit warnings so a sustained 429 storm doesn't spam =*Messages*= with one warning per token attempt.  Configurable cooldown per rate-limit type.
-
-#+BEGIN_SRC elisp
-(defcustom code-agent-rate-limit-warning-interval 3600
-  "Minimum seconds between repeated warnings for the same rate limit type.
-When a rate_limit_event with allowed_warning status arrives, a warning
-message is posted to the minibuffer.  Subsequent events of the same
-rateLimitType are suppressed until this interval elapses."
-  :type 'integer
-  :group 'code-agent)
-
-(defvar code-agent--rate-limit-last-warned (make-hash-table :test 'equal)
-  "Map rateLimitType string to float-time of last warning message.")
-
-(defun code-agent--format-reset-timestamp (unix-ts)
-  "Format UNIX-TS (a number) as relative time string.
-Shows days and hours for periods >= 24h, otherwise hours and minutes.
-Returns \"unknown\" for non-numeric input."
-  (if (numberp unix-ts)
-      (let* ((diff (- unix-ts (float-time)))
-             (hours (floor (/ diff 3600)))
-             (mins (floor (/ (mod diff 3600) 60))))
-        (if (> hours 24)
-            (format "%dd %dh" (/ hours 24) (mod hours 24))
-          (format "%dh %dm" hours mins)))
-    "unknown"))
-#+END_SRC
-
-**** Protocol-Based Message Dispatch
-:PROPERTIES:
-:CUSTOM_ID: backend-protocol-based-message-dispatch
-:END:
-
-Extensible message dispatch via =cl-defgeneric= / =cl-defmethod=.
-Each message type gets its own method, dispatched by symbol via eql specializer.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-handle-message (type parsed state)
-  "Handle a parsed message of TYPE from the CLI.
-TYPE is a symbol (assistant, user, result, system, etc.).
-PARSED is the raw JSON plist.
-STATE is the `code-agent--process-state'.")
-
-(cl-defmethod code-agent-handle-message ((type (eql 'assistant)) parsed state)
-  "Handle assistant message — dispatch PreToolUse hooks, then normal processing."
-  (code-agent--dispatch-pre-tool-use parsed state)
-  (code-agent--process-normal-message parsed state))
-
-(cl-defmethod code-agent-handle-message ((type (eql 'user)) parsed state)
-  "Handle user message — dispatch PostToolUse hooks, then normal processing."
-  (code-agent--dispatch-post-tool-use parsed state)
-  (code-agent--process-normal-message parsed state))
-
-(cl-defmethod code-agent-handle-message ((type (eql 'result)) parsed state)
-  "Handle result message — dispatch Stop hooks, then normal processing."
-  (let ((message (code-agent--parse-message parsed)))
-    (run-hook-with-args 'code-agent-stop-functions message state))
-  (code-agent--process-normal-message parsed state))
-
-(cl-defmethod code-agent-handle-message
-    ((type (eql 'rate_limit_event)) parsed state)
-  "Handle rate limit event — post warning message when near limit.
-Suppresses repeated warnings for the same rateLimitType within
-`code-agent-rate-limit-warning-interval' seconds."
-  (let* ((info (plist-get parsed :rate_limit_info))
-         (status (plist-get info :status))
-         (rate-type (plist-get info :rateLimitType))
-         (utilization (plist-get info :utilization))
-         (resets-at (plist-get info :resetsAt)))
-    (when (equal status "allowed_warning")
-      (let ((last (gethash rate-type code-agent--rate-limit-last-warned 0)))
-        (when (> (- (float-time) last) code-agent-rate-limit-warning-interval)
-          (puthash rate-type (float-time) code-agent--rate-limit-last-warned)
-          (message "⚠ Claude rate limit warning: %s at %.0f%% (resets %s)"
-                   rate-type
-                   (* (or utilization 0) 100)
-                   (code-agent--format-reset-timestamp resets-at)))))))
-
-;; Catch-all for system, init, and any future message types
-(cl-defmethod code-agent-handle-message (type parsed state)
-  "Default handler for unspecialized message types."
-  (code-agent--process-normal-message parsed state))
-#+END_SRC
-
-**** JSON Buffer Processing
-
-Process accumulated JSON data line by line. Each complete line (terminated by
-newline) is parsed and dispatched to the appropriate handler - either control
-requests for the bidirectional protocol, or normal message callbacks.
-
-#+BEGIN_SRC elisp
-(defun code-agent--try-parse-json (string)
-  "Try to parse STRING as JSON, returning plist or nil on failure.
-Uses standard json settings: plist objects, list arrays, keyword keys."
-  (condition-case nil
-      (let ((json-object-type 'plist)
-            (json-array-type 'list)
-            (json-key-type 'keyword))
-        (json-read-from-string string))
-    ((json-parse-error json-readtable-error json-end-of-file
-                       json-unknown-keyword error)
-     nil)))
-#+END_SRC
-
-#+NAME: filter-process-json-buffer
-#+BEGIN_SRC elisp
-(defun code-agent--process-json-buffer (process)
-  "Process accumulated JSON for PROCESS.
-PROCESS has state stored via `process-get'.
-Parses complete newline-delimited JSON and invokes callbacks."
-  (let* ((state (process-get process 'code-agent-state))
-         (buf (code-agent--process-state-json-buffer state))
-         (error-callback (code-agent--process-state-error-callback state)))
-    (while (string-match "^\\([^\n]+\\)\n" buf)
-      (let* ((line (match-string 1 buf))
-             (rest (substring buf (match-end 0))))
-        (setf (code-agent--process-state-json-buffer state) rest)
-        (setq buf rest)
-        (when (and line (not (string-empty-p (string-trim line))))
-          (let ((parsed (code-agent--try-parse-json line)))
-            (if (and parsed (listp parsed))
-                (let ((msg-type (plist-get parsed :type)))
-                  (if (not (stringp msg-type))
-                      ;; Parsed as JSON object but missing :type — treat as error
-                      (progn
-                        (code-agent--debug-log "JSON object without :type field: %s" line)
-                        (when error-callback
-                          (funcall error-callback
-                                   (list 'code-agent-cli-error
-                                         :message line
-                                         :original-error nil))))
-                    (code-agent--debug-log "Parsed JSON: %S" msg-type)
-                    ;; Control requests use direct dispatch (bidirectional protocol)
-                    (if (equal msg-type "control_request")
-                        (code-agent--handle-control-request process parsed)
-                      ;; All other types: generic dispatch via cl-defmethod
-                      (code-agent-handle-message
-                       (intern msg-type) parsed state))))
-              ;; Line is not valid JSON or is a bare value (number, string, boolean)
-              (code-agent--debug-log "Non-JSON output: %s" line)
-              (when error-callback
-                (funcall error-callback
-                         (list 'code-agent-cli-error
-                               :message line
-                               :original-error nil))))))))))
-#+END_SRC
-
-**** Process Filter Entry Point
-
-#+NAME: filter-main
-#+BEGIN_SRC elisp
-(defun code-agent--process-filter (process output)
-  "Process filter function for PROCESS.
-OUTPUT is the data received from the process.
-Uses `process-get' to retrieve state instead of closures (for dynamic binding compat)."
-  (condition-case err
-      (let ((state (process-get process 'code-agent-state)))
-        (when (and state (code-agent--process-state-ready state))
-          ;; Log stdout to verbose buffer for debugging
-          (when-let* ((session-key (code-agent--process-state-session-key state)))
-            (code-agent-verbose-insert session-key
-                                          (format "<<< STDOUT: %s" output)))
-          (let* ((json-buf (or (code-agent--process-state-json-buffer state) ""))
-                 (new-buf (concat json-buf output)))
-            (if (> (length new-buf) code-agent-max-json-buffer-size)
-                ;; Buffer overflow — clear buffer, signal error, kill process
-                (progn
-                  ;; Clear buffer FIRST to prevent sentinel from re-parsing garbage
-                  (setf (code-agent--process-state-json-buffer state) "")
-                  (let ((err-cb (code-agent--process-state-error-callback state)))
-                    (when err-cb
-                      (funcall err-cb
-                               (list :error
-                                     (format "JSON buffer overflow: %d bytes exceeds %d byte limit"
-                                             (length new-buf)
-                                             code-agent-max-json-buffer-size)))))
-                  (when (process-live-p process)
-                    (delete-process process)))
-              (setf (code-agent--process-state-json-buffer state) new-buf)
-              (code-agent--process-json-buffer process)))))
-    (error (message "code-agent: error in process filter: %S" err))))
-#+END_SRC
-
-*** Process Sentinel
-
-Normal-exit branch of the sentinel.  Fires complete callback, unregisters the active query, frees the buffer — the path every non-error query takes.
-
-#+BEGIN_SRC elisp
-(defun code-agent--sentinel-handle-normal-exit (state event)
-  "Handle normal (non-recovery) exit for STATE with EVENT.
-Calls the complete callback with nil for successful exit, or with
-an error plist for abnormal exit codes.
-Skips the complete callback entirely if the query was cancelled,
-since the cancel path already handled cleanup."
-  (code-agent-with-span "sentinel-normal-exit"
-      (list :event event) nil
-  ;; When a query is cancelled, code-agent-org-cancel (or cancel-query) already
-  ;; cleans up the session state (frees marker, sets status, stops spinner).
-  ;; Calling complete-callback here would cause duplicate cleanup and fire
-  ;; completion hooks with the wrong status.
-  (unless (code-agent--process-state-cancelled state)
-    (let ((complete-cb (code-agent--process-state-complete-callback state)))
-      (cond
-       ((string-match-p "finished" event)
-        (when complete-cb
-          (funcall complete-cb nil)))
-       ((string-match-p "exited abnormally" event)
-        (let ((exit-code (when (string-match "code \\([0-9]+\\)" event)
-                           (string-to-number (match-string 1 event)))))
-          (when complete-cb
-            (funcall complete-cb
-                     (list 'code-agent-process-error
-                           :message "Process exited abnormally"
-                           :exit-code exit-code)))))
-       (t
-        (when complete-cb
-          (funcall complete-cb
-                   (list 'code-agent-process-error
-                         :message (format "Process event: %s" event))))))))))
-
-(defun code-agent--sentinel-handle-abnormal-exit (process state event)
-  "Handle abnormal exit (recovery path) for PROCESS with STATE and EVENT.
-Inserts recovery message, kills orphaned children, does minimal cleanup,
-then resumes the session."
-  (let ((trace-ctx (process-get process 'code-agent-trace-ctx)))
-  (code-agent-with-span "sentinel-abnormal-exit"
-      (list :event (string-trim event)) trace-ctx
-  (when-let* ((session-key (code-agent--process-state-session-key state)))
-    (code-agent-verbose-insert session-key
-                                  (format ">>> ABNORMAL EXIT DETECTED - initiating recovery")))
-  (code-agent--insert-recovery-message state event)
-  (code-agent--kill-child-processes (process-id process))
-  ;; Clear Docker path mappings if this process owned them
-  (when (code-agent--process-state-docker-mode state)
-    (setq emacs-mcp-server-path-mappings nil))
-  ;; Registry-aware cleanup (removes from active-states, queries, etc.)
-  (code-agent-registry-cleanup-process state)
-  ;; Kill output buffer after registry cleanup
-  (when-let* ((buf (code-agent--process-state-buffer state)))
-    (when (buffer-live-p buf)
-      (kill-buffer buf)))
-  (code-agent--resume-session state))))
-
-(defun code-agent--sentinel-cleanup (process state)
-  "Clean up after PROCESS exits with STATE.
-Kills orphaned children, removes from active-states, unregisters
-query, clears Docker mappings, and kills output buffer."
-  ;; Kill any orphaned child processes (delegate to existing helper)
-  (code-agent--kill-child-processes (process-id process))
-  ;; Remove from active states (registry is sole owner)
-  (setf (code-agent--registry-active-states code-agent--registry)
-        (delq state (code-agent--registry-active-states code-agent--registry)))
-  ;; Per-process cleanup via registry
-  (when-let* ((req-id (code-agent--process-state-request-id state)))
-    (code-agent--cleanup-process-entries req-id)
-    (code-agent--unregister-query req-id))
-  ;; Clear Docker path mappings if this process owned them
-  (when (code-agent--process-state-docker-mode state)
-    (setq emacs-mcp-server-path-mappings nil))
-  (when-let* ((buf (code-agent--process-state-buffer state)))
-    (when (buffer-live-p buf)
-      (kill-buffer buf))))
-
-(defun code-agent--sentinel-log-exit (state event)
-  "Log PROCESS EVENT to STATE's verbose buffer with pending-counter summary."
-  (when-let* ((session-key (code-agent--process-state-session-key state)))
-    (code-agent-verbose-insert
-     session-key
-     (format ">>> PROCESS EXIT: %s (pending-bg=%d pending-ctrl=%d)"
-             (string-trim event)
-             (hash-table-count code-agent--pending-background-tasks)
-             (hash-table-count code-agent--pending-control-requests)))))
-
-(defun code-agent--sentinel-flush-final-line (state trimmed)
-  "Best-effort handling of the last line that arrived without trailing newline.
-
-Three shapes matter:
-- A `control_request` we cannot answer — log a clear WARNING since
-  the CLI has died before we could write the response.
-- Any other valid JSON message — log it as INFO; nothing else to do
-  because the regular dispatcher only fires on newline-terminated
-  lines.
-- Anything that does not parse — forward to ERROR-CALLBACK as a
-  raw CLI error so the caller's failure path runs."
-  (let ((session-key (code-agent--process-state-session-key state))
-        (error-callback (code-agent--process-state-error-callback state))
-        (parsed (code-agent--try-parse-json trimmed)))
-    (code-agent--debug-log "Remaining output without newline: %s" trimmed)
-    (if (and parsed (listp parsed))
-        (let ((msg-type (plist-get parsed :type)))
-          (cond
-           ((not (stringp msg-type))
-            (when session-key
-              (code-agent-verbose-insert
-               session-key
-               (format ">>> INFO: Final JSON without :type: %s" trimmed))))
-           ((equal msg-type "control_request")
-            (when session-key
-              (code-agent-verbose-insert
-               session-key
-               ">>> WARNING: control_request received without newline (CLI died?) - cannot respond"))
-            (message "Claude: control_request received but CLI died before we could respond"))
-           (t
-            (code-agent--debug-log "Parsed remaining JSON: %S" msg-type)
-            (when session-key
-              (code-agent-verbose-insert
-               session-key
-               (format ">>> INFO: Final message without newline: %s" msg-type))))))
-      (when error-callback
-        (funcall error-callback
-                 (list 'code-agent-cli-error
-                       :message trimmed
-                       :original-error nil))))))
-
-(defun code-agent--sentinel-emergency-cleanup (process)
-  "Minimal cleanup to prevent state leaks if the sentinel itself errored.
-Wraps `code-agent-registry-cleanup-process' in its own condition-case
-because the original sentinel-level handler has already fired."
-  (condition-case nil
-      (let ((state (process-get process 'code-agent-state)))
-        (when state
-          (code-agent-registry-cleanup-process state)))
-    (error nil)))
-
-(defun code-agent--process-sentinel (process event)
-  "Process sentinel function for PROCESS.
-EVENT is the process event string.
-
-Five phases under one `process-sentinel' span:
-1. Log the exit to the per-session verbose buffer.
-2. Mark STATE closed/not-ready so in-flight callbacks no-op.
-3. Drain any newline-terminated JSON still in the buffer.
-4. Handle the trailing partial line (no newline) via
-   `--sentinel-flush-final-line'.
-5. Dispatch to the normal vs abnormal exit handler.
-
-Outer `condition-case' falls back to
-`--sentinel-emergency-cleanup' so a bug here can't leak STATE
-out of the registry."
-  (condition-case err
-      (let* ((state (process-get process 'code-agent-state))
-             (trace-ctx (process-get process 'code-agent-trace-ctx)))
-        (code-agent-with-span "process-sentinel"
-            (list :event (string-trim event)) trace-ctx
-          (code-agent--debug-log "Process event: %s" (string-trim event))
-          (when state
-            (code-agent--sentinel-log-exit state event)
-            (setf (code-agent--process-state-closed state) t)
-            (setf (code-agent--process-state-ready state) nil)
-            (code-agent--process-json-buffer process)
-            (let ((remaining (code-agent--process-state-json-buffer state)))
-              (when (and remaining
-                         (not (string-empty-p (string-trim remaining))))
-                (code-agent--sentinel-flush-final-line
-                 state (string-trim remaining))))
-            (if (code-agent--is-abnormal-exit-p event state)
-                (code-agent--sentinel-handle-abnormal-exit process state event)
-              (code-agent--sentinel-handle-normal-exit state event)
-              (code-agent--sentinel-cleanup process state)))))
-    (error
-     (message "code-agent: error in process sentinel: %S" err)
-     (code-agent--sentinel-emergency-cleanup process))))
-#+END_SRC
-
-*** Session Recovery
-
-Automatic session recovery when CLI exits abnormally (e.g., killed by signal).
-
-**** Abnormal Exit Detection
-
-Classifies the sentinel's =event= argument into normal vs recovery-warranting.  Signals like SIGKILL + non-zero exit during streaming trigger the recovery branch below.
-
-#+BEGIN_SRC elisp
-(defun code-agent--is-abnormal-exit-p (event state)
-  "Check if EVENT represents an abnormal exit that should trigger recovery.
-STATE is the process state. Returns t if:
-- Process was killed by signal (e.g., \"killed: 9\")
-- Process exited with non-zero code
-- Process finished but no result message was received"
-  (and code-agent-auto-recovery
-       (code-agent--process-state-session-id state)  ; Need session-id to resume
-       (not (code-agent--process-state-got-result state))  ; No result received
-       (not (code-agent--process-state-cancelled state))   ; Not user-cancelled
-       (or (string-match-p "killed" event)
-           (string-match-p "exited abnormally" event)
-           ;; Also treat "finished" without result as abnormal
-           (string-match-p "finished" event))))
-#+END_SRC
-
-**** Recovery Message Insertion
-
-Inserts a recovery-warning marker into the response stream so the user sees the retry without losing the prior tokens.  Goes through the same token-callback path as real tokens.
-
-#+BEGIN_SRC elisp
-(defun code-agent--insert-recovery-message (state event)
-  "Insert a recovery warning message using token-callback.
-STATE is the process state, EVENT is the exit event."
-  (when-let* ((token-callback (code-agent--process-state-token-callback state)))
-    (let* ((signal-info (cond
-                         ((string-match "killed: \\([0-9]+\\)" event)
-                          (format "killed: %s" (match-string 1 event)))
-                         ((string-match "code \\([0-9]+\\)" event)
-                          (format "exit code: %s" (match-string 1 event)))
-                         (t (string-trim event))))
-           (message (format "\n\n⚠️ *Session interrupted (%s)* Attempting automatic recovery...\n\n"
-                           signal-info)))
-      (funcall token-callback message))))
-#+END_SRC
-
-**** Session Resumption
-
-Issues =--resume <sdk-uuid>= on a fresh CLI subprocess after abnormal exit.  Reuses the same =process-state=, so the transition is invisible to callbacks.
-
-#+BEGIN_SRC elisp
-(defun code-agent--resume-session (state)
-  "Resume a session after abnormal exit.
-STATE is the previous process state containing session-id and callbacks."
-  (code-agent-with-span "resume-session" nil nil
-  (let* ((session-id (code-agent--process-state-session-id state))
-         (original-options (code-agent--process-state-options state))
-         (session-key (code-agent--process-state-session-key state))
-         ;; Build new options with resume flag
-         (new-options (plist-put (copy-sequence original-options) :resume session-id)))
-
-    ;; Log the recovery attempt
-    (when session-key
-      (code-agent-verbose-insert session-key
-                                    (format ">>> RECOVERY: Resuming session %s" session-id)))
-    (code-agent--debug-log "Resuming session after abnormal exit: %s" session-id)
-
-    ;; Start new query with recovery prompt and resume flag
-    (code-agent-query
-     code-agent-recovery-prompt  ; Use configurable recovery prompt
-     :options new-options
-     :on-message (code-agent--process-state-callback state)
-     :on-token (code-agent--process-state-token-callback state)
-     :on-error (code-agent--process-state-error-callback state)
-     :on-complete (code-agent--process-state-complete-callback state)
-     :session-key session-key
-     :source-buffer (code-agent--process-state-source-buffer state)
-     :query-context (code-agent--process-state-query-context state)
-     :source-location-fn (code-agent--process-state-source-location-fn state)
-     :source-location-args (code-agent--process-state-source-location-args state)))))
-#+END_SRC
-
-*** Pipe Deadlock Prevention
-
-When using pipes for bidirectional communication, deadlock can occur if:
-1. The CLI writes to stdout faster than Emacs reads
-2. The pipe buffer fills up (64KB Linux, 16KB macOS)
-3. The CLI blocks waiting for buffer space
-4. Emacs blocks waiting for CLI to accept stdin
-
-Solution: Always drain pending output before writing to stdin, and chunk
-large messages with interleaved draining.
-
-#+BEGIN_SRC elisp
-(defun code-agent--drain-output (process &optional timeout-ms)
-  "Drain pending output from PROCESS before sending input.
-TIMEOUT-MS is milliseconds to wait per drain cycle, defaults to 50ms.
-Returns t if any output was drained, nil otherwise."
-  (let ((timeout-secs (/ (or timeout-ms 50) 1000.0))
-        (drained nil))
-    (while (and (process-live-p process)
-                (accept-process-output process timeout-secs nil t))
-      (setq drained t))
-    drained))
-
-(defun code-agent--send-json-safe (process json-str session-key)
-  "Send JSON-STR to PROCESS with deadlock prevention.
-Drains output before sending, chunks large messages.
-SESSION-KEY is used for verbose logging."
-  ;; Log to verbose buffer
-  (when session-key
-    (code-agent-verbose-insert session-key
-                                  (format ">>> STDIN: %s" json-str)))
-  (code-agent--debug-log "Sending to stdin: %s"
-                           (substring json-str 0 (min 200 (length json-str))))
-  ;; Only send if process is alive
-  (when (process-live-p process)
-    ;; CRITICAL: Drain stdout first to prevent deadlock
-    (code-agent--drain-output process)
-    ;; Send in chunks with interleaved draining for large messages
-    (let ((len (length json-str))
-          (pos 0)
-          (chunk-size code-agent-stdin-chunk-size))
-      (while (< pos len)
-        ;; Drain between chunks (except first)
-        (when (> pos 0)
-          (code-agent--drain-output process 10))
-        (let ((chunk (substring json-str pos (min (+ pos chunk-size) len))))
-          (process-send-string process chunk))
-        (setq pos (+ pos chunk-size))))))
-
-(defun code-agent--configure-process-io (process)
-  "Configure PROCESS for optimal I/O throughput.
-Sets buffer sizes and coding for reliable bidirectional communication."
-  (with-current-buffer (process-buffer process)
-    ;; Increase read chunk size (Emacs 27+)
-    (when (boundp 'read-process-output-max)
-      (setq-local read-process-output-max (* 1024 1024)))
-    ;; Disable adaptive buffering for lower latency
-    (setq-local process-adaptive-read-buffering nil))
-  ;; UTF-8 encoding (already set in make-process, but be explicit)
-  (set-process-coding-system process 'utf-8-unix 'utf-8-unix))
-#+END_SRC
-
-*** Streaming Mode Initialization
-
-In streaming mode, we need to:
-1. Send an initialize control request to set up hooks
-2. Send the user prompt as a JSON message
-3. Keep stdin open for bidirectional communication
-4. Close stdin only after receiving the result message
-
-#+BEGIN_SRC elisp
-(defun code-agent--send-stdin (process json-data session-key)
-  "Send JSON-DATA to PROCESS stdin with deadlock prevention.
-SESSION-KEY is used for verbose logging.
-Uses `code-agent--send-json-safe' to drain output before sending
-and chunk large messages to prevent pipe buffer blocking."
-  (let* ((json-object-type 'plist)
-         (json-array-type 'list)
-         (json-key-type 'keyword)
-         (json-str (concat (json-encode json-data) "\n")))
-    ;; Use safe send with draining and chunking
-    (code-agent--send-json-safe process json-str session-key)))
-
-(defun code-agent--streaming-init (process state prompt)
-  "Initialize streaming mode for PROCESS with STATE and send PROMPT.
-Sends initialize control request, waits for response, then sends user message."
-  (code-agent-with-span "streaming-init" nil nil
-  (let ((session-key (code-agent--process-state-session-key state)))
-    ;; Step 1: Send initialize control request
-    (let ((init-request (list :type "control_request"
-                              :request_id "init_1"
-                              :request (list :subtype "initialize"
-                                            :hooks nil))))
-      (code-agent--send-stdin process init-request session-key))
-
-    ;; Step 2: Send user message with prompt
-    ;; The CLI expects: {"type": "user", "message": {"role": "user", "content": "..."}}
-    (let ((user-message (list :type "user"
-                              :message (list :role "user"
-                                            :content prompt))))
-      (code-agent--send-stdin process user-message session-key))
-
-    ;; Mark state as ready (we don't wait for init response synchronously)
-    (setf (code-agent--process-state-ready state) t))))
-#+END_SRC
-
-*** Background Task Tracking
-
-Track background tasks (launched with =run_in_background: true=) to keep the
-process alive until all tasks complete. The tracker is registered on the
-=code-agent-post-tool-use-functions= hook.
-
-Two types of background tasks exist:
-1. *Task tool* (subagents): Returns =isAsync: true= with =agentId=
-2. *Bash tool*: Returns =backgroundTaskId= field (no =isAsync= flag)
-
-Both must be tracked to prevent premature stdin close.
-
-#+BEGIN_SRC elisp
-;; `code-agent--pending-background-tasks' is defined as an alias into the
-;; unified registry in the "Standalone Variable Aliases" section above.
-;; All mutations via puthash/remhash/clrhash on the standalone var go to
-;; the same hash-table object that lives in the registry struct.
-
-(defun code-agent--background-task-tracker (_tool-use-id _result _is-error
-                                              tool-use-result state)
-  "Track background tasks from PostToolUse hook.
-STATE is the process-state struct (used to identify the owning process).
-TOOL-USE-RESULT contains:
-- For Task tool: isAsync=t, agentId (e.g., \"a4b3ecf\")
-- For Bash tool: backgroundTaskId (e.g., \"b8406fe\")
-- For TaskOutput: task.task_id, task.status"
-  (when tool-use-result
-    (let ((owner (and state (code-agent--process-state-request-id state))))
-      ;; Case 1: Task tool async launch - isAsync=t with agentId
-      (when (and (eq (plist-get tool-use-result :isAsync) t)
-                 (plist-get tool-use-result :agentId))
-        (let ((agent-id (plist-get tool-use-result :agentId)))
-          (puthash agent-id (or owner t) code-agent--pending-background-tasks)
-          (code-agent--debug-log "Background Task started: %s (owner: %s)"
-                                   agent-id owner)))
-      ;; Case 2: Bash tool background - backgroundTaskId field
-      (when-let* ((bg-task-id (plist-get tool-use-result :backgroundTaskId)))
-        (puthash bg-task-id (or owner t) code-agent--pending-background-tasks)
-        (code-agent--debug-log "Background Bash started: %s (owner: %s)"
-                                 bg-task-id owner))
-      ;; Task completion: task.status="completed"
-      (when-let* ((task (plist-get tool-use-result :task))
-                  (task-id (plist-get task :task_id))
-                  (status (plist-get task :status)))
-        (when (equal status "completed")
-          (remhash task-id code-agent--pending-background-tasks)
-          (code-agent--debug-log "Background task completed: %s" task-id))))))
-
-(defun code-agent--has-pending-background-tasks-p (&optional owner-request-id)
-  "Return non-nil if there are pending background tasks.
-When OWNER-REQUEST-ID is non-nil, only count tasks owned by that process.
-When nil, checks the global count (any owner).  Callers should guard
-with (and owner-req-id (has-pending-...)) to avoid stale-task blocking."
-  (if owner-request-id
-      (catch 'found
-        (maphash (lambda (_k v)
-                   (when (equal v owner-request-id)
-                     (throw 'found t)))
-                 code-agent--pending-background-tasks)
-        nil)
-    (> (hash-table-count code-agent--pending-background-tasks) 0)))
-
-;; Register tracker on PostToolUse hook
-(add-hook 'code-agent-post-tool-use-functions
-          #'code-agent--background-task-tracker)
-#+END_SRC
-
-*** Pending Control Request Tracking
-
-Track pending control_requests that need responses. The CLI sends permission
-requests (can_use_tool) and expects control_responses. If stdin is closed
-before all control_responses are sent, the CLI will exit unexpectedly.
-
-#+BEGIN_SRC elisp
-;; `code-agent--pending-control-requests' is defined as an alias into the
-;; unified registry in the "Standalone Variable Aliases" section above.
-;; All mutations via puthash/remhash/clrhash on the standalone var go to
-;; the same hash-table object that lives in the registry struct.
-
-(defun code-agent--track-control-request (request-id &optional owner-request-id)
-  "Track REQUEST-ID as pending a response.
-OWNER-REQUEST-ID identifies the owning process for per-process cleanup."
-  (puthash request-id (or owner-request-id t) code-agent--pending-control-requests)
-  (code-agent--debug-log "Control request pending: %s (owner: %s, total: %d)"
-                          request-id owner-request-id
-                          (hash-table-count code-agent--pending-control-requests)))
-
-(defun code-agent--untrack-control-request (request-id)
-  "Remove REQUEST-ID from pending tracking after response sent."
-  (remhash request-id code-agent--pending-control-requests)
-  (code-agent--debug-log "Control request resolved: %s (remaining: %d)"
-                          request-id
-                          (hash-table-count code-agent--pending-control-requests)))
-
-(defun code-agent--has-pending-control-requests-p ()
-  "Return non-nil if there are pending control requests awaiting responses."
-  (> (hash-table-count code-agent--pending-control-requests) 0))
-
-(defun code-agent--clear-pending-control-requests ()
-  "Clear all pending control request tracking.
-Called during session cleanup."
-  (clrhash code-agent--pending-control-requests))
-
-(defun code-agent--cleanup-process-entries (owner-request-id)
-  "Remove registry entries owned by OWNER-REQUEST-ID.
-Only removes entries from `code-agent--pending-background-tasks' and
-`code-agent--pending-control-requests' whose value matches OWNER-REQUEST-ID.
-This is safe for parallel sessions — other sessions' entries are preserved."
-  (when owner-request-id
-    (code-agent--remove-hash-entries-by-value
-     code-agent--pending-background-tasks owner-request-id)
-    (code-agent--remove-hash-entries-by-value
-     code-agent--pending-control-requests owner-request-id)))
-#+END_SRC
-
-*** Closing Stdin After Result
-
-We need to close stdin when we receive the result message to signal completion.
-This is handled in the process filter when a result message is received.
-If there are pending background tasks, we keep stdin open.
-
-**** Why Delayed Stdin Close is Necessary
-
-The Claude Code CLI uses a bidirectional protocol over stdin/stdout:
-- We send: user prompts, control responses (permissions, hooks)
-- CLI sends: messages, control requests (can_use_tool, mcp_message, hook_callback)
-
-When we receive a =result= message, it signals the end of the conversation turn.
-However, closing stdin immediately can cause issues:
-
-1. *Process Filter Timing*: The =result= message is processed inside
-   =code-agent--process-filter=. If we call =process-send-eof= synchronously,
-   it may trigger process termination before the current filter completes.
-
-2. *MCP Server Communication*: With =emacs-mcp-server= active, there may be
-   pending =mcp_message= control requests or responses in flight.
-
-3. *Hook Callbacks*: Any pending hook callbacks need to complete before
-   the connection closes.
-
-The Python SDK handles this by waiting for the result event before closing
-stdin when MCP servers or hooks are present (see =stream_input= in query.py).
-
-Our solution: Use =run-at-time= with a small delay (0.1s) to:
-- Let the current process filter invocation complete
-- Allow any pending filter calls to run
-- Give MCP communication time to settle
-- Then close stdin cleanly
-
-#+BEGIN_SRC elisp
-(defcustom code-agent-stdin-close-delay 0.1
-  "Delay in seconds before closing stdin after receiving result message.
-This delay allows pending process filter invocations and MCP communication
-to complete before signaling end-of-input to the Claude CLI.
-
-The Python SDK uses a similar approach, waiting for the result event
-before closing stdin when MCP servers are active.
-
-Set to 0 to close immediately (original behavior, may cause early exit issues).
-Set to nil to disable automatic stdin close (for debugging)."
-  :type '(choice (number :tag "Delay in seconds")
-                 (const :tag "Disable auto-close" nil))
-  :group 'code-agent)
-
-(defun code-agent--maybe-close-stdin (process parsed)
-  "Close stdin when PARSED is a result message.
-PROCESS is the CLI process.
-Delegates to `code-agent--schedule-stdin-close' which retries
-if control requests are still pending.
-
-Background tasks are NOT checked — the CLI waits for all background
-agents internally before emitting the result message.  By the time
-we receive result, all agent output has already been streamed.
-
-The delay between retries uses `code-agent-stdin-close-delay'."
-  (when (equal (plist-get parsed :type) "result")
-    (if (not code-agent-stdin-close-delay)
-        (code-agent--debug-log "Result received, stdin auto-close disabled")
-      (code-agent--debug-log "Result received, scheduling stdin close")
-      (code-agent--schedule-stdin-close process 0))))
-
-(defun code-agent--schedule-stdin-close (process attempt)
-  "Try to close PROCESS stdin.  Retry if control requests are pending.
-ATTEMPT is the current retry count (0-based).
-Retries up to 50 times (5 seconds) then force-closes to prevent hang."
-  (let ((max-attempts 50)
-        (delay (or code-agent-stdin-close-delay 0.1)))
-    (cond
-     ;; Process already dead — nothing to do
-     ((not (process-live-p process)) nil)
-     ;; No pending control requests — close now
-     ((not (code-agent--has-pending-control-requests-p))
-      (code-agent--debug-log "Closing stdin (attempt %d)" attempt)
-      (process-send-eof process))
-     ;; Max attempts reached — force close to prevent infinite hang
-     ((>= attempt max-attempts)
-      (code-agent--debug-log "Force-closing stdin after %d retries, %d control requests still pending"
-                               attempt (hash-table-count code-agent--pending-control-requests))
-      (process-send-eof process))
-     ;; Retry after delay
-     (t
-      (code-agent--debug-log "Control requests pending (%d), retry %d/%d"
-                               (hash-table-count code-agent--pending-control-requests)
-                               attempt max-attempts)
-      (lexical-let ((proc process)
-                    (next-attempt (1+ attempt)))
-        (run-at-time delay nil
-                     (lambda ()
-                       (code-agent--schedule-stdin-close proc next-attempt))))))))
-#+END_SRC
-
-*** Process Creation
-
-Resolves the CLI parts tuple (executable, args, Docker-or-not, raw path).  The output is consumed by =start-process= and by the Docker-mode wrapper that injects =docker compose run=.
-
-#+BEGIN_SRC elisp
-(defun code-agent--resolve-cli-parts (options)
-  "Return ``(CLI-PARTS DOCKER-P RAW-CLI-PATH)'' for OPTIONS.
-
-CLI-PARTS is the argv prefix: a list of strings.  For Docker
-commands (``docker compose exec claude claude'') the path is
-split into multiple tokens; for regular paths it's the single
-expanded executable.  DOCKER-P is the boolean predicate.
-RAW-CLI-PATH is the unprocessed string (used downstream to derive
-the CLI's directory for the exec-path prepend)."
-  (let* ((raw-cli-path (or (plist-get options :cli-path)
-                           (code-agent--find-cli)))
-         (docker-p (code-agent--docker-command-p raw-cli-path))
-         (cli-parts (if docker-p
-                        (code-agent--split-command raw-cli-path)
-                      (list (expand-file-name raw-cli-path)))))
-    (list cli-parts docker-p raw-cli-path)))
-
-(defun code-agent--make-start-state
-    (options req-id docker-p callback token-callback error-callback
-             complete-callback session-key source-buffer query-context
-             source-location-fn source-location-args)
-  "Build the process-state struct for a fresh `--start-process' call.
-
-Pulled into its own constructor wrapper so the top-level reads as
-a 6-line plan instead of a 16-key keyword soup."
-  (code-agent--make-process-state
-   :options options
-   :json-buffer ""
-   :callback callback
-   :token-callback token-callback
-   :error-callback error-callback
-   :complete-callback complete-callback
-   :request-id req-id
-   :start-time (float-time)
-   :session-key session-key
-   :source-buffer source-buffer
-   :query-context query-context
-   :source-location-fn source-location-fn
-   :source-location-args source-location-args
-   :docker-mode docker-p
-   :ready nil
-   :closed nil))
-
-(defun code-agent--launch-and-wire-process (command state session-key prompt
-                                                       cli-parts args
-                                                       default-directory env-vars)
-  "Spawn the CLI subprocess from COMMAND and wire STATE onto it.
-
-Bidirectional wiring: STATE keeps a reference to the process and
-its buffer; the process carries STATE + trace context via
-`process-put' so the filter and sentinel (which receive only the
-process) can recover the state without closure capture.  Side
-effects: configures I/O, registers the query for cancellation,
-seeds the per-session verbose buffer when session-key is set,
-sends the streaming-mode init payload, and registers STATE in the
-registry's active-states list.  Returns nothing (caller already
-holds STATE)."
-  (let ((process (make-process
-                  :name "code-agent"
-                  :command command
-                  :buffer (generate-new-buffer " *code-agent*")
-                  :connection-type 'pipe ; use pipe, not PTY
-                  :filter #'code-agent--process-filter
-                  :sentinel #'code-agent--process-sentinel
-                  :coding 'utf-8-unix
-                  :noquery t)))
-    (process-put process 'code-agent-state state)
-    (process-put process 'code-agent-trace-ctx (code-agent-trace-context))
-    (setf (code-agent--process-state-process state) process)
-    (setf (code-agent--process-state-buffer state) (process-buffer process))
-    (code-agent--configure-process-io process)
-    (code-agent--register-query
-     (code-agent--process-state-request-id state) state)
-    (when session-key
-      (code-agent--get-session-verbose-buffer session-key)
-      (code-agent-verbose-insert-query-header
-       session-key prompt (string-join cli-parts " ")
-       args default-directory env-vars))
-    (code-agent--streaming-init process state prompt)
-    (setf (code-agent--registry-active-states code-agent--registry)
-          (cons state (code-agent--registry-active-states code-agent--registry)))))
-
-(cl-defun code-agent--start-process (prompt options &key callback error-callback
-                                            complete-callback token-callback
-                                            request-id session-key source-buffer
-                                            query-context source-location-fn
-                                            source-location-args)
-  "Start Claude CLI process with PROMPT and OPTIONS.
-
-All other arguments are keyword arguments:
-  :CALLBACK is called with each parsed message.
-  :ERROR-CALLBACK is called on errors.
-  :COMPLETE-CALLBACK is called when process completes.
-  :TOKEN-CALLBACK is called with each text token for streaming.
-  :REQUEST-ID is a unique identifier for this request (auto-generated if nil).
-  :SESSION-KEY identifies the session for verbose output grouping.
-  :SOURCE-BUFFER is the buffer that initiated this query.
-  :QUERY-CONTEXT is a code-agent-query-context struct for display.
-  :SOURCE-LOCATION-FN is a function symbol to call for navigation.
-  :SOURCE-LOCATION-ARGS is a list of args for SOURCE-LOCATION-FN.
-
-Uses streaming mode by default to enable bidirectional control protocol
-for features like canUseTool permission callback.
-
-Returns a process state object."
-  (code-agent-with-span "start-process" (list :span-kind "CLIENT") nil
-    (let* ((resolved      (code-agent--resolve-cli-parts options))
-           (cli-parts     (nth 0 resolved))
-           (docker-p      (nth 1 resolved))
-           (raw-cli-path  (nth 2 resolved))
-           (args          (code-agent--build-args options t))
-           (cwd           (plist-get options :cwd))
-           (env-vars      (plist-get options :env))
-           (req-id        (or request-id (code-agent--generate-request-id)))
-           (state (code-agent--make-start-state
-                   options req-id docker-p
-                   callback token-callback error-callback complete-callback
-                   session-key source-buffer query-context
-                   source-location-fn source-location-args))
-           (default-directory (or cwd default-directory))
-           ;; When cli-path is explicit, prepend its directory to exec-path so
-           ;; #!/usr/bin/env node finds the matching node (e.g. under nvm).
-           (cli-dir (when (and raw-cli-path (not docker-p))
-                      (file-name-directory (expand-file-name raw-cli-path))))
-           (exec-path (if cli-dir (cons cli-dir exec-path) exec-path))
-           (process-environment
-            (code-agent--build-process-environment env-vars cli-dir))
-           (command (append cli-parts args)))
-      (code-agent--launch-and-wire-process
-       command state session-key prompt cli-parts args
-       default-directory env-vars)
-      state)))
-#+END_SRC
-
-*** JSON Protocol
-
-*** Content Block Parsing
-
-Per-type dispatch via =cl-defgeneric=.  Each block kind gets its own
-=cl-defmethod=, keyed on the type symbol (=text=, =tool_use=, etc.).
-Adding a new block kind is one new =cl-defmethod=, no central edit.
-The default method returns the raw block — back-compat with prior
-unknown-type behaviour.
-
-The string-to-symbol bridge =--parse-content-block= keeps the wire
-contract (JSON =:type= is a string) decoupled from the dispatch key
-(Elisp symbol), so generics dispatch via cheap =eq= on interned
-symbols rather than =equal= on strings.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-block-parse (type block)
-  "Parse BLOCK into a typed struct based on TYPE.
-TYPE is a symbol derived from the wire-protocol =:type= string.
-Default method (unspecialised) returns BLOCK unchanged — preserves the
-prior unknown-type fall-through behaviour."
-  (ignore type)
-  block)
-
-(cl-defmethod code-agent-block-parse ((_type (eql 'text)) block)
-  "Wrap a =text= block payload in a typed =code-agent-text-block= struct."
-  (code-agent-make-text-block
-   :text (plist-get block :text)))
-
-(cl-defmethod code-agent-block-parse ((_type (eql 'thinking)) block)
-  "Wrap a =thinking= block in =code-agent-thinking-block= (carries
-the chain-of-thought stream + the LLM's signature)."
-  (code-agent-make-thinking-block
-   :thinking (plist-get block :thinking)
-   :signature (plist-get block :signature)))
-
-(cl-defmethod code-agent-block-parse ((_type (eql 'tool_use)) block)
-  "Wrap a =tool_use= block in =code-agent-tool-use-block= (the tool
-call the LLM wants the runtime to execute)."
-  (code-agent-make-tool-use-block
-   :id (plist-get block :id)
-   :name (plist-get block :name)
-   :input (plist-get block :input)))
-
-(cl-defmethod code-agent-block-parse ((_type (eql 'tool_result)) block)
-  "Wrap a =tool_result= block in =code-agent-tool-result-block= (the
-runtime's reply to a prior =tool_use= request)."
-  (code-agent-make-tool-result-block
-   :tool-use-id (plist-get block :tool_use_id)
-   :content (plist-get block :content)
-   :is-error (plist-get block :is_error)))
-
-(defun code-agent--parse-content-block (block)
-  "Parse a content BLOCK plist into appropriate struct.
-Bridges the string-typed wire protocol to the symbol-keyed generic
-dispatch above.  Unknown block types fall through to the default
-method, which returns the raw plist unchanged."
-  (let ((type-str (plist-get block :type)))
-    (code-agent-block-parse
-     (if type-str (intern type-str) 'unknown)
-     block)))
-#+END_SRC
-
-*** Message Parsing
-
-Sequence parser — runs =parse-content-block= over the list and returns a structurally-typed list ready for dispatch.
-
-#+BEGIN_SRC elisp
-(defun code-agent--parse-content-blocks (blocks)
-  "Parse a list of content BLOCKS."
-  (when blocks
-    (mapcar #'code-agent--parse-content-block blocks)))
-
-(defun code-agent--parse-message (json)
-  "Parse a JSON plist into appropriate message struct."
-  (let ((type (plist-get json :type)))
-    (pcase type
-      ("user"
-       (let ((message (plist-get json :message)))
-         (code-agent-make-user-message
-          :content (plist-get message :content)
-          :parent-tool-use-id (plist-get message :parent_tool_use_id))))
-      ("assistant"
-       (let ((message (plist-get json :message)))
-         (code-agent-make-assistant-message
-          :content (code-agent--parse-content-blocks
-                    (plist-get message :content))
-          :model (plist-get message :model)
-          :parent-tool-use-id (plist-get message :parent_tool_use_id)
-          :error (plist-get message :error))))
-      ("system"
-       (code-agent-make-system-message
-        :subtype (plist-get json :subtype)
-        :data json))
-      ("result"
-       (code-agent-make-result-message
-        :subtype (plist-get json :subtype)
-        :duration-ms (plist-get json :duration_ms)
-        :duration-api-ms (plist-get json :duration_api_ms)
-        :is-error (plist-get json :is_error)
-        :num-turns (plist-get json :num_turns)
-        :session-id (plist-get json :session_id)
-        :total-cost-usd (plist-get json :total_cost_usd)
-        :usage (plist-get json :usage)
-        :result (plist-get json :result)))
-      ;; Handle other message types as raw plists
-      (_ json))))
-#+END_SRC
-
-*** Core API
-:PROPERTIES:
-:DEPENDS_ON: Data Structures, Process Management, Permission System, Session Management
-:DEPENDED_BY: Client API, Conversation Titling, Prompt Refinement, code-agent-org.org
-:END:
-
-*** Query Function
-
-The =code-agent-query= public API.  Resolves options, spawns the CLI subprocess, registers the active query, and wires the process filter + sentinel to the callbacks.
-
-#+BEGIN_SRC elisp
-(defvar emacs-mcp-server-path-mappings)
-
-(defun code-agent--prepare-query-options (options cli-path project-root)
-  "Prepare effective OPTIONS and CLI-PATH for a query.
-Returns a plist (:options OPTS :cli-path PATH).
-Resolves CLI path fallback, creates default options if nil,
-and auto-starts Docker container when needed."
-  (let* ((effective-cli-path (or cli-path code-agent-cli-path))
-         (opts (or options (code-agent-options))))
-    ;; Auto-start Docker container if needed
-    (when (and code-agent-docker-auto-start
-               (code-agent--docker-command-p effective-cli-path))
-      (code-agent--ensure-docker-container effective-cli-path project-root))
-    (list :options opts :cli-path effective-cli-path)))
-
-(cl-defun code-agent-query (prompt &key options on-message on-token on-error on-complete
-                                     session-key source-buffer query-context
-                                     source-location-fn source-location-args
-                                     cli-path path-mappings project-root
-                                     context-label)
-  "Send a one-shot query to Claude.
-
-PROMPT is the query string to send.
-
-OPTIONS is an optional plist created with `code-agent-options'.
-CONTEXT-LABEL is the name of the org section for display in permission prompts.
-
-ON-MESSAGE is called with each message as it arrives.
-  Function signature: (lambda (message) ...)
-  where MESSAGE is one of:
-    - `code-agent-user-message'
-    - `code-agent-assistant-message'
-    - `code-agent-system-message'
-    - `code-agent-result-message'
-
-ON-TOKEN is called with each text token for streaming display.
-  Function signature: (lambda (text) ...)
-  This is useful for real-time streaming UIs like code-agent-org mode.
-
-ON-ERROR is called if an error occurs.
-  Function signature: (lambda (error) ...)
-
-ON-COMPLETE is called when the query finishes.
-  Function signature: (lambda (result-or-error) ...)
-
-SESSION-KEY identifies the session for verbose output grouping (optional).
-  When provided, messages will be written to a per-session verbose buffer.
-
-SOURCE-BUFFER is the buffer that initiated this query (optional).
-  Used for display in session manager and mode-line.
-
-QUERY-CONTEXT is a code-agent-query-context struct for display (optional).
-  Used together with SOURCE-BUFFER for display.
-
-SOURCE-LOCATION-FN is a function symbol to call for navigation (optional).
-  When non-nil, the query will be shown as a navigable link in session manager.
-  The function is called with SOURCE-LOCATION-ARGS in SOURCE-BUFFER.
-
-SOURCE-LOCATION-ARGS is a list of args for SOURCE-LOCATION-FN (optional).
-  Passed to the location function when navigating to source.
-
-CLI-PATH overrides `code-agent-cli-path' for this query (optional).
-  Use for Docker execution, e.g., \"docker compose exec claude claude\".
-  When a Docker command is detected and `code-agent-docker-auto-start' is t,
-  the container will be started automatically.
-
-PATH-MAPPINGS is an alist of (HOST-PATH . CONTAINER-PATH) for Docker mode (optional).
-  These mappings are let-bound to `emacs-mcp-server-path-mappings' during query
-  execution, enabling path translation between container and host.
-
-PROJECT-ROOT is the project directory path (optional).
-  Used to resolve relative paths in Docker compose commands and for finding
-  docker-compose.yml. Typically set from org property PROJECT_ROOT.
-
-Returns the process state object for potential interruption.
-The process state includes a request-id that can be used with
-`code-agent-cancel-query' for cancellation.
-
-Example:
-  (code-agent-query
-   \"What is 2+2?\"
-   :on-message (lambda (msg)
-                 (when (code-agent-assistant-message-p msg)
-                   (message \"Response: %s\"
-                            (code-agent-extract-text msg))))
-   :on-token (lambda (text)
-               (insert text))  ; For streaming display
-   :on-complete (lambda (result)
-                  (message \"Done!\"))
-   :session-key \"my-session\"
-   :source-buffer (current-buffer)
-   :query-context (code-agent-make-query-context :instruction-num 5))
-
-Docker example:
-  (code-agent-query
-   \"List files\"
-   :cli-path \"docker compose exec claude claude\"
-   :path-mappings \\='((\"/home/user/project\" . \"/workspace\")))"
-  (unless prompt
-    (error "Prompt is required"))
-  (code-agent-with-span "code-agent-query"
-      (list :span-kind "CLIENT" :session-key session-key
-            :input prompt) nil
-  (let* ((prepared (code-agent--prepare-query-options options cli-path project-root))
-         (effective-cli-path (plist-get prepared :cli-path))
-         (opts (plist-get prepared :options)))
-    ;; Set path mappings for MCP server (for Docker mode path translation).
-    ;; This must be setq (not let-bound) because MCP requests arrive
-    ;; asynchronously via HTTP, outside any let-binding scope.
-    ;; The variable is cleared on query completion.
-    (setq emacs-mcp-server-path-mappings path-mappings)
-    ;; Execute query
-    (let ((code-agent-cli-path effective-cli-path))
-      (let ((state (code-agent--start-process
-                    prompt opts
-                    :callback on-message
-                    :error-callback on-error
-                    :complete-callback on-complete
-                    :token-callback on-token
-                    :session-key session-key
-                    :source-buffer source-buffer
-                    :query-context query-context
-                    :source-location-fn source-location-fn
-                    :source-location-args source-location-args)))
-        ;; Store context-label on the process for permission callbacks
-        (when (and state context-label)
-          (let ((process (code-agent--process-state-process state)))
-            (when process
-              (process-put process :context-label context-label))))
-        state)))))
-
-#+END_SRC
-
-*** Accumulating Wrapper
-
-Fire-and-forget convenience around `code-agent-query` for callers
-that just want the full text response, not the streamed events.
-Originally written for `code-agent-title.org` (title generation);
-both original consumers (`code-agent-title.org`, `code-agent-refine.org`)
-were removed with the embedded-chat surface, so today the wrapper is a
-tested standalone utility awaiting its next "ask Claude for one short
-string" caller.
-
-#+BEGIN_SRC elisp
-(cl-defun code-agent-query-accumulate (prompt &key options on-result on-error
-                                              session-key)
-  "Run a query that accumulates all response text, then calls ON-RESULT.
-This is a convenience wrapper around `code-agent-query' for fire-and-forget
-queries that just need the full text response (e.g., title generation,
-prompt refinement).
-
-PROMPT is the query prompt.
-OPTIONS is an options plist (from `code-agent-options').
-ON-RESULT is called with the accumulated text string (trimmed).
-ON-ERROR is called on error.
-SESSION-KEY is an optional session key."
-  (lexical-let ((collected-text "")
-                (on-result-cb on-result))
-    (code-agent-query
-     prompt
-     :options options
-     :session-key session-key
-     :on-message (lambda (msg)
-                   (when (code-agent-assistant-message-p msg)
-                     (when-let* ((text (code-agent-extract-text msg)))
-                       (setq collected-text (concat collected-text text)))))
-     :on-error on-error
-     :on-complete (lambda (_result)
-                    (when on-result-cb
-                      (funcall on-result-cb (string-trim collected-text)))))))
-#+END_SRC
-
-*** Helper Functions
-
-Small text-extraction helpers shared by the user-facing API.  =code-agent-extract-text= flattens assistant messages back into a string for log output, header lines, etc.
-
-#+BEGIN_SRC elisp
-(defun code-agent-extract-text (message)
-  "Extract text content from an assistant MESSAGE.
-Returns concatenated text from all text blocks, or nil if no text."
-  (when (code-agent-assistant-message-p message)
-    (let ((texts nil))
-      (dolist (block (code-agent-assistant-message-content message))
-        (when (code-agent-text-block-p block)
-          (push (code-agent-text-block-text block) texts)))
-      (when texts
-        (string-join (nreverse texts) "")))))
-
-(defun code-agent-message-type (message)
-  "Get the type symbol for MESSAGE.
-Returns one of: user, assistant, system, result, or unknown."
-  (cond
-   ((code-agent-user-message-p message) 'user)
-   ((code-agent-assistant-message-p message) 'assistant)
-   ((code-agent-system-message-p message) 'system)
-   ((code-agent-result-message-p message) 'result)
-   (t 'unknown)))
-
-(defun code-agent-extract-tool-uses (message)
-  "Extract tool use blocks from an assistant MESSAGE.
-Returns a list of `code-agent-tool-use-block' structs."
-  (when (code-agent-assistant-message-p message)
-    (cl-remove-if-not #'code-agent-tool-use-block-p
-                      (code-agent-assistant-message-content message))))
-
-(defun code-agent-extract-thinking (message)
-  "Extract thinking content from an assistant MESSAGE.
-Returns concatenated thinking text, or nil if none."
-  (when (code-agent-assistant-message-p message)
-    (let ((thoughts nil))
-      (dolist (block (code-agent-assistant-message-content message))
-        (when (code-agent-thinking-block-p block)
-          (push (code-agent-thinking-block-thinking block) thoughts)))
-      (when thoughts
-        (string-join (nreverse thoughts) "\n")))))
-
-(defun code-agent--extract-error-message (error)
-  "Extract human-readable message from ERROR.
-ERROR can be (symbol :message ...) plist, a string, or other."
-  (cond
-   ;; CLI error: (code-agent-cli-error :message "..." ...) - plist starts at cdr
-   ((and (listp error) (symbolp (car error)) (plist-get (cdr error) :message))
-    (plist-get (cdr error) :message))
-   ;; Plain plist with :message
-   ((and (listp error) (plist-get error :message))
-    (plist-get error :message))
-   ;; String error
-   ((stringp error) error)
-   ;; Symbol error (e.g., 'error)
-   ((symbolp error) (symbol-name error))
-   ;; List with error symbol and details: (error "message" ...)
-   ((and (listp error) (eq (car error) 'error) (stringp (cadr error)))
-    (cadr error))
-   ;; Fallback: convert to string, truncate if too long
-   (t (let ((str (format "%S" error)))
-        (if (> (length str) 200)
-            (concat (substring str 0 197) "...")
-          str)))))
-
-(defun code-agent-format-elapsed-time (start-time &optional format-style)
-  "Format elapsed time since START-TIME as human-readable string.
-FORMAT-STYLE can be:
-  'compact   - \"5s\", \"10m\", \"2h\" (default for mode-line)
-  'verbose   - \"started 5 seconds ago\"
-  nil        - defaults to 'compact
-
-Returns \"unknown\" if START-TIME is nil."
-  (if (null start-time)
-      "unknown"
-    (let* ((elapsed (- (float-time) start-time))
-           (style (or format-style 'compact)))
-      (cond
-       ;; Less than 60 seconds
-       ((< elapsed 60)
-        (if (eq style 'verbose)
-            (format "started %d seconds ago" (round elapsed))
-          (format "%ds" (round elapsed))))
-       ;; Less than 1 hour
-       ((< elapsed 3600)
-        (if (eq style 'verbose)
-            (format "started %d minutes ago" (round (/ elapsed 60)))
-          (format "%dm" (round (/ elapsed 60)))))
-       ;; 1 hour or more
-       (t
-        (if (eq style 'verbose)
-            (format "started %d hours ago" (round (/ elapsed 3600)))
-          (format "%dh" (round (/ elapsed 3600)))))))))
-#+END_SRC
-
-*** Client API
-:PROPERTIES:
-:DEPENDS_ON: Data Structures, Process Management, Core API
-:DEPENDED_BY: Interactive Chat Mode
-:END:
-
-The client API provides bidirectional interactive conversations.
-
-*** Client Structure
-
-=code-agent-client= struct — bundles per-client options, callback set, and session identity for the interactive chat surface.  Distinct from per-query =process-state=.
-
-#+BEGIN_SRC elisp
-(cl-defstruct (code-agent-client
-               (:constructor code-agent--make-client)
-               (:copier nil))
-  "Interactive Claude client for bidirectional conversations.
-
-Use `code-agent-client-create' to construct instances.
-
-For persistent clients, use `code-agent-client-connect' once,
-then `code-agent-client-send-message' for subsequent queries."
-  state           ; Process state (code-agent--process-state struct)
-  options         ; Options plist (created with code-agent-options)
-  session-id      ; Current session ID (SDK UUID)
-  session-key     ; Org session key (e.g., /path/file.org::my-session)
-  (connected-p nil) ; Boolean connection state
-  hooks           ; Alist of (event . matchers)
-  on-message      ; Default message callback
-  on-error        ; Default error callback
-  on-complete     ; Callback when response completes
-  on-disconnect   ; Callback when client disconnects
-  (query-count 0) ; Number of queries sent through this client
-  (created-at nil) ; Timestamp when client was created
-  (last-activity nil)) ; Timestamp of last query/response
-#+END_SRC
-
-*** Client Creation
-
-Factory for =code-agent-client= — keyword-only construction with sensible defaults so the comint chat-mode integration stays one call.
-
-#+BEGIN_SRC elisp
-(cl-defun code-agent-client-create (&key options on-message on-error on-complete
-                                          on-disconnect session-key)
-  "Create a new Claude client.
-
-OPTIONS is a plist created with `code-agent-options'.
-ON-MESSAGE is the default callback for received messages.
-ON-ERROR is the default callback for errors.
-ON-COMPLETE is called when each query response completes.
-ON-DISCONNECT is called when the client disconnects.
-SESSION-KEY is the org session key for this client (optional).
-
-Returns a `code-agent-client' struct.
-
-Example:
-  (setq my-client
-        (code-agent-client-create
-         :options (code-agent-options
-                   :model \"claude-sonnet-4-5\"
-                   :permission-mode 'accept-edits)
-         :on-message (lambda (msg) (message \"Got: %s\" msg))
-         :session-key \"/path/to/file.org::my-session\"))"
-  (code-agent--make-client
-   :options (or options (code-agent-options))
-   :hooks (plist-get options :hooks)
-   :on-message on-message
-   :on-error on-error
-   :on-complete on-complete
-   :on-disconnect on-disconnect
-   :session-key session-key
-   :connected-p nil
-   :query-count 0
-   :created-at (float-time)
-   :last-activity nil))
-#+END_SRC
-
-*** Client Methods
-
-Connection + send + disconnect verbs on the client.  Each is a thin wrapper over the per-query =code-agent-query= path, specialised to persist state across multiple turns.
-
-#+BEGIN_SRC elisp
-(defun code-agent-client-connect (client &optional initial-prompt)
-  "Connect CLIENT to Claude with optional INITIAL-PROMPT.
-
-Starts the CLI process in streaming mode."
-  (code-agent-with-span "client-connect" (list :span-kind "CLIENT") nil
-  (when (code-agent-client-connected-p client)
-    (error "Client is already connected"))
-  (let* ((options (code-agent-client-options client))
-         (prompt (or initial-prompt ""))
-         (on-msg (code-agent-client-on-message client))
-         (on-err (code-agent-client-on-error client)))
-    (setf (code-agent-client-state client)
-          (code-agent--start-process
-           prompt options
-           :callback (lambda (msg)
-                       ;; Track session ID from result messages
-                       (when (code-agent-result-message-p msg)
-                         (setf (code-agent-client-session-id client)
-                               (code-agent-result-message-session-id msg)))
-                       ;; Call user callback
-                       (when on-msg
-                         (funcall on-msg msg)))
-           :error-callback on-err
-           :complete-callback (lambda (result)
-                                (setf (code-agent-client-connected-p client) nil)
-                                (when (and result on-err)
-                                  (funcall on-err result)))))
-    (setf (code-agent-client-connected-p client) t)
-    client)))
-
-(cl-defun code-agent-client-send (client message &key on-response on-error)
-  "Send MESSAGE through CLIENT (legacy - starts new process).
-
-MESSAGE is a string to send to Claude.
-ON-RESPONSE is called with each response message.
-ON-ERROR is called if an error occurs.
-
-Note: This creates a new query process for each message.
-For persistent bidirectional streaming, use `code-agent-client-send-message'."
-  (unless (code-agent-client-connected-p client)
-    (error "Client is not connected"))
-  ;; Legacy: start a new process for each message
-  (let* ((options (code-agent-client-options client))
-         ;; Continue from previous session if we have one
-         (session-id (code-agent-client-session-id client))
-         (new-options (if session-id
-                          (plist-put (copy-sequence options) :resume session-id)
-                        options)))
-    (setf (code-agent-client-state client)
-          (code-agent--start-process
-           message new-options
-           :callback (or on-response (code-agent-client-on-message client))
-           :error-callback (or on-error (code-agent-client-on-error client))
-           :complete-callback
-           (lambda (result)
-             (when (and result (code-agent-client-on-error client))
-               (funcall (code-agent-client-on-error client) result)))))))
-
-(cl-defun code-agent-client-send-message (client message &key on-message on-error
-                                                   on-complete token-callback)
-  "Send MESSAGE through CLIENT's persistent connection.
-
-This sends the message through the existing process without spawning a new one.
-Requires the client to be connected with `code-agent-client-connect'.
-
-MESSAGE is the prompt string to send.
-ON-MESSAGE is called for each response message (overrides client default).
-ON-ERROR is called if an error occurs (overrides client default).
-ON-COMPLETE is called when the response completes (overrides client default).
-TOKEN-CALLBACK is called with each text token for streaming display.
-
-Returns non-nil if the message was sent successfully."
-  (code-agent-with-span "client-send-message" (list :span-kind "CLIENT") nil
-  (unless (code-agent-client-connected-p client)
-    (error "Client is not connected"))
-  (let* ((state (code-agent-client-state client))
-         (process (code-agent--process-state-process state))
-         (session-key (code-agent-client-session-key client)))
-    (unless (and process (process-live-p process))
-      (error "Client process is not alive"))
-    ;; Update client callbacks via public API
-    (code-agent-update-state-callbacks state
-     :callback (when on-message
-                 (lambda (msg)
-                   ;; Track session ID from result messages
-                   (when (code-agent-result-message-p msg)
-                     (setf (code-agent-client-session-id client)
-                           (code-agent-result-message-session-id msg))
-                     ;; Call on-complete when we get result
-                     (when (or on-complete (code-agent-client-on-complete client))
-                       (funcall (or on-complete (code-agent-client-on-complete client)) msg)))
-                   (funcall on-message msg)))
-     :error-callback on-error
-     :token-callback token-callback)
-    ;; Update client metadata
-    (cl-incf (code-agent-client-query-count client))
-    (setf (code-agent-client-last-activity client) (float-time))
-    ;; Send user message through existing process
-    (let ((user-message (list :type "user"
-                              :message (list :role "user"
-                                            :content message))))
-      (code-agent--send-stdin process user-message session-key))
-    t)))
-
-(defun code-agent-client-disconnect (client)
-  "Disconnect CLIENT from Claude.
-
-Cleans up process and resources, calls on-disconnect callback if set."
-  (when (code-agent-client-connected-p client)
-    (let ((on-disconnect (code-agent-client-on-disconnect client))
-          (session-key (code-agent-client-session-key client)))
-      (when-let* ((state (code-agent-client-state client)))
-        (when-let* ((process (code-agent--process-state-process state)))
-          (when (process-live-p process)
-            (code-agent--kill-process-tree process)))
-        (when-let* ((buf (code-agent--process-state-buffer state)))
-          (when (buffer-live-p buf)
-            (kill-buffer buf))))
-      (setf (code-agent-client-connected-p client) nil)
-      (setf (code-agent-client-state client) nil)
-      ;; Call on-disconnect callback
-      (when on-disconnect
-        (funcall on-disconnect client)))))
-
-(defun code-agent-client-interrupt (client)
-  "Send interrupt signal through CLIENT."
-  (when-let* ((state (code-agent-client-state client)))
-    (when-let* ((process (code-agent--process-state-process state)))
-      (when (process-live-p process)
-        (interrupt-process process)))))
-
-(defun code-agent-get-session-id (client)
-  "Get the current session ID from CLIENT.
-Returns nil if not yet available."
-  (code-agent-client-session-id client))
-
-(defun code-agent-client-alive-p (client)
-  "Return non-nil if CLIENT's process is alive and responsive."
-  (and (code-agent-client-connected-p client)
-       (when-let* ((state (code-agent-client-state client)))
-         (when-let* ((process (code-agent--process-state-process state)))
-           (process-live-p process)))))
-
-#+END_SRC
-
-** Control + Cancellation + Verbose
-
-Three depth-3 sub-sections: =control_request= dispatch (interrupt,
-set-permission-mode, set-model), cancellation taxonomy, and the
-verbose buffer machinery.
-
-*** Control Request Handling
-
-The =control_request= side-channel — interrupt, set-permission-mode, set-model.  Each request-id gets a matching response sent back to the CLI's stdin.
-
-#+BEGIN_SRC elisp
-(defun code-agent--send-control-response (process request-id subtype response-data)
-  "Send control protocol response to PROCESS.
-
-REQUEST-ID: string matching the request
-SUBTYPE: \"success\" or \"error\"
-RESPONSE-DATA: plist with response fields or :error string
-
-Also untracks the request from pending control requests."
-  (let* ((response (list :type "control_response"
-                        :response (list :subtype subtype
-                                       :request_id request-id
-                                       :response response-data)))
-         (json-object-type 'plist)
-         (json-array-type 'list)
-         (json-key-type 'keyword)
-         (json (concat (json-encode response) "\n"))
-         (state (process-get process 'code-agent-state))
-         (session-key (and state (code-agent--process-state-session-key state))))
-    (code-agent--debug-log "Sending control response: %s"
-                            (substring json 0 (min 200 (length json))))
-    ;; Log to verbose buffer for debugging
-    (when session-key
-      (code-agent-verbose-insert session-key
-                                    (format ">>> STDIN (control_response): %s"
-                                            (substring json 0 (min 300 (length json))))))
-    ;; Untrack the request now that we're sending the response
-    (code-agent--untrack-control-request request-id)
-    ;; Only send if process is still alive
-    (if (process-live-p process)
-        (progn
-          ;; CRITICAL: Drain pending output before sending to prevent deadlock
-          (code-agent--drain-output process)
-          (process-send-string process json))
-      ;; Log when we can't send the response - this indicates the CLI died unexpectedly
-      (code-agent--debug-log "WARNING: Cannot send control_response - process is dead (id=%s)"
-                               request-id)
-      (when session-key
-        (code-agent-verbose-insert session-key
-                                      (format ">>> ERROR: control_response DROPPED (process dead) id=%s"
-                                              request-id)))
-      (message "Claude: control_response dropped - CLI process died (request-id: %s)" request-id))))
-
-(defun code-agent--handle-control-can-use-tool (process request-id request-data)
-  "Handle the ``can_use_tool'' subtype by running the permission hook.
-Builds the context plist from process-attached metadata
-(session-id, context-label, suggestions), dispatches through
-`--run-permission-functions', and emits a success
-`control_response' with the resolved behavior + updated input."
-  (let* ((tool-name (plist-get request-data :tool_name))
-         (tool-input (plist-get request-data :input))
-         (session-id (process-get process :session-id))
-         (context-label (process-get process :context-label))
-         (context (list :session-id session-id
-                        :context-label context-label
-                        :suggestions
-                        (plist-get request-data :permission_suggestions))))
-    (code-agent--debug-log "Running permission functions for %s (id=%s)"
-                             tool-name request-id)
-    (let ((result (code-agent--run-permission-functions
-                   tool-name tool-input context)))
-      (code-agent--debug-log "Permission result for %s: %S (id=%s)"
-                               tool-name result request-id)
-      (code-agent--send-control-response
-       process request-id "success"
-       (list :behavior (or (plist-get result :behavior) "allow")
-             :updatedInput (or (plist-get result :updated-input) tool-input)
-             :message (plist-get result :message))))))
-
-(defun code-agent--handle-control-request (process request)
-  "Handle control_request from Claude CLI.
-
-PROCESS: The Claude CLI process
-REQUEST: Parsed control_request plist
-
-Invokes appropriate Emacs hooks and sends control_response.
-Tracks pending requests to prevent premature stdin close.
-
-Subtypes:
-- ``can_use_tool''    → `--handle-control-can-use-tool'
-- ``hook_callback''   → reserved, empty success response
-- (anything else)     → signals `error', caught by outer
-                       `condition-case' which emits an error
-                       control_response so the CLI side gets a
-                       deterministic answer."
-  (let* ((trace-ctx (process-get process 'code-agent-trace-ctx))
-         (request-id (plist-get request :request_id))
-         (request-data (plist-get request :request))
-         (subtype (plist-get request-data :subtype)))
-    (code-agent-with-span "handle-control-request"
-        (list :subtype subtype) trace-ctx
-      (code-agent--debug-log "Control request: %s (id=%s)" subtype request-id)
-      ;; Track this request as pending until the response is sent — prevents
-      ;; premature stdin close while we're still computing the answer.
-      (let ((owner (when-let* ((state (process-get process 'code-agent-state)))
-                     (code-agent--process-state-request-id state))))
-        (code-agent--track-control-request request-id owner))
-      (condition-case err
-          (cond
-           ((equal subtype "hook_callback")
-            (code-agent--send-control-response
-             process request-id "success" (list)))
-           ((equal subtype "can_use_tool")
-            (code-agent--handle-control-can-use-tool
-             process request-id request-data))
-           (t
-            (error "Unsupported control request subtype: %s" subtype)))
-        (error
-         (code-agent--send-control-response
-          process request-id "error"
-          (list :error (error-message-string err))))))))
-#+END_SRC
-
-*** Query Cancellation
-:PROPERTIES:
-:DEPENDS_ON: Data Structures, Process Management
-:DEPENDED_BY: Core API, Activity Mode-Line, code-agent-org.org
-:END:
+Active-query tracking, the public cancel API, and the periodic sweep that
+catches processes whose sentinel never fired.
 
 *** Active Query Tracking
 
@@ -3296,364 +616,6 @@ Registered on `kill-emacs-hook' to ensure clean shutdown."
 (add-hook 'kill-emacs-hook #'code-agent--kill-emacs-cleanup)
 #+END_SRC
 
-*** Verbose Output
-
-Per-session verbose output buffers display CLI-like output for all queries
-within a session.
-
-*** Verbose Buffer Storage
-
-Configurable cap (lines, characters, bytes) for per-session verbose buffers — without this they grow unbounded over a long session.  Trim happens at the front so the latest messages survive.
-
-#+BEGIN_SRC elisp
-(defcustom code-agent-verbose-buffer-max-size nil
-  "Maximum size in characters for verbose buffers.
-When a verbose buffer exceeds this size, the oldest content is trimmed.
-Set to nil to disable trimming (unlimited growth).
-Recommended: 500000 (500KB) for typical usage."
-  :type '(choice (const :tag "Unlimited" nil)
-                 (integer :tag "Max characters"))
-  :group 'code-agent)
-#+END_SRC
-
-*** Verbose Mode
-
-=code-agent-verbose-mode= — read-only =special-mode= specialisation that owns the per-session verbose buffer.
-
-#+BEGIN_SRC elisp
-(define-derived-mode code-agent-verbose-mode special-mode "Claude-Verbose"
-  "Major mode for viewing Claude session verbose output."
-  (setq buffer-read-only t)
-  (setq truncate-lines nil)
-  (visual-line-mode 1))
-#+END_SRC
-
-*** Verbose Buffer Management
-
-Insertion + trim primitives for the verbose buffer — wraps =insert= so the cap is enforced on every write rather than as a periodic sweep.
-
-#+BEGIN_SRC elisp
-(defun code-agent-verbose-insert (session-key text)
-  "Insert TEXT into verbose buffer for SESSION-KEY.
-When `code-agent-verbose-buffer-max-size' is set, trims oldest content
-if buffer exceeds the limit after insertion.
-
-Auto-creates the session buffer if it does not already exist —
-otherwise backends like Pi that only route through this single
-helper would silently no-op on every verbose write, leaving the
-user with the \"No verbose buffer for session\" message from
-`code-agent-org-show-verbose'.  Tightens the previous bare
-`gethash' which only wrote to pre-existing buffers."
-  (when-let* ((buf (code-agent--get-session-verbose-buffer session-key)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (let ((inhibit-read-only t))
-          ;; Trim if over max size before inserting
-          (when (and code-agent-verbose-buffer-max-size
-                     (> (buffer-size) code-agent-verbose-buffer-max-size))
-            (let ((trim-to (/ code-agent-verbose-buffer-max-size 2)))
-              (goto-char (+ (point-min) (- (buffer-size) trim-to)))
-              ;; Advance to next line boundary for clean trim
-              (forward-line 1)
-              (delete-region (point-min) (point))
-              (goto-char (point-min))
-              (insert "[...verbose output trimmed...]\n")))
-          (goto-char (point-max))
-          (insert text)
-          (unless (string-suffix-p "\n" text)
-            (insert "\n")))))))
-
-(defun code-agent--get-session-verbose-buffer (session-key)
-  "Get or create verbose buffer for SESSION-KEY."
-  (or (let ((buf (gethash session-key code-agent--session-verbose-buffers)))
-        (and buf (buffer-live-p buf) buf))
-      (let ((buf (generate-new-buffer
-                  (format "*Claude Session[%s]*"
-                          (if (string-match "::\\(.+\\)$" session-key)
-                              (match-string 1 session-key)
-                            (file-name-nondirectory session-key))))))
-        (with-current-buffer buf
-          (code-agent-verbose-mode)
-          (let ((inhibit-read-only t))
-            (insert (format "═══ Claude Session ═══\n"))
-            (insert (format "Session: %s\n" session-key))
-            (insert (format "Started: %s\n\n" (format-time-string "%Y-%m-%d %H:%M:%S")))))
-        (puthash session-key buf code-agent--session-verbose-buffers)
-        buf)))
-
-(defun code-agent--group-args-as-pairs (args)
-  "Group ARGS into (OPT . VAL) pairs for readable verbose-buffer rendering.
-Bare flags (e.g. \"-v\") get a nil VAL; positional args also get
-nil VAL.  Returns a list of cons cells in original order."
-  (let (pairs (i 0))
-    (while (< i (length args))
-      (let ((arg (nth i args)))
-        (cond
-         ((and (string-prefix-p "-" arg)
-               (< (1+ i) (length args))
-               (not (string-prefix-p "-" (nth (1+ i) args))))
-          (push (cons arg (nth (1+ i) args)) pairs)
-          (setq i (+ i 2)))
-         (t
-          (push (cons arg nil) pairs)
-          (setq i (1+ i))))))
-    (nreverse pairs)))
-
-(defun code-agent--insert-command-section (cli-path args)
-  "Render a ``Command:'' block (cli-path + grouped option/value pairs)."
-  (insert "\n"
-          (propertize "Command:\n" 'face 'font-lock-keyword-face)
-          (format "  %s \\\n" cli-path))
-  (dolist (pair (code-agent--group-args-as-pairs args))
-    (let ((opt (propertize (car pair) 'face 'font-lock-constant-face))
-          (val (cdr pair)))
-      (insert (if val
-                  (format "    %s %s \\\n" opt val)
-                (format "    %s \\\n" opt))))))
-
-(defun code-agent--insert-env-section (env-vars)
-  "Render an ``Environment:'' block, masking TOKEN/KEY/SECRET/PASSWORD values."
-  (insert (format "\n%s\n"
-                  (propertize "Environment:" 'face 'font-lock-keyword-face)))
-  (dolist (pair env-vars)
-    (let* ((name (car pair))
-           (value (cdr pair))
-           (display-value
-            (if (string-match-p "TOKEN\\|KEY\\|SECRET\\|PASSWORD" name)
-                (concat (substring value 0 (min 8 (length value))) "...")
-              value)))
-      (insert (format "  %s=%s\n"
-                      (propertize name 'face 'font-lock-variable-name-face)
-                      display-value)))))
-
-(defun code-agent-verbose-insert-query-header
-    (session-key prompt &optional cli-path args cwd env-vars)
-  "Insert query header in verbose buffer for SESSION-KEY with PROMPT.
-CLI-PATH is the path to claude CLI, ARGS are command line arguments,
-CWD is working directory, ENV-VARS is alist of environment variables.
-
-Renders four optional sections inside the buffer, in order:
-banner → Command (`--insert-command-section') → Working directory
-→ Environment (`--insert-env-section') → Prompt."
-  (when-let* ((buf (gethash session-key code-agent--session-verbose-buffers)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (let ((inhibit-read-only t))
-          (goto-char (point-max))
-          (insert "\n"
-                  "════════════════════════════════════════════════════════════════\n"
-                  (format "▸ Query [%s]\n" (format-time-string "%H:%M:%S")))
-          (when (and cli-path args)
-            (code-agent--insert-command-section cli-path args))
-          (when cwd
-            (insert (format "\n%s %s\n"
-                            (propertize "Working directory:"
-                                        'face 'font-lock-keyword-face)
-                            cwd)))
-          (when env-vars
-            (code-agent--insert-env-section env-vars))
-          (insert "\n"
-                  (propertize "Prompt:\n" 'face 'font-lock-keyword-face)
-                  prompt
-                  "\n\n"))))))
-#+END_SRC
-
-*** Message Formatter
-
-Pretty-prints tool inputs into the verbose buffer.  Different tool kinds (Read, Bash, Edit, etc.) carry different shapes; this dispatcher renders each with a tool-aware layout.
-
-#+BEGIN_SRC elisp
-(defun code-agent--verbose-format-tool-input (input)
-  "Format tool INPUT for display, handling different types."
-  (cond
-   ((null input) "")
-   ((stringp input) input)
-   ((listp input)
-    ;; Convert plist or alist to readable format
-    (let ((json-str (condition-case nil
-                        (json-encode input)
-                      (error (format "%S" input)))))
-      json-str))
-   (t (format "%S" input))))
-
-(defun code-agent--verbose-format-content-block (block)
-  "Format a single content BLOCK for verbose display."
-  (cond
-   ;; Tool use block - show full tool call with input
-   ((code-agent-tool-use-block-p block)
-    (let* ((name (code-agent-tool-use-block-name block))
-           (input (code-agent-tool-use-block-input block))
-           (input-str (code-agent--verbose-format-tool-input input)))
-      (concat
-       (format "\n%s %s\n"
-               (propertize "▶ Tool:" 'face 'font-lock-keyword-face)
-               (propertize name 'face 'font-lock-function-name-face))
-       (when (and input-str (not (string-empty-p input-str)))
-         (format "%s\n%s\n"
-                 (propertize "  Input:" 'face 'font-lock-comment-face)
-                 input-str)))))
-
-   ;; Tool result block - show content
-   ((code-agent-tool-result-block-p block)
-    (let* ((is-error (code-agent-tool-result-block-is-error block))
-           (content (code-agent-tool-result-block-content block))
-           (content-str (if (stringp content)
-                            content
-                          (code-agent--verbose-format-tool-input content))))
-      (concat
-       (format "%s %s\n"
-               (propertize "◀ Result:" 'face 'font-lock-keyword-face)
-               (if is-error
-                   (propertize "ERROR" 'face 'error)
-                 (propertize "OK" 'face 'success)))
-       (when (and content-str (not (string-empty-p content-str)))
-         (format "%s\n" content-str)))))
-
-   ;; Thinking block - show actual thinking content
-   ((code-agent-thinking-block-p block)
-    (let ((thinking (code-agent-thinking-block-thinking block)))
-      (concat
-       (format "\n%s\n" (propertize "💭 Thinking:" 'face 'font-lock-comment-face))
-       (when (and thinking (not (string-empty-p thinking)))
-         (format "%s\n" (propertize thinking 'face 'font-lock-doc-face))))))
-
-   ;; Text block
-   ((code-agent-text-block-p block)
-    (code-agent-text-block-text block))
-
-   (t nil)))
-
-(defun code-agent--verbose-format-content-blocks (blocks &optional parse-raw)
-  "Format BLOCKS list into a single string via verbose-format-content-block.
-Each block is formatted individually, then joined.  When PARSE-RAW is non-nil,
-each element is first passed through `code-agent--parse-content-block'
-\(used for raw user-message plists)."
-  (let ((parts nil))
-    (dolist (block blocks)
-      (let ((parsed (if parse-raw
-                        (code-agent--parse-content-block block)
-                      block)))
-        (when-let* ((formatted (code-agent--verbose-format-content-block parsed)))
-          (push formatted parts))))
-    (when parts
-      (mapconcat #'identity (nreverse parts) ""))))
-
-(defun code-agent--verbose-format-assistant-msg (msg)
-  "Format assistant MSG for verbose buffer display."
-  (let ((content (code-agent-assistant-message-content msg)))
-    (code-agent--debug-log "Assistant content blocks: %d items" (length content))
-    (dolist (block content)
-      (code-agent--debug-log "  Block type: %s"
-                               (cond
-                                ((code-agent-tool-use-block-p block) "tool_use")
-                                ((code-agent-thinking-block-p block) "thinking")
-                                ((code-agent-text-block-p block) "text")
-                                ((code-agent-tool-result-block-p block) "tool_result")
-                                (t (format "unknown: %S" (type-of block))))))
-    (code-agent--verbose-format-content-blocks content)))
-
-(defun code-agent--verbose-format-user-msg (msg)
-  "Format user MSG for verbose buffer display.
-Shows tool results but skips plain string content (already in header)."
-  (let ((content (code-agent-user-message-content msg)))
-    (cond
-     ;; Content is a list of blocks (tool results)
-     ((and (listp content) (listp (car content)))
-      (code-agent--verbose-format-content-blocks content t))
-     ;; String content or anything else — nothing to show
-     (t nil))))
-
-(defun code-agent--verbose-format-system-msg (msg)
-  "Format system MSG for verbose buffer display."
-  (let* ((subtype (code-agent-system-message-subtype msg))
-         (data (code-agent-system-message-data msg))
-         (message-text (plist-get data :message)))
-    (cond
-     ((string= subtype "error")
-      (format "❌ Error: %s\n" (or message-text subtype)))
-     ((string= subtype "init")
-      (format "ℹ️ %s\n" (or message-text "Initializing...")))
-     (message-text
-      (format "ℹ️ %s\n" message-text))
-     (subtype
-      (format "ℹ️ %s\n" subtype))
-     (t nil))))
-
-(defun code-agent--verbose-format-result-msg (msg)
-  "Format result MSG for verbose buffer display."
-  (format "\n%s\n"
-          (propertize
-           (format "════ Complete: %.1fs | $%.4f ════"
-                   (/ (or (code-agent-result-message-duration-ms msg) 0) 1000.0)
-                   (or (code-agent-result-message-total-cost-usd msg) 0))
-           'face 'font-lock-comment-face)))
-
-(defun code-agent--verbose-format-message (msg)
-  "Format MSG for verbose buffer display.
-Dispatches to type-specific formatters for assistant, user, system,
-and result messages."
-  (cond
-   ((code-agent-assistant-message-p msg) (code-agent--verbose-format-assistant-msg msg))
-   ((code-agent-user-message-p msg)      (code-agent--verbose-format-user-msg msg))
-   ((code-agent-system-message-p msg)    (code-agent--verbose-format-system-msg msg))
-   ((code-agent-result-message-p msg)    (code-agent--verbose-format-result-msg msg))
-   (t nil)))
-
-(defun code-agent--verbose-write-message (session-key msg)
-  "Write MSG to verbose buffer for SESSION-KEY."
-  (code-agent--debug-log "Verbose write: session=%s msg-type=%s"
-                           session-key
-                           (cond
-                            ((code-agent-assistant-message-p msg) "assistant")
-                            ((code-agent-user-message-p msg) "user")
-                            ((code-agent-system-message-p msg) "system")
-                            ((code-agent-result-message-p msg) "result")
-                            (t "unknown")))
-  (when session-key
-    (when-let* ((buf (gethash session-key code-agent--session-verbose-buffers))
-                (formatted (code-agent--verbose-format-message msg)))
-      (when (and buf (buffer-live-p buf) (not (string-empty-p formatted)))
-        (with-current-buffer buf
-          (let ((inhibit-read-only t))
-            (goto-char (point-max))
-            (insert formatted)))))))
-#+END_SRC
-
-*** View Commands
-
-Interactive commands for jumping to a session's verbose buffer — used both by the transient menu and by the session-manager UI in [[file:../chat/code-agent.org][code-agent.org]].
-
-#+BEGIN_SRC elisp
-(defun code-agent-show-session-verbose (session-key)
-  "Show verbose buffer for SESSION-KEY."
-  (interactive
-   (list (completing-read "Session: "
-           (let (keys)
-             (maphash (lambda (k buf)
-                        (when (buffer-live-p buf)
-                          (push k keys)))
-                      code-agent--session-verbose-buffers)
-             keys))))
-  (when-let* ((buf (gethash session-key code-agent--session-verbose-buffers)))
-    (when (buffer-live-p buf)
-      (display-buffer buf))))
-
-(defun code-agent-list-session-verbose-buffers ()
-  "List all session verbose buffers."
-  (interactive)
-  (let ((bufs nil))
-    (maphash (lambda (key buf)
-               (when (buffer-live-p buf)
-                 (push (cons key buf) bufs)))
-             code-agent--session-verbose-buffers)
-    (if bufs
-        (let ((selected (completing-read "Session buffer: "
-                          (mapcar #'car bufs))))
-          (when-let* ((buf (cdr (assoc selected bufs))))
-            (switch-to-buffer buf)))
-      (message "No session verbose buffers"))))
-#+END_SRC
-
 * Tri-Protocol Architecture
 :PROPERTIES:
 :CUSTOM_ID: tri-protocol-architecture
@@ -3720,13 +682,21 @@ backend       (abstract)                               │    send-text / send-k
                                                           cmux-backend     tmux-backend
 #+end_example
 
+Diagram as shipped 2026-04-24.  The agent-family branch (=claude-code-
+backend=, =acp-backend=, opencode/gemini/codex) was removed 2026-07 —
+zero production callers survived the org-as-control-plane pivot.  Of
+Protocol 3's generics, only =open-terminal-tab= survives; the rest
+(=execute-block=, =append-response=, =cancel-from-org=, etc.) were
+deleted along with the agent-family side.  See [[file:PROTOCOL-MAP.org::#protocol-3-org][PROTOCOL-MAP.org §
+Protocol 3]] for the current generic list.
+
 The three protocols form a clean separation:
 
 | Protocol | Receiver | Purpose |
 |----------+----------+---------|
 | 1 — lifecycle | =code-agent-backend= | query / cancel / cleanup / introspect — what every backend does |
 | 2b — multiplexer wire | =code-agent-multiplexer-backend= | launch-session / send-text / capture-screen — how to talk to a terminal multiplexer |
-| 3 — org-integration | =code-agent-backend= | execute-block / append-response / cancel-from-org — how to plug a backend into a code-agent-org buffer |
+| 3 — org-integration | =code-agent-backend= | =open-terminal-tab= — the only surviving generic; how a multiplexer backend opens a terminal tab for the org buffer to drive |
 
 (Protocol 2a — agent wire — was retired in 2026-05.  The aspirational
 =code-agent-agent-backend= base class had zero subclasses; concrete
@@ -3744,8 +714,10 @@ so it sat as a sibling to the ACP abstract, not a child of it.
 The ACP family (=code-agent-acp*.org=, =code-agent-jsonrpc.org=) was
 removed — the pivot direction (org as control plane for agents living
 in cmux/tmux terminals) drops embedded ACP chat backends entirely.
-Only =code-agent-claude-code-backend= remains on the agent-family
-side; the multiplexer side (cmux/tmux, below) is unaffected.
+=code-agent-claude-code-backend= — the last agent-family backend — was
+itself deleted 2026-07 (zero production callers after the pivot); the
+agent-family side of this protocol is now unoccupied. The multiplexer
+side (cmux/tmux, below) is unaffected.
 
 ** Why Two Layers on the Multiplexer Side
 
@@ -3758,12 +730,18 @@ that stops the follower), agent-profile resolution, and the
 Claude-only-args filter. Concrete subclasses supply roughly six
 =cl-defmethod= implementations each — about 300 lines per multiplexer.
 
-** Two Canonical Execution Flows
+** Two Canonical Execution Flows (historical — both superseded 2026-07)
 
 Same =C-c C-c= entry point, two shapes downstream depending on which
-family the backend belongs to.
+family the backend belongs to. This described the shipped 2026-04-24
+architecture. Neither flow is current: =code-agent-org-execute= and
+every Protocol 3 generic except =open-terminal-tab= were deleted
+2026-07 when the org-as-control-plane pivot removed the Emacs-side
+dispatch layer entirely. Kept as the historical record of how the two
+families diverged downstream of the same entry point; see "Current
+Execution Model" below for what actually runs today.
 
-*** W1: Agent family (Claude Code / ACP)
+*** W1: Agent family (Claude Code / ACP) — removed 2026-07
 
 #+begin_example
 User C-c C-c in ai block
@@ -3781,7 +759,15 @@ User C-c C-c in ai block
                           └─▶ query-completed → advance loop / dequeue
 #+end_example
 
-*** W2: Multiplexer family (cmux / tmux)
+This whole flow — =code-agent-org-backend-execute-block= and every
+Protocol 3 generic it calls (=insert-prompt=, =open-response-section=,
+=append-response=, =finalize-response=, =query-completed=, etc.) — was
+deleted 2026-07 along with =code-agent-claude-code-backend=. Execution
+now happens entirely inside the terminal the org buffer drives (W2
+below); there is no Emacs-side org-integration dispatch for agent-family
+backends anymore.
+
+*** W2: Multiplexer family (cmux / tmux) — removed 2026-07
 
 #+begin_example
 User C-c C-c in ai block
@@ -3805,8 +791,27 @@ Later, Python hook: UserPromptSubmit / PostToolUse / Stop
                                     query-completed}            ← Protocol 3
 #+end_example
 
-The frontend never sees the difference. Backend dispatch is on the
-*instance* via Protocol 3 generics, never on a string discriminator.
+Both flows dispatched on the *instance* via Protocol 3 generics, never
+on a string discriminator — that part of the design survived. The
+dispatch chain itself (=code-agent-org-execute=, =execute-block=,
+=insert-prompt=, =open-response-section=, =register-query=,
+=append-response=, =finalize-response=, =query-completed=) did not:
+deleted 2026-07 along with the rest of the Emacs-side org-integration
+layer.
+
+** Current Execution Model — org as control plane
+
+Org no longer dispatches AI-block execution through Protocol 3 at all.
+=open-terminal-tab= raises (or focuses) a cmux/tmux terminal pane
+running the agent CLI directly; the user interacts with the agent
+inside that terminal, not through response text streamed into the org
+buffer. What survives on the Emacs side: request-id registration in
+=code-agent--active-queries= (mode-line spinner, =*Claude Queries*=
+buffer, cancellation — see "Active Query Tracking" above) and the
+Python =workspace_bridge.py= writing status to =/tmp/code-agent-status=
+for cmux's sidebar. See [[file:../org/code-agent-org-terminal-base.org][code-agent-org-terminal-base.org]] for the
+shared cmux/tmux primitives (status file I/O, session-key hash table,
+tab-title generation).
 
 ** Capability Matrix (authoritative for =supports-p=)
 
@@ -3851,18 +856,16 @@ section below defines Protocol 1 and the Org-Integration generics
 (Protocol 3) that every backend consumes.
 
 * Backend Protocol
-:PROPERTIES:
-:DEPENDS_ON: Data Structures
-:DEPENDED_BY: Process Management, Core API, Client API
-:END:
 
 Extensible backend abstraction via =cl-defgeneric= / =cl-defmethod=.
-Each backend type (JSON stream, terminal, future HTTP) implements this protocol.
+Each backend type (cmux/tmux terminal, future HTTP) implements this protocol.
 The presentation layer (code-agent-org.org) depends only on these generics.
 
 ** Backend Base Struct
 
-Abstract =code-agent-backend= — every concrete subclass (=claude-code=, ACP profiles, multiplexer-derived) inherits this single base; protocol generics dispatch on it.
+Abstract =code-agent-backend= — every concrete subclass (multiplexer-derived,
+future HTTP/agent backends) inherits this single base; protocol generics
+dispatch on it.
 
 #+BEGIN_SRC elisp
 (cl-defstruct (code-agent-backend
@@ -3872,7 +875,7 @@ Abstract =code-agent-backend= — every concrete subclass (=claude-code=, ACP pr
 Dispatch on this type via cl-defmethod for protocol implementations.
 Do not instantiate directly — use a concrete backend constructor."
   (type nil :read-only t
-   :documentation "Keyword identifying backend type, e.g. :claude-code, :terminal."))
+   :documentation "Keyword identifying backend type, e.g. :multiplexer, :terminal."))
 #+END_SRC
 
 ** Backend Protocol Generics
@@ -3936,13 +939,6 @@ Frontend uses this for recovery decisions."
   ;; Default: unknown
   'unknown)
 
-(cl-defgeneric code-agent-backend-verbose-buffer (backend)
-  "Return the verbose/debug buffer managed by BACKEND, or nil.
-When non-nil, the caller should use this instead of the shared verbose buffer.
-For example, a terminal backend may return its terminal buffer."
-  ;; Default: no backend-managed verbose buffer
-  nil)
-
 (cl-defgeneric code-agent-backend-ready-p (backend)
   "Return non-nil if BACKEND is ready to accept a new query.
 Persistent backends may return nil when a query is still in-flight."
@@ -3975,328 +971,20 @@ See `code-agent-backend--callback-capabilities' for the mapping."
 ** Org-Integration Protocol (Protocol 3)
 
 The third protocol alongside lifecycle (Protocol 1) and the
-family-specific wire protocols (Protocols 2a/2b).  Protocol 3 covers
-*how a backend interacts with the org buffer* — executing an AI
-block, inserting prompts, streaming responses, notifying on
-permission, recovering sessions.  Every backend implements all three
-protocols; sensible defaults cascade from the abstract bases.
+multiplexer wire protocol (Protocol 2b).  Protocol 3 covers *how a
+backend interacts with the org buffer*.  After the org-as-control-plane
+pivot only one generic remains: =open-terminal-tab=, dispatched by the
+frontend's =code-agent-org-open-terminal-tab= command.  The rest of the
+old surface (execute-block, prompt/response streaming, permission
+notify, session recovery, status badges, todos) was deleted 2026-07
+with the embedded-chat path — see git history for the contracts if a
+future backend needs them.
 
 The prefix =code-agent-org-backend-= (rather than the
 =code-agent-backend-= of Protocols 1/2) is deliberate and final:
 it marks the protocol as the org-level interaction surface, visible
 to the frontend ([[file:../org/code-agent-org.org][code-agent-org.org]]), while Protocols 1/2 are
 wire-level contracts internal to the SDK layer.
-
-The =block-info= plist carries =:prompt=, =:callbacks=, =:props=,
-=:session-key=, plus the optional surface keys (=:target-heading=,
-=:custom-id=, =:source-buffer=, =:source-marker=, =:loop-max=,
-=:loop-interval=) that concrete backends consume when present.
-
-*** Specialisation status (as of audit 2026-05-27)
-
-| Generic | Default | Test coverage | Production specialisation |
-|---------+---------+---------------+---------------------------|
-| =execute-block= | unpacks +delegates | yes (tmux + cmux) | tmux |
-| =insert-prompt= | no-op | =test-p3-insert-prompt-default-is-noop= | none (multiplexer family — future) |
-| =open-response-section= | nil | =test-p3-open-response-section-default-returns-nil= | none (frontend default) |
-| =append-response= | safe insert + advance marker | 3 tests inc. dead-buffer safety | none |
-| =finalize-response= | no-op | =test-p3-finalize-response-default-is-noop= | none |
-| =query-completed= | no-op | =test-p3-query-completed-default-is-noop= | none |
-| =status-badge= | nil | yes | none |
-| =todos-update= | no-op | yes | none |
-| =recover-session= | no-op | yes | none |
-| =register-query= | no-op | *no* | *none* — pending Protocol-3 migration |
-| =permission-notify= | mode-line alert | *no* | *none* — wired through =code-agent-add-alert= directly |
-| =permission-resolved= | clear alert | *no* | *none* — same as above |
-
-The last three rows are forward declarations awaiting wiring; the
-intermediate path uses =code-agent-add-alert= directly without
-Protocol-3 dispatch.  Promoting them to live dispatch is on the
-backlog (see =CODEBASE-REVIEW.org=).  Each =cl-defgeneric= below is
-kept because the docstring + default carries the design contract;
-deletion would lose the documented intent before the migration ships.
-
-*** Execute Block
-:PROPERTIES:
-:CUSTOM_ID: backend-execute-block
-:END:
-
-=execute-block= is the primary frontend entry point — called once
-per C-c C-c on an AI block.  The default method on
-=code-agent-backend= unpacks =block-info= and delegates to
-=code-agent-backend-query=.  Concrete agent and multiplexer
-backends override with their own orchestration.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-execute-block (backend block-info)
-  "Execute an AI block on BACKEND.
-BLOCK-INFO is a plist: :prompt :callbacks :session-key :props
-:target-heading :custom-id :source-buffer :source-marker
-:loop-max :loop-interval.
-Returns an opaque handle compatible with `code-agent-backend-cancel'.
-Concrete backends may override for family-specific flow; default
-shims to `code-agent-backend-query' below.")
-
-(cl-defmethod code-agent-org-backend-execute-block
-  ((backend code-agent-backend) block-info)
-  "Default execute-block: dispatch BLOCK-INFO's :prompt through
-`code-agent-backend-query' on BACKEND.
-Default shim — keeps the JSON/ACP execution path running unchanged
-when the frontend calls through Protocol 3.  Concrete agent and
-multiplexer backends override with their own orchestration."
-  (let* ((prompt (plist-get block-info :prompt))
-         (callbacks (plist-get block-info :callbacks))
-         (props (plist-get block-info :props))
-         (filtered (code-agent-backend-filter-callbacks backend callbacks)))
-    (apply #'code-agent-backend-query backend prompt filtered props)))
-#+END_SRC
-
-*** Insert Prompt
-:PROPERTIES:
-:CUSTOM_ID: backend-insert-prompt
-:END:
-
-Materialise the user's prompt in the org buffer so a later response
-can anchor relative to it.  For agent-family backends the AI src
-block itself IS the visible prompt, so the default is a no-op.
-Multiplexer-family backends override: the response section lives
-under a distinct =:claude_chat:= instruction heading that the bridge
-writes, so that heading has to be created first.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-insert-prompt (backend block-info)
-  "Materialise the user's prompt in the org buffer for BACKEND.
-Default: no-op (suitable for agent-family — the ai src block IS the
-prompt).  Multiplexer-family overrides to insert a :claude_chat:
-instruction heading via the Python bridge."
-  (ignore backend block-info)
-  nil)
-#+END_SRC
-
-*** Open Response Section
-:PROPERTIES:
-:CUSTOM_ID: backend-open-response-section
-:END:
-
-Return a live marker where streamed response text should be appended.
-The default is intentionally a no-op (return nil) — Protocol 3
-defaults live in the SDK layer and must not reach up into the
-org-integration layer via =fboundp=.  The frontend
-([[file:../org/code-agent-org.org][code-agent-org.org]]) provides a concrete implementation by
-overriding on =code-agent-backend= in its own module; agent and
-multiplexer backends inherit that frontend default unless they need
-a specialisation.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-open-response-section (backend block-info)
-  "Return a live marker where response text should be appended.
-Default: return nil.  The frontend provides the real implementation
-by specialising on `code-agent-backend'.  Concrete family bases
-(agent, multiplexer) may override."
-  (ignore backend block-info)
-  nil)
-#+END_SRC
-
-*** Append Response
-:PROPERTIES:
-:CUSTOM_ID: backend-append-response
-:END:
-
-Write a chunk of response text at the given marker.  Default is a
-safe insert-at-marker that preserves marker position — works for
-both agent-family (token-by-token streaming) and multiplexer-family
-(whole-chunk delivery from the bridge) out of the box.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-append-response (backend marker chunk)
-  "Append CHUNK of response text at MARKER for BACKEND.
-Default: insert-at-marker, preserving marker position."
-  (ignore backend)
-  (when (and (markerp marker) (marker-buffer marker)
-             (buffer-live-p (marker-buffer marker))
-             (stringp chunk))
-    (with-current-buffer (marker-buffer marker)
-      (save-excursion
-        (goto-char marker)
-        (insert chunk)
-        (set-marker marker (point))))))
-#+END_SRC
-
-*** Finalize Response
-:PROPERTIES:
-:CUSTOM_ID: backend-finalize-response
-:END:
-
-Called once after the stream completes.  Default is no-op; subclasses
-attach a footer, persist telemetry (tokens / duration / tool count),
-save the buffer.  =meta= carries whatever the wire protocol exposes;
-backends that can't produce a field leave it out and callers guard
-via =code-agent-backend-supports-p=.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-finalize-response (backend marker meta)
-  "Finalize the response at MARKER for BACKEND.
-META is a plist of telemetry (:elapsed-ms :token-count :error etc).
-Default: no-op — subclasses add footer / persist telemetry / save."
-  (ignore backend marker meta)
-  nil)
-#+END_SRC
-
-*** Register Query
-:PROPERTIES:
-:CUSTOM_ID: backend-register-query
-:END:
-
-Book-keeping on query start: record the request id so hooks can find
-the active query, set =:busy= in session state.  Default is a no-op
-placeholder — concrete agent backends and the frontend currently use
-their own =code-agent--register-query= path; this generic exists
-for callers that prefer Protocol 3 dispatch.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-register-query (backend block-info)
-  "Register BLOCK-INFO as an in-flight query on BACKEND.
-Default: no-op — most callers still use `code-agent--register-query'
-directly; this generic is the Protocol-3-dispatch alternative."
-  (ignore backend block-info)
-  nil)
-#+END_SRC
-
-*** Query Completed
-:PROPERTIES:
-:CUSTOM_ID: backend-query-completed
-:END:
-
-Called from the sentinel / Stop hook when a query finishes.  Clears
-=:busy=, advances loop state, dequeues the next pending block.
-Default is a no-op in Phase 1; concrete backends specialise as they
-migrate their completion paths.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-query-completed (backend session-key)
-  "Mark BACKEND's query for SESSION-KEY as complete.
-Clears :busy, advances loop, dequeues next pending block.
-Default: no-op; concrete backends override to drive their completion path."
-  (ignore backend session-key)
-  nil)
-#+END_SRC
-
-*** Cancel From Org
-:PROPERTIES:
-:CUSTOM_ID: backend-cancel-from-org
-:END:
-
-User-initiated cancel (C-c C-k) from the org buffer.  Default
-dispatches to =code-agent-backend-cancel= with a nil handle (the
-backend looks it up from session state).  Multiplexer backends
-override to additionally =send-key :ctrl-c= to the pane so the TUI
-stops.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-cancel-from-org (backend session-key)
-  "Handle user-initiated cancel (C-c C-k) from the org buffer on BACKEND.
-Default dispatches to `code-agent-backend-cancel' with the query
-handle read from session state (via `code-agent-org-session-get'
-when available).  The `fboundp' guard keeps this SDK-layer default
-from hard-depending on the org-integration layer at load time."
-  (let ((handle (when (and session-key
-                           (fboundp 'code-agent-org-session-get))
-                  (funcall 'code-agent-org-session-get
-                           session-key :query-handle))))
-    (code-agent-backend-cancel backend handle)))
-#+END_SRC
-
-*** Permission Notify / Resolved
-:PROPERTIES:
-:CUSTOM_ID: backend-permission-notify-resolved
-:END:
-
-The agent or its TUI has paused waiting for user permission
-(=session/request_permission= over ACP, =can_use_tool= over Claude
-Code stream-json, or a Y/N prompt in the TUI for multiplexer
-backends).  Default adds / removes a mode-line alert via
-=code-agent-add-alert=.  cmux overrides to additionally flash the
-sidebar and raise the workspace.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-permission-notify (backend request-desc)
-  "Notify user that BACKEND needs a tool-use permission.
-REQUEST-DESC is a short string describing the tool / action.
-Default: add a mode-line alert via `code-agent-add-alert' if
-available.  cmux overrides to add sidebar alert + focus workspace."
-  (ignore backend)
-  (when (fboundp 'code-agent-add-alert)
-    (funcall 'code-agent-add-alert
-             :id 'permission-needed
-             :label (format "⚠ Permission: %s"
-                            (or request-desc "tool use"))
-             :face 'warning)))
-
-(cl-defgeneric code-agent-org-backend-permission-resolved (backend)
-  "Clear the permission-needed alert for BACKEND."
-  (ignore backend)
-  (when (fboundp 'code-agent-remove-alert)
-    (funcall 'code-agent-remove-alert 'permission-needed)))
-#+END_SRC
-
-*** Recover Session
-:PROPERTIES:
-:CUSTOM_ID: backend-recover-session
-:END:
-
-Called after Emacs restart / module reload to rebuild runtime state.
-Agent-family reads the backend's session property for the next
-=--resume=.  Multiplexer-family walks the multiplexer's existing
-sessions, rebuilds the workspace↔session-key map, re-starts the
-follower if verbose mode was active.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-recover-session (backend)
-  "Recover BACKEND's session state after Emacs restart / reload.
-Default: no-op.  Agent-family: re-read session property for next
-resume.  Multiplexer-family: resolve-session-by-heading + restart
-follower + re-apply style."
-  (ignore backend)
-  nil)
-#+END_SRC
-
-*** Status Badge
-:PROPERTIES:
-:CUSTOM_ID: backend-status-badge
-:END:
-
-Return a short string for headline display (spinner / ready / busy /
-error).  Default is nil (no badge).  Concrete backends specialise to
-consult their own status source (process state for agent-family,
-status file + pattern match for multiplexer-family).
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-status-badge (backend session-key)
-  "Return a status badge string for SESSION-KEY on BACKEND.
-Used by the headline renderer.  Default returns nil (no badge)."
-  (ignore backend session-key)
-  nil)
-#+END_SRC
-
-*** Todos Update
-:PROPERTIES:
-:CUSTOM_ID: backend-todos-update
-:END:
-
-The Python bridge calls this (via MCP) when the agent's Todo tool
-writes a new list.  Default is no-op.  The bridge is the only caller
-for multiplexer backends today; agent-family agents embed todos
-directly into their response stream so they override by parsing the
-stream event.
-
-#+BEGIN_SRC elisp
-(cl-defgeneric code-agent-org-backend-todos-update (backend todos instr-custom-id)
-  "Update the todo-list display for INSTR-CUSTOM-ID on BACKEND.
-TODOS is the parsed list from the agent.  Default: no-op — the
-Python bridge calls this directly for multiplexer backends."
-  (ignore backend todos instr-custom-id)
-  nil)
-#+END_SRC
 
 *** Open Terminal Tab
 :PROPERTIES:
@@ -4318,285 +1006,6 @@ CLI's focus/activate command."
               (or (code-agent-backend-type backend) "unknown")))
 #+END_SRC
 
-
-* JSON Stream Backend
-:PROPERTIES:
-:DEPENDS_ON: Backend Protocol
-:DEPENDED_BY: Core API, Client API
-:END:
-
-The Claude Code backend wraps the existing process layer. It handles
-both per-query (one-shot) and persistent-client (bidirectional) modes.
-
-** Design Heritage
-
-This backend's current shape is the result of two extraction passes
-that preceded the Tri-Protocol Refactor. Both moves are shipped; the
-notes below preserve the *why* now that the as-was layout is gone.
-
-- *2026-03-09 — JSON-stream extraction.* The pre-refactor
-  [[file:../chat/code-agent.org][code-agent.org]] was ~5000 lines and conflated two concerns:
-  generic SDK coordination (sessions, query registry, mode-line, hooks)
-  versus JSON-stream wire mechanics (process spawn, filter, JSON
-  parse, control protocol, stdin management, message structs). The
-  =backend-query= generic existed but the JSON-stream method just
-  delegated back into the same file — the abstraction was a pretty
-  facade over a monolith. Extraction created a dedicated backend
-  module so callers depend only on generics; backend code stops
-  mutating shared state directly.
-- *2026-03-10 — per-backend split on the org-integration side.* The
-  same shape repeated one layer up: =claude-org.org= was carrying ~1000
-  lines of two now-removed terminal backends (deleted in commit
-  =1038144= once the multiplexer family covered the same ground). Each
-  backend got its own file so per-backend changes stop touching
-  unrelated code. The backends themselves are gone; the structural
-  pattern survived as the cmux / tmux split today.
-- *2026-04-24 — Tri-Protocol formalisation.* The two earlier splits
-  produced the right *files* but the *interfaces* between them were
-  still ad-hoc — the frontend branched on =CLAUDE_BACKEND= strings,
-  agent identity wasn't modelled. The refactor formalised everything
-  into the four protocols documented in =* Tri-Protocol
-  Architecture= above. The JSON-stream backend now lives as
-  =code-agent-claude-code-backend= (Protocol 1 + Protocol 2a
-  agent-wire), sibling to the ACP family which speaks JSON-RPC over
-  the same agent-wire generics.
-
-** Stream Lifecycle
-
-Six components carry a single CLI invocation from spawn to completion;
-each stage is one =defun= in this file. Reading them top-to-bottom is
-the cleanest way to understand the wire.
-
-| Stage | Function | What it does |
-|-------+----------+--------------|
-| 1 | =--start-process= | Spawns =claude --print --output-format stream-json=, attaches filter + sentinel, stores =--process-state= |
-| 2 | =--process-filter= | Accumulates raw bytes into =json-buffer=, guards overflow, peels complete JSONL lines |
-| 3 | =--process-json-buffer= | Parses each line; =control_request= → control handler, otherwise =handle-message= generic |
-| 4 | =--process-normal-message= | Sets =got-result= on result type, fires token / message callbacks, captures =session-id=, calls =--maybe-close-stdin= |
-| 5 | =--maybe-close-stdin= | After a =result= message, schedules EOF on stdin so the CLI exits |
-| 6 | =--process-sentinel= | Process exit; flushes buffer; calls =on-complete= or triggers auto-recovery |
-
-The =--process-state= struct holds every per-query field the chain
-needs:
-
-| Field | Role |
-|-------+------|
-| =process= / =json-buffer= | Process handle + JSONL accumulator |
-| =callback= / =token-callback= / =error-callback= / =complete-callback= | Four lifecycle callbacks the org layer subscribes to |
-| =got-result= | Set when the protocol-level =result= message arrives — sole differentiator between normal exit and crash |
-| =closed= / =ready= / =cancelled= | Sentinel flags; filter ignores output when =ready= is nil |
-| =session-id= | Captured from =system/init=; required for =--resume= |
-| =session-key= / =request-id= | Owner identity for verbose logging and registry lookups |
-
-** Real-World Protocol Facts
-
-Audited from 698 real Claude Code sessions plus 24 fixtures
-(2026-03 analysis). These are invariants the lifecycle code can rely
-on; deviations would be CLI-side regressions, not Emacs bugs.
-
-- *Exactly one =result= per CLI invocation.* Zero exceptions in the
-  audit. Crashed/killed processes emit zero. Code that "defends" by
-  expecting more is dead.
-- *Background agents complete BEFORE =result=.* When the assistant
-  launches a Task tool, the CLI waits for the agent internally and
-  streams its output back as ordinary =assistant= messages. By the
-  time =result= arrives, every byte of agent output is already in
-  the org buffer. The SDK does not need to keep stdin open for
-  background agents — see the dead-but-harmless tracker note below.
-- *Parallel tool use is normal.* Up to 31 parallel tool calls
-  observed in a single =assistant= message; 333 instances of
-  2-parallel. All =tool_result= blocks for a parallel batch arrive
-  in one =user= message. Each =tool_result= triggers PostToolUse
-  hooks individually.
-- *Message-type taxonomy.* =system= (init, always first) /
-  =assistant= (streaming tokens or tool_use blocks) / =user= (tool
-  results) / =result= (final, exactly one) / =rate_limit_event=
-  (warning, non-fatal) / =control_request= (bidirectional mode,
-  permission gating).
-- *=stop_reason= values.* =null= (more tokens coming) / =end_turn=
-  (assistant finished naturally) / =tool_use= (pausing for tool) /
-  =stop_sequence= (CLI-initiated interrupt — dequeue path).
-
-** Completion Model — Three Phases
-
-The current completion path is a three-phase model. Earlier code was
-two-phase (protocol-level signal + sentinel) and had a documented
-hang: when control requests were pending at the moment =result=
-arrived, =--maybe-close-stdin= would log-and-give-up with no retry,
-the process never received EOF, and =on-complete= never fired. The
-session stayed =:busy t= forever.
-
-| Phase | Trigger | Action | Failure guard |
-|-------+---------+--------+---------------|
-| 1 — Protocol | =result= message received | Set =got-result=, fire result-received hook, schedule stdin close | — |
-| 2 — Stdin Close | Polling retry up to 5 s | Close stdin when control requests clear | Force-close after =max-attempts × delay= |
-| 3 — Process Exit | Sentinel fires | Call =on-complete=, cancel watchdog | Watchdog kills runaway process at =code-agent-query-timeout= (default 5 min) |
-
-Three lessons from this design fold back into invariants the code
-must keep:
-
-- *No "give up" branches in stdin-close.* Either retry until clear,
-  force-close after a max budget, or watchdog-kill — never log and
-  return. The hang lived in exactly that gap.
-- *Background-task tracker is dead but harmless.* It checks
-  =(plist-get tool-use-result :isAsync)= but real Task results return
-  *plain text*, not JSON, so =:isAsync= is never present and the
-  tracker never registers any task. Removing it would simplify code,
-  but since the CLI internally waits for background agents, the
-  always-empty tracker does not block anything either. The tracker
-  remains for informational display (mode-line, session manager) and
-  must NOT block stdin close.
-- *=got-result= is the abnormal-exit oracle.* The sentinel decides
-  recovery via =--is-abnormal-exit-p=, which returns =t= when ALL
-  of: auto-recovery enabled, =session-id= captured, =got-result= NOT
-  set, =cancelled= NOT set, exit event matches "killed" / "exited
-  abnormally" / "finished". A "finished" exit *without* =got-result=
-  is treated as a crash and triggers =--resume-session=. Anything
-  that mutates =got-result= prematurely (or skips setting it on the
-  result message) breaks recovery.
-
-#+BEGIN_SRC elisp
-(cl-defstruct (code-agent-claude-code-backend
-               (:include code-agent-backend (type :claude-code))
-               (:constructor code-agent-claude-code-backend--create)
-               (:copier nil))
-  "Claude Code CLI backend (--output-format stream-json).
-Handles both per-query and persistent-client modes."
-  (process-state nil :documentation "Active code-agent--process-state or nil")
-  (client nil :documentation "Persistent code-agent--client or nil")
-  (session-key nil :documentation "File-based session key for resume")
-  (persistent-p nil :documentation "Non-nil for persistent client mode"))
-
-(cl-defmethod code-agent-backend-supports-p
-    ((backend code-agent-claude-code-backend) capability)
-  "Claude Code backend supports all standard capabilities."
-  (pcase capability
-    (:streaming-tokens t)
-    (:structured-messages t)
-    (:tool-use t)
-    (:session-resume t)
-    (:interactive-input t)
-    (:persistent-client (code-agent-claude-code-backend-persistent-p backend))
-    (_ nil)))
-
-(cl-defmethod code-agent-backend-classify-error
-    ((backend code-agent-claude-code-backend) error)
-  "Classify ERROR using Claude Code error patterns."
-  (let ((msg (cond
-              ((stringp error) error)
-              ((and (listp error) (plist-get error :message))
-               (plist-get error :message))
-              (t nil))))
-    (cond
-     ((null msg) 'unknown)
-     ((code-agent--context-too-long-p msg) 'context-limit)
-     ((code-agent--session-expired-p msg) 'session-expired)
-     (t 'unknown))))
-
-(cl-defmethod code-agent-backend-verbose-buffer
-    ((_backend code-agent-claude-code-backend))
-  "JSON backend uses the shared verbose buffer system, not a backend-managed one."
-  nil)
-
-(cl-defmethod code-agent-backend-ready-p
-    ((backend code-agent-claude-code-backend))
-  "JSON backend is ready when no query is active."
-  (not (code-agent-backend-active-p backend)))
-
-(cl-defmethod code-agent-backend-active-p
-    ((backend code-agent-claude-code-backend))
-  "Check if JSON backend has an active query."
-  (when-let* ((state (code-agent-claude-code-backend-process-state backend)))
-    (code-agent--query-active-p state)))
-
-(cl-defmethod code-agent-backend-session-id
-    ((backend code-agent-claude-code-backend))
-  "Return SDK UUID for the JSON backend's session."
-  (when-let* ((key (code-agent-claude-code-backend-session-key backend)))
-    (code-agent--get-sdk-uuid key)))
-
-(cl-defmethod code-agent-backend-cancel
-    ((backend code-agent-claude-code-backend) handle)
-  "Cancel query via HANDLE (a process-state)."
-  (when handle
-    (code-agent-query-interrupt handle)))
-
-(cl-defmethod code-agent-backend-cleanup
-    ((backend code-agent-claude-code-backend))
-  "Clean up JSON backend resources."
-  (when-let* ((state (code-agent-claude-code-backend-process-state backend)))
-    (code-agent-close-process-state state)
-    (setf (code-agent-claude-code-backend-process-state backend) nil))
-  (when-let* ((client (code-agent-claude-code-backend-client backend)))
-    (when (code-agent-client-alive-p client)
-      (code-agent-client-disconnect client))
-    (setf (code-agent-claude-code-backend-client backend) nil)))
-
-(cl-defmethod code-agent-backend-send-input
-    ((backend code-agent-claude-code-backend) input)
-  "Send INPUT to the active Claude Code process via stdin."
-  (when-let* ((state (code-agent-claude-code-backend-process-state backend)))
-    (when-let* ((proc (code-agent--process-state-process state)))
-      (when (process-live-p proc)
-        (process-send-string proc (concat input "\n"))))))
-
-(cl-defmethod code-agent-backend-query
-    ((backend code-agent-claude-code-backend) prompt callbacks &rest args)
-  "Send PROMPT via Claude Code backend, invoking CALLBACKS.
-Delegates to `code-agent-query' (one-shot) or
-`code-agent-client-send-message' (persistent)."
-  (let* ((on-token (plist-get callbacks :on-token))
-         (on-message (plist-get callbacks :on-message))
-         (on-error (plist-get callbacks :on-error))
-         (on-complete (plist-get callbacks :on-complete))
-         (state
-          (if (code-agent-claude-code-backend-persistent-p backend)
-              ;; Persistent mode: reuse client
-              (let* ((session-key (code-agent-claude-code-backend-session-key backend))
-                     (options (plist-get args :options))
-                     (client (or (code-agent-claude-code-backend-client backend)
-                                 (let ((c (code-agent-client-create
-                                           :options options
-                                           :session-key session-key)))
-                                   (code-agent-client-connect c "")
-                                   (setf (code-agent-claude-code-backend-client backend) c)
-                                   c))))
-                (code-agent-client-send-message
-                 client prompt
-                 :token-callback on-token
-                 :on-message on-message
-                 :on-error on-error
-                 :on-complete on-complete)
-                (code-agent-client-state client))
-            ;; One-shot mode: delegate to code-agent-query
-            (apply #'code-agent-query prompt
-                   :on-token on-token
-                   :on-message on-message
-                   :on-error on-error
-                   :on-complete on-complete
-                   (cl-loop for (k v) on args by #'cddr
-                            append (list k v))))))
-    ;; Store process-state for active-p / cancel
-    (setf (code-agent-claude-code-backend-process-state backend) state)
-    state))
-#+END_SRC
-
-** Public Utility Wrappers
-
-Public wrappers that let the presentation layer call these without
-depending on internal naming conventions.
-
-#+BEGIN_SRC elisp
-(defun code-agent-make-session-key (file-path &optional session-id)
-  "Create internal session key from FILE-PATH and optional SESSION-ID.
-Public wrapper for session key generation."
-  (code-agent--make-session-key file-path session-id))
-
-(defun code-agent-get-verbose-buffer (session-key)
-  "Return the verbose output buffer for SESSION-KEY, or nil."
-  (gethash session-key code-agent--session-verbose-buffers))
-
-#+END_SRC
 
 ** Backend Protocol Contract
 
@@ -4725,9 +1134,7 @@ Single =provide= so the module can be =require=d.
 
 **Verified by:**
 
-- [[file:../../tests/test-code-agent-backend-protocol.el][test-code-agent-backend-protocol.el]]
 - [[file:../../tests/test-code-agent-backend.el][test-code-agent-backend.el]]
-- [[file:../../tests/test-code-agent-json-protocol.el][test-code-agent-json-protocol.el]]
 
 #+begin_src elisp :tangle no
 ;; literate-elisp reader sentinel — keeps the file's final

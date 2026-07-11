@@ -338,7 +338,6 @@ Returns list of warning/error messages."
     "code-agent-org--set-exec-status"
     "code-agent-org-current-session-key"
     "code-agent-org--sessions"
-    "code-agent-org-heading-tag"
     "code-agent-org-exec-status-property"
     "code-agent-org-cli-session-property"
     ;; Emacs version-specific functions

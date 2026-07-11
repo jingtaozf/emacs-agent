@@ -391,53 +391,18 @@ or add it to test-structural--known-public-api if it's intentionally public."
 
 (defvar test-structural--known-public-api
   '(;; code-agent: core query API
-    "code-agent-query"
-    "code-agent-query-async"
-    "code-agent-query-accumulate"
-    "code-agent-query-interrupt"
-    "code-agent-query-kill"
-    "code-agent-query-request-id"
     "code-agent-query-context-format-id"
     "code-agent-query-context-format-label"
-    "code-agent-cancel"
-    "code-agent-cancel-all"
     "code-agent-cancel-all-queries"
     "code-agent-cancel-query"
-    "code-agent-version"
     "code-agent-active-query-count"
     "code-agent-list-queries"
-    "code-agent-options"
-    ;; code-agent: message extraction
-    "code-agent-extract-text"
-    "code-agent-extract-thinking"
-    "code-agent-extract-tool-uses"
-    "code-agent-message-type"
-    ;; code-agent: client API (bidirectional chat)
-    "code-agent-client-create"
-    "code-agent-client-connect"
-    "code-agent-client-disconnect"
-    "code-agent-client-send"
-    "code-agent-client-send-message"
-    "code-agent-client-interrupt"
-    "code-agent-get-session-id"
     ;; code-agent: session & state management
     "code-agent-make-session-key"
-    "code-agent-get-effective-permissions"
-    "code-agent-close-process-state"
     "code-agent-cleanup"
     "code-agent-kill-all-processes"
-    "code-agent-registry-cleanup-process"
-    "code-agent-update-state-callbacks"
-    ;; code-agent: permission system
-    "code-agent-check-permission"
-    "code-agent-permission-check-patterns"
-    "code-agent-permission-prompt"
-    "code-agent-permission-auto-allow"
-    "code-agent-permission-ask-user-question"
     ;; code-agent: IDE context
     "code-agent-collect-ide-context"
-    "code-agent-get-system-reminder"
-    "code-agent-build-system-reminder"
     ;; code-agent: alerts (mode-line)
     "code-agent-add-alert"
     "code-agent-remove-alert"
@@ -445,16 +410,11 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-rate-limit-mode-line-start"
     "code-agent-rate-limit-mode-line-stop"
     "code-agent-rate-limit-refresh"
-    ;; code-agent: verbose/debug
-    "code-agent-get-verbose-buffer"
-    "code-agent-show-session-verbose"
-    "code-agent-list-session-verbose-buffers"
     ;; code-agent: elapsed time helper
     "code-agent-format-elapsed-time"
     ;; code-agent: query management buffer
     "code-agent-queries-cancel-at-point"
     "code-agent-queries-goto-source"
-    "code-agent-queries-show-verbose"
     ;; code-agent-cmux-backend (Phase 3 multiplexer factory)
     "code-agent-cmux-backend-create"
     ;; code-agent-tmux-backend (Phase 4 multiplexer factory)
@@ -485,10 +445,6 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-goto-custom-id"
     ;; code-agent-org: workspace workflow
     "code-agent-org-insert-workspace"
-    ;; code-agent-org: refine
-    "code-agent-org-refine"
-    "code-agent-org-refine-block"
-    "code-agent-org-refine-prompt"
     ;; code-agent-org: session & connection management
     "code-agent-org-session-status"
     "code-agent-org-set-model"
@@ -500,14 +456,8 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-org-show-session-info"
     ;; code-agent-org: persistent-client registry (class-based singleton)
     "code-agent-org-persistent-registry-get-entry"
-    "code-agent-org-persistent-registry-get"
-    "code-agent-org-persistent-registry-alive-p"
-    "code-agent-org-persistent-registry-register"
-    "code-agent-org-persistent-registry-update-activity"
     "code-agent-org-persistent-registry-disconnect"
     "code-agent-org-persistent-registry-disconnect-buffer"
-    "code-agent-org-persistent-registry-list"
-    "code-agent-org-persistent-registry-count"
     ;; code-agent-org: copilot title generator (class-based singleton)
     "code-agent-org-copilot-title-generator-ensure-instance"
     "code-agent-org-copilot-title-generator-generate"
@@ -631,7 +581,6 @@ Only returns claude-* and emacs-mcp-server-* requires, not standard libs."
 (defvar test-structural--module-layers
   '(("emacs-mcp-server"       . 0)   ; independent
     ("code-agent-backend"    . 1)   ; bottom layer
-    ("code-agent-permission" . 1)
     ("code-agent-ide"        . 1)
     ("code-agent"            . 2)   ; core
     ("code-agent-org-session"      . 3)   ; org sub-modules

@@ -26,8 +26,6 @@ make test-unit-parallel # Run unit tests in parallel (~4.5s)
 make test-agent-unit    # Run code-agent unit tests only
 make test-org-unit      # Run code-agent-org unit tests only
 make test-backend-unit  # Run backend protocol unit tests
-make test-mock          # Run mock CLI tests (no API, fast)
-make test-integration   # Run integration tests (requires API key)
 make lint               # Static analysis (undefined functions/variables)
 make test-python        # Run Python CLI tool tests
 make check              # lint + test-unit + test-python (pre-commit gate)
@@ -123,8 +121,8 @@ at the top of this file). code-agent-specific application:
 
 `code-agent-backend.org` defines the canonical protocol
 (`code-agent-backend-query`, `-cancel`, `-cleanup`,
-`-classify-error`, …); `code-agent-acp-backend` and
-`code-agent-claude-code-backend` each `cl-defmethod` those generics.
+`-classify-error`, …); `code-agent-cmux-backend` and
+`code-agent-tmux-backend` each `cl-defmethod` those generics.
 Callers in `code-agent-org.org` dispatch on the backend instance —
 never branch on a string or symbol discriminator. New modules MUST
 follow the same pattern.
@@ -147,7 +145,7 @@ LP source lives in `.org` files loaded via `literate-elisp`:
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| Core SDK | `code-agent.org` | CLI subprocess, JSON stream parsing |
+| Core SDK | `code-agent.org` | Package shell, activity/rate-limit mode-lines |
 | Org Integration | `code-agent-org.org` | Workspace management: launch/restart/cancel cmux sessions, transient menu |
 | MCP Server | `emacs-mcp-server.org` | Emacs tools exposed to Claude / Pi |
 | Pi (default-loaded; ext opt-in) | `code-agent-pi-{backend,extension}.org` | pi.dev RPC backend (auto-load) + TS extension tangling to `~/.pi/agent/extensions/emacs-mcp.ts`; `:CLAUDE_BACKEND: pi` |
@@ -285,7 +283,6 @@ autonomous**; exploration → **L1-L2 inline**.
 | Full API docs | `code-agent.org` section headers |
 | Org integration | `code-agent-org.org` section headers |
 | Test fixtures | `tests/fixtures/` |
-| Mock CLI | `tests/mock-claude-cli.sh` |
 | Docker sandbox | `.devcontainer/` |
 | Prompt tags | `prompts/tags/` |
 | Reference SDK | `reference/code-agent-sdk-python/`; pi.dev source `reference/pi/` (submodule); Pi E2E `make test-e2e-pi` |

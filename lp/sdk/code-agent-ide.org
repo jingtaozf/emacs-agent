@@ -6,19 +6,20 @@
 :CUSTOM_ID: ide-overview
 :END:
 
-Without this module, every prompt to Claude would arrive context-free
-— no knowledge of which file the user is editing, where the cursor
-sits, what region is selected, or which buffers are visible.  This
-module collects that state from Emacs and serialises it into a
-=<system-reminder>= tag prepended to every prompt, matching the
-Python backend's format exactly so the LLM sees the same structure
-regardless of which client emitted the query.
+This module collects IDE state from Emacs — which file the user is
+editing, where the cursor sits, what region is selected, which
+buffers are visible — for consumers like the header-line display
+(=code-agent-org-header-line.org=).  The =<system-reminder>=-building
+half of this module (matching the Python backend's prompt-envelope
+format) was deleted 2026-07: zero production callers survived the
+org-as-control-plane pivot, since prompts now travel through the
+cmux/tmux terminal backends rather than an Emacs-side query API.
 
-Invariant: the =<system-reminder>= envelope is built deterministically
-from the active buffer + region + visible buffer list at the moment
-=code-agent-ide-context= is called.  Exclusions (chat buffer,
+Invariant: collected context is built deterministically from the
+active buffer + region + visible buffer list at the moment
+=code-agent-collect-ide-context= is called.  Exclusions (chat buffer,
 =*Messages*=, =*scratch*=, user-configured patterns) MUST be applied
-before any buffer content reaches the serialiser; secrets-in-buffer
+before any buffer content reaches a consumer; secrets-in-buffer
 leakage is the failure mode this module was added to prevent.
 
 * Dependencies
@@ -33,7 +34,7 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
 ;;; Commentary:
 
 ;; Provides functions for collecting IDE context from Emacs
-;; and building system reminder tags that match the Python backend format.
+;; (current file, open buffers, selection) for display consumers.
 
 ;;; Code:
 
@@ -168,95 +169,6 @@ collection when called from special buffers like Claude Chat."
           :selection (code-agent--format-selection)
           :cwd (or cwd default-directory))))
 #+END_SRC
-
-** System Reminder Building
-
-Builder helpers for system reminder — composes the runtime value from configuration + context.
-
-#+BEGIN_SRC elisp
-(cl-defun code-agent-build-system-reminder (&key current-file open-files
-                                                   selection file-path
-                                                   cwd extra-lines)
-  "Build <system-reminder> tag with IDE context.
-Returns string suitable for prepending to user prompt.
-
-CURRENT-FILE is plist with :name :path :modified.
-OPEN-FILES is list of such plists.
-SELECTION is plist with :text :start-line :end-line.
-FILE-PATH is the conversation notebook path.
-CWD is the working directory (project root) where operations should be performed.
-EXTRA-LINES is a list of additional strings to include in the reminder."
-  (let ((parts nil))
-    ;; Current file
-    (when current-file
-      (let ((name (or (plist-get current-file :name)
-                      (plist-get current-file :path)
-                      "unknown"))
-            (path (plist-get current-file :path))
-            (modified (plist-get current-file :modified)))
-        (push (concat "The user is currently editing: "
-                      name
-                      (if modified " (modified)" "")
-                      (if path (format " (%s)" path) ""))
-              parts)))
-
-    ;; Open files
-    (when open-files
-      (let ((file-list
-             (mapconcat
-              (lambda (f)
-                (concat (or (plist-get f :name)
-                            (plist-get f :path)
-                            "unknown")
-                        (if (plist-get f :modified) "*" "")))
-              (seq-take open-files 10)
-              ", ")))
-        (push (format "Open files in editor: %s" file-list) parts)))
-
-    ;; Selection
-    (when selection
-      (let ((text (plist-get selection :text))
-            (start-line (plist-get selection :start-line))
-            (end-line (plist-get selection :end-line)))
-        (when text
-          (push (format "Selected code (lines %d-%d):\n```\n%s\n```"
-                        start-line end-line text)
-                parts))))
-
-    ;; Working directory
-    (when cwd
-      (push (format "Working directory (project root): %s\nIMPORTANT: All file operations should be relative to this directory unless absolute paths are specified." cwd) parts))
-
-    ;; Conversation notebook
-    (when file-path
-      (push (format "Conversation notebook: %s" file-path) parts))
-
-    ;; Extra lines (for caller-specific context like org output level)
-    (when extra-lines
-      (dolist (line extra-lines)
-        (when (and line (stringp line) (> (length line) 0))
-          (push line parts))))
-
-    ;; Build final string
-    (if parts
-        (concat "<system-reminder>\n"
-                (mapconcat #'identity (nreverse parts) "\n")
-                "\n</system-reminder>")
-      "")))
-
-(defun code-agent-get-system-reminder (&optional file-path)
-  "Get system reminder with automatically collected IDE context.
-FILE-PATH is the optional conversation notebook path.
-All other context (current-file, open-files, selection) is collected
-automatically from current Emacs state."
-  (let ((context (code-agent-collect-ide-context)))
-    (code-agent-build-system-reminder
-     :current-file (plist-get context :current-file)
-     :open-files (plist-get context :open-files)
-     :selection (plist-get context :selection)
-     :file-path file-path)))
-#+END_SRC
-
 
 * Provide Feature
 

@@ -13,9 +13,9 @@ by session-key and the backend constructor registry.
 
 | Concern | Public surface |
 |---------+----------------|
-| Persistent client class | =code-agent-org-persistent-entry= / =-registry= structs + the 9 registry verbs (get-entry, get, alive-p, register, update-activity, disconnect, disconnect-buffer, list, count) |
+| Persistent client class | =code-agent-org-persistent-entry= / =-registry= structs + the 3 surviving registry verbs (get-entry, disconnect, disconnect-buffer) — register/get/alive-p/update-activity/list/count were deleted 2026-07 as zero-caller (the registry is never populated in production, so disconnect/disconnect-buffer run as safe no-ops) |
 | Backend registry | =code-agent-org-backend-registry= alist + =code-agent-org--make-default-backend= |
-| Lifecycle hooks | =--on-buffer-kill= / =--on-todo-state-change= (attached to kill-buffer-hook and org-after-todo-state-change-hook in the main module) |
+| Lifecycle hooks | =--on-buffer-kill= (attached to kill-buffer-hook in the main module) |
 
 ** Why one module
 
@@ -33,7 +33,7 @@ from:
 | =--session-get/put= | =session= |
 | =--current-session-key= | =session-context= |
 | =--get-org-property= | =env-permission= |
-| Backend constructors (=code-agent-claude-code-backend-create=, =code-agent-cmux-backend-create=, =code-agent-tmux-backend-create=) | their own modules (already required at file top of main) |
+| Backend constructors (=code-agent-cmux-backend-create=, =code-agent-tmux-backend-create=) | their own modules (already required at file top of main) |
 
 The main module reaches *back* into this one for
 =code-agent-org--session-display-name=.
@@ -105,71 +105,20 @@ Tests may rebind this, but all normal code paths share the one
 instance because a persistent client is a per-Emacs resource.")
 #+END_SRC
 
-*** Customization
-
-=code-agent-org-persistent-sessions= opts into the persistent pool.
-
-#+BEGIN_SRC elisp
-(defcustom code-agent-org-persistent-sessions nil
-  "When non-nil, use persistent process pool for sessions.
-When nil, spawn a new process for each query (legacy behavior).
-
-Persistent sessions reduce latency and allow Claude to maintain
-conversation context internally."
-  :type 'boolean
-  :group 'code-agent-org)
-#+END_SRC
-
 *** Lookup
 
-=get-entry= returns the internal struct; =get= returns just the
-client (the common read path); =alive-p= is a bool shortcut.
+=get-entry= returns the internal struct — the sole remaining reader,
+used by =disconnect= below.  =get= / =alive-p= (which only wrapped
+=get=) and =register= / =update-activity= were deleted 2026-07: the
+registry has no code path that ever calls =register=, so it is
+permanently empty in production; those verbs, plus the
+=code-agent-org-persistent-sessions= defcustom that gated a
+never-taken code path, had zero callers.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-persistent-registry-get-entry (registry session-key)
   "Return the `code-agent-org-persistent-entry' for SESSION-KEY, or nil."
   (gethash session-key (code-agent-org-persistent-registry-entries registry)))
-
-(defun code-agent-org-persistent-registry-get (registry session-key)
-  "Return the live client handle for SESSION-KEY, or nil if absent."
-  (when-let* ((entry (code-agent-org-persistent-registry-get-entry
-                      registry session-key)))
-    (code-agent-org-persistent-entry-client entry)))
-
-(defun code-agent-org-persistent-registry-alive-p (registry session-key)
-  "Return non-nil iff SESSION-KEY has a live client in REGISTRY."
-  (when-let* ((client (code-agent-org-persistent-registry-get registry
-                                                              session-key)))
-    (code-agent-client-alive-p client)))
-#+END_SRC
-
-*** Registration + Activity
-
-=register= records a new entry; =update-activity= bumps the
-timestamp and increments the query counter after each successful
-dispatch.
-
-#+BEGIN_SRC elisp
-(defun code-agent-org-persistent-registry-register
-    (registry session-key client buffer heading-pos)
-  "Record CLIENT + BUFFER + HEADING-POS under SESSION-KEY in REGISTRY."
-  (puthash session-key
-           (code-agent-org-persistent-entry--create
-            :client client
-            :buffer buffer
-            :heading-pos heading-pos
-            :last-activity (float-time)
-            :query-count 0)
-           (code-agent-org-persistent-registry-entries registry)))
-
-(defun code-agent-org-persistent-registry-update-activity
-    (registry session-key)
-  "Bump `last-activity' and increment `query-count' for SESSION-KEY."
-  (when-let* ((entry (code-agent-org-persistent-registry-get-entry
-                      registry session-key)))
-    (setf (code-agent-org-persistent-entry-last-activity entry) (float-time))
-    (setf (code-agent-org-persistent-entry-query-count entry)
-          (1+ (or (code-agent-org-persistent-entry-query-count entry) 0)))))
 #+END_SRC
 
 *** Disconnection
@@ -185,9 +134,6 @@ single-session path so the message format stays consistent.
 REASON (optional string) is shown in the user-facing message."
   (when-let* ((entry (code-agent-org-persistent-registry-get-entry
                       registry session-key)))
-    (when-let* ((client (code-agent-org-persistent-entry-client entry)))
-      (when (code-agent-client-alive-p client)
-        (code-agent-client-disconnect client)))
     (remhash session-key
              (code-agent-org-persistent-registry-entries registry))
     (message "Claude: Disconnected session %s%s"
@@ -203,23 +149,6 @@ REASON (optional string) is shown in the user-facing message."
              (code-agent-org-persistent-registry-entries registry))
     (dolist (key to-remove)
       (code-agent-org-persistent-registry-disconnect registry key "buffer killed"))))
-#+END_SRC
-
-*** Enumeration
-
-Enumerates response sections in a buffer — used when the Stop hook needs to find the matching response section by sequence rather than by query-id.
-
-#+BEGIN_SRC elisp
-(defun code-agent-org-persistent-registry-list (registry)
-  "Return a list of (SESSION-KEY . ENTRY) pairs for every entry in REGISTRY."
-  (let ((pairs nil))
-    (maphash (lambda (key entry) (push (cons key entry) pairs))
-             (code-agent-org-persistent-registry-entries registry))
-    (nreverse pairs)))
-
-(defun code-agent-org-persistent-registry-count (registry)
-  "Return the number of entries currently held by REGISTRY."
-  (hash-table-count (code-agent-org-persistent-registry-entries registry)))
 #+END_SRC
 
 *** Backend Registry Dispatch
@@ -252,11 +181,7 @@ session-id auto-save, were removed along with =code-agent-pi-backend.org=.)
 Called from the file body to (re)initialize the global registry on
 every literate-elisp reload — this is what makes hot-edits to a
 factory lambda actually take effect."
-  `(("claude-code"   . ,(lambda (session-key _options)
-                          (code-agent-claude-code-backend--create
-                           :session-key session-key
-                           :persistent-p code-agent-org-persistent-sessions)))
-    ("cmux"          . ,(lambda (session-key _options)
+  `(("cmux"          . ,(lambda (session-key _options)
                           (code-agent-cmux-backend-create
                            :session-key session-key)))
     ("tmux"          . ,(lambda (session-key _options)
@@ -283,14 +208,14 @@ symmetry and for a future Phase 3b cut-over.")
   "Create the default backend for SESSION-KEY with OPTIONS.
 Dispatches on the CLAUDE_BACKEND org property via
 `code-agent-org-backend-registry'.  Unknown values fall back to
-\"claude-code\" with a one-line `message' so the user knows to update
-the property (e.g. \"json-stream\" → \"claude-code\")."
+\"cmux\" with a one-line `message' so the user knows to update
+the property (e.g. an unset or unrecognized value → \"cmux\")."
   (let* ((prop-value (code-agent-org-get-org-property "CLAUDE_BACKEND" t))
          (direct-hit (cdr (assoc prop-value code-agent-org-backend-registry)))
          (constructor (or direct-hit
-                          (cdr (assoc "claude-code" code-agent-org-backend-registry)))))
+                          (cdr (assoc "cmux" code-agent-org-backend-registry)))))
     (when (and prop-value (not direct-hit))
-      (message "CLAUDE_BACKEND=%S not in registry; falling back to claude-code."
+      (message "CLAUDE_BACKEND=%S not in registry; falling back to cmux."
                prop-value))
     (funcall constructor session-key options)))
 
@@ -352,25 +277,6 @@ Added to `kill-buffer-hook' (buffer-local) in `code-agent-org-mode'."
     (code-agent-org-persistent-registry-disconnect-buffer
      code-agent-org--persistent-registry (current-buffer))))
 
-(defvar org-state) ; dynamically bound by Org in todo-state-change hooks
-
-(defun code-agent-org--on-todo-state-change ()
-  "Handle TODO state changes for session lifecycle.
-When a section with CLAUDE_SESSION_ID is marked DONE or CANCELLED,
-disconnect the associated persistent client.
-
-Added to `org-after-todo-state-change-hook' (buffer-local) in `code-agent-org-mode'."
-  (when (and (bound-and-true-p org-state)
-             (member org-state '("DONE" "CANCELLED")))
-    ;; Check if this heading has a CLAUDE_SESSION_ID
-    (when-let* ((session-id (org-entry-get nil "CLAUDE_SESSION_ID" nil)))
-      (let ((session-key (code-agent-org-current-session-key)))
-        (when (code-agent-org-persistent-registry-alive-p
-               code-agent-org--persistent-registry session-key)
-          (code-agent-org-persistent-registry-disconnect
-           code-agent-org--persistent-registry
-           session-key
-           (format "section marked %s" org-state)))))))
 #+END_SRC
 
 

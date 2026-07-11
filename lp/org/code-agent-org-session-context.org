@@ -17,7 +17,7 @@ recovery context when a session expires.
 | File-level =#+PROPERTY= lookup | =--get-file-level-property= |
 | =CLAUDE_SESSION_ID= resolution | =--get-session-id= / =--get-session-scope= / =--current-session-key= |
 | Session scope tag (=:claude_session:=) | =--has-session-tag-p= / =--find-session-scope-heading= |
-| SDK UUID persistence (for =--resume=) | =--get-sdk-uuid= / =--set-sdk-uuid= / =--clear-sdk-uuid= |
+| SDK UUID persistence (for =--resume=) | =--get-sdk-uuid= |
 
 ** Dependencies
 
@@ -156,58 +156,6 @@ Returns nil if not set."
       ;; File-level: get from #+PROPERTY keyword
       (code-agent-org--get-file-level-property code-agent-org-sdk-uuid-property))))
 
-(defun code-agent-org--set-sdk-uuid (uuid)
-  "Set SDK UUID in org property.
-Stores at the appropriate scope based on where CLAUDE_SESSION_ID is defined:
-- If session ID is in a heading (current or parent), stores in that heading's property drawer
-- Otherwise stores at file level."
-  (let ((session-heading (code-agent-org--find-session-scope-heading)))
-    (if session-heading
-        ;; Section-level: set in the heading that defines the session
-        (save-excursion
-          (goto-char session-heading)
-          (org-set-property code-agent-org-sdk-uuid-property uuid))
-      ;; File-level: use #+PROPERTY keyword
-      (save-excursion
-        (goto-char (point-min))
-        (if (re-search-forward
-             (format "^#\\+PROPERTY:[ \t]+%s[ \t]+.+$" code-agent-org-sdk-uuid-property)
-             nil t)
-            ;; Update existing
-            (replace-match (format "#+PROPERTY: %s %s"
-                                   code-agent-org-sdk-uuid-property uuid))
-          ;; Insert new after other properties
-          (goto-char (point-min))
-          (if (re-search-forward "^#\\+PROPERTY:" nil t)
-              (progn
-                (end-of-line)
-                (insert (format "\n#+PROPERTY: %s %s"
-                                code-agent-org-sdk-uuid-property uuid)))
-            ;; No properties, insert after title or at beginning
-            (if (re-search-forward "^#\\+TITLE:" nil t)
-                (progn
-                  (end-of-line)
-                  (insert (format "\n#+PROPERTY: %s %s"
-                                  code-agent-org-sdk-uuid-property uuid)))
-              (insert (format "#+PROPERTY: %s %s\n" code-agent-org-sdk-uuid-property uuid)))))))))
-
-(defun code-agent-org--clear-sdk-uuid ()
-  "Clear SDK UUID from org properties.
-Removes the property from the appropriate scope based on where CLAUDE_SESSION_ID is defined."
-  (let ((session-heading (code-agent-org--find-session-scope-heading)))
-    (if session-heading
-        ;; Section-level: remove from property drawer
-        (save-excursion
-          (goto-char session-heading)
-          (org-delete-property code-agent-org-sdk-uuid-property))
-      ;; File-level: remove #+PROPERTY line
-      (save-excursion
-        (goto-char (point-min))
-        (when (re-search-forward
-               (format "^#\\+PROPERTY:[ \t]+%s[ \t]+.+\n?"
-                       code-agent-org-sdk-uuid-property)
-               nil t)
-          (replace-match ""))))))
 #+END_SRC
 
 

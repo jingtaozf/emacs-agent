@@ -5,14 +5,13 @@ EMACS ?= emacs
 BATCH = $(EMACS) -Q --batch
 
 # Source files
-SOURCES = code-agent-trace.org
+SOURCES = lp/trace/code-agent-trace.org
 
 # Test files
 # Note: actual test loading is in target recipes below, not this variable
-UNIT_TESTS = tests/test-code-agent-unit.el tests/test-code-agent-json-protocol.el tests/test-code-agent-backend.el tests/test-code-agent-backend-protocol.el
-MOCK_TESTS = tests/test-code-agent-mock.el
-INTEGRATION_TESTS = tests/test-code-agent-integration.el tests/test-code-agent-permissions.el tests/test-mcp-ide-integration.el tests/test-mcp-mode-line.el
-ALL_TESTS = $(UNIT_TESTS) $(MOCK_TESTS) $(INTEGRATION_TESTS)
+UNIT_TESTS = tests/test-code-agent-unit.el tests/test-code-agent-backend.el
+INTEGRATION_TESTS = tests/test-mcp-mode-line.el
+ALL_TESTS = $(UNIT_TESTS) $(INTEGRATION_TESTS)
 
 # Load path for tests
 LITERATE_ELISP_DIR ?= $(HOME)/projects/literate-elisp
@@ -38,7 +37,7 @@ LOAD_AGENT_ONLY = $(LOAD_LITERATE) $(LOAD_AGENT)
 LOAD_ALL = $(LOAD_LITERATE) $(LOAD_AGENT) $(LOAD_MCP) $(LOAD_ORG)
 
 .PHONY: all
-all: compile test-unit
+all: test-unit
 
 .PHONY: help
 help:
@@ -46,26 +45,17 @@ help:
 	@echo "================================"
 	@echo ""
 	@echo "Development:"
-	@echo "  make compile          - Byte-compile source files"
 	@echo "  make clean            - Remove compiled files"
 	@echo "  make reload           - Reload org files in running Emacs"
 	@echo "  make install-hooks    - Install/update git pre-commit hook"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test-smoke       - Fast syntax check (< 2s) — run after every edit"
-	@echo "  make test             - Run all tests (unit + parallel integration)"
+	@echo "  make test             - Run all tests (unit + org-surface)"
 	@echo "  make test-unit        - Run unit tests only (fast, no API, ~13s)"
 	@echo "  make test-unit-parallel - Run unit tests in parallel (~4.5s)"
-	@echo "  make test-integration - Run integration tests in parallel (6 jobs, default)"
-	@echo "  make test-integration-seq     - Run integration tests sequentially"
-	@echo "  make test-integration PARALLEL_JOBS=N  - Custom parallelism"
 	@echo "  make test-agent-unit  - Run code-agent unit tests"
-	@echo "  make test-permissions - Run permission functions tests"
 	@echo "  make test-mcp-mode-line - Run MCP mode-line spinner tests"
-	@echo "  make test-mock        - Run mock CLI tests (no API, fast)"
-	@echo "  make test-agent-mock  - Run agent mock CLI tests"
-	@echo "  make test-docker      - Run Docker unit tests (path translation)"
-	@echo "  make test-docker-sandbox - Run Docker sandbox tests (requires container)"
 	@echo "  make test-workspace-bridge  - E2E tests for terminal workspace bridge (requires MCP)"
 	@echo "  make test-readme-smoke - Run README tutorial smoke tests (no API)"
 	@echo "  make test-readme      - Run full README tutorial tests (requires API)"
@@ -94,21 +84,10 @@ help:
 	@echo "                          * Duplicate definitions"
 	@echo "  make check            - Run all checks (lint + test-unit)"
 
-.PHONY: compile
-compile:
-	@echo "Compiling literate org files..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_LITERATE) \
-		--eval "(literate-elisp-tangle-file \"code-agent.org\")" \
-		--eval "(literate-elisp-tangle-file \"code-agent-org.org\")" \
-		--eval "(byte-compile-file \"code-agent.el\")" \
-		--eval "(byte-compile-file \"code-agent-org.el\")"
-
 .PHONY: clean
 clean:
 	@echo "Cleaning compiled files..."
 	rm -f code-agent.elc
-	rm -f code-agent-org.el code-agent-org.elc
 	rm -f tests/*.elc
 
 .PHONY: reload
@@ -127,13 +106,13 @@ install-hooks:
 	@cp scripts/pre-commit .git/hooks/pre-commit
 	@chmod +x .git/hooks/pre-commit
 	@echo "Pre-commit hook installed successfully."
-	@echo "Hook runs 656 tests (~50s): lint, unit, permissions, mock CLI"
+	@echo "Hook runs: lint, unit, mcp-mode-line"
 	@echo "To skip temporarily: git commit --no-verify"
 
 # Testing targets
 
 .PHONY: test
-test: test-unit test-integration
+test: test-unit test-org-unit
 
 # Fast syntax check — agents run after every edit (< 2s)
 .PHONY: test-smoke
@@ -168,107 +147,6 @@ UNIT_PARALLEL_JOBS ?= 3
 test-unit-parallel:
 	@$(MAKE) -j$(UNIT_PARALLEL_JOBS) test-unit
 
-# Parallel integration testing configuration
-PARALLEL_JOBS ?= 8
-PARALLEL := $(shell which parallel 2>/dev/null)
-BREW := $(shell which brew 2>/dev/null)
-
-# Main integration target - now uses parallel by default
-.PHONY: test-integration
-test-integration: _ensure-parallel
-	@if which parallel >/dev/null 2>&1; then \
-		echo "Running integration tests with $(PARALLEL_JOBS) parallel jobs (GNU parallel)..."; \
-		$(MAKE) _run-sharded-tests-parallel TOTAL_SHARDS=$(PARALLEL_JOBS); \
-	else \
-		echo "Running integration tests with $(PARALLEL_JOBS) parallel jobs (bash background)..."; \
-		$(MAKE) _run-sharded-tests-bash TOTAL_SHARDS=$(PARALLEL_JOBS); \
-	fi
-
-# Sequential integration tests (old behavior)
-.PHONY: test-integration-seq
-test-integration-seq: test-agent-integration test-org-integration
-
-# Ensure GNU parallel is installed (auto-install via brew if missing)
-.PHONY: _ensure-parallel
-_ensure-parallel:
-ifndef PARALLEL
-ifdef BREW
-	@echo "GNU parallel not found. Installing via Homebrew..."
-	@brew install parallel
-	@echo "GNU parallel installed successfully."
-else
-	@echo "Note: GNU parallel not found. Using bash background jobs."
-	@echo "For better output, install: brew install parallel (macOS) or apt install parallel (Linux)"
-endif
-endif
-
-# Internal: run shards using GNU parallel
-.PHONY: _run-sharded-tests-parallel
-_run-sharded-tests-parallel:
-	@seq 0 $$(($(TOTAL_SHARDS) - 1)) | $(PARALLEL) -j$(TOTAL_SHARDS) --group --tag \
-		'$(BATCH) $(LOAD_PATH) \
-			$(LOAD_ALL) \
-			-l tests/fixtures/test-config.el \
-			-l tests/fixtures/test-parallel.el \
-			-l tests/test-code-agent-integration.el \
-			--eval "(test-claude-run-shard $(TOTAL_SHARDS) {})"'
-
-# Internal: run shards using bash background jobs (portable fallback)
-.PHONY: _run-sharded-tests-bash
-_run-sharded-tests-bash:
-	@mkdir -p .test-results
-	@rm -f .test-results/shard-*.log .test-results/shard-*.exit
-	@echo "Starting $(TOTAL_SHARDS) test shards..."
-	@for i in $$(seq 0 $$(($(TOTAL_SHARDS) - 1))); do \
-		( $(BATCH) $(LOAD_PATH) \
-			$(LOAD_ALL) \
-			-l tests/fixtures/test-config.el \
-			-l tests/fixtures/test-parallel.el \
-			-l tests/test-code-agent-integration.el \
-			--eval "(test-claude-run-shard $(TOTAL_SHARDS) $$i)" \
-			> .test-results/shard-$$i.log 2>&1; \
-			echo $$? > .test-results/shard-$$i.exit ) & \
-	done; \
-	echo "Waiting for all shards to complete..."; \
-	wait; \
-	echo ""; \
-	echo "=== Test Results by Shard ==="; \
-	failed=0; \
-	for i in $$(seq 0 $$(($(TOTAL_SHARDS) - 1))); do \
-		exit_code=$$(cat .test-results/shard-$$i.exit 2>/dev/null || echo 1); \
-		if [ "$$exit_code" = "0" ]; then \
-			echo "Shard $$i: PASSED"; \
-		else \
-			echo "Shard $$i: FAILED (exit $$exit_code)"; \
-			failed=1; \
-		fi; \
-	done; \
-	echo ""; \
-	if [ "$$failed" = "1" ]; then \
-		echo "=== Failed Shard Logs ==="; \
-		for i in $$(seq 0 $$(($(TOTAL_SHARDS) - 1))); do \
-			exit_code=$$(cat .test-results/shard-$$i.exit 2>/dev/null || echo 1); \
-			if [ "$$exit_code" != "0" ]; then \
-				echo "--- Shard $$i ---"; \
-				tail -50 .test-results/shard-$$i.log; \
-			fi; \
-		done; \
-		exit 1; \
-	fi
-
-# View test logs from parallel run
-.PHONY: test-logs
-test-logs:
-	@if [ -d .test-results ]; then \
-		for f in .test-results/shard-*.log; do \
-			echo "=== $$f ==="; \
-			cat "$$f"; \
-			echo ""; \
-		done; \
-	else \
-		echo "No test results found. Run 'make test-integration' first."; \
-	fi
-
 .PHONY: test-agent-unit
 test-agent-unit:
 	@echo "Running code-agent unit tests..."
@@ -277,14 +155,6 @@ test-agent-unit:
 		-l tests/fixtures/test-config.el \
 		-l tests/test-code-agent-unit.el \
 		-l tests/test-code-agent-refactor-phase3.el \
-		-l tests/test-code-agent-json-protocol.el \
-		-l tests/test-code-agent-state-management.el \
-		-l tests/test-code-agent-background-tasks.el \
-		-l tests/test-code-agent-error-injection.el \
-		-l tests/test-code-agent-sentinel.el \
-		-l tests/test-json-parser-property.el \
-		-l tests/test-harness-phase2.el \
-		-l tests/test-permission-round-trip.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-backend-unit
@@ -293,7 +163,6 @@ test-backend-unit:
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_AGENT_ONLY) \
 		-l tests/test-code-agent-backend.el \
-		-l tests/test-code-agent-backend-protocol.el \
 		-l tests/test-backend-protocol3.el \
 		-f ert-run-tests-batch-and-exit
 
@@ -351,33 +220,12 @@ test-mcp-unit:
 		-l tests/test-mcp-http.el \
 		-f ert-run-tests-batch-and-exit
 
-.PHONY: test-mock
-test-mock: test-agent-mock test-org-mock
-
-.PHONY: test-agent-mock
-test-agent-mock:
-	@echo "Running code-agent mock CLI tests..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_AGENT_ONLY) \
-		-l tests/fixtures/test-config.el \
-		-l tests/test-code-agent-mock.el \
-		-f ert-run-tests-batch-and-exit
-
 .PHONY: test-org-mock
 test-org-mock:
 	@echo "Running code-agent-org mock CLI tests..."
 	$(BATCH) $(LOAD_PATH) \
 		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
-		-f ert-run-tests-batch-and-exit
-
-.PHONY: test-agent-integration
-test-agent-integration:
-	@echo "Running code-agent integration tests (requires API key)..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_AGENT_ONLY) \
-		-l tests/fixtures/test-config.el \
-		-l tests/test-code-agent-integration.el \
 		-f ert-run-tests-batch-and-exit
 
 .PHONY: test-org-integration
@@ -388,24 +236,6 @@ test-org-integration:
 		$(LOAD_ALL) \
 		-l tests/fixtures/test-config.el \
 		-f ert-run-tests-batch-and-exit
-
-.PHONY: test-permissions
-test-permissions:
-	@echo "Running permission functions tests..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_ORG) \
-		-l tests/test-code-agent-permissions.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :permissions))"
-
-.PHONY: test-org-permissions
-test-org-permissions:
-	@echo "Running org file protection permission tests..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_AGENT_ONLY) \
-		$(LOAD_ORG) \
-		-l tests/test-code-agent-permissions.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :org))"
 
 # NOTE: test-extraction and test-mcp-ide targets removed — source files were deleted.
 # See git log for history.
@@ -419,24 +249,6 @@ test-mcp-mode-line:
 		$(LOAD_MCP) \
 		-l tests/test-mcp-mode-line.el \
 		--eval "(ert-run-tests-batch-and-exit '(tag :mcp-mode-line))"
-
-.PHONY: test-docker
-test-docker:
-	@echo "Running Docker unit tests (path translation, etc.)..."
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_ALL) \
-		-l tests/test-docker-integration.el \
-		--eval "(ert-run-tests-batch-and-exit '(and (tag :docker) (not (tag :sandbox))))"
-
-.PHONY: test-docker-sandbox
-test-docker-sandbox:
-	@echo "Running Docker sandbox integration tests..."
-	@echo "Prerequisites: make docker-up && make docker-auth"
-	@echo ""
-	$(BATCH) $(LOAD_PATH) \
-		$(LOAD_ALL) \
-		-l tests/test-docker-integration.el \
-		--eval "(ert-run-tests-batch-and-exit '(tag :sandbox))"
 
 # Docker container management
 .PHONY: docker-auth

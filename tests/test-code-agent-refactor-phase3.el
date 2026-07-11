@@ -34,61 +34,14 @@
   (should (fboundp 'code-agent-backend-session-id))
   (should (fboundp 'code-agent-backend-classify-error)))
 
-;; F11.4 JSON stream backend struct and constructor
-(ert-deftest test-f11-claude-code-backend-struct ()
-  "JSON stream backend struct should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f11)
-  (should (fboundp 'code-agent-claude-code-backend-p))
-  (should (fboundp 'code-agent-claude-code-backend--create)))
-
-;; F11.5 Claude CLI backend was removed (no longer supported)
+;; F11.4/F11.5 JSON stream backend (code-agent-claude-code-backend) removed
+;; 2026-07 — zero production callers after the org-as-control-plane pivot.
 
 ;; F11.6 Backend filter-callbacks helper
 (ert-deftest test-f11-backend-filter-callbacks ()
   "Backend filter-callbacks should extract callback functions."
   :tags '(:unit :fast :stable :isolated :refactor :f11)
   (should (fboundp 'code-agent-backend-filter-callbacks)))
-
-;;; ============================================================
-;;; F12: code-agent-permission module extraction
-;;; ============================================================
-
-;; F12.1 Module provides feature
-(ert-deftest test-f12-permission-module-provides-feature ()
-  "The code-agent-permission module should provide its feature."
-  :tags '(:unit :fast :stable :isolated :refactor :f12)
-  (should (featurep 'code-agent-permission)))
-
-;; F12.3 Permission check functions exist
-(ert-deftest test-f12-permission-check-functions ()
-  "Core permission check functions should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f12)
-  (should (fboundp 'code-agent-permission-check-patterns))
-  (should (boundp 'code-agent-permission-functions)))
-
-;; F12.4 Permission matching works
-(ert-deftest test-f12-permission-match-basic ()
-  "Permission pattern matching should work correctly."
-  :tags '(:unit :fast :stable :isolated :refactor :f12)
-  (should (fboundp 'code-agent-permission-match-p))
-  ;; Wildcard matches everything
-  (should (code-agent-permission-match-p "Read" nil "*"))
-  ;; Exact tool name match
-  (should (code-agent-permission-match-p "Read" nil "Read"))
-  (should-not (code-agent-permission-match-p "Write" nil "Read")))
-
-;; F12.5 Permission cache functions exist
-(ert-deftest test-f12-permission-cache-functions ()
-  "Permission cache functions should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f12)
-  (should (fboundp 'code-agent--permission-cache-key)))
-
-;; F12.6 Permission prompt functions exist
-(ert-deftest test-f12-permission-prompt-functions ()
-  "Permission prompt functions should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f12)
-  (should (fboundp 'code-agent-permission-prompt))
-  (should (fboundp 'code-agent-permission-auto-allow)))
 
 ;;; ============================================================
 ;;; F13: code-agent-ide module extraction
@@ -106,11 +59,9 @@
   :tags '(:unit :fast :stable :isolated :refactor :f13)
   (should (fboundp 'code-agent-collect-ide-context)))
 
-;; F13.3 System reminder building function exists
-(ert-deftest test-f13-ide-build-system-reminder ()
-  "System reminder building function should be defined."
-  :tags '(:unit :fast :stable :isolated :refactor :f13)
-  (should (fboundp 'code-agent-build-system-reminder)))
+;; F13.3 System reminder building (code-agent-build-system-reminder /
+;; code-agent-get-system-reminder) removed 2026-07 — zero production
+;; callers after the org-as-control-plane pivot.
 
 ;; F13.4 Buffer filtering works
 (ert-deftest test-f13-ide-buffer-filtering ()
@@ -132,16 +83,6 @@
 ;;; ============================================================
 ;;; Cross-module integration
 ;;; ============================================================
-
-(ert-deftest test-f11-f13-cross-module-backend-uses-permissions ()
-  "Backend protocol and permissions should work together."
-  :tags '(:unit :fast :stable :isolated :refactor :integration)
-  ;; Just verify both modules are loaded and key functions exist
-  (should (featurep 'code-agent-backend))
-  (should (featurep 'code-agent-permission))
-  (should (featurep 'code-agent-ide))
-  ;; Main code-agent should still work with extracted modules
-  (should (featurep 'code-agent)))
 
 (provide 'test-code-agent-refactor-phase3)
 ;;; test-code-agent-refactor-phase3.el ends here

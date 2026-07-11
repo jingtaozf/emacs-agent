@@ -9,8 +9,10 @@
 ;; during the bug-hunting experiment (all 3 "bugs" turned out to
 ;; already be correctly handled).
 ;;
-;; Bug #2: process-live-p check before process-send-eof in timer
-;; Bug #3: condition-case around JSON parsing
+;; Bug #2 (stdin-close timer) and Bug #3 (JSON parser condition-case)
+;; guarded code that was deleted 2026-07 along with the JSON-stream
+;; engine (code-agent--schedule-stdin-close, code-agent--try-parse-json
+;; — zero production callers after the org-as-control-plane pivot).
 ;; Bug #6: buffer-live-p check in font-lock debounce timer
 
 ;;; Code:
@@ -22,43 +24,6 @@
            (locate-dominating-file (file-name-directory load-file-name) "Makefile"))
       (locate-dominating-file default-directory "Makefile"))
   "Project root directory.")
-
-;;; Bug #2 regression: Timer checks process liveness before send-eof
-
-(ert-deftest test-hardening-stdin-close-checks-process-live ()
-  "The stdin-close timer callback checks (process-live-p) before (process-send-eof).
-FIX: Wrap process-send-eof in timer callbacks with (when (process-live-p proc) ...)
-See ARCHITECTURE.org Invariants: Timer callbacks check liveness."
-  :tags '(:unit :fast :stable :hardening)
-  (when test-hardening--project-root
-    (let* ((file (expand-file-name "lp/sdk/code-agent-backend.org" test-hardening--project-root))
-           (content (with-temp-buffer
-                      (insert-file-contents file)
-                      (buffer-string))))
-      ;; The delayed stdin-close code must check process-live-p
-      ;; near process-send-eof.  Verify both appear in the same region.
-      (should (string-match-p "process-live-p" content))
-      (should (string-match-p "process-send-eof" content))
-      ;; Verify the timer lambda has the guard (search for the pattern)
-      (should (or (string-match-p
-                   "process-live-p proc" content)
-                  (error "process-send-eof in timer without process-live-p guard.\nFIX: Add (when (process-live-p proc) ...) around process-send-eof in timer callback."))))))
-
-;;; Bug #3 regression: JSON parser has condition-case
-
-(ert-deftest test-hardening-json-parser-handles-errors ()
-  "code-agent--try-parse-json wraps json-read-from-string in condition-case.
-FIX: Add (condition-case nil (json-read-from-string ...) (error nil)) to
-prevent JSON parse errors from propagating through process filter."
-  :tags '(:unit :fast :stable :hardening)
-  ;; Test the actual function behavior
-  (should (null (code-agent--try-parse-json "not json at all")))
-  (should (null (code-agent--try-parse-json "")))
-  (should (null (code-agent--try-parse-json "{")))
-  ;; Valid JSON should parse
-  (let ((result (code-agent--try-parse-json "{\"type\":\"test\"}")))
-    (should result)
-    (should (equal (plist-get result :type) "test"))))
 
 ;;; Bug #6 regression: Font-lock timer checks buffer liveness
 

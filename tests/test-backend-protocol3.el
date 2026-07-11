@@ -1,8 +1,9 @@
 ;;; test-backend-protocol3.el --- Protocol 3 smoke tests -*- lexical-binding: t -*-
 ;;
-;; Covers the default methods of the Org-Integration Protocol (Protocol 3)
-;; added in the 2026-04-24 tri-protocol refactor.  Verifies the generics
-;; dispatch without error and the defaults behave as documented.
+;; Structural checks for the multiplexer-family backends (cmux/tmux)
+;; that implement the Org-Integration Protocol (Protocol 3) added in
+;; the 2026-04-24 tri-protocol refactor, plus tmux's Protocol 2b
+;; session-status smoke tests.
 ;;
 ;; See: docs/design-docs/2026-tri-protocol-backend-refactor.org §Protocol 3.
 
@@ -13,14 +14,13 @@
 (require 'code-agent-cmux-backend)
 (require 'code-agent-tmux-backend)
 
-;;; Test fixture — a minimal concrete agent backend for dispatch testing.
+;;; Test fixture — concrete multiplexer backends for dispatch testing.
 ;;; `code-agent-backend' is the Protocol 1 base (`:constructor nil',
-;;; abstract).  Concrete agents inherit from it directly; we instantiate
-;;; `code-agent-claude-code-backend' for dispatch tests.
-
-(defun test-p3--fresh-claude-code-backend ()
-  "Return a fresh `code-agent-claude-code-backend' for Protocol 3 dispatch tests."
-  (code-agent-claude-code-backend--create))
+;;; abstract). The only concrete agent-family backend
+;;; (`code-agent-claude-code-backend') was deleted 2026-07 (zero
+;;; production callers); no concrete agent-family backend remains, so
+;;; the "default errors for agent-family backends" dispatch test that
+;;; used it was removed along with its fixture.
 
 (defun test-p3--fresh-cmux-backend ()
   "Return a fresh `code-agent-cmux-backend' instance."
@@ -29,73 +29,6 @@
 (defun test-p3--fresh-tmux-backend ()
   "Return a fresh `code-agent-tmux-backend' instance."
   (code-agent-tmux-backend-create :session-key "test::fixture"))
-
-;;; Protocol 3 — Smoke tests for default methods
-
-(ert-deftest test-p3-insert-prompt-default-is-noop ()
-  "Default `insert-prompt' method returns nil without side effects."
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-insert-prompt backend '(:prompt "hi")))))
-
-(ert-deftest test-p3-open-response-section-default-returns-nil ()
-  "Default `open-response-section' returns nil (frontend must override)."
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-open-response-section backend
-                                                          '(:prompt "hi")))))
-
-(ert-deftest test-p3-append-response-default-inserts-at-marker ()
-  "Default `append-response' inserts CHUNK at MARKER and advances it."
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (with-temp-buffer
-      (let ((marker (point-marker)))
-        (code-agent-org-backend-append-response backend marker "hello ")
-        (code-agent-org-backend-append-response backend marker "world")
-        (should (equal (buffer-string) "hello world"))
-        (should (= (marker-position marker) (point-max)))))))
-
-(ert-deftest test-p3-append-response-survives-dead-buffer ()
-  "`append-response' is a safe no-op when marker's buffer is dead."
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend))
-        (dead-marker
-         (let ((buf (generate-new-buffer " *test-dead*")))
-           (with-current-buffer buf (prog1 (point-marker) (kill-buffer buf))))))
-    (should-not (code-agent-org-backend-append-response backend dead-marker "x"))))
-
-(ert-deftest test-p3-finalize-response-default-is-noop ()
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-finalize-response backend nil nil))))
-
-(ert-deftest test-p3-query-completed-default-is-noop ()
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-query-completed backend "sk"))))
-
-(ert-deftest test-p3-recover-session-default-is-noop ()
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-recover-session backend))))
-
-(ert-deftest test-p3-status-badge-default-returns-nil ()
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-status-badge backend "sk"))))
-
-(ert-deftest test-p3-todos-update-default-is-noop ()
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-not (code-agent-org-backend-todos-update backend '() nil))))
-
-(ert-deftest test-p3-open-terminal-tab-default-errors-for-agent ()
-  "Agent-family default signals `user-error' — no terminal to open."
-  :tags '(:unit :fast :stable :protocol-3)
-  (let ((backend (test-p3--fresh-claude-code-backend)))
-    (should-error (code-agent-org-backend-open-terminal-tab backend)
-                  :type 'user-error)))
 
 ;;; Multiplexer backend structural checks
 

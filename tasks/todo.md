@@ -121,3 +121,51 @@ Delegated to workspace `Emacs-claude dev2` (workspace:30, surface:48).
 - Findings file exists, non-trivial, structured as a feature list.
 - Spot-check ≥3 claims against `reference/pi` source / research doc — no hallucinated features.
 - Each "omp-only" feature is plausibly absent in default pi (cross-check tool set).
+
+---
+
+# claude-do: dead-code removal — instances management (2026-07-11)
+
+Delegated to workspace `Emacs-claude dev2` (workspace:15, surface:27).
+Plan approved by user: ~/.claude/plans/glittery-baking-starfish.md
+Discipline: no commit; make test-smoke after every edit; locate by
+heading name (line numbers shifted by prior deletions).
+
+Already done by planner (this session, verified green):
+- [x] U0 periphery: 11 *~ backups, workspace-hooks.json(+~),
+      prompts/refine-prompt.org deleted; Makefile SOURCES/compile/clean/
+      all/INTEGRATION_TESTS fixed. Gate: test-smoke 3/3, test-unit
+      246+56+68 all expected.
+- [x] U1 (partial): backend.org dead Protocol 3 generic sections deleted
+      (Specialisation table + Execute Block…Todos Update; Open Terminal
+      Tab kept; intro rewritten); tmux-backend.org `** Protocol 3 — Org
+      Integration` (execute-block + ready-banner-regex + wait helper +
+      cancel-from-org) deleted; cmux-backend.org `*** Cancel From Org`
+      deleted.
+
+Remaining units (executor):
+- [x] U1-finish: backend.org Message Event Hooks trim (keep
+      code-agent-invocation-hook only; delete pre/post-tool-use-functions,
+      stop-functions, `*** Event Dispatch Functions`); trim
+      tests/test-backend-protocol3.el to open-terminal-tab + inheritance.
+      Gate: make test-smoke && make test-backend-unit.
+- [x] U2 verbose subsystem (backend.org Verbose Output; chat
+      queries-show-verbose + badge; structural whitelist; backend.el trim).
+      Gate: make test-org-unit test-backend-unit.
+- [x] U3 engine core (backend.org bulk delete + 3 relocations;
+      org-process registry fallback→cmux; 11 test files deleted + 5
+      trimmed; Makefile/pre-commit sync). Gate: make test-unit test-org-unit.
+- [x] U4 permission.org whole file + preset defcustom relocation.
+      Gate: make check.
+- [x] U5 lp/org+ide zero-caller functions (11). Gate: make test-org-unit.
+- [x] U6 docs/prose sync + final gates.
+
+All units completed 2026-07-11. Final gates (run by planner):
+test-smoke 3/3, lint 7/7, test 30+8+68+119 all 0 unexpected,
+cold-load (require 'code-agent) exit 0.
+Cumulative: 46 files changed, 481 insertions(+), 11848 deletions(-),
+15 files git-rm'd. Uncommitted per no-commit rule.
+Follow-ups flagged by executor: backend.org Capability Matrix still
+lists pre-pivot agent columns (pre-existing staleness);
+code-agent-backend-filter-callbacks has zero test coverage (re-add
+with cmux fixture); no python test for workspace_bridge.py.

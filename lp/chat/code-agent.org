@@ -32,41 +32,14 @@ through one-direction setters; no module reaches in for raw values.
 
 This is an Emacs client library for the [[https://claude.ai/code][Claude Code CLI]]. It provides a
 literate programming implementation of the Claude Agent SDK, allowing
-Emacs users to interact with Claude programmatically.
+Emacs users to interact with Claude programmatically via cmux/tmux
+terminal backends driven from org-mode.
 
-The library mirrors the Python Claude Agent SDK API, providing:
-- ~code-agent-query~ for one-shot queries
-- ~code-agent-client~ for bidirectional interactive conversations
-- Streaming response support via callbacks
+The library provides:
 - Basic hook support (PreToolUse, PostToolUse, Stop)
 - Session management (continue, resume)
 - Activity mode-line indicator with spinning animation
 - Usage mode-line showing API utilization percentages
-
-** Usage Example
-
-End-to-end usage example showing the public surface in action.
-
-#+BEGIN_SRC elisp :load no
-;; One-shot query
-(code-agent-query
- "What is 2+2?"
- :on-message (lambda (msg)
-               (when (code-agent-assistant-message-p msg)
-                 (message "Response: %s"
-                          (code-agent-extract-text msg))))
- :on-complete (lambda (_) (message "Done!")))
-
-;; Interactive client
-(let ((client (code-agent-client-create
-               :options (code-agent-options
-                         :model "claude-sonnet-4-5"
-                         :permission-mode 'accept-edits))))
-  (code-agent-client-connect client)
-  (code-agent-client-send
-   client "Hello, Claude!"
-   :on-response (lambda (msg) (message "Got: %s" msg))))
-#+END_SRC
 
 * Dependencies and Requirements
 
@@ -115,7 +88,7 @@ Load-order dependencies — pulled in eagerly so symbols are bound before any =d
 (let* ((module-dir (file-name-directory (or load-file-name buffer-file-name "")))
        (repo-root (locate-dominating-file module-dir "code-agent.el"))
        (lp-dir (and repo-root (expand-file-name "lp" repo-root))))
-  (dolist (module '("code-agent-backend" "code-agent-permission" "code-agent-ide"))
+  (dolist (module '("code-agent-backend" "code-agent-ide"))
     (unless (featurep (intern module))
       (let* ((basename (concat module ".org"))
              (candidates
@@ -434,7 +407,7 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
             (unless has-queries
               (insert "No active queries.\n")))
           (insert "\n")
-          (insert "Keys: RET=goto source  v=verbose  k=cancel  K=cancel all  g=refresh  q=quit\n")
+          (insert "Keys: RET=goto source  k=cancel  K=cancel all  g=refresh  q=quit\n")
           (goto-char (min pos (point-max))))))))
 #+END_SRC
 
@@ -442,31 +415,15 @@ Extracts the timestamp portion from session IDs like sdd-20260303-132101."
 
 The =*Claude Queries*= buffer (opened by =code-agent-list-queries=,
 also =M-x code-agent-list-queries= or =,m= from the agent menu) is
-the middle layer of a three-layer monitoring model. The model was
-inspired by Stern (Kubernetes log streamer), prodigy.el, tmux's
-=monitor-activity=, and =docker-compose logs=:
+the middle layer of a two-layer monitoring model:
 
 | Layer | Surface | Role |
 |-------+---------+------|
 | 1 | Mode-line =[C:◐×3]= | Always-visible activity indicator (count + spinner) |
-| 2 | =*Claude Queries*= dashboard (this section) | One row per active query — session-key, elapsed, status, =[+N lines]= unread badge |
-| 3 | =*cmux: <workspace>*= verbose buffer (per session) | Full live terminal mirror; reached via =RET= or =v= on a dashboard row |
+| 2 | =*Claude Queries*= dashboard (this section) | One row per active query — session-key, elapsed, status |
 
-The dashboard's per-row =[+N lines]= badge tracks unread output by
-comparing the verbose buffer's current line count against a
-=last-viewed-line-count= stored when the user last visited that
-buffer. =RET= opens the verbose buffer in the same window; =v= opens
-in a side window. =k= cancels a single query, =K= cancels all, =g=
-refreshes.
-
-A *unified all-output view* (one scrolling buffer aggregating output
-from every active session, like =docker-compose logs=) is intended
-future work. The shape would be: dispatcher in the verbose tick that
-also inserts into a =*Claude All Output*= buffer with a colour-coded
-session-name prefix (using =SDD_COLOR=); same scroll-preservation /
-follow-mode (=G=) / transient menu (=,= sends keys to the session
-under cursor) as the per-session buffer. Not built today because the
-per-session buffer + dashboard navigation has been sufficient.
+=RET= jumps to the query's source heading, =k= cancels a single
+query, =K= cancels all, =g= refreshes.
 
 #+BEGIN_SRC elisp
 (defvar code-agent-queries-mode-map
@@ -476,7 +433,6 @@ per-session buffer + dashboard navigation has been sufficient.
 ;; Define keys outside defvar so they are applied on reload
 ;; (defvar does not re-evaluate when the variable already has a value).
 (define-key code-agent-queries-mode-map (kbd "RET") #'code-agent-queries-goto-source)
-(define-key code-agent-queries-mode-map (kbd "v") #'code-agent-queries-show-verbose)
 (define-key code-agent-queries-mode-map (kbd "k") #'code-agent-queries-cancel-at-point)
 (define-key code-agent-queries-mode-map (kbd "K") #'code-agent-cancel-all-queries)
 (define-key code-agent-queries-mode-map (kbd "g") #'code-agent-list-queries)
@@ -514,23 +470,13 @@ per-session buffer + dashboard navigation has been sufficient.
                       (navigable (not (null loc-fn))))
                  ;; Track Docker vs local counts
                  (if docker-p (cl-incf docker-count) (cl-incf local-count))
-                 ;; Check verbose buffer for activity badge
                  (let* ((src-buf (code-agent--process-state-source-buffer state))
                         (session-key (when (and src-buf (buffer-live-p src-buf))
                                       (with-current-buffer src-buf
                                         (condition-case nil
                                             (code-agent-org-current-session-key)
-                                          (error nil)))))
-                        (verbose-buf (when session-key
-                                       (gethash session-key code-agent--session-verbose-buffers)))
-                        (verbose-lines (when (and verbose-buf (buffer-live-p verbose-buf))
-                                         (with-current-buffer verbose-buf
-                                           (count-lines (point-min) (point-max)))))
-                        (has-verbose (and verbose-buf (buffer-live-p verbose-buf))))
-                   ;; Format: ▶ ● buffer-name Instruction N  [elapsed]  [+N lines]
-                   (if has-verbose
-                       (insert (propertize "▶ " 'face 'font-lock-warning-face))
-                     (insert "  "))
+                                          (error nil))))))
+                   ;; Format: ● buffer-name Instruction N  [elapsed]
                    (insert (propertize (format "● %s" identity)
                                        'face (if navigable 'link 'font-lock-function-name-face)
                                        'query-id id
@@ -543,9 +489,6 @@ per-session buffer + dashboard navigation has been sufficient.
                      (insert (propertize (format " %s" label)
                                          'face 'font-lock-keyword-face)))
                    (insert (format "  [%s]" elapsed))
-                   (when verbose-lines
-                     (insert (propertize (format "  [%d lines]" verbose-lines)
-                                         'face 'font-lock-comment-face)))
                    (insert "\n")))))
            code-agent--active-queries)
           (unless has-queries
@@ -559,7 +502,7 @@ per-session buffer + dashboard navigation has been sufficient.
               (insert (format "  Local: %d" local-count)))
             (insert "\n")))
         (insert "\n")
-        (insert "Keys: RET=goto source  v=verbose output  k=cancel  K=cancel all  g=refresh  q=quit\n"))
+        (insert "Keys: RET=goto source  k=cancel  K=cancel all  g=refresh  q=quit\n"))
       (code-agent-queries-mode)
       (goto-char (point-min)))
     (display-buffer buf)))
@@ -605,21 +548,6 @@ For non-navigable queries, jumps to the source buffer only."
               (if (apply loc-fn loc-args)
                   (message "Jumped to source")
                 (message "Location function failed to find target"))))))))))
-#+END_SRC
-
-#+BEGIN_SRC elisp
-(defun code-agent-queries-show-verbose ()
-  "Show verbose output buffer for the query at point."
-  (interactive)
-  (let ((session-key (get-text-property (point) 'session-key)))
-    (if (null session-key)
-        (message "No session on this line")
-      (let ((verbose-buf (gethash session-key code-agent--session-verbose-buffers)))
-        (if (and verbose-buf (buffer-live-p verbose-buf))
-            (display-buffer verbose-buf
-              '((display-buffer-reuse-window display-buffer-in-side-window)
-                (side . right) (window-width . 0.5)))
-          (message "No verbose buffer for this session"))))))
 #+END_SRC
 
 ** Auto-Enable
@@ -999,13 +927,12 @@ standalone ~code-agent.el~ file.
 
 ;;; Commentary:
 
-;; Claude Agent SDK for Emacs - A client library for the Claude Code CLI.
-;; This package provides async subprocess communication with Claude,
-;; streaming responses, and hook support.
+;; Claude Agent SDK for Emacs - An org-mode control plane for Claude Code
+;; sessions running in cmux/tmux terminals, with hook support and
+;; session management.
 ;;
-;; Usage:
-;;   (code-agent-query \"What is 2+2?\"
-;;     :on-message (lambda (msg) (message \"%s\" msg)))
+;; Usage: add a #+begin_src ai block to an org-mode buffer with
+;; code-agent-org-mode enabled.
 
 ;;; Code:
 
@@ -1023,49 +950,10 @@ standalone ~code-agent.el~ file.
 
 **Verified by:**
 
-- [[file:../../tests/test-code-agent-backend-protocol.el][test-code-agent-backend-protocol.el]]
 - [[file:../../tests/test-code-agent-backend.el][test-code-agent-backend.el]]
-- [[file:../../tests/test-code-agent-background-tasks.el][test-code-agent-background-tasks.el]]
-- [[file:../../tests/test-code-agent-error-injection.el][test-code-agent-error-injection.el]]
 - [[file:../../tests/test-code-agent-input-validation.el][test-code-agent-input-validation.el]]
-- [[file:../../tests/test-code-agent-integration.el][test-code-agent-integration.el]]
-- [[file:../../tests/test-code-agent-json-protocol.el][test-code-agent-json-protocol.el]]
-- [[file:../../tests/test-code-agent-mock.el][test-code-agent-mock.el]]
-- [[file:../../tests/test-code-agent-org-cancel-active-queries.el][test-code-agent-org-cancel-active-queries.el]]
-- [[file:../../tests/test-code-agent-org-cancel-race.el][test-code-agent-org-cancel-race.el]]
-- [[file:../../tests/test-code-agent-org-cancel.el][test-code-agent-org-cancel.el]]
-- [[file:../../tests/test-code-agent-org-cleanup-r2.el][test-code-agent-org-cleanup-r2.el]]
-- [[file:../../tests/test-code-agent-org-cleanup.el][test-code-agent-org-cleanup.el]]
-- [[file:../../tests/test-code-agent-org-content-loss-repro.el][test-code-agent-org-content-loss-repro.el]]
-- [[file:../../tests/test-code-agent-org-edge-cases.el][test-code-agent-org-edge-cases.el]]
-- [[file:../../tests/test-code-agent-org-exec-status.el][test-code-agent-org-exec-status.el]]
-- [[file:../../tests/test-code-agent-org-heading-level.el][test-code-agent-org-heading-level.el]]
-- [[file:../../tests/test-code-agent-org-integration.el][test-code-agent-org-integration.el]]
-- [[file:../../tests/test-code-agent-org-loop-detection.el][test-code-agent-org-loop-detection.el]]
-- [[file:../../tests/test-code-agent-org-loop.el][test-code-agent-org-loop.el]]
-- [[file:../../tests/test-code-agent-org-marker-lifecycle.el][test-code-agent-org-marker-lifecycle.el]]
-- [[file:../../tests/test-code-agent-org-mock.el][test-code-agent-org-mock.el]]
-- [[file:../../tests/test-code-agent-org-pre-completion.el][test-code-agent-org-pre-completion.el]]
-- [[file:../../tests/test-code-agent-org-query-id-issues.el][test-code-agent-org-query-id-issues.el]]
-- [[file:../../tests/test-code-agent-org-query-id.el][test-code-agent-org-query-id.el]]
-- [[file:../../tests/test-code-agent-org-queue.el][test-code-agent-org-queue.el]]
-- [[file:../../tests/test-code-agent-org-refactor-phase1.el][test-code-agent-org-refactor-phase1.el]]
-- [[file:../../tests/test-code-agent-org-refactor-phase2.el][test-code-agent-org-refactor-phase2.el]]
-- [[file:../../tests/test-code-agent-org-refactor-phase4.el][test-code-agent-org-refactor-phase4.el]]
-- [[file:../../tests/test-code-agent-org-refactor-phase5.el][test-code-agent-org-refactor-phase5.el]]
-- [[file:../../tests/test-code-agent-org-refine.el][test-code-agent-org-refine.el]]
-- [[file:../../tests/test-code-agent-org-resolve-backend.el][test-code-agent-org-resolve-backend.el]]
-- [[file:../../tests/test-code-agent-org-response.el][test-code-agent-org-response.el]]
-- [[file:../../tests/test-code-agent-org-scheduled.el][test-code-agent-org-scheduled.el]]
-- [[file:../../tests/test-code-agent-org-telemetry.el][test-code-agent-org-telemetry.el]]
-- [[file:../../tests/test-code-agent-org-unit.el][test-code-agent-org-unit.el]]
 - [[file:../../tests/test-code-agent-org-workspace.el][test-code-agent-org-workspace.el]]
-- [[file:../../tests/test-code-agent-org-wrong-level-repro.el][test-code-agent-org-wrong-level-repro.el]]
-- [[file:../../tests/test-code-agent-org-wrong-position-repro.el][test-code-agent-org-wrong-position-repro.el]]
-- [[file:../../tests/test-code-agent-permissions.el][test-code-agent-permissions.el]]
 - [[file:../../tests/test-code-agent-refactor-phase3.el][test-code-agent-refactor-phase3.el]]
-- [[file:../../tests/test-code-agent-sentinel.el][test-code-agent-sentinel.el]]
-- [[file:../../tests/test-code-agent-state-management.el][test-code-agent-state-management.el]]
 - [[file:../../tests/test-code-agent-unit.el][test-code-agent-unit.el]]
 
 #+begin_src elisp :tangle no

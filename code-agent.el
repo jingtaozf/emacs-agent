@@ -73,7 +73,6 @@ ad-hoc files added later), then every immediate subdir of ``lp/``."
 ;; Load all modules
 (code-agent--load-module "code-agent-trace")
 (code-agent--load-module "code-agent-backend")
-(code-agent--load-module "code-agent-permission")
 (code-agent--load-module "code-agent-ide")
 ;; Abstract base for multiplexer backends (tri-protocol Protocol 2b —
 ;; see docs/design-docs/2026-tri-protocol-backend-refactor.org).

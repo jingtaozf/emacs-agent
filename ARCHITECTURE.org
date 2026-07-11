@@ -12,7 +12,7 @@ is the meta-map summary.
 | Group | Role | Examples |
 |---+---+---|
 | =lp/trace/= | tracing macros (no deps) | code-agent-trace |
-| =lp/sdk/= | core SDK + Python bridge + MCP server | backend, permission, ide, python, emacs-mcp-server |
+| =lp/sdk/= | core SDK + Python bridge + MCP server | backend, ide, python, emacs-mcp-server |
 | =lp/chat/= | UI/coordination + comint utilities | code-agent, chat, translate, title, refine |
 | =lp/org/= | org-mode integration | 17 =code-agent-org-*= modules |
 | =lp/backend/= | concrete backends (tri-protocol) | multiplexer, cmux, tmux, acp-*, pi-* |
@@ -42,23 +42,22 @@ use repo-relative =[[file:lp/<group>/X.org]]= form.
                          │ all depend on
   ┌──────────────────────┴──────────────────────────────────────┐
   │ lp/chat/code-agent.org  (thin UI/coordination layer)        │
-  │   Mode-lines, Chat Mode, Utilities (translate/title)        │
-  │   Loads: backend, permission, ide                           │
+  │   Mode-lines, package shell                                  │
+  │   Loads: backend, ide                                        │
   └──────────────────────┬──────────────────────────────────────┘
                          │ depends on
   ┌──────────────────────┴──────────────────────────────────────┐
-  │ lp/sdk/code-agent-backend.org  (bulk of SDK logic)          │
-  │   Customization, data structures, process mgmt,             │
-  │   session mgmt, JSON protocol, core API, client API,        │
-  │   backend protocol, JSON stream & CLI backends,             │
-  │   verbose output, query cancellation                        │
-  └───┬────────────────────────────────────────────────┬────────┘
-      │ cross-module dep                               │
-  ┌───┴──────────────┐                  ┌──────────────┴────────┐
-  │ lp/sdk/          │                  │ lp/sdk/               │
-  │ permission       │                  │ ide.org               │
-  │  .org            │                  │ (Buffer Context)      │
-  └──────────────────┘                  └───────────────────────┘
+  │ lp/sdk/code-agent-backend.org  (protocol + session utilities)│
+  │   Customization, session mgmt, process state,                │
+  │   active-query tracking + cancellation, backend protocol     │
+  │   (Protocol 1 generics + Protocol 3 org-integration)          │
+  └───┬───────────────────────────────────────────────────────────┘
+      │ cross-module dep
+  ┌───┴──────────────────┐
+  │ lp/sdk/               │
+  │ ide.org               │
+  │ (Buffer Context)      │
+  └───────────────────────┘
   BOTTOM LAYER: no cross-dependencies
   (independent / utility / optional: see Layout table above)
 #+end_example
@@ -72,7 +71,7 @@ High-level position:
 | Order | Group | Why |
 |-------+-------+-----|
 |   0   | =lp/trace/= | Macros must compile before consumers |
-|   1-3 | =lp/sdk/= | Protocol generics + permission + IDE context |
+|   1-3 | =lp/sdk/= | Protocol generics + IDE context |
 |   4   | =lp/chat/= entry (=code-agent.org=) | Activity / rate-limit mode-lines |
 |   5-11 | =lp/org/= | Org integration sub-modules in dependency order |
 |  12-13 | =lp/backend/= | Concrete multiplexer + ACP backends |
@@ -146,9 +145,13 @@ Shipped 2026-04-24 (Phases 0–4). Full design in =code-agent-backend.org=
 → "Tri-Protocol Architecture". Three protocols — lifecycle
 (=code-agent-backend-*=), mux-wire (=code-agent-mux-*=),
 org-integration (=code-agent-org-backend-*=). The agent-wire layer retired
-2026-05; agent backends inherit lifecycle base directly. Families:
-agent (claude-code, opencode, gemini, codex, pi) and multiplexer (cmux,
-tmux), symmetric siblings. Frontend dispatches via Protocol 3 generics.
+2026-05; agent backends inherit lifecycle base directly. The ACP agent
+family (opencode, gemini, codex) and =code-agent-claude-code-backend=
+(the JSON-stream agent backend) were both removed by 2026-07 — zero
+production callers survived the org-as-control-plane pivot. Only the
+multiplexer family (cmux, tmux) remains; Pi runs as a cmux agent
+profile, not a distinct backend. Frontend dispatches via Protocol 3
+generics.
 
 *Single-page reference*: [[file:lp/sdk/PROTOCOL-MAP.org][lp/sdk/PROTOCOL-MAP.org]] — every
 =cl-defgeneric= × every backend, with "specialised by" + test-
@@ -173,9 +176,10 @@ covered the same ground better:
 | In-Emacs harness (general) | Various wrappers | External multiplexer wins on every axis |
 
 Survived: =--active-queries= registry / mode-line spinner /
-=*Claude Queries*= buffer (now drive cmux + tmux); JSON-stream path —
-see =code-agent-backend.org= → "JSON Stream Backend" → "Design
-Heritage".
+=*Claude Queries*= buffer (now drive cmux + tmux). The JSON-stream
+path itself (=code-agent-claude-code-backend= and the process-lifecycle
+wiring around it) did not survive — deleted 2026-07, zero production
+callers once cmux/tmux covered execution entirely.
 
 * Testing & Harness
 

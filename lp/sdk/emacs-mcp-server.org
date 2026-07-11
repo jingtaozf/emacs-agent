@@ -96,18 +96,23 @@ When Claude Code runs in a Docker container, file paths in requests use
 container paths (e.g., =/workspace/file.txt=) that must be translated to
 host paths (e.g., =/home/user/project/file.txt=) for Emacs to operate on.
 
-This variable is set by =code-agent-query= when Docker mode is active.
-Since MCP requests arrive asynchronously via HTTP (outside any let-binding
-scope), =setq= must be used instead of =let=.  The variable is automatically
-cleared when the query completes.
+No code path currently sets this variable — its only setter lived inside
+=code-agent-query='s Docker-mode branch, deleted 2026-07 along with the
+JSON-stream engine.  =emacs-mcp-server--handler-eval-elisp= still calls
+the translate helpers below on every =evalElisp= request, so they stay;
+with =emacs-mcp-server-path-mappings= permanently nil, =--to-host-path=
+/ =--to-container-path= take their "return path unchanged" branch,
+making translation a no-op identity transform until a future Docker-mode
+setter is wired back in (originally =setq=, not =let=, since MCP
+requests arrive asynchronously via HTTP outside any let-binding scope).
 
 #+BEGIN_SRC elisp
 (defvar emacs-mcp-server-path-mappings nil
   "Alist of (HOST-PATH . CONTAINER-PATH) for Docker path translation.
-This variable is set by `code-agent-query' when Docker mode is active
-and cleared on query completion.  MCP requests use this to translate
-container paths to host paths before evaluation, and host paths back to
-container paths in results.
+No code path currently sets this (see prose above); MCP requests
+still translate container paths to host paths before evaluation, and
+host paths back to container paths in results, through this variable
+as a no-op until a Docker-mode setter is wired back in.
 
 Example mapping:
   ((\"/home/user/project\" . \"/workspace\"))
@@ -417,9 +422,9 @@ Single dispatch function — routes incoming events to the matching method below
 #+BEGIN_SRC elisp
 (defun emacs-mcp-server--handler-eval-elisp (params _session)
   "Handler for evalElisp tool.  PARAMS contains code, optional save_current_state and timeout.
-When `emacs-mcp-server-path-mappings' is bound (by `code-agent-query' in Docker
-mode), translates container paths to host paths before evaluation and back again
-in results.
+When `emacs-mcp-server-path-mappings' is bound (currently no code path sets
+it — see Path Translation section), translates container paths to host
+paths before evaluation and back again in results.
 Evaluation is wrapped in `with-timeout' to prevent blocking Emacs (single-threaded).
 The timeout is effective for I/O-bound code (file, network, process); tight CPU
 loops cannot be interrupted — an inherent Emacs limitation."

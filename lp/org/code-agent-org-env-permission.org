@@ -171,8 +171,25 @@ Examples:
 
 Property lookup with inheritance — section drawer wins over
 file-level =#+PROPERTY:= which wins over the defcustom fallback.
+=code-agent-permission-preset= names that fallback — relocated here
+(2026-07) from the deleted code-agent-permission.org; it is now just a
+plain preset-name string matched against =code-agent-org--permission-mode-map=
+(defined in code-agent-org-customize.org), not a pattern-match engine
+input.
 
 #+BEGIN_SRC elisp
+(defcustom code-agent-permission-preset "readonly"
+  "Permission preset name for Claude operations.
+Matched against `code-agent-org--permission-mode-map' to resolve the
+CLI --permission-mode value.  Options:
+  - \"readonly\": read-only tools only
+  - \"accept-edits\": adds file write/edit tools
+  - \"bypass\": allow all operations"
+  :type '(choice (const :tag "Read-only (recommended)" "readonly")
+                 (const :tag "Accept Edits" "accept-edits")
+                 (const :tag "Bypass All" "bypass"))
+  :group 'code-agent)
+
 (defun code-agent-org--get-permission-mode-property ()
   "Get CLAUDE_PERMISSION_MODE from org properties.
 Checks section property drawer first, then file-level #+PROPERTY.
@@ -209,24 +226,6 @@ Returns CLI permission-mode value."
     (if mode-info
         (plist-get mode-info :short)
       "??")))
-
-(defun code-agent-org--get-setting-sources ()
-  "Get setting sources for Claude CLI.
-Checks CLAUDE_SETTING_SOURCES org property first, then uses default.
-Returns list of strings like (\"user\" \"project\").
-Returns default safely if not in org-mode context."
-  (let ((prop-value
-         (ignore-errors
-           (or
-            ;; Section-level property (with inheritance)
-            (org-entry-get nil code-agent-org-setting-sources-property t)
-            ;; File-level property via keyword
-            (code-agent-org--get-file-level-property code-agent-org-setting-sources-property)))))
-    (if prop-value
-        ;; Parse comma-separated string from property
-        (mapcar #'string-trim (split-string prop-value ","))
-      ;; Use default
-      code-agent-org-setting-sources)))
 
 (defun code-agent-org-get-org-property (property &optional no-expand)
   "Get PROPERTY value from org properties with variable expansion.
@@ -345,20 +344,6 @@ Or set `code-agent-org-auto-start-mcp-server' to nil to disable auto-start"))
     (unless (emacs-mcp-server-running-p)
       (emacs-mcp-server-start))))
 
-(defun code-agent-org--get-mcp-config ()
-  "Get MCP config JSON string if server is running.
-Returns nil if MCP server is not available or not running.
-When Docker mode is active, uses host.docker.internal instead of localhost."
-  (when (and (fboundp 'emacs-mcp-server-running-p)
-             (emacs-mcp-server-running-p))
-    (let* ((port (emacs-mcp-server-port))
-           ;; Use host.docker.internal for Docker mode, localhost otherwise
-           (host (if (code-agent-org--docker-mode-p)
-                     "host.docker.internal"
-                   "localhost")))
-      (json-encode
-       `((mcpServers . ((emacs . ((type . "http")
-                                  (url . ,(format "http://%s:%d/mcp" host port)))))))))))
 #+END_SRC
 
 * Provide
@@ -373,8 +358,6 @@ Single =provide= so the module can be =require=d.
 :PROPERTIES:
 :CUSTOM_ID: org-env-permission-see-also
 :END:
-
-**Verified by:** [[file:../../tests/test-permission-round-trip.el][test-permission-round-trip.el]]
 
 #+begin_src elisp :tangle no
 ;; literate-elisp reader sentinel — keeps the file's final

@@ -1,67 +1,18 @@
 ;;; test-code-agent-input-validation.el --- Tests for Input Validation -*- lexical-binding: t; -*-
 
-;; Tests for input validation layer (answer length, file path, command, env parsing)
+;; Tests for the safe env-file parser (code-agent-org--parse-env).
 ;; Originally written test-first (TDD), now validating implemented functions.
+;;
+;; The answer-length / file-path / command validation tests that used to
+;; live here were removed 2026-07 along with code-agent--validate-answer,
+;; code-agent--validate-file-path, and code-agent--validate-command —
+;; those were only consumed by the deleted JSON-stream engine (zero
+;; production callers after the org-as-control-plane pivot).
 
 (require 'ert)
 (require 'cl-lib)
 
 ;; Note: code-agent.org is loaded via Makefile
-
-;;; Answer Length Validation Tests
-
-(ert-deftest test-validate-answer-nil-input ()
-  "TDD: nil answer should be valid (no answer provided)."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd)
-  (should (code-agent--validate-answer nil)))
-
-(ert-deftest test-validate-answer-empty-string ()
-  "TDD: Empty string answer should be valid."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd)
-  (should (code-agent--validate-answer "")))
-
-(ert-deftest test-validate-answer-normal-length ()
-  "TDD: Normal length answers should be valid."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd)
-  (should (code-agent--validate-answer "This is a normal answer"))
-  (should (code-agent--validate-answer (make-string 1000 ?x)))
-  (should (code-agent--validate-answer (make-string 5000 ?x))))
-
-(ert-deftest test-validate-answer-at-limit ()
-  "TDD: Answer exactly at limit should be valid."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd)
-  (let ((code-agent-max-answer-length 10000))
-    (should (code-agent--validate-answer (make-string 10000 ?x)))))
-
-(ert-deftest test-validate-answer-exceeds-limit ()
-  "TDD: Answer exceeding limit should signal error."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd :security)
-  (let ((code-agent-max-answer-length 10000))
-    (should-error (code-agent--validate-answer (make-string 10001 ?x))
-                  :type 'error)))
-
-(ert-deftest test-validate-answer-huge-input ()
-  "TDD: Extremely large answers should be rejected."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd :security)
-  (let ((code-agent-max-answer-length 10000))
-    ;; 1MB of data
-    (should-error (code-agent--validate-answer (make-string 1048576 ?x))
-                  :type 'error)))
-
-(ert-deftest test-validate-answer-custom-limit ()
-  "TDD: Custom max length should be respected."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd)
-  (let ((code-agent-max-answer-length 100))
-    (should (code-agent--validate-answer (make-string 100 ?x)))
-    (should-error (code-agent--validate-answer (make-string 101 ?x))
-                  :type 'error)))
-
-(ert-deftest test-max-answer-length-variable-exists ()
-  "TDD: Max answer length variable should be defined."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd)
-  (should (boundp 'code-agent-max-answer-length))
-  (should (numberp code-agent-max-answer-length))
-  (should (> code-agent-max-answer-length 0)))
 
 ;;; Env File Parsing Tests (Safe parsing without read)
 
@@ -169,27 +120,6 @@ This test ensures the env parser doesn't use (read) which could execute code."
                       (code-agent-org--parse-env (buffer-string) :from-string t)
                       nil)
                   (error t)))))
-
-;;; Tool Input Validation Tests
-
-(ert-deftest test-validate-tool-input-file-path ()
-  "TDD: File paths should be validated for suspicious patterns."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd :security)
-  ;; Normal paths
-  (should (code-agent--validate-file-path "/tmp/test.txt"))
-  (should (code-agent--validate-file-path "/home/user/project/file.el"))
-  ;; Null bytes (could truncate path checks)
-  (should-error (code-agent--validate-file-path "/tmp/test\x00.txt")
-                :type 'error))
-
-(ert-deftest test-validate-tool-input-command ()
-  "TDD: Commands should be validated for length."
-  :tags '(:unit :fast :stable :isolated :input-validation :tdd :security)
-  (let ((code-agent-max-command-length 100000))
-    (should (code-agent--validate-command "ls -la"))
-    (should (code-agent--validate-command (make-string 99999 ?x)))
-    (should-error (code-agent--validate-command (make-string 100001 ?x))
-                  :type 'error)))
 
 (provide 'test-code-agent-input-validation)
 ;;; test-code-agent-input-validation.el ends here

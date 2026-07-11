@@ -159,26 +159,9 @@ Returns list of (NAME POS SESSION-ID) ordered by position."
 
 ** CUSTOM_ID Utilities
 
-Generation + sanitisation helpers for =:CUSTOM_ID:= slugs — kebab-case + ASCII-safe so the slug round-trips through cross-file links.
+Navigate to a heading by its =:CUSTOM_ID:= value.
 
 #+BEGIN_SRC elisp
-(defun code-agent-org--goto-block-by-custom-id (custom-id)
-  "Navigate to heading with CUSTOM_ID using org-link-search.
-Returns t if navigation succeeded, nil otherwise."
-  (condition-case nil
-      (progn
-        (org-link-search (format "#%s" custom-id))
-        t)
-    (error nil)))
-
-(defun code-agent-org--custom-id-exists-p (custom-id)
-  "Check if CUSTOM_ID exists in the current buffer."
-  (when custom-id
-    (save-excursion
-      (save-restriction
-        (widen)
-        (code-agent-org--goto-block-by-custom-id custom-id)))))
-
 (defun code-agent-org-goto-custom-id (custom-id)
   "Navigate to the heading with CUSTOM_ID.
 Returns t if found and positioned, nil otherwise."
@@ -188,28 +171,6 @@ Returns t if found and positioned, nil otherwise."
     (org-back-to-heading t)
     t))
 
-(defun code-agent-org--find-instruction-custom-id ()
-  "Find the CUSTOM_ID of the instruction heading containing point.
-Checks immediate heading, previous siblings, then parent headings."
-  (save-excursion
-    (let ((custom-id nil))
-      (ignore-errors
-        (org-back-to-heading t)
-        (when (member code-agent-org-heading-tag (org-get-tags nil t))
-          (setq custom-id (org-entry-get nil "CUSTOM_ID"))))
-      (unless custom-id
-        (let ((current-level (org-current-level)))
-          (while (and (not custom-id)
-                      (org-get-previous-sibling))
-            (when (and (= (org-current-level) current-level)
-                       (member code-agent-org-heading-tag (org-get-tags nil t)))
-              (setq custom-id (org-entry-get nil "CUSTOM_ID"))))))
-      (unless custom-id
-        (ignore-errors
-          (while (and (not custom-id) (org-up-heading-safe))
-            (when (member code-agent-org-heading-tag (org-get-tags nil t))
-              (setq custom-id (org-entry-get nil "CUSTOM_ID"))))))
-      custom-id)))
 #+END_SRC
 
 ** CUSTOM_ID Generation
@@ -262,29 +223,6 @@ Heading tags take priority (appear first in list)."
         (push (downcase tag) all-tags)))
     (nreverse all-tags)))
 
-(defun code-agent-org--get-block-header-args ()
-  "Get header arguments from current ai block.
-Returns plist of header arguments, e.g. (:phase \"code\" :tests t)."
-  (save-excursion
-    (let ((case-fold-search t))
-      (when (re-search-backward "^[ \t]*#\\+begin_src[ \t]+ai\\b" nil t)
-        (let ((line (buffer-substring-no-properties (point) (line-end-position))))
-          (when (string-match "#\\+begin_src[ \t]+ai\\b[ \t]*\\(.*\\)" line)
-            (let ((args-str (match-string 1 line))
-                  (result nil))
-              (when (and args-str (not (string-empty-p args-str)))
-                ;; Parse header args: :key value :key2 value2
-                (with-temp-buffer
-                  (insert args-str)
-                  (goto-char (point-min))
-                  (while (re-search-forward ":\\([a-zA-Z_-]+\\)\\(?:[ \t]+\\([^ \t\n:]+\\)\\)?" nil t)
-                    (let ((key (intern (concat ":" (match-string 1))))
-                          (val (match-string 2)))
-                      ;; Build plist: push value first, then key (reversed later)
-                      (push key result)
-                      (push (or val t) result)))))
-              ;; Result is (val2 key2 val1 key1), reverse to get (key1 val1 key2 val2)
-              (nreverse result))))))))
 #+END_SRC
 
 
