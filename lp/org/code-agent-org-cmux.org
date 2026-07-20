@@ -615,6 +615,58 @@ Polls the cmux pane for the Claude TUI readiness signal — first prompt is held
   :group 'code-agent-org)
 #+END_SRC
 
+The ready check itself runs in two tiers.  When the org session has a =CLAUDE_SESSION_ID=, we block on the =cmux wait-for claude-ready-<session-id>= signal that the Python SessionStart hook stamps on launch — ~50 ms latency under normal conditions.  If the signal is missed or times out, we fall back to polling =capture-pane= against the active agent profile's ready-patterns (=type a message= / =-- INSERT --= for Claude Code).
+
+#+BEGIN_SRC elisp
+(defun code-agent-org-cmux--wait-for-ready (surface-id)
+  "Wait for Claude Code TUI to be ready in SURFACE-ID.
+Uses cmux wait-for signal from SessionStart hook (50ms polling).
+Falls back to capture-pane polling if signal times out."
+  (code-agent-with-span "cmux-wait-for-ready"
+      (list :surface-id surface-id :timeout code-agent-org-cmux-ready-timeout) nil
+  (let ((workspace-session-id
+         (condition-case nil
+             (code-agent-org-terminal-find-session-property "CLAUDE_SESSION_ID")
+           (error nil)))
+        (timeout (number-to-string code-agent-org-cmux-ready-timeout)))
+    (if workspace-session-id
+        ;; Event-driven: wait for signal from SessionStart hook
+        (condition-case nil
+            (progn
+              (code-agent-org-cmux--call "wait-for"
+                (format "claude-ready-%s" workspace-session-id)
+                "--timeout" timeout)
+              t)
+          (error
+           ;; Fallback: poll capture-pane with shorter timeout
+           (code-agent-org-cmux--wait-for-ready-poll surface-id 10)))
+      ;; No session ID — poll only
+      (code-agent-org-cmux--wait-for-ready-poll
+       surface-id code-agent-org-cmux-ready-timeout)))))
+
+(defun code-agent-org-cmux--wait-for-ready-poll (surface-id timeout)
+  "Fallback: poll capture-pane for agent ready state every 0.5s up to TIMEOUT seconds.
+Uses ready-patterns from the active agent profile, falling back to Claude Code patterns."
+  (let* ((profile (code-agent-org-cmux--get-agent-profile))
+         (patterns (if profile
+                       (code-agent-org-cmux--agent-profile-ready-patterns profile)
+                     '("type a message" "-- INSERT --" "-- insert --")))
+         (pattern-re (mapconcat #'regexp-quote patterns "\\|"))
+         (deadline (+ (float-time) timeout))
+         (ready nil))
+    (while (and (not ready) (< (float-time) deadline))
+      (condition-case nil
+          (let ((screen (code-agent-org-cmux--call "capture-pane"
+                          "--surface" surface-id)))
+            (when (string-match-p pattern-re screen)
+              (setq ready t)))
+        (error nil))
+      (unless ready (sleep-for 0.5)))
+    (unless ready
+      (error "Timeout: agent not ready in cmux after %ds" timeout))
+    t))
+#+END_SRC
+
 ** Future: Event-Driven Ready Detection via =cmux wait-for=
 
 The poll loop above samples =capture-pane= every 1 s for up to 30 s.
@@ -2287,11 +2339,6 @@ was skipped, the permission event proves a query is active)."
   (code-agent-org-cmux--focus-workspace-by-session workspace-session-id)
   ;; Activate cmux app + Emacs (best-effort, macOS only)
   (code-agent-org-cmux--activate-app)
-  ;; macOS notification
-  (code-agent-org--notify "Claude: Permission Needed"
-                      (format "%s needs approval for %s"
-                              (code-agent--permission-label workspace-session-id)
-                              tool-name))
   "ok"))
 
 (defun code-agent-org-cmux--permission-resolved (workspace-session-id)
