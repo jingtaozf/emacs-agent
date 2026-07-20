@@ -106,3 +106,15 @@
 ;; literate-elisp reader sentinel — keeps file's final non-empty content a code block
 #+end_src
 ```
+
+## 2026-07-20 — partial-refactor dangling calls (defun deleted, call site left)
+
+**Mistake**: `git log -S` showed two refactor commits left dangling call sites behind:
+- `26df975` (pivot to org-as-control-plane) deleted `code-agent-org-cmux--wait-for-ready` but kept the call in `--launch-workspace` → void-function at runtime.
+- `7980a53` (drop response sync, verbose buffer) deleted `code-agent-org-cancel-all` + `code-agent-org--notify` but kept the calls in `--on-buffer-kill` and `--permission-needed`.
+
+**Context**: `*Messages*` surfaced the `wait-for-ready` one because `launch-workspace` runs every session start; the other two stayed silent (only fire on buffer-kill / permission event). Existing `test-structural-no-dead-public-functions` (F35) missed all three — its `directory-files` is non-recursive, so it scans only repo-root `.org` files, never `lp/org/` where the actual sources live.
+
+**Rule**: After any refactor that deletes a `defun`, grep `(defun NAME\b` AND `NAME\b` separately — call sites and definitions can diverge. Treat any call to a project-prefixed symbol with no `defun` as a bug, not dead code. When the deleted feature is intentional, delete the call site too (don't leave the dead reference).
+
+**Structural test added**: `test-structural-no-dangling-calls` (F35b) in `tests/test-structural.el` — recursively scans every source `.org` (including `lp/org/`), builds a defined-set from `defun`/`cl-defun`/`defmacro`/`defsubst`/`cl-defgeneric`/`cl-defmethod`/`cl-defstruct` (with `:constructor`/`:predicate` options) / `define-minor-mode` / `defalias`, walks every call site (skipping `quote`, def-form metadata, `setq`/`let`/`lambda` data positions), and fails on any project-prefixed call that has no definition. Caught both `7980a53` leaks on first run.
