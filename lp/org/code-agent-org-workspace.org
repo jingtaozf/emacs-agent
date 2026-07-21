@@ -193,6 +193,99 @@ Returns a slug like \"code-agent-dev-research-output-sdd-20251227-180147\"."
         (format "%s-%s" session-id slug)))))
 #+END_SRC
 
+* Workspace Bridge Session Persistence
+
+The Python bridge's =SessionStart= hook calls these via MCP to persist
+the agent CLI's session id onto the workspace heading, so a later
+restart can =--resume= the conversation that actually ran in that tab.
+Routing is by =:CUSTOM_ID:= / =:CLAUDE_SESSION_ID:= value — never by
+point — so a save for workspace B lands on B even while the user is
+editing workspace A.
+
+This chain was deleted with the embedded-chat surfaces (2026-07,
+=refactor(python): minimize workspace_bridge=) while the launch side
+kept reading =:CLAUDE_CLI_SESSION:= for =--resume= — every restart
+resumed a stale session.  Restored 2026-07-12; see
+=tests/test-cli-session-persistence.el=.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org-workspace-bridge--ensure-buffer (org-file)
+  "Ensure ORG-FILE is loaded in Emacs and return its buffer.
+Opens the file via `find-file-noselect' if not already visiting."
+  (or (find-buffer-visiting org-file)
+      (find-file-noselect org-file)))
+
+(defun code-agent-org-workspace-bridge--goto-session (workspace-key)
+  "Move point to the workspace section matching WORKSPACE-KEY in current buffer.
+
+WORKSPACE-KEY is matched against two properties, in this order:
+
+1. =:CUSTOM_ID:= — the stable, globally-unique heading anchor set by
+   ``workspace_launcher.py`` as the ``WORKSPACE_CUSTOM_ID`` env var.
+   Survives heading rename and cmux workspace rename.
+
+2. =:CLAUDE_SESSION_ID:= — legacy routing key, retained for code
+   paths still using ``WORKSPACE_SESSION_ID``.
+
+Signals error if neither match is found."
+  (goto-char (point-min))
+  (let ((found nil)
+        (pattern-cid
+         (format "^[ \t]*:CUSTOM_ID:[ \t]+%s[ \t]*$"
+                 (regexp-quote workspace-key)))
+        (pattern-sid
+         (format "^[ \t]*:CLAUDE_SESSION_ID:[ \t]+%s[ \t]*$"
+                 (regexp-quote workspace-key))))
+    ;; Try CUSTOM_ID first (preferred).
+    (save-excursion
+      (while (and (not found) (re-search-forward pattern-cid nil t))
+        (save-excursion
+          (org-back-to-heading t)
+          ;; Only accept matches on workspace-level headings — a
+          ;; ``:CUSTOM_ID:`` on an instruction or response inside the
+          ;; workflow would otherwise sometimes win and misroute.  A
+          ;; workspace heading is the ancestor that owns
+          ;; ``:CLAUDE_SESSION_ID:``.
+          (when (org-entry-get nil "CLAUDE_SESSION_ID")
+            (setq found (point))))))
+    ;; Fall back to CLAUDE_SESSION_ID.
+    (unless found
+      (save-excursion
+        (when (re-search-forward pattern-sid nil t)
+          (setq found (point)))))
+    (unless found
+      (error "No workspace section found for key %s" workspace-key))
+    (goto-char found)
+    (org-back-to-heading t)))
+
+(defun code-agent-org-workspace-bridge-save-cli-session
+    (org-file session-id cli-session-id &optional property-name)
+  "Save CLI-SESSION-ID as a property on the workspace section for SESSION-ID in ORG-FILE.
+PROPERTY-NAME defaults to `code-agent-org-cli-session-property' (CLAUDE_CLI_SESSION).
+Pass a different property name for other agents (e.g. COPILOT_CLI_SESSION).
+Saves silently to persist immediately."
+  (let ((prop (or property-name code-agent-org-cli-session-property)))
+    (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer org-file)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (code-agent-org-workspace-bridge--goto-session session-id)
+          (org-set-property prop cli-session-id)
+          (let ((inhibit-message t))
+            (save-buffer))
+          cli-session-id)))))
+
+(defun code-agent-org-workspace-bridge-get-cli-session (org-file session-id)
+  "Get the saved Claude CLI session ID for SESSION-ID in ORG-FILE.
+Returns the session ID string, or nil if none saved."
+  (with-current-buffer (code-agent-org-workspace-bridge--ensure-buffer org-file)
+    (save-excursion
+      (save-restriction
+        (widen)
+        (code-agent-org-workspace-bridge--goto-session session-id)
+        (org-entry-get nil code-agent-org-cli-session-property)))))
+#+END_SRC
+
 * Collect Current Context
 
 Gathers the workspace, buffer, file, region, IDE context into one plist — the input to every backend-query call.

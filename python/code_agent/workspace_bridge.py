@@ -1,4 +1,4 @@
-"""Minimal workspace bridge — permission handling only.
+"""Minimal workspace bridge — permission handling + CLI session persistence.
 
 The bridge handles two Claude CLI hook events:
 
@@ -75,18 +75,31 @@ def _escape_elisp_string(s: str) -> str:
     )
 
 
+def _cli_session_property() -> str:
+    """Org property name where the current agent persists its session id.
+
+    Copilot uses a distinct property so a workspace can run both agents
+    without stomping on each other's resume token (see
+    ``COPILOT_CLI_SESSION`` in code-agent-org-cmux.org); everyone else
+    shares ``CLAUDE_CLI_SESSION``.
+    """
+    if os.environ.get("AGENT_TYPE", "").lower() == "copilot":
+        return "COPILOT_CLI_SESSION"
+    return "CLAUDE_CLI_SESSION"
+
+
 # ======================================================================
 # WorkspaceBridge
 # ======================================================================
 
 
 class WorkspaceBridge:
-    """Minimal bridge — permission handling only.
+    """Minimal bridge — permission handling + CLI session persistence.
 
     Holds the MCP client, the target org file, the session id, and
-    (when available) an OpenTelemetry tracer.  Only ``_handle_permission``
-    and ``_handle_permission_clear`` carry real logic — every other event
-    prints a warning and returns.
+    (when available) an OpenTelemetry tracer.  Only ``_handle_permission``,
+    ``_handle_permission_clear`` and ``_handle_session_start`` carry real
+    logic — every other event prints a warning and returns.
     """
 
     INTERACTIVE_TOOLS: frozenset[str] = frozenset({"AskUserQuestion", "ExitPlanMode"})
@@ -297,6 +310,39 @@ class WorkspaceBridge:
                 )
             except (McpConnectionError, McpElispError):
                 pass
+
+    def _handle_session_start(self, input_data: dict) -> None:
+        """Handle ``SessionStart`` — persist the CLI session id for --resume.
+
+        The launch/restart command builders read the workspace heading's
+        ``CLAUDE_CLI_SESSION`` property to build ``--resume <id>``; this
+        handler is the only writer.  Without it the property goes stale
+        and every restart resumes an old conversation (2026-07-12 bug).
+        Routing is by ``WORKSPACE_CUSTOM_ID`` / ``WORKSPACE_SESSION_ID``,
+        so the id lands on the right heading regardless of where the
+        user's point is.
+        """
+        cli_session = input_data.get("session_id") or input_data.get("sessionId", "")
+        with self._span(
+            "handle-session-start",
+            **self._span_attrs(None, **{"cli.session_id": cli_session}),
+        ):
+            if cli_session:
+                prop = _cli_session_property()
+                try:
+                    self._mcp_eval(
+                        f"(code-agent-org-workspace-bridge-save-cli-session "
+                        f'"{_escape_elisp_string(self.org_file)}" '
+                        f'"{_escape_elisp_string(self._routing_key())}" '
+                        f'"{_escape_elisp_string(cli_session)}" '
+                        f'"{prop}")'
+                    )
+                except (McpConnectionError, McpElispError):
+                    logger.warning(
+                        "Failed to persist CLI session %s for %s",
+                        cli_session,
+                        self.session_id,
+                    )
 
 
 # ======================================================================
