@@ -1,0 +1,799 @@
+#+TITLE: Claude Agent — Orca Backend
+#+PROPERTY: literate-load yes
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA 670f37e38f38c94319d39c5309c95522745c33e8
+#+PROPERTY: LITERATE_ORG_SOURCE_SHA_DATE 2026-07-26T00:24:57Z
+#+PROPERTY: LITERATE_ORG_TREESIT_GRAMMAR_HASH 186d1a7555bb35a1472a7ab4ef3957831639d621
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: orca-backend-overview
+:END:
+
+Orca (=com.stablyai.orca=) is a worktree-centric workspace app: it owns
+a registry of git repos, spawns terminals inside them, and drives an
+embedded browser.  Its CLI is the third multiplexer this SDK speaks to,
+after cmux and tmux, and it is the one the user actually runs Claude
+Code inside today.
+
+Invariant: every orca-specific behaviour goes through =cl-defmethod= on
+=code-agent-orca-backend=; the frontend never string-matches "orca".
+Unlike the cmux backend — a thin facade over the legacy
+=code-agent-org-cmux--*= body — this module implements Protocol 2b
+directly, the way [[file:code-agent-tmux-backend.org][code-agent-tmux-backend.org]] does.
+
+Four measured properties of the orca CLI shaped every design decision
+below; each is called out at the section that depends on it.
+
+| Measurement | Consequence |
+|-------------+-------------|
+| ≈230 ms per CLI invocation (process startup, not RPC) | identity is cached in slots + org properties; never re-queried per call |
+| =terminal wait --for tui-idle= is *render quiescence*, not turn-complete | used for launch readiness only; completion still arrives via the =Stop= hook |
+| A single ESC only leaves vi INSERT mode | cancel sends a mode-exit ESC *before* the agent profile's cancel keys |
+| =--worktree path:= resolves registered worktree roots only | launch resolves the git top level and refuses politely rather than guessing |
+
+* Claude Agent — Orca Backend
+:PROPERTIES:
+:LITERATE_ORG_BLOCK_KIND: atomic
+:header-args:elisp: :tangle yes
+:END:
+
+Concrete multiplexer backend for Orca.  Subclass of
+=code-agent-multiplexer-backend= implementing Protocol 2b against
+=orca terminal *= subcommands.
+
+** Setup
+
+Deps, user knobs, the struct, the factory, and the single JSON-aware
+call helper every Protocol 2b method below shells through.
+
+*** Dependencies
+
+Loaded eagerly at file evaluation time.  The two
+=code-agent-org-cmux--= declarations are deliberate and temporary: the
+launch-command builder and the agent-profile registry are
+multiplexer-agnostic in substance but still live in the cmux module.
+Orca calls them rather than forking ~400 lines; promoting them into
+=code-agent-org-terminal-base.org= is tracked as follow-up work in
+[[file:../_drafts/draft.org::#orca-multiplexer-backend][draft.org § orca-multiplexer-backend]].
+
+#+BEGIN_SRC elisp
+(require 'cl-lib)
+(require 'json)
+(require 'subr-x)
+(require 'code-agent-backend)
+(require 'code-agent-multiplexer)
+
+;; Multiplexer-agnostic helpers that still live in the cmux module.
+(declare-function code-agent-org-cmux--build-launch-command
+                  "code-agent-org-cmux" (org-file workspace-session-id project-root))
+(declare-function code-agent-org-cmux--get-agent-profile
+                  "code-agent-org-cmux" (&optional agent-type-override))
+(declare-function code-agent-org-cmux--agent-profile-vi-mode "code-agent-org-cmux" (profile))
+(declare-function code-agent-org-cmux--agent-profile-ready-patterns "code-agent-org-cmux" (profile))
+(declare-function code-agent-org-cmux--agent-profile-busy-patterns "code-agent-org-cmux" (profile))
+(declare-function code-agent-org-cmux--agent-profile-cancel-keys "code-agent-org-cmux" (profile))
+#+END_SRC
+
+*** Customization
+
+=code-agent-orca-cli-path= exists because Orca ships three executables
+with the same job — =orca= (production), =orca-dev= (a =pnpm dev=
+checkout), and =orca-ide= (Linux, where bare =orca= is the GNOME screen
+reader).  Getting that wrong on Linux starts speech synthesis on the
+user's machine, so the knob is not cosmetic.
+
+#+BEGIN_SRC elisp
+(defgroup code-agent-orca nil
+  "Orca multiplexer backend."
+  :group 'code-agent)
+
+(defcustom code-agent-orca-cli-path "orca"
+  "Path to the Orca CLI executable.
+Set to \"orca-dev\" for a development checkout, or \"orca-ide\" on
+Linux — there, bare \"orca\" is the GNOME screen reader and running
+it starts speech output."
+  :type 'string
+  :group 'code-agent-orca)
+
+(defcustom code-agent-orca-ready-timeout 90
+  "Seconds to wait for the agent TUI to finish booting after launch.
+Passed to `orca terminal wait --for tui-idle'.  A real Claude Code
+launch measured 3.5 s; the ceiling covers a cold start behind repo
+setup hooks."
+  :type 'integer
+  :group 'code-agent-orca)
+#+END_SRC
+
+*** Class
+
+Orca identity is a pair: the *worktree* (=<repoId>::<absPath>=, stable
+across app restarts) and the *terminal handle* (=term_<uuid>=, stable
+only while the runtime lives).  Both are cached in slots so the hot
+path never pays the 230 ms lookup, and both are mirrored into org
+properties by the launch path so they survive an Emacs restart.
+
+=multiplexer-session-id= inherited from the base holds the worktree id;
+=pane-id= holds the terminal handle.  The extra slots below record
+what the launch resolved so error messages can name it.
+
+#+BEGIN_SRC elisp
+(cl-defstruct (code-agent-orca-backend
+               (:include code-agent-multiplexer-backend (type :orca))
+               (:constructor code-agent-orca-backend--create)
+               (:copier nil))
+  "Concrete Orca-driven terminal backend.
+Slots in addition to those inherited from
+`code-agent-multiplexer-backend':
+- `orca-cmd': executable path (defaults to the defcustom).
+- `worktree-path': absolute path the worktree id resolved from, kept
+  for diagnostics when a selector stops resolving."
+  (orca-cmd      nil)
+  (worktree-path nil))
+#+END_SRC
+
+*** Factory
+
+Single factory function — callers MUST go through this.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca-backend-create (&rest args)
+  "Create an Orca backend.
+ARGS are forwarded to `code-agent-orca-backend--create'.  Defaults
+`:orca-cmd' to `code-agent-orca-cli-path' if not specified."
+  (let ((cmd (or (plist-get args :orca-cmd)
+                 code-agent-orca-cli-path)))
+    (apply #'code-agent-orca-backend--create :orca-cmd cmd args)))
+#+END_SRC
+
+*** Internal Helper — Run orca
+
+Every orca command answers the same JSON envelope —
+={"ok": true, "result": {...}}= or ={"ok": false, "error": {"code": …}}=
+— so one helper parses it and hands callers either the =result= alist
+or a =(:error . CODE)= cons.  Returning the error *code* rather than
+signalling matters: =selector_not_found= and =terminal_handle_stale=
+are both routine control flow here, not exceptions.
+
+Callers pass =--json= implicitly; the helper appends it.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--call (backend &rest args)
+  "Invoke the Orca CLI synchronously with ARGS plus `--json'.
+Returns the parsed `result' alist on success, or a cons
+\(:error . CODE-STRING) when the envelope reports failure or the
+process could not be run.  BACKEND supplies the CLI path."
+  (let ((cli (or (and backend (code-agent-orca-backend-orca-cmd backend))
+                 code-agent-orca-cli-path)))
+    (with-temp-buffer
+      (let ((rc (apply #'call-process cli nil (current-buffer) nil
+                       (append args (list "--json")))))
+        (goto-char (point-min))
+        (condition-case nil
+            (let* ((data (json-parse-buffer :object-type 'alist
+                                            :array-type 'list
+                                            :null-object nil
+                                            :false-object nil)))
+              (if (alist-get 'ok data)
+                  (alist-get 'result data)
+                (cons :error (or (alist-get 'code (alist-get 'error data))
+                                 (format "exit-%s" rc)))))
+          (error (cons :error (format "unparseable-output-exit-%s" rc))))))))
+
+(defun code-agent-orca--error-code (reply)
+  "Return the error code string when REPLY is an error cons, else nil."
+  (and (consp reply) (eq (car reply) :error) (cdr reply)))
+#+END_SRC
+
+*** Internal Helper — Run orca asynchronously
+
+Orca costs ≈230 ms per invocation because each call re-spawns a shell
+wrapper; cmux's socket answers in ≈103 ms.  Emacs is single-threaded,
+so anything not on a user-initiated critical path must not block it —
+the same reasoning that bans =call-process= inside timers in
+=.claude/rules/minimize-emacs-mcp-calls.md=.
+
+This helper is the async escape hatch: fire and forget, with an
+optional sentinel callback receiving the parsed result.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--call-async (backend args &optional callback)
+  "Invoke the Orca CLI with ARGS plus `--json' without blocking Emacs.
+CALLBACK, when given, is called with the same value
+`code-agent-orca--call' would have returned."
+  (let* ((cli (or (and backend (code-agent-orca-backend-orca-cmd backend))
+                  code-agent-orca-cli-path))
+         (buf (generate-new-buffer " *orca-async*"))
+         (proc (apply #'start-process "orca-async" buf cli
+                      (append args (list "--json")))))
+    (set-process-sentinel
+     proc
+     (lambda (_p event)
+       (when (string-match-p "\\`\\(finished\\|exited\\|killed\\|deleted\\)" event)
+         (unwind-protect
+             (when callback
+               (condition-case err
+                   (funcall callback
+                            (with-current-buffer buf
+                              (goto-char (point-min))
+                              (condition-case nil
+                                  (let ((data (json-parse-buffer
+                                               :object-type 'alist
+                                               :array-type 'list
+                                               :null-object nil
+                                               :false-object nil)))
+                                    (if (alist-get 'ok data)
+                                        (alist-get 'result data)
+                                      (cons :error
+                                            (or (alist-get 'code (alist-get 'error data))
+                                                "unknown"))))
+                                (error (cons :error "unparseable-output")))))
+                 (error (message "code-agent-orca async callback failed: %S" err))))
+           (when (buffer-live-p buf) (kill-buffer buf))))))
+    proc))
+#+END_SRC
+
+** Worktree Resolution
+
+Orca will only host a terminal inside a worktree it has registered.
+A subdirectory of a registered repo fails, and so does an unregistered
+git repo — both answer =selector_not_found=.  So resolution walks from
+the caller's directory to the git top level, asks Orca about *that*,
+and on failure hands the caller a precise instruction instead of a
+generic error.
+
+Registration is deliberately not automatic: =orca repo add= mutates the
+user's app state and the CLI has no =repo rm=, so it is not something a
+backend should do behind the user's back.
+
+*** Resolve a worktree id from a directory
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--git-top-level (dir)
+  "Return the git top level containing DIR, or DIR when it is not a repo."
+  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
+    (with-temp-buffer
+      (if (zerop (call-process "git" nil (current-buffer) nil
+                               "rev-parse" "--show-toplevel"))
+          (string-trim (buffer-string))
+        (directory-file-name (expand-file-name dir))))))
+
+(defun code-agent-orca--resolve-worktree (backend dir)
+  "Return the Orca worktree id owning DIR.
+Signals a `user-error' naming the exact `orca repo add' command when
+Orca does not know the enclosing repository — registration mutates the
+user's Orca state and is theirs to authorise."
+  (let* ((root (code-agent-orca--git-top-level dir))
+         (reply (code-agent-orca--call backend
+                                       "worktree" "show"
+                                       "--worktree" (concat "path:" root)))
+         (code (code-agent-orca--error-code reply)))
+    (cond
+     ((null code)
+      (let ((id (alist-get 'id (alist-get 'worktree reply))))
+        (setf (code-agent-orca-backend-worktree-path backend) root)
+        id))
+     ((equal code "selector_not_found")
+      (user-error
+       "Orca does not know %s. Register it first: orca repo add --path %s"
+       root root))
+     (t (user-error "orca worktree show failed: %s" code)))))
+#+END_SRC
+
+*** Cached worktree lookup
+
+The resolution above costs one 230 ms call.  Callers go through this
+wrapper so it happens once per backend instead of once per operation.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--worktree-id (backend)
+  "Return BACKEND's worktree id, resolving and caching it on first use."
+  (or (code-agent-multiplexer-backend-multiplexer-session-id backend)
+      (let ((id (code-agent-orca--resolve-worktree backend default-directory)))
+        (setf (code-agent-multiplexer-backend-multiplexer-session-id backend) id)
+        id)))
+#+END_SRC
+
+** Protocol 2b — Multiplexer Wire
+
+Nine methods implement Protocol 2b on =code-agent-orca-backend=, each
+shelling out to =orca= via =--call=.
+
+*** Protocol 2b — CLI Path
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-cli-path ((backend code-agent-orca-backend))
+  "Return the Orca CLI path for BACKEND — slot override, then defcustom."
+  (or (code-agent-orca-backend-orca-cmd backend)
+      code-agent-orca-cli-path))
+#+END_SRC
+
+*** Protocol 2b — Launch Session
+
+=terminal create --command= injects its argument as a command line into
+the pane's interactive shell, so the shell prefix the launch builder
+already emits — =unset VIRTUAL_ENV; set -a; . <envfile>; set +a; …= —
+runs verbatim.  The spawned pane inherits =ORCA_WORKTREE_ID= and, more
+usefully, does *not* inherit =CLAUDECODE=, so a nested =claude= starts
+without the "inside another Claude Code session" refusal.
+
+LAUNCH-CMD arrives as a list for Protocol 2b compatibility with tmux;
+orca wants one string, so the parts are joined.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-launch-session
+  ((backend code-agent-orca-backend) launch-cmd)
+  "Create an Orca terminal running LAUNCH-CMD and record its handle.
+Returns the terminal handle string, or nil on failure."
+  (let* ((worktree (code-agent-orca--worktree-id backend))
+         (cmd (if (listp launch-cmd)
+                  (mapconcat #'identity launch-cmd " ")
+                launch-cmd))
+         (title (or (code-agent-multiplexer-backend-session-key backend)
+                    "code-agent"))
+         (reply (code-agent-orca--call backend
+                                       "terminal" "create"
+                                       "--worktree" (concat "id:" worktree)
+                                       "--title" title
+                                       "--command" cmd))
+         (code (code-agent-orca--error-code reply)))
+    (if code
+        (progn (message "code-agent-orca: terminal create failed: %s" code) nil)
+      (let ((handle (alist-get 'handle (alist-get 'terminal reply))))
+        (setf (code-agent-multiplexer-backend-pane-id backend) handle)
+        handle))))
+#+END_SRC
+
+*** Protocol 2b — Ensure Session
+
+Returns the recorded handle only when Orca still has a *live* terminal
+behind it.  Two distinct deaths have to be caught, and only one of them
+is an error:
+
+- An Orca restart invalidates the handle outright and =terminal show=
+  answers =terminal_handle_stale=.
+- Closing the tab does *not* invalidate the handle.  =terminal show=
+  keeps answering =ok: true= — with =connected: false= and
+  =writable: false=, and with the terminal gone from =terminal list=.
+  Checking only the error code would report that corpse as a live
+  session, so launch would "focus" a tab that no longer exists and
+  every later send would vanish into it.
+
+Either way the slot is cleared so the next launch creates a fresh
+terminal, mirroring how the tmux backend treats a dead session.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-ensure-session
+  ((backend code-agent-orca-backend))
+  "Return BACKEND's live terminal handle, or nil when there is none."
+  (let ((handle (code-agent-multiplexer-backend-pane-id backend)))
+    (when handle
+      (let* ((reply (code-agent-orca--call backend
+                                           "terminal" "show"
+                                           "--terminal" handle))
+             (terminal (unless (code-agent-orca--error-code reply)
+                         (alist-get 'terminal reply))))
+        (if (and terminal (alist-get 'connected terminal))
+            handle
+          (setf (code-agent-multiplexer-backend-pane-id backend) nil)
+          nil)))))
+#+END_SRC
+
+*** Protocol 2b — Send Key
+
+Orca has no key-name vocabulary; =terminal send --text= writes raw
+bytes to the pty, so the keyword vocabulary the agent profiles already
+speak maps onto control characters here.  =--interrupt= is Orca's own
+one-byte Ctrl-C and is used for =:ctrl-c= so the intent stays legible
+in the CLI log.
+
+#+BEGIN_SRC elisp
+(defconst code-agent-orca--key-bytes
+  '((:enter       . "\r")
+    (:escape      . "\033")
+    (:ctrl-b      . "\002")
+    (:ctrl-e      . "\005")
+    (:ctrl-o      . "\017")
+    (:shift-enter . "\033\r")
+    (:tab         . "\t"))
+  "Keyword → raw byte sequence written to the pty by `send-key'.
+Orca exposes no key names, so every key is literal bytes.")
+
+(cl-defmethod code-agent-mux-send-key
+  ((backend code-agent-orca-backend) key)
+  "Send named KEY to BACKEND's terminal as raw bytes."
+  (when-let* ((handle (code-agent-multiplexer-backend-pane-id backend)))
+    (if (eq key :ctrl-c)
+        (code-agent-orca--call backend "terminal" "send"
+                               "--terminal" handle "--interrupt")
+      (let ((bytes (alist-get key code-agent-orca--key-bytes)))
+        (if bytes
+            (code-agent-orca--call backend "terminal" "send"
+                                   "--terminal" handle "--text" bytes)
+          (message "code-agent-mux-send-key: unknown key %S" key)
+          nil)))))
+#+END_SRC
+
+*** Protocol 2b — Send Text
+
+Two behaviours the wire forces, both measured rather than assumed:
+
+- Orca writes =--text= straight to the pty, so a multi-line prompt
+  would submit at the first newline.  Wrapping the payload in
+  *bracketed paste* (=ESC [ 200 ~= … =ESC [ 201 ~=) makes the agent TUI
+  treat it as one paste event; a two-line prompt verified as landing
+  whole in Claude's input box with nothing submitted early.  The same
+  wrapper carries a 200 000-byte payload, so there is no separate
+  large-text path of the kind cmux needs.
+- A vi-mode TUI in NORMAL mode would interpret the paste as commands,
+  so INSERT mode is ensured first, exactly as the cmux path does.
+
+Text is *not* submitted here — the caller decides, via =send-key
+:enter=, so "typed" and "typed and submitted" stay distinguishable.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--send-raw (backend text)
+  "Write TEXT to BACKEND's terminal with no paste wrapper and no submit."
+  (when-let* ((handle (code-agent-multiplexer-backend-pane-id backend)))
+    (code-agent-orca--call backend "terminal" "send"
+                           "--terminal" handle "--text" text)))
+
+(defun code-agent-orca--ensure-insert-mode (backend)
+  "Put a vi-mode agent TUI into INSERT mode before pasting into it."
+  (let ((screen (code-agent-mux-capture-screen backend)))
+    (unless (string-match-p "-- INSERT --\\|-- insert --" screen)
+      (code-agent-orca--send-raw backend "i")
+      (sleep-for 0.3))))
+
+(cl-defmethod code-agent-mux-send-text
+  ((backend code-agent-orca-backend) text)
+  "Paste TEXT into BACKEND's terminal without submitting it."
+  (let* ((clean (substring-no-properties (or text "")))
+         (profile (ignore-errors (code-agent-org-cmux--get-agent-profile)))
+         (vi-p (or (null profile)
+                   (code-agent-org-cmux--agent-profile-vi-mode profile))))
+    (when vi-p
+      (code-agent-orca--ensure-insert-mode backend))
+    (code-agent-orca--send-raw
+     backend (concat "\033[200~" clean "\033[201~"))))
+#+END_SRC
+
+*** Protocol 2b — Capture Screen
+
+=terminal read= answers plain text with no ANSI escapes, so unlike the
+cmux and tmux paths there is nothing to strip.  Under a full-screen TUI
+the cursor stream never advances — alt-screen redraws are not
+scrollback — so a cursor-incremental read would return nothing useful
+and the tail *is* the current screen.
+
+#+BEGIN_SRC elisp
+(defcustom code-agent-orca-capture-lines 120
+  "Number of trailing terminal lines `capture-screen' requests."
+  :type 'integer
+  :group 'code-agent-orca)
+
+(cl-defmethod code-agent-mux-capture-screen
+  ((backend code-agent-orca-backend))
+  "Return BACKEND's current terminal text as a string."
+  (or (when-let* ((handle (code-agent-multiplexer-backend-pane-id backend)))
+        (let* ((reply (code-agent-orca--call
+                       backend "terminal" "read"
+                       "--terminal" handle
+                       "--limit" (number-to-string code-agent-orca-capture-lines)))
+               (code (code-agent-orca--error-code reply)))
+          (unless code
+            (mapconcat #'identity
+                       (alist-get 'tail (alist-get 'terminal reply))
+                       "\n"))))
+      ""))
+#+END_SRC
+
+*** Protocol 2b — Session Status
+
+Screen-pattern classification against the active agent profile, the
+same signals the cmux backend reads.  Busy is checked first: Claude
+renders its input box *and* its spinner simultaneously, so a
+ready-pattern match says nothing about whether a turn is in flight.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-session-status
+  ((backend code-agent-orca-backend))
+  "Return :ready / :busy / :missing for BACKEND's terminal."
+  (if (null (code-agent-multiplexer-backend-pane-id backend))
+      :missing
+    (let* ((screen (code-agent-mux-capture-screen backend))
+           (profile (ignore-errors (code-agent-org-cmux--get-agent-profile)))
+           (ready (if profile
+                      (code-agent-org-cmux--agent-profile-ready-patterns profile)
+                    '("-- INSERT --" "type a message")))
+           (busy  (if profile
+                      (code-agent-org-cmux--agent-profile-busy-patterns profile)
+                    '("esc to interrupt" "Thinking" "Tool:"))))
+      (cond
+       ((string-empty-p screen) :missing)
+       ((cl-some (lambda (re) (string-match-p re screen)) busy) :busy)
+       ((cl-some (lambda (re) (string-match-p re screen)) ready) :ready)
+       (t :busy)))))
+#+END_SRC
+
+*** Protocol 2b — Rename
+
+Orca accepts the rename and echoes the new title, but its own tab
+titles are regenerated from agent activity, so the label seen in
+=terminal list= reverts.  The call is kept because it is the honest
+implementation of the generic and costs nothing; *identity must never
+be derived from a title* — that is what the worktree id and handle are
+for.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-rename
+  ((backend code-agent-orca-backend) workspace-name &optional _tab-name)
+  "Set the title of BACKEND's terminal tab to WORKSPACE-NAME."
+  (when-let* ((handle (code-agent-multiplexer-backend-pane-id backend)))
+    (code-agent-orca--call backend "terminal" "rename"
+                           "--terminal" handle "--title" workspace-name)))
+#+END_SRC
+
+*** Protocol 2b — Focus
+
+Raises the terminal's tab in the Orca UI — the action behind a
+permission alert's "click to focus".
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-mux-focus ((backend code-agent-orca-backend))
+  "Bring BACKEND's terminal tab to the foreground in Orca."
+  (when-let* ((handle (code-agent-multiplexer-backend-pane-id backend)))
+    (code-agent-orca--call backend "terminal" "switch" "--terminal" handle)))
+#+END_SRC
+
+** Launch Readiness
+
+=terminal wait --for tui-idle= reports that the terminal stopped
+emitting output, which is exactly right for "the TUI finished booting"
+and exactly wrong for "the agent finished answering" — measured at
+0.5 s into a query that ran for another twenty seconds.  It is
+therefore used here and nowhere else; turn completion continues to
+arrive through the =Stop= hook.
+
+The wait runs asynchronously: at up to
+=code-agent-orca-ready-timeout= seconds a synchronous call would
+freeze Emacs for the whole boot.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca-wait-for-ready (backend callback)
+  "Wait until BACKEND's agent TUI has finished booting, then call CALLBACK.
+CALLBACK receives t when the terminal reached tui-idle, nil otherwise.
+Never blocks Emacs."
+  (if-let* ((handle (code-agent-multiplexer-backend-pane-id backend)))
+      (code-agent-orca--call-async
+       backend
+       (list "terminal" "wait" "--terminal" handle
+             "--for" "tui-idle"
+             "--timeout-ms" (number-to-string
+                             (* 1000 code-agent-orca-ready-timeout)))
+       (lambda (reply)
+         (funcall callback
+                  (and (not (code-agent-orca--error-code reply))
+                       (eq t (alist-get 'satisfied (alist-get 'wait reply)))))))
+    (funcall callback nil)))
+#+END_SRC
+
+** Cancellation
+
+A single ESC does not cancel a running Claude turn — it leaves vi
+INSERT mode, and the turn keeps going.  The second ESC is what
+interrupts.  Rather than hard-code "twice", the mode-exit ESC is sent
+because the profile says the TUI is vi-mode, and the cancel keys that
+follow are whatever the profile declares.  A non-vi agent therefore
+gets exactly its own cancel keys and no spurious escape.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca-cancel (backend)
+  "Interrupt whatever BACKEND's agent TUI is currently doing."
+  (let* ((profile (ignore-errors (code-agent-org-cmux--get-agent-profile)))
+         (vi-p (or (null profile)
+                   (code-agent-org-cmux--agent-profile-vi-mode profile)))
+         (keys (if profile
+                   (code-agent-org-cmux--agent-profile-cancel-keys profile)
+                 '("escape"))))
+    ;; Leave INSERT mode first — otherwise the TUI eats the cancel key.
+    (when vi-p
+      (code-agent-mux-send-key backend :escape)
+      (sleep-for 0.2))
+    (dolist (k keys)
+      (code-agent-mux-send-key
+       backend
+       (cond ((member k '("escape" "Escape")) :escape)
+             ((member k '("C-c" "ctrl-c"))    :ctrl-c)
+             (t :escape))))))
+#+END_SRC
+
+** Protocol 1 — Lifecycle Capabilities
+
+Orca has no sidebar-status surface and no workspace styling, so those
+capabilities stay nil the way they do for tmux.  There is no verbose
+follower either: the CLI offers no streaming read, and under a TUI the
+cursor stream does not advance — Orca's own pane is the live view.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-backend-supports-p
+  ((_backend code-agent-orca-backend) capability)
+  "Capability reply for Orca backends."
+  (pcase capability
+    (:session-resume      t)
+    (:interactive-input   t)
+    (:verbose-follower    nil)
+    (:ide-server          nil)
+    (:workspace-style     nil)
+    (:sidebar-feedback    nil)
+    (:streaming-tokens    nil)
+    (:structured-messages nil)
+    (_ nil)))
+#+END_SRC
+
+** Protocol 3 — Org Integration
+
+*** Open Terminal Tab
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-org-backend-open-terminal-tab
+  ((backend code-agent-orca-backend))
+  "Raise BACKEND's Orca terminal tab."
+  (if (code-agent-multiplexer-backend-pane-id backend)
+      (code-agent-mux-focus backend)
+    (user-error "No Orca terminal for this session yet — launch it first")))
+#+END_SRC
+
+*** Hook routing
+
+Three of the four are the backend-neutral bodies from
+[[file:../org/code-agent-org-terminal-base.org][code-agent-org-terminal-base.org]] — orca needs no special handling for
+turn completion or permission alerts, because both reach the
+multiplexer only through Protocol 2b generics this backend implements.
+
+Identity adoption is the exception.  cmux rebuilds identity by looking
+its workspace up by heading title; Orca regenerates tab titles from
+agent activity, so the title is not identity here.  The two ids the
+launch path wrote into properties are.
+
+#+BEGIN_SRC elisp
+(declare-function code-agent-org-terminal--query-completed
+                  "code-agent-org-terminal-base" (backend workspace-session-id))
+(declare-function code-agent-org-terminal--permission-needed
+                  "code-agent-org-terminal-base" (backend workspace-session-id tool-name))
+(declare-function code-agent-org-terminal--permission-resolved
+                  "code-agent-org-terminal-base" (backend workspace-session-id))
+
+(cl-defmethod code-agent-org-backend-query-completed
+  ((backend code-agent-orca-backend) workspace-session-id)
+  (code-agent-org-terminal--query-completed backend workspace-session-id))
+
+(cl-defmethod code-agent-org-backend-permission-needed
+  ((backend code-agent-orca-backend) workspace-session-id tool-name)
+  (code-agent-org-terminal--permission-needed backend workspace-session-id tool-name))
+
+(cl-defmethod code-agent-org-backend-permission-resolved
+  ((backend code-agent-orca-backend) workspace-session-id)
+  (code-agent-org-terminal--permission-resolved backend workspace-session-id))
+
+(cl-defmethod code-agent-org-backend-adopt-identity
+  ((backend code-agent-orca-backend))
+  "Re-read BACKEND's worktree id and terminal handle from the heading."
+  (let ((worktree (org-entry-get nil "ORCA_WORKTREE" t))
+        (handle   (org-entry-get nil "ORCA_TERMINAL" t)))
+    (when worktree
+      (setf (code-agent-multiplexer-backend-multiplexer-session-id backend)
+            (string-remove-prefix "id:" worktree)))
+    (when handle
+      (setf (code-agent-multiplexer-backend-pane-id backend) handle))
+    handle))
+#+END_SRC
+
+*** Launch
+
+Point is on (or inside) the workspace heading; =CLAUDE_SESSION_ID=
+identifies the session and the launch command comes from the shared
+builder, so what is left is Orca-specific: resolve the worktree, create
+the terminal, write the two ids back as properties, and register the
+session so hook callbacks can find their way home.
+
+Idempotence is the contract: a session whose handle Orca still knows
+is focused, not relaunched.  Readiness is awaited asynchronously —
+a synchronous wait would freeze Emacs for the whole TUI boot.
+
+#+BEGIN_SRC elisp
+(declare-function code-agent-org-terminal-goto-session-heading
+                  "code-agent-org-terminal-base" ())
+(declare-function code-agent-org-get-project-root "code-agent-org" ())
+(declare-function code-agent-org-session-put "code-agent-org-session" (key prop value))
+(declare-function code-agent-org-current-session-key "code-agent-org-session" ())
+(defvar code-agent-org-terminal--workspace-to-session-key)
+
+(defun code-agent-orca--persist-identity (backend workspace-session-id)
+  "Write BACKEND's ids onto the session heading and register the session."
+  (let ((session-key (code-agent-org-current-session-key))
+        (worktree (code-agent-multiplexer-backend-multiplexer-session-id backend))
+        (handle   (code-agent-multiplexer-backend-pane-id backend)))
+    (save-excursion
+      (save-restriction
+        (code-agent-org-terminal-goto-session-heading)
+        (when worktree (org-set-property "ORCA_WORKTREE" (concat "id:" worktree)))
+        (when handle   (org-set-property "ORCA_TERMINAL" handle))))
+    (when session-key
+      (code-agent-org-session-put session-key :workspace-session-id workspace-session-id)
+      (code-agent-org-session-put session-key :backend backend)
+      (puthash workspace-session-id session-key
+               code-agent-org-terminal--workspace-to-session-key))
+    (when (buffer-file-name) (save-buffer))))
+
+(cl-defmethod code-agent-org-backend-launch
+  ((backend code-agent-orca-backend))
+  "Launch — or focus — the Orca terminal for the org session at point."
+  (let ((workspace-session-id
+         (save-excursion (code-agent-org-terminal-goto-session-heading))))
+    (unless workspace-session-id
+      (user-error "No CLAUDE_SESSION_ID here — create a workspace section first"))
+    ;; Adopt anything a previous Emacs left on the heading before deciding.
+    (save-excursion
+      (code-agent-org-terminal-goto-session-heading)
+      (code-agent-org-backend-adopt-identity backend))
+    (if (code-agent-mux-ensure-session backend)
+        (progn
+          (code-agent-mux-focus backend)
+          (message "Orca terminal focused (%s)"
+                   (code-agent-multiplexer-backend-pane-id backend)))
+      (let* ((project-root (or (ignore-errors (code-agent-org-get-project-root))
+                               default-directory))
+             (default-directory project-root)
+             (launch-cmd (code-agent-org-cmux--build-launch-command
+                          (buffer-file-name) workspace-session-id project-root))
+             (handle (code-agent-mux-launch-session backend launch-cmd)))
+        (unless handle
+          (user-error "Orca refused to create a terminal for %s" workspace-session-id))
+        (code-agent-orca--persist-identity backend workspace-session-id)
+        (message "Orca terminal %s launched; waiting for the agent TUI…" handle)
+        (code-agent-orca-wait-for-ready
+         backend
+         (lambda (ready)
+           (message "Orca terminal %s %s" handle
+                    (if ready "ready" "did not reach idle before the timeout"))))
+        handle))))
+#+END_SRC
+
+*** Cancel
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-org-backend-cancel-from-org
+  ((backend code-agent-orca-backend))
+  "Interrupt the agent running in BACKEND's Orca terminal."
+  (save-excursion
+    (code-agent-org-terminal-goto-session-heading)
+    (code-agent-org-backend-adopt-identity backend))
+  (if (code-agent-multiplexer-backend-pane-id backend)
+      (progn (code-agent-orca-cancel backend)
+             (message "Sent cancel to the Orca terminal"))
+    (user-error "No Orca terminal for this session")))
+#+END_SRC
+
+** Provide
+
+Single =provide= so the module can be =require=d.
+
+#+BEGIN_SRC elisp
+(provide 'code-agent-orca-backend)
+#+END_SRC
+
+* See also
+:PROPERTIES:
+:CUSTOM_ID: orca-backend-see-also
+:END:
+
+**Verified by:**
+
+- [[file:../../tests/test-orca-backend.el][test-orca-backend.el]]
+- [[file:../../tests/test-orca-e2e-local.el][test-orca-e2e-local.el]]
+
+#+begin_src elisp :tangle no
+;; literate-elisp reader sentinel — keeps the file's final
+;; non-empty content a code block (See-also prose alone trips
+;; an EOF signal in the reader).
+#+end_src

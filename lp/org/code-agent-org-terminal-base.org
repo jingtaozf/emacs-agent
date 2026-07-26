@@ -230,6 +230,161 @@ and saves the request-id to a status file for the Python hook."
     (code-agent-org-terminal--save-request-id workspace-session-id req-id)))
 #+END_SRC
 
+** Hook Routing — backend-neutral bodies
+
+The three events the Python bridge pushes over MCP — turn finished,
+permission opened, permission closed — plus the cross-restart mapping
+rebuild they depend on.  cmux answers the matching Protocol 3 generics
+from its own legacy body; every *other* multiplexer answers them with
+the functions here, so a new backend inherits the whole behaviour by
+writing four one-line methods.
+
+Everything below reaches the multiplexer only through Protocol 2b
+generics, never through a named CLI.
+
+*** Turn completion
+
+Unregisters the in-flight query, clears the session's busy flag, and
+continues a =:LOOP_MAX:= run when one is active.  The =condition-case=
+is load-bearing rather than defensive: this runs from Python over MCP,
+where an unhandled error would leave the session wedged at =:busy t=
+forever with no user-visible cause.
+
+#+BEGIN_SRC elisp
+(declare-function code-agent-org-session-get "code-agent-org-session" (key prop))
+(declare-function code-agent-org-session-put "code-agent-org-session" (key prop value))
+(declare-function code-agent--get-active-query "code-agent-backend" (request-id))
+(declare-function code-agent--unregister-query "code-agent-backend" (request-id))
+(declare-function code-agent-mux-send-text "code-agent-multiplexer" (backend text))
+(declare-function code-agent-mux-send-key "code-agent-multiplexer" (backend key))
+(declare-function code-agent-mux-focus "code-agent-multiplexer" (backend))
+(declare-function code-agent-add-alert "code-agent" (id &rest args))
+(declare-function code-agent-remove-alert "code-agent" (id))
+(declare-function code-agent--permission-label "code-agent-org-cmux" (session-id))
+(declare-function code-agent-org-current-session-key "code-agent-org-session" ())
+
+(defun code-agent-org-terminal--submit-prompt (backend prompt)
+  "Type PROMPT into BACKEND's terminal and submit it."
+  (code-agent-mux-send-text backend prompt)
+  (code-agent-mux-send-key backend :enter))
+
+(defun code-agent-org-terminal--continue-loop (backend session-key workspace-session-id)
+  "Schedule the next `:LOOP_MAX:' iteration for SESSION-KEY, if any."
+  (let ((current (or (code-agent-org-session-get session-key :loop-current) 1))
+        (max     (or (code-agent-org-session-get session-key :loop-max) 1)))
+    (if (< current max)
+        (let ((interval (or (code-agent-org-session-get session-key :loop-interval) 0))
+              (prompt   (code-agent-org-session-get session-key :original-prompt)))
+          (code-agent-org-session-put session-key :loop-current (1+ current))
+          (code-agent-org-terminal--save-request-id
+           workspace-session-id (code-agent--generate-request-id))
+          (if (> interval 0)
+              (run-at-time interval nil
+                           #'code-agent-org-terminal--submit-prompt backend prompt)
+            (code-agent-org-terminal--submit-prompt backend prompt)))
+      (code-agent-org-session-put session-key :loop-max nil)
+      (code-agent-org-session-put session-key :loop-current nil))))
+
+(defun code-agent-org-terminal--query-completed (backend workspace-session-id)
+  "Backend-neutral handler for WORKSPACE-SESSION-ID's turn finishing."
+  (condition-case err
+      (let ((session-key (gethash workspace-session-id
+                                  code-agent-org-terminal--workspace-to-session-key)))
+        (when-let* ((req-id (code-agent-org-terminal--read-request-id
+                             workspace-session-id))
+                    (state (code-agent--get-active-query req-id)))
+          (setf (code-agent--process-state-closed state) t)
+          (code-agent--unregister-query req-id))
+        (when session-key
+          (code-agent-org-session-put session-key :busy nil)
+          (code-agent-org-terminal--continue-loop
+           backend session-key workspace-session-id)))
+    (error
+     (when-let* ((sk (gethash workspace-session-id
+                              code-agent-org-terminal--workspace-to-session-key)))
+       (code-agent-org-session-put sk :busy nil))
+     (message "code-agent-org-terminal: query-completed failed: %S" err))))
+#+END_SRC
+
+*** Permission alerts
+
+Registers a mode-line alert whose action focuses the agent's terminal,
+then focuses it immediately.  Focus goes through =code-agent-mux-focus=
+— the Protocol 2b generic that shipped with a no-op default and no
+callers until this call site.
+
+The self-healing =:busy= write is not bookkeeping tidiness: Claude Code
+skips the prompt hook on a retry or a =/continue=, and a permission
+event is proof a turn is in flight, so this is the only signal that a
+skipped-hook session is actually running.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org-terminal--permission-needed (backend workspace-session-id tool-name)
+  "Backend-neutral permission-needed alert for WORKSPACE-SESSION-ID."
+  (let ((session-key (gethash workspace-session-id
+                              code-agent-org-terminal--workspace-to-session-key)))
+    (when (and session-key (not (code-agent-org-session-get session-key :busy)))
+      (code-agent-org-session-put session-key :busy t)
+      (unless (code-agent-org-terminal--read-request-id workspace-session-id)
+        (condition-case nil
+            (let ((buf (code-agent-org-session-get session-key :source-buffer)))
+              (when (and buf (buffer-live-p buf))
+                (with-current-buffer buf
+                  (code-agent-org-terminal-register-query workspace-session-id nil))))
+          (error nil)))))
+  (code-agent-add-alert
+   (intern workspace-session-id)
+   :label (code-agent--permission-label workspace-session-id)
+   :tooltip (format "Permission needed: %s\nClick to focus the agent terminal" tool-name)
+   :face '(:foreground "orange" :weight bold)
+   :action (lambda ()
+             (code-agent-remove-alert (intern workspace-session-id))
+             (ignore-errors (code-agent-mux-focus backend))))
+  (ignore-errors (code-agent-mux-focus backend))
+  "ok")
+
+(defun code-agent-org-terminal--permission-resolved (_backend workspace-session-id)
+  "Backend-neutral permission-resolved handler for WORKSPACE-SESSION-ID."
+  (code-agent-remove-alert (intern workspace-session-id))
+  "ok")
+#+END_SRC
+
+*** Cross-restart recovery
+
+Finds the org heading whose =CLAUDE_SESSION_ID= matches and re-registers
+the workspace-to-session-key mapping the rest of the routing depends
+on.  =AT-HEADING-FN= runs with point on that heading so a backend can
+read its own identity properties back into its slots — the hook that
+replaces cmux's title lookup, which cannot work on a multiplexer that
+regenerates tab titles from agent activity.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org-terminal--recover-session (workspace-session-id &optional at-heading-fn)
+  "Rebuild the session-key mapping for WORKSPACE-SESSION-ID from org buffers.
+Calls AT-HEADING-FN with point on the matching heading when supplied.
+Returns the session-key, or nil when no buffer carries that session."
+  (cl-block recover
+    (dolist (buf (buffer-list))
+      (when (and (buffer-file-name buf)
+                 (with-current-buffer buf (bound-and-true-p code-agent-org-mode)))
+        (with-current-buffer buf
+          (save-excursion
+            (save-restriction
+              (widen)
+              (goto-char (point-min))
+              (when (re-search-forward
+                     (format ":CLAUDE_SESSION_ID: %s"
+                             (regexp-quote workspace-session-id))
+                     nil t)
+                (org-back-to-heading t)
+                (let ((session-key (code-agent-org-current-session-key)))
+                  (when session-key
+                    (puthash workspace-session-id session-key
+                             code-agent-org-terminal--workspace-to-session-key)
+                    (when at-heading-fn (funcall at-heading-fn))
+                    (cl-return-from recover session-key)))))))))))
+#+END_SRC
+
 ** Provide
 
 Single =provide= so the module can be =require=d.

@@ -419,6 +419,10 @@ or add it to test-structural--known-public-api if it's intentionally public."
     "code-agent-cmux-backend-create"
     ;; code-agent-tmux-backend (Phase 4 multiplexer factory)
     "code-agent-tmux-backend-create"
+    ;; code-agent-orca-backend (Orca multiplexer factory + public helpers)
+    "code-agent-orca-backend-create"
+    "code-agent-orca-wait-for-ready"
+    "code-agent-orca-cancel"
     ;; code-agent-backend public API
     "code-agent-backend-register"
     "code-agent-backend-get"

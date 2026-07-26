@@ -1862,3 +1862,70 @@ workspaces:
 --json= and assert =--find-group-by-name= resolves the ref and
 =--ensure-group-membership= picks create-vs-add correctly.  Not yet
 added — the live run above is the current proof.
+
+* Journey 9 — Orca backend (launch → drive → recover → cancel)
+:PROPERTIES:
+:CUSTOM_ID: journey-9-orca
+:END:
+
+Exercises =:CLAUDE_BACKEND: orca= end to end against the running Orca
+app.  Fixture: =tests/e2e/org/workspace-test.org= §
+[[file:org/workspace-test.org::#e2e-orca-launch][Orca Backend Launch (Journey 9)]].
+
+Prerequisites: Orca is running, and the repo is registered with it.
+Orca hosts terminals only inside worktrees it knows, so an
+unregistered project answers =selector_not_found= — check with
+=orca worktree show --worktree path:$PWD --json= before blaming the
+backend.
+
+** Steps
+
+1. Reload the changed modules in the live Emacs, then confirm the
+   registry knows orca:
+   #+begin_src elisp
+   (list :registry (mapcar #'car code-agent-org-backend-registry)
+         :orca (featurep 'code-agent-orca-backend))
+   #+end_src
+   Expected: =("cmux" "tmux" "orca")= and =t=.
+2. Put point on the Journey-9 heading and launch:
+   =(code-agent-org-terminal-launch)=.  Expected: a handle string, and
+   =ORCA_WORKTREE= / =ORCA_TERMINAL= written onto the heading.
+3. Confirm on the Orca side that Claude Code booted:
+   =orca terminal read --terminal <handle> --limit 20 --json=.
+4. Send a *multi-line* prompt through the backend
+   (=code-agent-mux-send-text= then =code-agent-mux-send-key … :enter=)
+   and confirm both lines land in the input box before submission —
+   this is what the bracketed-paste wrapper buys.
+5. While a long turn runs, check =(code-agent-mux-session-status b)=
+   reports =:busy=, then =(code-agent-org-terminal-cancel)= and confirm
+   the spinner stops.
+6. Simulate an Emacs restart: =remhash= the session from
+   =code-agent-org-terminal--workspace-to-session-key= and clear the
+   session's =:backend=, then call
+   =(code-agent-org--terminal-backend "sdd-e2e-orca-001")=.  Expected:
+   an =code-agent-orca-backend= with handle and worktree repopulated
+   from the org properties.
+7. Close the tab in Orca, then relaunch.  Expected: a *new* terminal,
+   not a "focused" dead one.
+8. Cleanup: =orca terminal close --terminal <handle> --tab=.
+
+*Verified 2026-07-25 (live Emacs → Orca 1.4.155 → Claude Code v2.1.220).*
+
+| Step | Result |
+|------+--------|
+| registry | =("cmux" "tmux" "orca")= |
+| launch from org heading | =term_05def5e7…=; both properties written |
+| Claude booted | banner + prompt box within 3.5 s of =tui-idle= |
+| multi-line prompt | both lines in the box, nothing submitted early; reply =⏺ orca backend online= |
+| status while busy | =:busy= during =✻ Ebbing… (20s)= |
+| cancel | spinner cleared, prompt text restored |
+| hook routing | =query-completed= cleared =:busy=; permission alert registered then cleared |
+| restart recovery | backend, handle and worktree all rebuilt from properties |
+| relaunch after tab close | fresh terminal created, reply =⏺ relaunch ok= |
+| cmux regression | a =:CLAUDE_BACKEND: cmux= heading still resolves and routes to =code-agent-cmux-backend= |
+
+*Bug this journey caught.*  Step 7 originally reported "Orca terminal
+focused" instead of relaunching.  Closing a tab does not invalidate the
+handle — =terminal show= still answers =ok: true=, with
+=connected: false=.  =ensure-session= now requires =connected=; see
+=tasks/lessons.md= 2026-07-25.

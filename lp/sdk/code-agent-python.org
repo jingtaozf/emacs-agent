@@ -35,8 +35,15 @@ the plan-mode false positives.
 
 #+begin_src json
 {
-  "description": "Emacs Claude Agent hooks — permission handling only",
+  "description": "Emacs Claude Agent hooks — permission handling + CLI session persistence",
   "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/python workspace-bridge session-start",
+        "timeout": 10
+      }]
+    }],
     "PreToolUse": [{
       "matcher": "AskUserQuestion",
       "hooks": [{
@@ -1623,21 +1630,48 @@ class WorkspaceLauncher:
         * ``WORKSPACE_CUSTOM_ID``   — preferred routing key (org heading
           ``:CUSTOM_ID:`` — globally unique, survives heading rename)
         * ``CMUX_WORKSPACE``        — cmux workspace title at launch
-          time (display + sanity check only, not a routing key)
+          time (display + sanity check only, not a routing key), set
+          only when the launcher really is running inside cmux
+        * ``ORCA_WORKTREE``         — the Orca counterpart, set only
+          when running inside Orca
 
-        ``CMUX_WORKSPACE`` falls back to empty string when cmux
-        cannot be reached (CI / direct invocation).
+        Both are display labels and both fall back to unset when the
+        host multiplexer cannot be identified (CI / direct invocation).
         """
         os.environ["WORKSPACE_ORG_FILE"] = self.org_file
         os.environ["WORKSPACE_SESSION_ID"] = self.session_id or ""
         os.environ["WORKSPACE_CUSTOM_ID"] = self.workspace_custom_id or ""
-        cmux_ws = self._detect_cmux_workspace_title() or ""
-        if cmux_ws:
-            os.environ["CMUX_WORKSPACE"] = cmux_ws
+        if self._host_multiplexer() == "orca":
+            # Orca exports the worktree id into every pane it spawns, so
+            # the label costs nothing — and asking the orca CLI would
+            # cost ~230 ms of process startup for a display string.
+            os.environ["ORCA_WORKTREE"] = os.environ.get("ORCA_WORKTREE_ID", "")
+        elif self._host_multiplexer() == "cmux":
+            cmux_ws = self._detect_cmux_workspace_title() or ""
+            if cmux_ws:
+                os.environ["CMUX_WORKSPACE"] = cmux_ws
         os.environ["EMACS_MCP_URL"] = self.mcp_url
         os.environ["CLAUDE_PLUGIN_ROOT"] = self.plugin_dir
         if self.agent_type_env_value:
             os.environ["AGENT_TYPE"] = self.agent_type_env_value
+
+    @staticmethod
+    def _host_multiplexer() -> str:
+        """Identify the multiplexer this launcher is running inside.
+
+        Both apps can run at once, so asking a CLI is not enough: from
+        inside an Orca pane ``cmux identify`` happily answers about
+        whichever cmux workspace is focused, and the launcher would
+        label the session with a workspace it has nothing to do with.
+        The per-pane env vars are the only trustworthy signal.
+
+        Returns ``"orca"``, ``"cmux"``, or ``""`` when neither.
+        """
+        if os.environ.get("ORCA_WORKTREE_ID") or os.environ.get("ORCA_PANE_KEY"):
+            return "orca"
+        if os.environ.get("CMUX_WORKSPACE_ID") or os.environ.get("CMUX_SURFACE_ID"):
+            return "cmux"
+        return ""
 
     def _detect_cmux_workspace_title(self) -> str:
         """Best-effort: ask cmux for the current workspace title.
@@ -1769,7 +1803,7 @@ routing logic that previously lived here has been moved into Elisp.
 Module docstring — minimal description of the permission-only scope.
 
 #+begin_src python
-"""Minimal workspace bridge — permission handling only.
+"""Minimal workspace bridge — permission handling + CLI session persistence.
 
 The bridge handles two Claude CLI hook events:
 
@@ -1856,6 +1890,19 @@ def _escape_elisp_string(s: str) -> str:
         .replace("\x00", "")  # invalid in elisp strings
     )
 
+
+def _cli_session_property() -> str:
+    """Org property name where the current agent persists its session id.
+
+    Copilot uses a distinct property so a workspace can run both agents
+    without stomping on each other's resume token (see
+    ``COPILOT_CLI_SESSION`` in code-agent-org-cmux.org); everyone else
+    shares ``CLAUDE_CLI_SESSION``.
+    """
+    if os.environ.get("AGENT_TYPE", "").lower() == "copilot":
+        return "COPILOT_CLI_SESSION"
+    return "CLAUDE_CLI_SESSION"
+
 #+end_src
 =cl-defclass=-like Python class — =WorkspaceBridge= holds minimal bridge state.  Only permission-related handlers remain; all other event handlers were removed.
 
@@ -1866,12 +1913,12 @@ def _escape_elisp_string(s: str) -> str:
 
 
 class WorkspaceBridge:
-    """Minimal bridge — permission handling only.
+    """Minimal bridge — permission handling + CLI session persistence.
 
     Holds the MCP client, the target org file, the session id, and
-    (when available) an OpenTelemetry tracer.  Only ``_handle_permission``
-    and ``_handle_permission_clear`` carry real logic — every other event
-    prints a warning and returns.
+    (when available) an OpenTelemetry tracer.  Only ``_handle_permission``,
+    ``_handle_permission_clear`` and ``_handle_session_start`` carry real
+    logic — every other event prints a warning and returns.
     """
 
     INTERACTIVE_TOOLS: frozenset[str] = frozenset({"AskUserQuestion", "ExitPlanMode"})
@@ -2083,6 +2130,39 @@ class WorkspaceBridge:
             except (McpConnectionError, McpElispError):
                 pass
 
+    def _handle_session_start(self, input_data: dict) -> None:
+        """Handle ``SessionStart`` — persist the CLI session id for --resume.
+
+        The launch/restart command builders read the workspace heading's
+        ``CLAUDE_CLI_SESSION`` property to build ``--resume <id>``; this
+        handler is the only writer.  Without it the property goes stale
+        and every restart resumes an old conversation (2026-07-12 bug).
+        Routing is by ``WORKSPACE_CUSTOM_ID`` / ``WORKSPACE_SESSION_ID``,
+        so the id lands on the right heading regardless of where the
+        user's point is.
+        """
+        cli_session = input_data.get("session_id") or input_data.get("sessionId", "")
+        with self._span(
+            "handle-session-start",
+            **self._span_attrs(None, **{"cli.session_id": cli_session}),
+        ):
+            if cli_session:
+                prop = _cli_session_property()
+                try:
+                    self._mcp_eval(
+                        f"(code-agent-org-workspace-bridge-save-cli-session "
+                        f'"{_escape_elisp_string(self.org_file)}" '
+                        f'"{_escape_elisp_string(self._routing_key())}" '
+                        f'"{_escape_elisp_string(cli_session)}" '
+                        f'"{prop}")'
+                    )
+                except (McpConnectionError, McpElispError):
+                    logger.warning(
+                        "Failed to persist CLI session %s for %s",
+                        cli_session,
+                        self.session_id,
+                    )
+
 #+end_src
 Script entry point — translates CLI argv / env vars into the runtime call below.  Simplified: no cross-cmux-restart routing recovery.
 
@@ -2109,7 +2189,13 @@ def main() -> None:
     org_file = os.environ.get("WORKSPACE_ORG_FILE", "")
     session_id = os.environ.get("WORKSPACE_SESSION_ID", "")
     workspace_custom_id = os.environ.get("WORKSPACE_CUSTOM_ID", "")
-    cmux_workspace = os.environ.get("CMUX_WORKSPACE", "")
+    # Display label only.  Whichever multiplexer launched this session
+    # exported its own; exactly one of the two is ever set.
+    cmux_workspace = (
+        os.environ.get("CMUX_WORKSPACE")
+        or os.environ.get("ORCA_WORKTREE")
+        or ""
+    )
     mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
 
     if not org_file or not session_id:

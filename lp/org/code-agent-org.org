@@ -109,18 +109,15 @@ required feature is already provided.
 (declare-function claude-ide-start-server-in-directory "claude-ide" (key directory))
 (declare-function claude-ide-stop-server "claude-ide" (key))
 
-;; Forward declarations for cmux backends
-(declare-function code-agent-org-cmux-open-tab "code-agent-org-cmux" ())
-(declare-function code-agent-org-cmux--ensure-session "code-agent-org-cmux" ())
+;; Forward declarations for cmux — only the interactive commands the
+;; transient menu binds and the IDE-server hook remain.  Hook routing
+;; goes through Protocol 3 dispatch now, not through named cmux symbols.
 (declare-function code-agent-org-cmux--ensure-ide-server "code-agent-org-cmux" (project-root workspace-session-id))
-(declare-function code-agent-org-cmux--get-status "code-agent-org-cmux" (workspace-session-id surface-id))
-(declare-function code-agent-org-cmux--query-completed "code-agent-org-cmux" (workspace-session-id))
-(declare-function code-agent-org-cmux--recover-session "code-agent-org-cmux" (workspace-session-id))
-(declare-function code-agent-org-cmux--permission-needed "code-agent-org-cmux" (workspace-session-id tool-name))
-(declare-function code-agent-org-cmux--permission-resolved "code-agent-org-cmux" (workspace-session-id))
 (declare-function code-agent-org-cmux-restart "code-agent-org-cmux" ())
 (declare-function code-agent-org-cmux-cancel "code-agent-org-cmux" ())
-(declare-function code-agent-org-terminal--read-request-id "code-agent-org-cmux" (workspace-session-id))
+;; Shared terminal helpers (code-agent-org-terminal-base.org).
+(declare-function code-agent-org-terminal--read-request-id "code-agent-org-terminal-base" (workspace-session-id))
+(declare-function code-agent-org-terminal--recover-session "code-agent-org-terminal-base" (workspace-session-id &optional at-heading-fn))
 (defvar code-agent-org-terminal--workspace-to-session-key)
 (defvar code-agent-org--sessions)
 (defvar code-agent-org-persistent-registry)
@@ -130,64 +127,79 @@ required feature is already provided.
 
 ** Terminal Dispatchers
 
-Dispatchers called by workspace_bridge.py to route events to the correct
-terminal backend.  All use the same pattern: check if the session is
-known to cmux, then dispatch accordingly.
+Three events arrive here from =workspace_bridge.py= over MCP carrying
+nothing but a workspace-session-id, and each has to reach the backend
+that owns that session.
+
+Resolving the owner is the whole job, and it happens once, in
+=--terminal-backend= below.  Previously each dispatcher open-coded a
+=cond= over =(fboundp 'code-agent-org-cmux--…)= — which made cmux the
+only reachable multiplexer no matter what any other backend
+implemented.  The =fboundp= arms are gone; the three dispatchers now
+send a Protocol 3 message and let dispatch decide.
 
 #+BEGIN_SRC elisp
+(defun code-agent-org--terminal-backend (workspace-session-id)
+  "Return the backend owning WORKSPACE-SESSION-ID, or nil.
+
+Three sources, cheapest first.  The cached =:backend= slot is
+authoritative — the launch path put it there — so the common case
+costs one hash lookup.  When the hash is empty because Emacs
+restarted, `code-agent-org-backend-recover-session' rebuilds the
+mapping from the org buffer, which is the authoritative record.  Only
+then does the request-id file act as a last-resort proof that the
+session existed at all.
+
+Recovery must precede the request-id fallback: that path re-enters
+with the hash still empty, so the session stays out of sync — busy
+never clears, the loop never continues — unless the mapping is
+rebuilt from the org section first."
+  (let ((session-key (gethash workspace-session-id
+                              code-agent-org-terminal--workspace-to-session-key)))
+    (or (and session-key (code-agent-org-session-get session-key :backend))
+        ;; Hash cold.  One scan of the loaded org buffers finds the
+        ;; heading that owns this session; standing on it, the
+        ;; CLAUDE_BACKEND property says which backend to build, and the
+        ;; backend reads its own identity properties back.
+        (let (found)
+          (when (code-agent-org-terminal--recover-session
+                 workspace-session-id
+                 (lambda ()
+                   (setq found (code-agent-org--resolve-backend
+                                (code-agent-org-current-session-key)
+                                (list :cwd default-directory)))
+                   (when found
+                     (ignore-errors (code-agent-org-backend-adopt-identity found)))))
+            found))
+        ;; Module reload / race: no org buffer is loaded, but the
+        ;; request-id file proves a session is live.  Fall back to the
+        ;; configured default so the query still gets unregistered
+        ;; rather than leaking as permanently in-flight.
+        (and (code-agent-org-terminal--read-request-id workspace-session-id)
+             (when-let* ((ctor (cdr (assoc code-agent-org-default-backend
+                                           code-agent-org-backend-registry))))
+               (funcall ctor (or session-key workspace-session-id) nil))))))
+
 (defun code-agent-org--terminal-query-completed (workspace-session-id)
-  "Dispatch query-completed to the correct terminal backend.
-WORKSPACE-SESSION-ID identifies the session whose query just finished.
-Tries cmux (checks hash table, then falls back to request-id file)."
-  (cond
-   ;; cmux: session-key in hash table (normal path)
-   ((and (fboundp 'code-agent-org-cmux--query-completed)
-         (gethash workspace-session-id code-agent-org-terminal--workspace-to-session-key))
-    (code-agent-org-cmux--query-completed workspace-session-id))
-   ;; cmux: hash empty but the org section still exists (Emacs restart /
-   ;; session eviction) — recover the mapping by scanning loaded buffers,
-   ;; then dispatch.  This must precede the request-id fallback: that path
-   ;; re-enters with the hash still empty, so the session goes out of sync
-   ;; (busy never clears, loop never continues) unless the mapping is first
-   ;; rebuilt from the authoritative org section.
-   ((and (fboundp 'code-agent-org-cmux--query-completed)
-         (fboundp 'code-agent-org-cmux--recover-session)
-         (code-agent-org-cmux--recover-session workspace-session-id))
-    (code-agent-org-cmux--query-completed workspace-session-id))
-   ;; cmux: hash empty, recovery failed, but request-id file exists
-   ;; (module reload / race) — last-resort dispatch.
-   ((and (fboundp 'code-agent-org-cmux--query-completed)
-         (code-agent-org-terminal--read-request-id workspace-session-id))
-    (code-agent-org-cmux--query-completed workspace-session-id))
-   (t (message "code-agent-org: no terminal backend loaded for query-completed"))))
+  "Route query-completion for WORKSPACE-SESSION-ID to its backend."
+  (if-let* ((backend (code-agent-org--terminal-backend workspace-session-id)))
+      (code-agent-org-backend-query-completed backend workspace-session-id)
+    (message "code-agent-org: no backend owns session %s (query-completed)"
+             workspace-session-id)))
 
 (defun code-agent-org--terminal-permission-needed (workspace-session-id tool-name)
-  "Dispatch permission notification to the correct terminal backend."
-  (cond
-   ((and (fboundp 'code-agent-org-cmux--permission-needed)
-         (boundp 'code-agent-org-terminal--workspace-to-session-key)
-         (gethash workspace-session-id code-agent-org-terminal--workspace-to-session-key))
-    (code-agent-org-cmux--permission-needed workspace-session-id tool-name))
-   ;; Recover a lost mapping (Emacs restart / eviction) before dropping.
-   ((and (fboundp 'code-agent-org-cmux--permission-needed)
-         (fboundp 'code-agent-org-cmux--recover-session)
-         (code-agent-org-cmux--recover-session workspace-session-id))
-    (code-agent-org-cmux--permission-needed workspace-session-id tool-name))
-   (t (message "code-agent-org: no terminal backend loaded for permission-needed"))))
+  "Route a permission request for WORKSPACE-SESSION-ID to its backend."
+  (if-let* ((backend (code-agent-org--terminal-backend workspace-session-id)))
+      (code-agent-org-backend-permission-needed backend workspace-session-id tool-name)
+    (message "code-agent-org: no backend owns session %s (permission-needed)"
+             workspace-session-id)))
 
 (defun code-agent-org--terminal-permission-resolved (workspace-session-id)
-  "Dispatch permission resolution to the correct terminal backend."
-  (cond
-   ((and (fboundp 'code-agent-org-cmux--permission-resolved)
-         (boundp 'code-agent-org-terminal--workspace-to-session-key)
-         (gethash workspace-session-id code-agent-org-terminal--workspace-to-session-key))
-    (code-agent-org-cmux--permission-resolved workspace-session-id))
-   ;; Recover a lost mapping (Emacs restart / eviction) before dropping.
-   ((and (fboundp 'code-agent-org-cmux--permission-resolved)
-         (fboundp 'code-agent-org-cmux--recover-session)
-         (code-agent-org-cmux--recover-session workspace-session-id))
-    (code-agent-org-cmux--permission-resolved workspace-session-id))
-   (t (message "code-agent-org: no terminal backend loaded for permission-resolved"))))
+  "Route a permission resolution for WORKSPACE-SESSION-ID to its backend."
+  (if-let* ((backend (code-agent-org--terminal-backend workspace-session-id)))
+      (code-agent-org-backend-permission-resolved backend workspace-session-id)
+    (message "code-agent-org: no backend owns session %s (permission-resolved)"
+             workspace-session-id)))
 #+END_SRC
 
 ** with-backend macro
@@ -216,9 +228,9 @@ explicitly."
      ,@body))
 #+END_SRC
 
-** Open cmux tab
+** Open terminal tab
 
-Opens the terminal tab for the current session using the cmux backend.
+Opens the terminal tab for the current session using its backend.
 
 #+BEGIN_SRC elisp
 (defun code-agent-org-open-terminal-tab ()
@@ -230,6 +242,27 @@ their workspace / tab.  Agent backends default to a user-error
   (interactive)
   (code-agent-org-with-backend backend
     (code-agent-org-backend-open-terminal-tab backend)))
+#+END_SRC
+
+** Terminal lifecycle commands
+
+The two verbs the transient menu offers on a workspace heading.  Both
+resolve the heading's own =:CLAUDE_BACKEND:= and send a Protocol 3
+message, so the same keystroke drives whichever multiplexer that
+workspace declared.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org-terminal-launch ()
+  "Launch — or focus — the agent terminal for the workspace at point."
+  (interactive)
+  (code-agent-org-with-backend backend
+    (code-agent-org-backend-launch backend)))
+
+(defun code-agent-org-terminal-cancel ()
+  "Interrupt whatever the agent terminal at point is doing."
+  (interactive)
+  (code-agent-org-with-backend backend
+    (code-agent-org-backend-cancel-from-org backend)))
 #+END_SRC
 
 ** Workspace Status Helper
@@ -255,7 +288,9 @@ Insert a new workspace heading with the standard properties for cmux session man
 (defun code-agent-org-new-workspace (name)
   "Create a new workspace heading named NAME at the end of the buffer.
 Inserts a top-level heading with =:CMUX_WORKSPACE:= and
-=:CLAUDE_SESSION_ID:= properties, then moves point there."
+=:CLAUDE_SESSION_ID:= properties, then moves point there.
+The stamped =:CLAUDE_BACKEND:= comes from
+`code-agent-org-default-backend'."
   (interactive "sWorkspace name: ")
   (save-excursion
     (goto-char (point-max))
@@ -263,7 +298,7 @@ Inserts a top-level heading with =:CMUX_WORKSPACE:= and
     (insert "\n* " name "\n")
     (insert ":PROPERTIES:\n")
     (insert ":CMUX_WORKSPACE: " name "\n")
-    (insert ":CLAUDE_BACKEND: cmux\n")
+    (insert ":CLAUDE_BACKEND: " code-agent-org-default-backend "\n")
     (let ((session-id (format "sdd-%s" (format-time-string "%Y%m%d-%H%M%S"))))
       (insert ":CLAUDE_SESSION_ID: " session-id "\n"))
     (insert ":END:\n"))
@@ -323,10 +358,10 @@ interactive workspace command hangs off.
   "Claude Org-mode workspace management menu."
   ["Workspace"
    ("n" "New workspace" code-agent-org-new-workspace)
-   ("r" "Launch/Restart" code-agent-org-cmux-restart)
-   ("c" "Cancel operation" code-agent-org-cmux-cancel)
+   ("r" "Launch/Restart" code-agent-org-terminal-launch)
+   ("c" "Cancel operation" code-agent-org-terminal-cancel)
    ("s" "Show status" code-agent-org-cmux-show-status)
-   ("I" "Open cmux tab" code-agent-org-open-terminal-tab)]
+   ("I" "Open terminal tab" code-agent-org-open-terminal-tab)]
   ["Backend"
    ("P" "Permission mode" code-agent-org-switch-permission-mode)]
   ["IDE"

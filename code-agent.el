@@ -86,6 +86,7 @@ ad-hoc files added later), then every immediate subdir of ``lp/``."
 ;; backend instance instead of string-matching CLAUDE_BACKEND.
 (code-agent--load-module "code-agent-cmux-backend")
 (code-agent--load-module "code-agent-tmux-backend")
+(code-agent--load-module "code-agent-orca-backend")
 ;; Pi runs as a cmux agent profile (:AGENT_TYPE: pi in
 ;; code-agent-org-cmux.org), not a separate Elisp backend module — the
 ;; RPC-mode :CLAUDE_BACKEND: pi route (code-agent-pi-backend.org,

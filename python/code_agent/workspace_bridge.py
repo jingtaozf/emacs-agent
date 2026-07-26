@@ -367,7 +367,11 @@ def main() -> None:
     org_file = os.environ.get("WORKSPACE_ORG_FILE", "")
     session_id = os.environ.get("WORKSPACE_SESSION_ID", "")
     workspace_custom_id = os.environ.get("WORKSPACE_CUSTOM_ID", "")
-    cmux_workspace = os.environ.get("CMUX_WORKSPACE", "")
+    # Display label only.  Whichever multiplexer launched this session
+    # exported its own; exactly one of the two is ever set.
+    cmux_workspace = (
+        os.environ.get("CMUX_WORKSPACE") or os.environ.get("ORCA_WORKTREE") or ""
+    )
     mcp_url = os.environ.get("EMACS_MCP_URL", "http://localhost:9999/mcp")
 
     if not org_file or not session_id:

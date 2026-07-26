@@ -435,21 +435,48 @@ class WorkspaceLauncher:
         * ``WORKSPACE_CUSTOM_ID``   — preferred routing key (org heading
           ``:CUSTOM_ID:`` — globally unique, survives heading rename)
         * ``CMUX_WORKSPACE``        — cmux workspace title at launch
-          time (display + sanity check only, not a routing key)
+          time (display + sanity check only, not a routing key), set
+          only when the launcher really is running inside cmux
+        * ``ORCA_WORKTREE``         — the Orca counterpart, set only
+          when running inside Orca
 
-        ``CMUX_WORKSPACE`` falls back to empty string when cmux
-        cannot be reached (CI / direct invocation).
+        Both are display labels and both fall back to unset when the
+        host multiplexer cannot be identified (CI / direct invocation).
         """
         os.environ["WORKSPACE_ORG_FILE"] = self.org_file
         os.environ["WORKSPACE_SESSION_ID"] = self.session_id or ""
         os.environ["WORKSPACE_CUSTOM_ID"] = self.workspace_custom_id or ""
-        cmux_ws = self._detect_cmux_workspace_title() or ""
-        if cmux_ws:
-            os.environ["CMUX_WORKSPACE"] = cmux_ws
+        if self._host_multiplexer() == "orca":
+            # Orca exports the worktree id into every pane it spawns, so
+            # the label costs nothing — and asking the orca CLI would
+            # cost ~230 ms of process startup for a display string.
+            os.environ["ORCA_WORKTREE"] = os.environ.get("ORCA_WORKTREE_ID", "")
+        elif self._host_multiplexer() == "cmux":
+            cmux_ws = self._detect_cmux_workspace_title() or ""
+            if cmux_ws:
+                os.environ["CMUX_WORKSPACE"] = cmux_ws
         os.environ["EMACS_MCP_URL"] = self.mcp_url
         os.environ["CLAUDE_PLUGIN_ROOT"] = self.plugin_dir
         if self.agent_type_env_value:
             os.environ["AGENT_TYPE"] = self.agent_type_env_value
+
+    @staticmethod
+    def _host_multiplexer() -> str:
+        """Identify the multiplexer this launcher is running inside.
+
+        Both apps can run at once, so asking a CLI is not enough: from
+        inside an Orca pane ``cmux identify`` happily answers about
+        whichever cmux workspace is focused, and the launcher would
+        label the session with a workspace it has nothing to do with.
+        The per-pane env vars are the only trustworthy signal.
+
+        Returns ``"orca"``, ``"cmux"``, or ``""`` when neither.
+        """
+        if os.environ.get("ORCA_WORKTREE_ID") or os.environ.get("ORCA_PANE_KEY"):
+            return "orca"
+        if os.environ.get("CMUX_WORKSPACE_ID") or os.environ.get("CMUX_SURFACE_ID"):
+            return "cmux"
+        return ""
 
     def _detect_cmux_workspace_title(self) -> str:
         """Best-effort: ask cmux for the current workspace title.

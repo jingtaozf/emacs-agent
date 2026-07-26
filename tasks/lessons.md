@@ -118,3 +118,21 @@
 **Rule**: After any refactor that deletes a `defun`, grep `(defun NAME\b` AND `NAME\b` separately — call sites and definitions can diverge. Treat any call to a project-prefixed symbol with no `defun` as a bug, not dead code. When the deleted feature is intentional, delete the call site too (don't leave the dead reference).
 
 **Structural test added**: `test-structural-no-dangling-calls` (F35b) in `tests/test-structural.el` — recursively scans every source `.org` (including `lp/org/`), builds a defined-set from `defun`/`cl-defun`/`defmacro`/`defsubst`/`cl-defgeneric`/`cl-defmethod`/`cl-defstruct` (with `:constructor`/`:predicate` options) / `define-minor-mode` / `defalias`, walks every call site (skipping `quote`, def-form metadata, `setq`/`let`/`lambda` data positions), and fails on any project-prefixed call that has no definition. Caught both `7980a53` leaks on first run.
+
+## 2026-07-25 — tangled .py edited directly; the .org went stale
+
+**Mistake**: `670f37e` ("恢复 CLI session persistence") added `_handle_session_start` and `_cli_session_property` to `python/code_agent/workspace_bridge.py` **and** the `SessionStart` entry to `hooks/hooks.json` by hand. Both files are tangle output of `lp/sdk/code-agent-python.org`, which never received either change. The drift stayed invisible for four days because nothing re-tangles on its own.
+
+**Context**: Surfaced only when an unrelated change to `workspace_launcher.py` required `make tangle-python` — the tangle silently *reverted* both files, deleting a whole handler plus the hook that invokes it. `git diff` after tangling was the only signal; the 117 python tests still passed against the stale-but-present `.py` right up to that moment, and would have started failing the moment the tangle was committed. The second file was nearly missed: `git status` was scanned for `python/` and `hooks/hooks.json` sat two lines above it.
+
+**Rule**: Before tangling, `git diff --stat <tangle-output-dir>` must be empty. A non-empty diff *before* your own change means someone hand-edited the output — port it back into the `.org` first, then tangle, then confirm the only remaining diff is yours. Never resolve the conflict by discarding the tangle: the `.org` is the source of truth, so the fix direction is always `.py` → `.org`, never `.org` ← re-run.
+
+**Not yet a structural test**: the check wants a CI step that tangles into a scratch tree and diffs against the committed output (`make check-tangle-drift` shape, per `literate-agent`'s `lp-resync-metadata.md` invariant 2). Filed here rather than implemented because it needs a tangle-to-tempdir mode the Makefile does not have yet.
+
+## 2026-07-25 — "ok: true" is not "alive" (Orca closed-tab handle)
+
+**Mistake**: `code-agent-mux-ensure-session` for the Orca backend treated any non-error envelope from `orca terminal show` as proof the terminal was live. Closing a tab does *not* invalidate the handle — `terminal show` keeps answering `ok: true`, with `connected: false`, and the terminal disappears from `terminal list`.
+
+**Context**: Every unit test passed; the bug appeared only in live E2E, where relaunching after closing the tab reported "Orca terminal focused" and then sent prompts into a pane that no longer existed. The envelope's `ok` field answers "was the request well-formed", never "is the resource usable".
+
+**Rule**: When a CLI wraps replies in an `ok`/`error` envelope, `ok: true` means the *call* succeeded. Liveness, writability, and existence are separate fields inside `result` — read them. Any `ensure-*` / `-alive-p` predicate built on the envelope alone is checking the wrong thing.

@@ -95,6 +95,18 @@ Loaded eagerly at file evaluation time — symbols below assume every required f
                   "code-agent-org-cmux" (surface-id text &optional socket-path))
 (declare-function code-agent-org-cmux--ensure-session
                   "code-agent-org-cmux" ())
+(declare-function code-agent-org-cmux--query-completed
+                  "code-agent-org-cmux" (workspace-session-id))
+(declare-function code-agent-org-cmux--permission-needed
+                  "code-agent-org-cmux" (workspace-session-id tool-name))
+(declare-function code-agent-org-cmux--permission-resolved
+                  "code-agent-org-cmux" (workspace-session-id))
+(declare-function code-agent-org-cmux--recover-session
+                  "code-agent-org-cmux" (workspace-session-id))
+(declare-function code-agent-org-cmux-open-tab
+                  "code-agent-org-cmux" ())
+(declare-function code-agent-org-cmux-restart
+                  "code-agent-org-cmux" ())
 #+END_SRC
 
 *** Class
@@ -196,6 +208,49 @@ Surfaces the backing terminal pane to the user — opens a tab / focuses the sur
   ((_backend code-agent-cmux-backend))
   "Raise cmux's workspace tab."
   (code-agent-org-cmux-open-tab))
+#+END_SRC
+
+*** Protocol 3 — hook routing
+
+Four one-line delegations to the legacy body.  They exist so the
+frontend can route hook callbacks by *dispatch* instead of by
+=fboundp= on a cmux symbol name; the behaviour on the cmux side is
+byte-for-byte what it was before the generics landed.
+
+#+BEGIN_SRC elisp
+(cl-defmethod code-agent-org-backend-query-completed
+  ((_backend code-agent-cmux-backend) workspace-session-id)
+  "Delegate to the legacy cmux query-completion handler."
+  (code-agent-org-cmux--query-completed workspace-session-id))
+
+(cl-defmethod code-agent-org-backend-permission-needed
+  ((_backend code-agent-cmux-backend) workspace-session-id tool-name)
+  "Delegate to the legacy cmux permission-needed handler."
+  (code-agent-org-cmux--permission-needed workspace-session-id tool-name))
+
+(cl-defmethod code-agent-org-backend-permission-resolved
+  ((_backend code-agent-cmux-backend) workspace-session-id)
+  "Delegate to the legacy cmux permission-resolved handler."
+  (code-agent-org-cmux--permission-resolved workspace-session-id))
+
+(cl-defmethod code-agent-org-backend-launch
+  ((_backend code-agent-cmux-backend))
+  "Delegate to the legacy cmux launch/restart command."
+  (code-agent-org-cmux-restart))
+
+(cl-defmethod code-agent-org-backend-cancel-from-org
+  ((_backend code-agent-cmux-backend))
+  "Delegate to the legacy cmux cancel command."
+  (code-agent-org-cmux-cancel))
+
+(cl-defmethod code-agent-org-backend-adopt-identity
+  ((_backend code-agent-cmux-backend))
+  "Re-run the legacy cmux recovery scan for the session at point.
+cmux keys its identity off the heading title plus CMUX_SURFACE_ID, and
+the legacy scan already knows how to rebuild both hash tables from
+them; it is re-entered here rather than reimplemented."
+  (when-let* ((sid (org-entry-get nil "CLAUDE_SESSION_ID" t)))
+    (code-agent-org-cmux--recover-session sid)))
 #+END_SRC
 
 ** Provide

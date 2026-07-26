@@ -28,7 +28,8 @@ LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/lp/trace/code-agent-trace.org
 LOAD_AGENT = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/chat/code-agent.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-multiplexer.org\")" \
              --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-cmux-backend.org\")" \
-             --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-tmux-backend.org\")"
+             --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-tmux-backend.org\")" \
+             --eval "(literate-elisp-load \"$(PWD)/lp/backend/code-agent-orca-backend.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/sdk/emacs-mcp-server.org\")"
 LOAD_ORG = --eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org.org\")" \
            --eval "(literate-elisp-load \"$(PWD)/lp/org/code-agent-org-header-line.org\")"
@@ -165,6 +166,7 @@ test-backend-unit:
 		$(LOAD_AGENT_ONLY) \
 		-l tests/test-code-agent-backend.el \
 		-l tests/test-backend-protocol3.el \
+		-l tests/test-orca-backend.el \
 		-f ert-run-tests-batch-and-exit
 
 # Tangle the Pi extensions .org → ~/.pi/agent/extensions/{emacs-mcp,doom-loop}.ts.

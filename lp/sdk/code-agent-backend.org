@@ -1006,6 +1006,99 @@ CLI's focus/activate command."
               (or (code-agent-backend-type backend) "unknown")))
 #+END_SRC
 
+*** Hook Routing
+:PROPERTIES:
+:CUSTOM_ID: backend-hook-routing
+:END:
+
+Three events reach Emacs from the Python =workspace-bridge= over MCP
+rather than from a user command: a turn finished, a permission prompt
+opened, a permission prompt closed.  They arrive carrying only a
+workspace-session-id, so the frontend has to decide *which backend*
+should handle them.
+
+Before these generics the frontend made that decision with a =cond= of
+=(fboundp 'code-agent-org-cmux--…)= arms — the one place the frontend
+itself, not a backend module, knew a multiplexer by name.  Any second
+multiplexer was unreachable no matter how completely it implemented
+Protocols 1 and 2b.
+
+Two of the deleted 2026-07 Protocol 3 generics had these names.  The
+resurrection is narrow and deliberate: they route *hook callbacks*,
+not the embedded-chat execution path that deletion removed, and each
+has two implementors and a live caller from the day it lands.
+
+=adopt-identity= joins them because the routing decision itself needs
+it: when Emacs has restarted, the workspace-to-session-key table is
+empty.  Rebuilding *that* mapping is backend-neutral — scan the org
+buffers for the session id — but rebuilding a backend's own notion of
+which pane it owns is not.  cmux resolves its workspace by heading
+title; Orca regenerates tab titles from agent activity, so it reads
+back the ids the launch path wrote into properties instead.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric code-agent-org-backend-query-completed (backend workspace-session-id)
+  "Handle the agent's turn for WORKSPACE-SESSION-ID having finished.
+Clears busy state, unregisters the active query, and continues any
+loop.  Default: no-op — agent-family backends learn about completion
+from their own event stream."
+  (ignore backend workspace-session-id)
+  nil)
+
+(cl-defgeneric code-agent-org-backend-permission-needed
+    (backend workspace-session-id tool-name)
+  "Announce that WORKSPACE-SESSION-ID is blocked awaiting approval for
+TOOL-NAME.  Default: no-op."
+  (ignore backend workspace-session-id tool-name)
+  nil)
+
+(cl-defgeneric code-agent-org-backend-permission-resolved
+    (backend workspace-session-id)
+  "Announce that WORKSPACE-SESSION-ID's permission prompt is closed.
+Default: no-op."
+  (ignore backend workspace-session-id)
+  nil)
+
+(cl-defgeneric code-agent-org-backend-adopt-identity (backend)
+  "Re-read BACKEND's terminal identity with point on the session heading.
+Called after an Emacs restart, once the frontend has located the org
+heading that owns a session.  Default: no-op — a backend whose
+identity lives entirely in its own slots has nothing to recover."
+  (ignore backend)
+  nil)
+#+END_SRC
+
+*** Terminal Lifecycle From Org
+:PROPERTIES:
+:CUSTOM_ID: backend-terminal-lifecycle
+:END:
+
+The two verbs the transient menu offers for a workspace heading:
+bring the agent up, and interrupt whatever it is doing.  They are
+generics for the same reason the hook routing is — the menu used to
+name =code-agent-org-cmux-restart= directly, which meant the menu
+worked for exactly one multiplexer.
+
+=launch= is idempotent by contract: called against a session whose
+terminal is already alive it focuses that terminal rather than
+starting a second agent.
+
+#+BEGIN_SRC elisp
+(cl-defgeneric code-agent-org-backend-launch (backend)
+  "Start BACKEND's agent terminal for the org session at point, or focus
+it when it is already running.  Default: user-error."
+  (ignore backend)
+  (user-error "No terminal to launch for %s backend"
+              (or (code-agent-backend-type backend) "unknown")))
+
+(cl-defgeneric code-agent-org-backend-cancel-from-org (backend)
+  "Interrupt whatever BACKEND's agent terminal is currently doing.
+Default: user-error."
+  (ignore backend)
+  (user-error "No terminal to cancel for %s backend"
+              (or (code-agent-backend-type backend) "unknown")))
+#+END_SRC
+
 
 ** Backend Protocol Contract
 

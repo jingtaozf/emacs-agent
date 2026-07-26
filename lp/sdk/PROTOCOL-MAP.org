@@ -53,25 +53,38 @@ multiplexer family base.  Adding a new agent backend means writing
 The wire protocol multiplexer backends speak to type into a shell
 pane.  Only the multiplexer-family subclasses implement.
 
-| Generic | tmux | cmux | Frontend callers |
-|---------+------+------+------------------|
-| =code-agent-mux-cli-path= | yes | yes | yes (via dispatch) |
-| =code-agent-mux-launch-session= | yes | (legacy direct) | 2 |
-| =code-agent-mux-ensure-session= | yes | yes | yes |
-| =code-agent-mux-send-text= | yes | (legacy direct) | 3 |
-| =code-agent-mux-send-key= | yes | (legacy direct) | 5 |
-| =code-agent-mux-capture-screen= | yes | (legacy direct) | 1 |
-| =code-agent-mux-start-follower= | yes | (legacy direct) | yes |
-| =code-agent-mux-stop-follower= | yes | yes | yes |
-| =code-agent-mux-session-status= | yes | (legacy direct) | 3 |
-| =code-agent-mux-rename= | yes | no | *0* — not wired |
-| =code-agent-mux-focus= | yes | no | *0* — not wired |
+| Generic | tmux | cmux | orca | Frontend callers |
+|---------+------+------+------+------------------|
+| =code-agent-mux-cli-path= | yes | yes | yes | yes (via dispatch) |
+| =code-agent-mux-launch-session= | yes | (legacy direct) | yes | 2 |
+| =code-agent-mux-ensure-session= | yes | yes | yes | yes |
+| =code-agent-mux-send-text= | yes | (legacy direct) | yes | 3 |
+| =code-agent-mux-send-key= | yes | (legacy direct) | yes | 5 |
+| =code-agent-mux-capture-screen= | yes | (legacy direct) | yes | 1 |
+| =code-agent-mux-session-status= | yes | (legacy direct) | yes | 3 |
+| =code-agent-mux-rename= | yes | no | yes | *0* — not wired |
+| =code-agent-mux-focus= | yes | no | yes | 1 — permission alerts |
 
-Pattern: tmux is the reference multi-backend implementation; cmux's
-hot path still uses legacy =code-agent-org-cmux--call= direct
-dispatch (see [[file:../backend/code-agent-cmux-backend.org][code-agent-cmux-backend.org]] §"Two-Module Split" for
-the Phase-3b migration plan).  When cmux migrates, both backends
-will share the same 11-generic surface.
+Pattern: tmux was the reference multi-backend implementation and orca
+is the second complete one; cmux's hot path still uses legacy
+=code-agent-org-cmux--call= direct dispatch (see
+[[file:../backend/code-agent-cmux-backend.org][code-agent-cmux-backend.org]] §"Two-Module Split" for the Phase-3b
+migration plan).
+
+Two rows were deleted from this table on 2026-07-25:
+=code-agent-mux-start-follower= and =-stop-follower=.  Neither had a
+=cl-defgeneric= or a =cl-defmethod= anywhere in the tree — the
+streaming follower was removed with the 1 Hz =pipe-pane= poll (see
+[[file:../org/code-agent-org-cmux.org][code-agent-org-cmux.org]] § Query Completion for why) and the map was
+never updated.  A stale row in a protocol map is worse than a missing
+one: it invites a new backend to implement a contract that does not
+exist.
+
+=code-agent-mux-focus= gained its first caller the same day.  It had
+shipped as a forward declaration with a no-op default and zero
+callers; the permission-alert path in
+[[file:../org/code-agent-org-terminal-base.org][code-agent-org-terminal-base.org]] now dispatches through it instead of
+calling a cmux CLI directly.
 
 * Protocol 3 — Org Integration (=code-agent-org-backend-*=)
 :PROPERTIES:
@@ -83,16 +96,31 @@ Visible to the frontend at =lp/org/code-agent-org.org=.
 
 | Generic | Default | Specialised by | Test coverage |
 |---------+---------+----------------+---------------|
-| =open-terminal-tab= | signals =user-error= (no terminal for agent-family backends) | cmux | yes |
+| =open-terminal-tab= | signals =user-error= (no terminal for agent-family backends) | cmux, orca | yes |
+| =query-completed= | no-op | cmux, orca | yes |
+| =permission-needed= | no-op | cmux, orca | yes |
+| =permission-resolved= | no-op | cmux, orca | yes |
+| =adopt-identity= | no-op | cmux, orca | yes |
+| =launch= | signals =user-error= | cmux, orca | yes |
+| =cancel-from-org= | signals =user-error= | cmux, orca | yes |
 
-The other Protocol 3 generics (=execute-block=, =insert-prompt=,
-=open-response-section=, =append-response=, =finalize-response=,
-=query-completed=, =status-badge=, =todos-update=, =recover-session=,
-=register-query=, =permission-notify=, =permission-resolved=,
-=cancel-from-org=) were deleted 2026-07 along with the JSON-stream
-engine — execution now happens entirely inside the cmux/tmux terminal
-the org buffer drives, not through an Emacs-side org-integration
-dispatch layer.
+The bulk of the old Protocol 3 surface (=execute-block=,
+=insert-prompt=, =open-response-section=, =append-response=,
+=finalize-response=, =status-badge=, =todos-update=, =register-query=)
+was deleted 2026-07 along with the JSON-stream engine — execution
+happens inside the terminal the org buffer drives, not through an
+Emacs-side dispatch layer.  That deletion stands.
+
+Six generics came back on 2026-07-25 when the orca backend landed, and
+the distinction matters: the deleted ones carried *execution*; these
+carry *routing*.  Three route hook callbacks that arrive from Python
+over MCP with nothing but a workspace-session-id; =adopt-identity=
+rebuilds a backend's pane identity after an Emacs restart; =launch= and
+=cancel-from-org= are what the transient menu binds.  Before them the
+frontend picked a handler with a =cond= over
+=(fboundp 'code-agent-org-cmux--…)=, which made cmux the only
+reachable multiplexer regardless of what any other backend
+implemented.
 
 * Internal dispatch protocols (within-module)
 :PROPERTIES:

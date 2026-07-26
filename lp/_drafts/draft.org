@@ -1145,3 +1145,183 @@ model cleaner: one workspace = one persistent Claude Code session = one topic.
 - python/code_agent/workspace_launcher.py — story_name attribute
 - python/code_agent/claude_workspace.py — _normalize_story_slug
 - tests/ — ~200+ lines across 12 test files
+
+
+* 2026-07-25-orca-multiplexer-backend
+:PROPERTIES:
+:CUSTOM_ID: orca-multiplexer-backend
+:STATUS: shipped
+:OWNER: jt
+:END:
+
+** Motivation
+
+The user now runs Claude Code inside *Orca* (=com.stablyai.orca=
+v1.4.155) as well as cmux — both apps are live.  Every org
+control-plane verb (launch, restart, cancel, status, permission focus)
+was hard-wired to cmux, so inside Orca the whole control plane was
+dead.
+
+The goal was *one more multiplexer*, not a refactor of the multiplexer
+story: cmux behaviour unchanged, no protocol re-litigated.
+
+** What shipped
+
+| Piece | Where |
+|-------+-------|
+| Orca backend — all 9 Protocol 2b generics, direct (not a facade) | [[file:../backend/code-agent-orca-backend.org][code-agent-orca-backend.org]] |
+| Registry entry + =code-agent-org-default-backend= defcustom | [[file:../org/code-agent-org-process.org][code-agent-org-process.org]], [[file:../org/code-agent-org-customize.org][code-agent-org-customize.org]] |
+| Six Protocol 3 generics for hook routing + terminal lifecycle | [[file:../sdk/code-agent-backend.org][code-agent-backend.org]] § Hook Routing, § Terminal Lifecycle From Org |
+| Backend-neutral handler bodies any future multiplexer inherits | [[file:../org/code-agent-org-terminal-base.org][code-agent-org-terminal-base.org]] § Hook Routing |
+| Frontend =fboundp= dispatchers replaced by Protocol 3 dispatch | [[file:../org/code-agent-org.org][code-agent-org.org]] § Terminal Dispatchers |
+| Host-aware workspace labelling | [[file:../sdk/code-agent-python.org][code-agent-python.org]] =_host_multiplexer= |
+| 14 unit tests + Journey 9 live E2E | =tests/test-orca-backend.el=, =tests/e2e/living-workspace-test.org= |
+
+Gates at the end: =make check= green (static analysis, 73 elisp unit
+tests, org-surface, 117 python tests), plus the live E2E table below.
+
+** E2E evidence
+
+Measured against the running Orca runtime on 2026-07-25, including
+three real Claude Code sessions launched, driven, cancelled and closed.
+Findings that *contradicted* an earlier draft of this proposal are
+marked *CORRECTION*.
+
+| # | What was tested | Result |
+|---+-----------------+--------|
+| T1 | CLI latency, 5-call mean | =orca= ≈ *230 ms/call*; =cmux= ≈ 103 ms.  =orca --help= alone costs 407 ms → the cost is *process startup* (a bash wrapper), not runtime RTT |
+| T3 | Faster IPC available? | =daemon-v26.sock= + token exists under the app support dir.  Version-pinned name ⇒ private API; not used |
+| T4 | Launch command shape | The repo's =unset VIRTUAL_ENV; set -a; . <envfile>; set +a; <cmd>= prefix runs verbatim.  cwd = worktree path.  =ORCA_WORKTREE_ID= inherited by the pane |
+| T4 | =CLAUDECODE= inheritance | *Not* inherited — a spawned =claude= starts without the "inside another Claude Code session" refusal |
+| T4b | =terminal read= output | Plain text, *no ANSI escapes*.  Claude's prompt line uses NBSP (=\xa0=) after =❯= |
+| T5 | =wait --for tui-idle= at launch | =satisfied: true= at *3.5 s*, exactly when the prompt box finished rendering |
+| T6 | Bracketed paste, 2-line prompt | Both lines land in the input box; *nothing submits early* |
+| T7 | =wait --for tui-idle= during a query | *CORRECTION*: =satisfied: true= after *0.5 s* while the TUI still showed =· Schlepping…=.  Render quiescence, not turn-complete |
+| T7c | Cursor stream under a TUI | *CORRECTION*: =nextCursor= froze for the whole session — alt-screen redraws never advance it.  =terminal read= is a screen snapshot, exactly like =capture-pane= |
+| T8/T9 | ESC cancel while genuinely busy | *A single ESC does not cancel* — it only leaves vi INSERT mode.  A *second* ESC cancels and restores the prompt text |
+| T10 | Unknown handle | Error =terminal_handle_stale= |
+| T12 | =terminal rename= vs auto-titling | Rename returns =ok=, but =terminal list= keeps Orca's agent-derived title.  *Titles are not a usable identity key* |
+| T11/T13 | =path:= selector strictness | Exact registered worktree root only.  A subdirectory → =selector_not_found=; an unregistered git repo → =selector_not_found= |
+| T14 | Closed-tab handle | *Bug found in implementation*: =terminal show= still answers =ok: true= after =terminal close --tab=, with =connected: false=.  =ensure-session= now requires =connected= |
+| T15 | Handle aliasing | =terminal create= and =terminal list= can report *different* handles for the same =tabId=; both resolve and both drive the pane |
+
+Still untested, deliberately: behaviour across an Orca *app restart*.
+Testing it means quitting Orca under the user's live session.  The
+=adopt-identity= path is written for it (properties, not handles, are
+the durable identity) but the claim is unverified.
+
+** Consequences that shaped the code
+
+1. *230 ms per CLI call.*  Emacs is single-threaded and the project
+   already bans =call-process= inside timers.  Every non-user-initiated
+   call uses =start-process= + sentinel, and identity is cached in
+   slots + org properties instead of re-queried.
+2. *=tui-idle= is not turn-complete.*  Used for launch readiness and
+   nothing else; turn completion still arrives via the =Stop= hook.
+3. *Titles are not identity.*  cmux's =--recover-session= resolves a
+   workspace by heading title.  That cannot port, so Orca stores
+   =ORCA_WORKTREE= + =ORCA_TERMINAL= as properties and reads them back
+   in =adopt-identity=.
+4. *A project must be registered with Orca first.*  The backend
+   resolves the git top level, and on =selector_not_found= raises a
+   =user-error= naming the exact =orca repo add --path …= command
+   rather than registering on the user's behalf — the CLI has no
+   =repo rm=.
+5. *An envelope's =ok= is not liveness.*  T14; see
+   =tasks/lessons.md= 2026-07-25.
+
+** The obstacle, and what it actually was
+
+[[file:../org/code-agent-org.org][code-agent-org.org]] routed three MCP hook events with a =cond= over
+=(fboundp 'code-agent-org-cmux--…)= — the one place the *frontend
+itself* knew a multiplexer by name, and the reason a second
+multiplexer was unreachable regardless of how completely it
+implemented Protocols 1 and 2b.
+
+Reading the four cmux functions those arms reached showed almost none
+of the body was cmux-specific:
+
+| Function | cmux-specific content |
+|----------+------------------------|
+| =--query-completed= | none — session state, request-id file, loop scheduling.  Zero CLI calls |
+| =--permission-resolved= | none — one =code-agent-remove-alert= |
+| =--permission-needed= | two lines: focus-workspace and activate-app |
+| =--recover-session= | the org-buffer scan is generic; only the title lookup and the surface/UUID =puthash= are cmux |
+
+So the neutral bodies moved to =code-agent-org-terminal-base.org= and
+cmux kept one-line =cl-defmethod= s onto its existing legacy
+functions — its behaviour is byte-for-byte what it was, reached
+through dispatch instead of =fboundp=.
+
+** Generics added — six, not the one first proposed
+
+The first draft claimed a single new generic would do.  That was wrong
+in a specific way worth recording: it assumed the transient menu could
+keep binding =code-agent-org-cmux-restart= directly, which would have
+left the menu working for exactly one multiplexer — the same bug as
+the =fboundp= dispatchers, one layer up.
+
+| Generic | Why |
+|---------+-----|
+| =query-completed= / =permission-needed= / =permission-resolved= | route hook callbacks that arrive with only a workspace-session-id |
+| =adopt-identity= | rebuild a backend's pane identity after an Emacs restart; cmux uses titles, Orca uses properties |
+| =launch= / =cancel-from-org= | what the transient menu binds |
+
+Two of these names were deleted in 2026-07 along with the JSON-stream
+engine.  The resurrection is narrow: those carried *execution*, these
+carry *routing*, and each has two implementors and a live caller from
+the day it landed.
+
+=code-agent-mux-focus= gained its first caller rather than being added
+— it had shipped as a forward declaration with a no-op default and
+zero callers.
+
+** Resolved questions
+
+*** Rename =CMUX_WORKSPACE= to a neutral =AGENT_WORKSPACE=?  No.
+
+[[file:../org/code-agent-org-workspace.org][code-agent-org-workspace.org]] recognises a workspace root by its own
+=CMUX_WORKSPACE= *or* =CLAUDE_SESSION_ID=, and that function's
+docstring calls =CLAUDE_SESSION_ID= "the session marker every backend
+keys on".  An Orca workspace omits =CMUX_WORKSPACE= entirely and
+existing detection already works — verified live by the Journey-9
+fixture, which carries no cmux property.
+
+*** Sidebar status / progress parity?  No.
+
+The cmux sidebar wrappers appear in *no protocol*, and a repo-wide
+grep finds *zero* callers outside =code-agent-org-cmux.org=.  Orca
+inherits the no-op defaults.
+
+*** Follower / verbose buffer for orca?  None.
+
+[[file:../sdk/PROTOCOL-MAP.org][PROTOCOL-MAP.org]] listed =mux-start-follower= / =-stop-follower= as
+generics; neither had a =cl-defgeneric= or =cl-defmethod= anywhere —
+the map was stale and those rows are now deleted.  T7c independently
+kills rebuilding a follower on cursor reads: under a TUI the cursor
+never advances.
+
+*** Default backend when =CLAUDE_BACKEND= is unset?  Still cmux.
+
+Runtime host detection (=TERM_PROGRAM=Orca= → orca) was considered and
+rejected: both apps run simultaneously, and environment-derived
+selection means the same org file behaves differently depending on
+which terminal opened Emacs.  =code-agent-org-new-workspace= now stamps
+=code-agent-org-default-backend= (default ="cmux"=) instead of a
+hard-coded string, so a user who lives in Orca sets it once.
+
+Note the same reasoning *did* apply to the Python launcher, where env
+vars are the only trustworthy signal: from inside an Orca pane
+=cmux identify= happily answers about whichever cmux workspace is
+focused, so the launcher would have labelled the session with a
+workspace it has nothing to do with.  =_host_multiplexer= reads the
+per-pane env vars instead.
+
+** Remaining debt
+
+| Item | Note |
+|------+------|
+| =code-agent-org-cmux--build-launch-command= called from the orca backend | multiplexer-agnostic in substance, still cmux-named.  Promoting it (plus the agent-profile registry) into terminal-base is the next natural step; orca does not need it to work |
+| =code-agent-org-cmux--ensure-ide-server= named in a Python MCP eval | the function is multiplexer-agnostic and works as-is; renaming touches four files for no behaviour change |
+| Orca app-restart behaviour | untested — see above |
+| No tangle-drift gate | the 2026-07-25 lesson wants =make check-tangle-drift=; needs a tangle-to-tempdir mode the Makefile lacks |
