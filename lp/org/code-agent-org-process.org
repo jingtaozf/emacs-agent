@@ -152,6 +152,9 @@ REASON (optional string) is shown in the user-facing message."
 #+END_SRC
 
 *** Backend Registry Dispatch
+:PROPERTIES:
+:CUSTOM_ID: backend-registry-dispatch
+:END:
 
 The backend registry maps CLAUDE_BACKEND property strings to
 constructor lambdas.  (Pi is not one of these entries — it runs as a
@@ -210,16 +213,24 @@ symmetry and for a future Phase 3b cut-over.")
 (defun code-agent-org--make-default-backend (session-key options)
   "Create the default backend for SESSION-KEY with OPTIONS.
 Dispatches on the CLAUDE_BACKEND org property via
-`code-agent-org-backend-registry'.  Unknown values fall back to
-\"cmux\" with a one-line `message' so the user knows to update
-the property (e.g. an unset or unrecognized value → \"cmux\")."
+`code-agent-org-backend-registry'.  A heading that carries no
+property — or one whose value has left the registry — resolves to
+`code-agent-org-default-backend', so living in one multiplexer is a
+single setting rather than a property on every heading.  An
+unrecognized property value still says so, since that one is a typo
+or a backend that was deleted."
   (let* ((prop-value (code-agent-org-get-org-property "CLAUDE_BACKEND" t))
          (direct-hit (cdr (assoc prop-value code-agent-org-backend-registry)))
-         (constructor (or direct-hit
+         (default-hit (cdr (assoc code-agent-org-default-backend
+                                  code-agent-org-backend-registry)))
+         (constructor (or direct-hit default-hit
                           (cdr (assoc "cmux" code-agent-org-backend-registry)))))
     (when (and prop-value (not direct-hit))
-      (message "CLAUDE_BACKEND=%S not in registry; falling back to cmux."
-               prop-value))
+      (message "CLAUDE_BACKEND=%S not in registry; falling back to %s."
+               prop-value code-agent-org-default-backend))
+    (unless (or direct-hit default-hit)
+      (message "code-agent-org-default-backend=%S is not a registry key; using cmux."
+               code-agent-org-default-backend))
     (funcall constructor session-key options)))
 
 (defun code-agent-org--resolve-backend (session-key options)
