@@ -1055,6 +1055,12 @@ Orca's own create leaves one idle shell in the new worktree.  It is
 closed here rather than adopted, so that launching stays the single
 path =code-agent-org-terminal-launch= already owns.
 
+Either route needs the worktree's *own* repo registered.  Of
+=edo-literate='s twenty submodules exactly one is, and a submodule
+resolves against its superproject under longest-prefix matching, so
+the check below compares the matched repo's path against the git top
+level rather than trusting the match.
+
 #+BEGIN_SRC elisp
 (defun code-agent-orca--close-fallback-shells (worktree-id)
   "Close the idle shell Orca opens in a freshly created WORKTREE-ID."
@@ -1084,6 +1090,19 @@ existing checkout; the new heading is inserted as its sibling."
     (unless repo
       (user-error "Orca does not know %s. Register it first: orca repo add --path %s"
                   top top))
+    ;; A registered *parent* is not registration.  `--repo-for-path' matches
+    ;; the longest prefix, so a submodule of a known repo resolves to the
+    ;; superproject and every later step would name the wrong repository —
+    ;; the worktree would be created, the heading stamped, and only the
+    ;; launch would fail, with `selector_not_found' against a path Orca was
+    ;; never told about.  Orca registers submodules as repos in their own
+    ;; right; demand that here, while the message can still name the fix.
+    (unless (equal (code-agent-orca--canon (alist-get 'path repo))
+                   (code-agent-orca--canon top))
+      (user-error "Orca knows %s but not %s%s. Register it first: orca repo add --path %s"
+                  (alist-get 'displayName repo) (abbreviate-file-name top)
+                  (if super " — a submodule is a separate repo to Orca" "")
+                  top))
     (if super
         ;; Submodule: the checkout has to stay inside the superproject tree.
         (let ((path (expand-file-name (concat ".worktrees/" name) top)))
