@@ -284,25 +284,88 @@ Display the current workspace session identifier and its status.
 
 Insert a new workspace heading with the standard properties for cmux session management.
 
+A workspace heading is the binding between an org section and a
+checkout: =:CLAUDE_SESSION_ID:= names the session for hook routing,
+=:PROJECT_ROOT:= names the directory it works in.  The root is stamped
+explicitly rather than left to the file-level =#+PROPERTY:= default —
+the moment a second worktree exists, an inherited root can no longer
+say which one a heading means, and the multiplexer resolves the
+worktree from exactly this value.
+
+=:CMUX_WORKSPACE:= is stamped only by backends that read it back;
+asking the backend keeps that knowledge in the one module that owns
+the property instead of a string test at the call site.
+
 #+BEGIN_SRC elisp
-(defun code-agent-org-new-workspace (name)
-  "Create a new workspace heading named NAME at the end of the buffer.
-Inserts a top-level heading with =:CMUX_WORKSPACE:= and
-=:CLAUDE_SESSION_ID:= properties, then moves point there.
-The stamped =:CLAUDE_BACKEND:= comes from
-`code-agent-org-default-backend'."
-  (interactive "sWorkspace name: ")
+(cl-defgeneric code-agent-org-backend-workspace-properties (backend name)
+  "Return extra org properties to stamp on a new workspace heading NAME.
+An alist of (PROPERTY . VALUE); the base method stamps nothing."
+  (ignore backend name)
+  nil)
+
+(defun code-agent-org--session-id-taken-p (session-id)
+  "Return non-nil when SESSION-ID is already stamped in this buffer."
   (save-excursion
-    (goto-char (point-max))
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (re-search-forward
+       (concat "^[ \t]*:CLAUDE_SESSION_ID:[ \t]*" (regexp-quote session-id) "[ \t]*$")
+       nil t))))
+
+(defun code-agent-org--new-session-id ()
+  "Return a workspace session id no heading in this buffer uses yet.
+The timestamp has second resolution, so importing several worktrees in
+one command would otherwise stamp them all with the same id — and the
+id is what every hook routes on."
+  (let* ((base (format "sdd-%s" (format-time-string "%Y%m%d-%H%M%S")))
+         (candidate base)
+         (n 1))
+    (while (code-agent-org--session-id-taken-p candidate)
+      (setq n (1+ n)
+            candidate (format "%s-%d" base n)))
+    candidate))
+
+(defun code-agent-org-insert-workspace-heading (name project-root &optional level)
+  "Insert a workspace heading NAME bound to PROJECT-ROOT, and return its session id.
+The heading lands after the current subtree at LEVEL (default: the
+level of the heading at point, or 1), so a new workspace is a sibling
+of the one it was created from — nesting would re-parent every ai
+block written under the old heading."
+  (let* ((session-id (code-agent-org--new-session-id))
+         (lvl (or level
+                  (save-excursion
+                    (if (ignore-errors (org-back-to-heading t))
+                        (org-current-level)
+                      1))))
+         (extra (ignore-errors
+                  (code-agent-org-backend-workspace-properties
+                   (code-agent-org--make-default-backend session-id nil) name))))
+    (if (ignore-errors (org-back-to-heading t))
+        (org-end-of-subtree t t)
+      (goto-char (point-max)))
     (unless (bolp) (insert "\n"))
-    (insert "\n* " name "\n")
+    (insert "\n" (make-string lvl ?*) " " name "\n")
     (insert ":PROPERTIES:\n")
-    (insert ":CMUX_WORKSPACE: " name "\n")
-    (insert ":CLAUDE_BACKEND: " code-agent-org-default-backend "\n")
-    (let ((session-id (format "sdd-%s" (format-time-string "%Y%m%d-%H%M%S"))))
-      (insert ":CLAUDE_SESSION_ID: " session-id "\n"))
-    (insert ":END:\n"))
-  (message "Workspace '%s' created. Use C-c C-/ r to launch Claude Code." name))
+    (dolist (cell extra)
+      (insert ":" (car cell) ": " (cdr cell) "\n"))
+    (insert ":CLAUDE_SESSION_ID: " session-id "\n")
+    (insert ":PROJECT_ROOT: " (directory-file-name (expand-file-name project-root)) "\n")
+    (insert ":END:\n")
+    session-id))
+
+(defun code-agent-org-new-workspace (name)
+  "Create a workspace heading named NAME in the current worktree.
+The new heading is a sibling of the one at point and inherits its
+=:PROJECT_ROOT:=, so this is how a second agent joins a checkout that
+already has one.  Use `code-agent-org-orca-new-worktree' when the work
+needs its own checkout."
+  (interactive "sWorkspace name: ")
+  (let ((root (or (code-agent-org-get-project-root) default-directory)))
+    (save-excursion
+      (code-agent-org-insert-workspace-heading name root))
+    (message "Workspace '%s' created in %s. Use C-c C-/ r to launch."
+             name (abbreviate-file-name root))))
 #+END_SRC
 
 ** IDE Server Wrappers
@@ -357,11 +420,17 @@ interactive workspace command hangs off.
 (transient-define-prefix code-agent-org-menu ()
   "Claude Org-mode workspace management menu."
   ["Workspace"
-   ("n" "New workspace" code-agent-org-new-workspace)
+   ("n" "New workspace — this worktree" code-agent-org-new-workspace)
    ("r" "Launch/Restart" code-agent-org-terminal-launch)
    ("c" "Cancel operation" code-agent-org-terminal-cancel)
    ("s" "Show status" code-agent-org-cmux-show-status)
    ("I" "Open terminal tab" code-agent-org-open-terminal-tab)]
+  ["Worktree"
+   ("N" "New worktree + workspace" code-agent-org-orca-new-worktree)
+   ("g" "Worktree dashboard" code-agent-org-orca-worktrees)
+   ("w" "Worktree status" code-agent-org-orca-worktree-status)
+   ("i" "Import Orca worktrees" code-agent-org-orca-import-worktrees)
+   ("W" "Drop worktree" code-agent-org-orca-drop-worktree)]
   ["Backend"
    ("P" "Permission mode" code-agent-org-switch-permission-mode)]
   ["IDE"

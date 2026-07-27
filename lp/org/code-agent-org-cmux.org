@@ -810,7 +810,18 @@ overrides are still possible via `:ENV_FILE:' inheritance on a heading."
          ;; quietly.  Harmless for the no-rename case because the
          ;; spawned shell does not need ``VIRTUAL_ENV`` itself —
          ;; ``uv run`` activates the project venv on its own.
-         (unset-prefix "unset VIRTUAL_ENV; "))
+         (unset-prefix
+          (concat "unset VIRTUAL_ENV; "
+                  ;; Orca opens a pane at the *worktree root* and its
+                  ;; `terminal create' takes no --cwd, so a heading whose
+                  ;; PROJECT_ROOT is a subdirectory would otherwise start
+                  ;; the agent one or more levels too high.  cmux already
+                  ;; opens the pane at this directory, where the cd is a
+                  ;; no-op.
+                  (when-let* ((root (ignore-errors
+                                      (code-agent-org-get-project-root))))
+                    (format "cd %s; " (shell-quote-argument
+                                       (expand-file-name root)))))))
     (if (and env-file (file-readable-p env-file))
         (format "%sset -a; . %s; set +a; "
                 unset-prefix (shell-quote-argument env-file))

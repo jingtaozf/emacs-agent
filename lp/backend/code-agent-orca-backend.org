@@ -876,6 +876,344 @@ matching lifetime — see [[#orca-handle-cache][Terminal Handle Cache]]."
     (user-error "No Orca terminal for this session")))
 #+END_SRC
 
+** Worktree Management
+:PROPERTIES:
+:CUSTOM_ID: orca-worktree-management
+:END:
+
+Orca's unit of work is the worktree, and it already stores what a
+management surface wants to show: board status, live terminal count,
+agent state, lineage, linked issues.  =orca worktree ps= returns all of
+it for every visible worktree in *one* call, so the org buffer can be a
+view over Orca's state instead of a second copy of it — nothing here
+writes an Orca fact back into a property.
+
+The one binding that *is* persisted stays =:PROJECT_ROOT:=.  Everything
+else is re-derived: which worktree a heading means, what branch it is
+on, whether an agent is running.
+
+Two limits found by measurement, both worth knowing before trusting
+this surface:
+
+- =ps= only reports worktrees Orca *lists*.  A worktree created with
+  plain =git worktree add= resolves by path (after ~8 s of rescan) and
+  can host terminals, but it stays out of =list= and =ps= unless its
+  repo has =externalWorktreeVisibility: show= — a per-repo switch with
+  no CLI setter.  =new-worktree= therefore warns before taking that
+  route.
+- =agents[].lastAssistantMessage= holds the *last completed* message
+  and is cleared while the agent works, so it is a recovery source for
+  a response Emacs missed, never the primary one.  The =Stop= hook
+  still owns delivery.
+
+#+BEGIN_SRC elisp
+(declare-function code-agent-org-insert-workspace-heading
+                  "code-agent-org" (name project-root &optional level))
+
+(defun code-agent-orca--canon (path)
+  "Return PATH in the canonical form used to compare worktree paths."
+  (directory-file-name (file-truename (expand-file-name path))))
+
+(defun code-agent-orca--ps ()
+  "Return the rows of `orca worktree ps', or nil when the call fails."
+  (let ((reply (code-agent-orca--call nil "worktree" "ps" "--limit" "200")))
+    (unless (code-agent-orca--error-code reply)
+      (alist-get 'worktrees reply))))
+
+(defun code-agent-orca--ps-find (path &optional rows)
+  "Return the `ps' row whose worktree is PATH, or nil."
+  (let ((want (code-agent-orca--canon path)))
+    (seq-find (lambda (row)
+                (equal want (code-agent-orca--canon (alist-get 'path row))))
+              (or rows (code-agent-orca--ps)))))
+
+(defun code-agent-orca--repo-for-path (path)
+  "Return the Orca repo record owning PATH — the longest matching prefix.
+A submodule registered on its own must win over its superproject."
+  (let* ((reply (code-agent-orca--call nil "repo" "list"))
+         (repos (unless (code-agent-orca--error-code reply)
+                  (alist-get 'repos reply)))
+         (want (code-agent-orca--canon path))
+         (best nil)
+         (best-len -1))
+    (dolist (repo repos best)
+      (let ((rp (code-agent-orca--canon (alist-get 'path repo))))
+        (when (and (string-prefix-p rp want) (> (length rp) best-len))
+          (setq best repo best-len (length rp)))))))
+
+(defun code-agent-orca--superproject (dir)
+  "Return DIR's superproject working tree when DIR is a submodule, else nil."
+  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
+    (with-temp-buffer
+      (when (zerop (call-process "git" nil (current-buffer) nil
+                                 "rev-parse" "--show-superproject-working-tree"))
+        (let ((out (string-trim (buffer-string))))
+          (unless (string-empty-p out) out))))))
+
+(defun code-agent-orca--git (dir &rest args)
+  "Run git ARGS in DIR, returning trimmed stdout, or nil on failure."
+  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
+    (with-temp-buffer
+      (when (zerop (apply #'call-process "git" nil (current-buffer) nil args))
+        (string-trim (buffer-string))))))
+
+(defun code-agent-orca--heading-roots ()
+  "Map canonical =:PROJECT_ROOT:= → list of heading names across open org buffers.
+This is how a worktree learns whether some heading already claims it."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'org-mode) buffer-file-name)
+          (save-excursion
+            (save-restriction
+              (widen)
+              (goto-char (point-min))
+              (while (re-search-forward "^[ \t]*:CLAUDE_SESSION_ID:" nil t)
+                (let ((root (org-entry-get nil "PROJECT_ROOT" t))
+                      (head (substring-no-properties
+                             (or (org-get-heading t t t t) "?"))))
+                  (when root
+                    (let ((key (code-agent-orca--canon root)))
+                      (puthash key (cons head (gethash key table)) table))))))))))
+    table))
+#+END_SRC
+
+*** Worktree dashboard
+
+One =ps= call rendered as a table, with the org headings that claim
+each worktree appended.  A worktree with no heading is work Orca knows
+about and the notebook does not — the gap =import-worktrees= closes.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--row-line (row owners)
+  "Format ROW of `orca worktree ps' as one dashboard line, using OWNERS."
+  (let* ((path (alist-get 'path row))
+         (agents (alist-get 'agents row))
+         (heads (gethash (code-agent-orca--canon path) owners)))
+    (format "%-12s %-9s %2d term %2d agent  %-34s %-34s %s"
+            (or (alist-get 'workspaceStatus row) "-")
+            (or (alist-get 'status row) "-")
+            (or (alist-get 'liveTerminalCount row) 0)
+            (length agents)
+            (format "%s/%s" (or (alist-get 'repo row) "?")
+                    (or (alist-get 'displayName row) "?"))
+            (replace-regexp-in-string "\\`refs/heads/" ""
+                                      (or (alist-get 'branch row) ""))
+            (if heads (string-join (nreverse heads) ", ") "— no org heading"))))
+
+(defun code-agent-org-orca-worktrees ()
+  "Show every Orca worktree and the org heading that claims it."
+  (interactive)
+  (let ((rows (code-agent-orca--ps)))
+    (unless rows (user-error "orca worktree ps returned nothing"))
+    (let ((owners (code-agent-orca--heading-roots))
+          (buf (get-buffer-create "*Orca Worktrees*")))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (format "%-12s %-9s %-16s %-34s %-34s %s\n"
+                          "BOARD" "AGENT" "LIVE" "REPO/WORKTREE" "BRANCH" "ORG HEADING"))
+          (insert (make-string 120 ?-) "\n")
+          (dolist (row rows)
+            (insert (code-agent-orca--row-line row owners) "\n")))
+        (goto-char (point-min))
+        (special-mode))
+      (display-buffer buf))))
+
+(defun code-agent-org-orca-worktree-status ()
+  "Report Orca's live record for the worktree behind the heading at point."
+  (interactive)
+  (let* ((root (or (code-agent-org-get-project-root) default-directory))
+         (row (code-agent-orca--ps-find root)))
+    (if (null row)
+        (message "%s is not a worktree Orca lists (unregistered, or externalWorktreeVisibility=hide)"
+                 (abbreviate-file-name root))
+      (message "%s | board %s | agent %s | %d terminal(s) | %s%s"
+               (replace-regexp-in-string "\\`refs/heads/" ""
+                                         (or (alist-get 'branch row) "?"))
+               (or (alist-get 'workspaceStatus row) "-")
+               (or (alist-get 'status row) "-")
+               (or (alist-get 'liveTerminalCount row) 0)
+               (abbreviate-file-name (alist-get 'path row))
+               (if (alist-get 'parentWorktreeId row) " | has parent" "")))))
+#+END_SRC
+
+*** Creating a worktree
+
+Two routes, and the choice is forced by where the checkout may live.
+=orca worktree create= is the first-class one — Orca registers, names a
+branch, records lineage, and reveals it in the UI — but it always
+places the checkout under =~/orca/workspaces/<repo>/<name>=.  For a
+submodule that is fatal: a checkout outside the superproject breaks
+every relative path the meta-repo's literate sources tangle through.
+So a submodule gets a plain =git worktree add= inside the repo's own
+=.worktrees/=, at the price of Orca needing a rescan to notice it, and
+of the repo's =externalWorktreeVisibility= deciding whether it ever
+shows up in the UI at all.
+
+Orca's own create leaves one idle shell in the new worktree.  It is
+closed here rather than adopted, so that launching stays the single
+path =code-agent-org-terminal-launch= already owns.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--close-fallback-shells (worktree-id)
+  "Close the idle shell Orca opens in a freshly created WORKTREE-ID."
+  (let ((reply (code-agent-orca--call nil "terminal" "list"
+                                      "--worktree" (concat "id:" worktree-id))))
+    (unless (code-agent-orca--error-code reply)
+      (dolist (term (alist-get 'terminals reply))
+        (code-agent-orca--call nil "terminal" "close"
+                               "--terminal" (alist-get 'handle term))))))
+
+(defun code-agent-org-orca-new-worktree (name base)
+  "Create a worktree named NAME off BASE and bind a new workspace heading to it.
+Point must be inside a workspace whose =:PROJECT_ROOT:= names an
+existing checkout; the new heading is inserted as its sibling."
+  (interactive
+   (let* ((root (or (code-agent-org-get-project-root) default-directory))
+          (branch (or (code-agent-orca--git root "rev-parse" "--abbrev-ref" "HEAD")
+                      "main")))
+     (list (read-string "Worktree name: ")
+           (read-string "Base branch: " branch))))
+  (let* ((root (or (code-agent-org-get-project-root) default-directory))
+         (top (code-agent-orca--git-top-level root))
+         (repo (code-agent-orca--repo-for-path top))
+         (super (code-agent-orca--superproject top))
+         (visibility (and repo (alist-get 'externalWorktreeVisibility repo)))
+         new-path note)
+    (unless repo
+      (user-error "Orca does not know %s. Register it first: orca repo add --path %s"
+                  top top))
+    (if super
+        ;; Submodule: the checkout has to stay inside the superproject tree.
+        (let ((path (expand-file-name (concat ".worktrees/" name) top)))
+          (unless (code-agent-orca--git top "worktree" "add" path "-b" name)
+            (user-error "git worktree add failed for %s" path))
+          (setq new-path path
+                note (if (equal visibility "show")
+                         "Orca will list it after its next rescan (~8s)"
+                       (format "repo %s has externalWorktreeVisibility=%s — this worktree will NOT appear in Orca's UI or `worktree ps' until you turn that on"
+                               (alist-get 'displayName repo) visibility))))
+      ;; Standalone repo: let Orca own placement, naming and lineage.
+      (let* ((current (code-agent-orca--ps-find top))
+             (args (append (list "worktree" "create"
+                                 "--repo" (concat "id:" (alist-get 'id repo))
+                                 "--name" name
+                                 "--base-branch" base)
+                           (when current
+                             (list "--parent-worktree"
+                                   (concat "id:" (alist-get 'worktreeId current))))))
+             (reply (apply #'code-agent-orca--call nil args))
+             (code (code-agent-orca--error-code reply)))
+        (when code (user-error "orca worktree create failed: %s" code))
+        (let ((wt (alist-get 'worktree reply)))
+          (setq new-path (alist-get 'path wt)
+                note (format "branch %s"
+                             (replace-regexp-in-string
+                              "\\`refs/heads/" "" (or (alist-get 'branch wt) "?"))))
+          (code-agent-orca--close-fallback-shells (alist-get 'id wt)))))
+    (save-excursion
+      (code-agent-org-insert-workspace-heading name new-path))
+    (message "Worktree '%s' at %s (%s). Use C-c C-/ r to launch."
+             name (abbreviate-file-name new-path) note)))
+#+END_SRC
+
+*** Importing worktrees Orca already has
+
+A worktree created in Orca's own UI is invisible to the notebook until
+a heading claims it.  This lists the unclaimed ones and stamps a
+heading per selection, which is also the repair path when a heading is
+deleted by hand.
+
+#+BEGIN_SRC elisp
+(defun code-agent-org-orca-import-worktrees ()
+  "Insert a workspace heading for each Orca worktree no heading claims yet."
+  (interactive)
+  (let* ((rows (code-agent-orca--ps))
+         (owners (code-agent-orca--heading-roots))
+         (missing (seq-remove
+                   (lambda (row)
+                     (gethash (code-agent-orca--canon (alist-get 'path row)) owners))
+                   rows)))
+    (unless rows (user-error "orca worktree ps returned nothing"))
+    (unless missing (user-error "Every worktree Orca lists already has a heading"))
+    (let* ((labels (mapcar (lambda (row)
+                             (format "%s/%s — %s"
+                                     (or (alist-get 'repo row) "?")
+                                     (or (alist-get 'displayName row) "?")
+                                     (abbreviate-file-name (alist-get 'path row))))
+                           missing))
+           (chosen (completing-read-multiple "Import worktrees: " labels nil t))
+           (count 0))
+      (save-excursion
+        (dolist (label chosen)
+          (let* ((idx (seq-position labels label))
+                 (row (and idx (nth idx missing))))
+            (when row
+              (code-agent-org-insert-workspace-heading
+               (format "%s %s" (alist-get 'repo row) (alist-get 'displayName row))
+               (alist-get 'path row))
+              (setq count (1+ count))))))
+      (message "Imported %d worktree(s) as workspace headings" count))))
+#+END_SRC
+
+*** Dropping a worktree
+
+=orca worktree rm --force= deletes the checkout, the branch and git's
+registration in one go, so the guard matters more than the command:
+uncommitted changes, or commits that survive nowhere else, make the
+removal refuse rather than ask.
+
+Checking =@{u}..HEAD= alone is not enough, and the E2E run proved it:
+a worktree Orca creates starts on a fresh branch with *no upstream*,
+so that command exits fatal, the check silently passes, and the first
+commit made in the worktree would be deleted with it.  The fallback
+asks git which branches contain HEAD — when the answer is "only this
+one", the work exists nowhere else.
+
+#+BEGIN_SRC elisp
+(defun code-agent-orca--unsaved-commits (root)
+  "Return a description of commits that would die with ROOT's branch, or nil."
+  (let ((branch (code-agent-orca--git root "rev-parse" "--abbrev-ref" "HEAD")))
+    (or (let ((ahead (code-agent-orca--git root "log" "--oneline" "@{u}..HEAD")))
+          (when (and ahead (not (string-empty-p ahead)))
+            (format "%d commit(s) its upstream has never seen"
+                    (length (split-string ahead "\n" t)))))
+        ;; No upstream configured — ask which branches carry HEAD instead.
+        (let* ((contains (code-agent-orca--git
+                          root "branch" "--contains" "HEAD"
+                          "--format=%(refname:short)"))
+               (names (and contains (split-string contains "\n" t))))
+          (when (and names branch (equal names (list branch)))
+            "commits that exist on no other branch")))))
+
+(defun code-agent-org-orca-drop-worktree ()
+  "Remove the worktree behind the heading at point, after safety checks."
+  (interactive)
+  (let* ((root (or (code-agent-org-get-project-root)
+                   (user-error "No PROJECT_ROOT here")))
+         (dirty (code-agent-orca--git root "status" "--porcelain"))
+         (unsaved (code-agent-orca--unsaved-commits root))
+         (branch (code-agent-orca--git root "rev-parse" "--abbrev-ref" "HEAD")))
+    (when (and dirty (not (string-empty-p dirty)))
+      (user-error "%s has uncommitted changes — commit or discard them first"
+                  (abbreviate-file-name root)))
+    (when unsaved
+      (user-error "%s has %s on %s"
+                  (abbreviate-file-name root) unsaved branch))
+    (unless (yes-or-no-p (format "Delete worktree %s and branch %s? "
+                                 (abbreviate-file-name root) branch))
+      (user-error "Aborted"))
+    (let* ((reply (code-agent-orca--call nil "worktree" "rm"
+                                         "--worktree" (concat "path:" root)
+                                         "--force"))
+           (code (code-agent-orca--error-code reply)))
+      (if code
+          (user-error "orca worktree rm failed: %s" code)
+        (message "Worktree %s removed. Archive its heading when you are done with it."
+                 (abbreviate-file-name root))))))
+#+END_SRC
+
 ** Provide
 
 Single =provide= so the module can be =require=d.
