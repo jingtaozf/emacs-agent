@@ -23,6 +23,12 @@
 ;;; Recording stub — captures the argv every method would have run.
 ;;; ------------------------------------------------------------------
 
+;; The status dir is owned by the org layer, which `make test-backend-unit'
+;; does not load.  Bind it here so the backend suite can run standalone;
+;; the org layer's `defconst' still wins whenever it is loaded.
+(defvar code-agent-org-terminal-status-dir
+  (expand-file-name "code-agent-status" temporary-file-directory))
+
 (defvar test-orca--calls nil
   "Argv lists captured by `test-orca--with-cli'.")
 
@@ -195,25 +201,34 @@ ready first would report every running session as idle."
 ;;; Identity
 ;;; ------------------------------------------------------------------
 
-(ert-deftest test-orca-adopt-identity-strips-selector-prefix ()
-  "The stored `ORCA_WORKTREE' selector loses its `id:' prefix on read.
+(ert-deftest test-orca-adopt-identity-reads-cached-handle ()
+  "Identity comes from the status-dir cache, never from an org property.
 
-The property keeps the selector form so a human can paste it straight
-into an `orca' command; the slot holds the bare id because
-`launch-session' re-adds the prefix.  Keeping the prefix in the slot
-would produce `id:id:<repo>::<path>'."
+A handle is meaningless once Orca restarts, so it must not travel in a
+committed org file; the worktree is not adopted at all because it
+re-resolves from the project root.  Adoption therefore reads exactly
+one thing: the cache file keyed by CLAUDE_SESSION_ID."
   :tags '(:unit :fast :stable :orca)
-  (let ((b (code-agent-orca-backend-create :session-key "test::fixture")))
-    (cl-letf (((symbol-function 'org-entry-get)
-               (lambda (_pom prop &rest _)
-                 (pcase prop
-                   ("ORCA_WORKTREE" "id:repo-1::/tmp/proj")
-                   ("ORCA_TERMINAL" "term_abc")
-                   (_ nil)))))
-      (code-agent-org-backend-adopt-identity b)
-      (should (equal "repo-1::/tmp/proj"
-                     (code-agent-multiplexer-backend-multiplexer-session-id b)))
-      (should (equal "term_abc" (code-agent-multiplexer-backend-pane-id b))))))
+  (let* ((dir (make-temp-file "orca-status-" t))
+         (code-agent-org-terminal-status-dir dir)
+         (b (code-agent-orca-backend-create :session-key "test::fixture")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'org-entry-get)
+                   (lambda (_pom prop &rest _)
+                     (pcase prop
+                       ("CLAUDE_SESSION_ID" "sdd-fixture")
+                       ;; A leftover property from before the cache must
+                       ;; not be resurrected.
+                       ("ORCA_TERMINAL" "term_from_property")
+                       (_ nil)))))
+          (should-not (code-agent-org-backend-adopt-identity b))
+          (code-agent-orca--save-handle "sdd-fixture" "term_abc")
+          (should (equal "term_abc" (code-agent-org-backend-adopt-identity b)))
+          (should (equal "term_abc" (code-agent-multiplexer-backend-pane-id b)))
+          (should-not (code-agent-multiplexer-backend-multiplexer-session-id b))
+          (code-agent-orca--forget-handle "sdd-fixture")
+          (should-not (code-agent-orca--read-handle "sdd-fixture")))
+      (delete-directory dir t))))
 
 (ert-deftest test-orca-unregistered-directory-names-the-fix ()
   "`selector_not_found' becomes an instruction, not a raw error code.

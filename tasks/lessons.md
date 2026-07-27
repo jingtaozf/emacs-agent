@@ -136,3 +136,13 @@
 **Context**: Every unit test passed; the bug appeared only in live E2E, where relaunching after closing the tab reported "Orca terminal focused" and then sent prompts into a pane that no longer existed. The envelope's `ok` field answers "was the request well-formed", never "is the resource usable".
 
 **Rule**: When a CLI wraps replies in an `ok`/`error` envelope, `ok: true` means the *call* succeeded. Liveness, writability, and existence are separate fields inside `result` — read them. Any `ensure-*` / `-alive-p` predicate built on the envelope alone is checking the wrong thing.
+
+## 2026-07-26 — deferred lambda closed over `let` state; literate-elisp is dynamically bound
+
+**Mistake**: `code-agent-orca--call-async` handed `set-process-sentinel` an inline lambda referencing `buf` and `callback` from the enclosing `let*`, and the same shape repeated twice more (`code-agent-orca-wait-for-ready` over `callback`, `code-agent-org-backend-launch` over `handle`). literate-elisp loads `.org` sources under dynamic binding — the `lexical-binding: t` cookie is not honoured — so none of the three lambdas captured anything.
+
+**Context**: Every launch through `code-agent-menu` printed `if: Symbol's value as variable is void: buf` in `*Messages*` and silently dropped the readiness report. The reported variable was the *cleanup* one: the body's `void-variable callback` was overwritten by the `unwind-protect` cleanup's own `void-variable buf`, which is why the message named a buffer and not the callback. Nothing failed loudly — `terminal create` had already succeeded, so the terminal appeared and only the post-launch callback chain was dead.
+
+**Rule**: A lambda that outlives the form that created it must not reference enclosing `let` bindings. Three fixes, in preference order: read the value back off the object that survives (`process-buffer`, `process-get`), pass it through `apply-partially` to a named handler, or `lexical-let` it. Inline `lambda` remains fine for synchronous callers (`cl-some`, `mapcar`) that run inside the dynamic extent.
+
+**Structural test added**: `test-structural-no-deferred-closure-over-let` (F48) in `tests/test-structural.el` — walks every source `.org`, tracks `let`/arglist bindings, and flags any inline lambda passed to `set-process-sentinel` / `set-process-filter` / `run-at-time` / `run-with-timer` / `run-with-idle-timer` or a project function whose name ends in `-async` / `wait-for-ready` that references an outer binding. Verified against the pre-fix file: 3 violations found, 0 after the fix.

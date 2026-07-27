@@ -908,18 +908,21 @@ PROJECT-ROOT the working directory."
                 (save-excursion
                   (code-agent-org-terminal-goto-session-heading)
                   (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
+             (heading (ignore-errors (code-agent-org-terminal--tab-title)))
              (parts (list workspace-script
                           (shell-quote-argument (or org-file ""))
-                          (shell-quote-argument (or workspace-session-id "")))))
-        (when cli-session
-          (setq parts (append parts
-                              (list "--"
-                                    "--resume"
-                                    (shell-quote-argument cli-session)))))
-        (when (and extra (not (string-empty-p extra)))
-          (unless cli-session
-            (setq parts (append parts (list "--"))))
-          (setq parts (append parts (list extra))))
+                          (shell-quote-argument (or workspace-session-id ""))))
+             (claude-args
+              (append
+               (when cli-session
+                 (list "--resume" (shell-quote-argument cli-session)))
+               (when (and heading
+                          (not (string-match-p "--name\\_>" (or extra ""))))
+                 (list "--name" (shell-quote-argument heading)))
+               (when (and extra (not (string-empty-p extra)))
+                 (list extra)))))
+        (when claude-args
+          (setq parts (append parts (list "--") claude-args)))
         (mapconcat #'identity parts " ")))
      ;; bare claude
      ((eq code-agent-org-cmux-launch-command 'claude)
@@ -972,18 +975,27 @@ Used when `code-agent-org-cmux-agent-type' is `claude'."
               (code-agent-org-terminal-goto-session-heading)
               (org-entry-get nil "CLAUDE_CLI_SESSION" nil))))
          (workspace-script code-agent-org-cmux-workspace-script)
+         (heading (ignore-errors (code-agent-org-terminal--tab-title)))
          (parts (list workspace-script
                       (shell-quote-argument (or org-file ""))
-                      (shell-quote-argument (or workspace-session-id "")))))
-    (when cli-session
-      (setq parts (append parts
-                          (list "--"
-                                "--resume"
-                                (shell-quote-argument cli-session)))))
-    (when (and extra (not (string-empty-p extra)))
-      (unless cli-session
-        (setq parts (append parts (list "--"))))
-      (setq parts (append parts (list extra))))
+                      (shell-quote-argument (or workspace-session-id ""))))
+         (claude-args
+          (append
+           (when cli-session
+             (list "--resume" (shell-quote-argument cli-session)))
+           ;; Claude paints --name into the terminal title, which is the
+           ;; only handle a tab has on "which workspace am I" once the
+           ;; agent starts repainting.  cmux re-injects its own --name on
+           ;; respawn; Orca injects nothing, so its tabs all read
+           ;; "Claude Code" until this goes in.  A --name the user put in
+           ;; CLAUDE_EXTRA_ARGS wins.
+           (when (and heading
+                      (not (string-match-p "--name\\_>" (or extra ""))))
+             (list "--name" (shell-quote-argument heading)))
+           (when (and extra (not (string-empty-p extra)))
+             (list extra)))))
+    (when claude-args
+      (setq parts (append parts (list "--") claude-args)))
     (mapconcat #'identity parts " ")))
 
 (defvar code-agent-org-cmux--claude-only-args

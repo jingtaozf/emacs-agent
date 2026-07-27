@@ -1712,5 +1712,129 @@ Searches forward up to 10 lines for a non-comment line starting with (\"."
               (setq found t))))
         found))))
 
+;;; F48: No inline lambda closing over let-bound state in deferred callbacks
+
+(defconst test-structural--deferred-registrars
+  '(set-process-sentinel set-process-filter
+    run-at-time run-with-timer run-with-idle-timer)
+  "Calls whose lambda argument runs after the caller's dynamic extent ends.
+Project-local async entry points are matched by name in
+`test-structural--deferred-registrar-p'.")
+
+(defun test-structural--deferred-registrar-p (sym)
+  "Return non-nil when SYM defers its lambda argument past the current extent."
+  (and (symbolp sym)
+       (or (memq sym test-structural--deferred-registrars)
+           (string-match-p "-async\\'\\|wait-for-ready\\'" (symbol-name sym)))))
+
+(defmacro test-structural--each-cons (list var &rest body)
+  "Run BODY over LIST binding VAR, stopping at a dotted tail."
+  (declare (indent 2))
+  `(let ((tail ,list))
+     (while (consp tail)
+       (let ((,var (car tail))) ,@body)
+       (setq tail (cdr tail)))))
+
+(defun test-structural--binding-names (bindings)
+  "Names introduced by a `let'-style BINDINGS list."
+  (delq nil (mapcar (lambda (b) (cond ((symbolp b) b) ((consp b) (car b)))) bindings)))
+
+(defun test-structural--symbols-in (form acc)
+  "Collect every symbol appearing in FORM onto ACC."
+  (cond ((and form (symbolp form)) (cons form acc))
+        ((consp form) (test-structural--symbols-in
+                       (cdr form) (test-structural--symbols-in (car form) acc)))
+        (t acc)))
+
+(defun test-structural--lambda-inner-names (body)
+  "Names bound anywhere inside a lambda BODY — these shadow outer bindings."
+  (let ((acc nil))
+    (letrec ((walk (lambda (f)
+                     (when (consp f)
+                       (cond
+                        ((memq (car f) '(let let* if-let* when-let* if-let when-let))
+                         (setq acc (append (test-structural--binding-names (cadr f)) acc)))
+                        ((eq (car f) 'lambda)
+                         (setq acc (append (cadr f) acc)))
+                        ((memq (car f) '(dolist dotimes))
+                         (setq acc (cons (car (cadr f)) acc)))
+                        ((eq (car f) 'condition-case)
+                         (setq acc (cons (cadr f) acc))))
+                       (test-structural--each-cons f sub (funcall walk sub))))))
+      (funcall walk body))
+    acc))
+
+(defun test-structural--scan-deferred-closures (form bound file top acc)
+  "Collect deferred-lambda violations in FORM onto ACC.
+BOUND is the list of names bound by enclosing `let' forms and arglists;
+TOP names the enclosing definition for the report."
+  (if (not (consp form))
+      acc
+    (cond
+     ;; lexical-let captures correctly even under dynamic binding.
+     ((eq (car form) 'lexical-let) acc)
+     ((memq (car form) '(let let* if-let* when-let* if-let when-let))
+      (let ((inner (append (test-structural--binding-names (cadr form)) bound)))
+        (test-structural--each-cons (cadr form) b
+          (when (consp b)
+            (setq acc (test-structural--scan-deferred-closures
+                       (cadr b) bound file top acc))))
+        (test-structural--each-cons (cddr form) f
+          (setq acc (test-structural--scan-deferred-closures f inner file top acc)))
+        acc))
+     ((memq (car form) '(defun cl-defun defmacro))
+      (test-structural--scan-deferred-closures
+       (cdddr form)
+       (append (cl-remove-if (lambda (s) (memq s '(&optional &rest))) (nth 2 form)) bound)
+       file (nth 1 form) acc))
+     ((eq (car form) 'cl-defmethod)
+      (test-structural--scan-deferred-closures
+       (cdddr form)
+       (append (cl-remove-if-not
+                #'symbolp
+                (mapcar (lambda (a) (if (consp a) (car a) a)) (nth 2 form)))
+               bound)
+       file (nth 1 form) acc))
+     ((test-structural--deferred-registrar-p (car form))
+      (test-structural--each-cons (cdr form) arg
+        (if (and (consp arg) (eq (car arg) 'lambda))
+            (let* ((args (cl-remove-if (lambda (s) (memq s '(&optional &rest)))
+                                       (cadr arg)))
+                   (inner (test-structural--lambda-inner-names (cddr arg)))
+                   (free (cl-remove-if-not
+                          (lambda (s) (and (memq s bound)
+                                           (not (memq s args))
+                                           (not (memq s inner))))
+                          (delete-dups (test-structural--symbols-in (cddr arg) nil)))))
+              (when free
+                (push (format "%s: %s passes a lambda to %s closing over %S"
+                              (file-name-nondirectory file) top (car form) free)
+                      acc))
+              (setq acc (test-structural--scan-deferred-closures
+                         (cddr arg) (append args bound) file top acc)))
+          (setq acc (test-structural--scan-deferred-closures arg bound file top acc))))
+      acc)
+     (t
+      (test-structural--each-cons form f
+        (setq acc (test-structural--scan-deferred-closures f bound file top acc)))
+      acc))))
+
+(ert-deftest test-structural-no-deferred-closure-over-let ()
+  "Lambdas that outlive their caller must not reference enclosing `let' bindings.
+literate-elisp loads .org sources under dynamic binding, so such a lambda
+finds the variable void when the process, timer, or callback finally runs.
+FIX: pass the value through `apply-partially' to a named function, read it
+back off the process object, or wrap the lambda in `lexical-let'."
+  :tags '(:unit :fast :stable :structural)
+  (when test-structural--project-root
+    (let ((violations nil))
+      (dolist (file (test-structural--all-elisp-org-source-files))
+        (dolist (top (test-structural--read-sexps-from-org-elisp-blocks file))
+          (setq violations (test-structural--scan-deferred-closures
+                            top nil file nil violations))))
+      (should-with-fix (null violations)
+        (format "Deferred lambdas closing over let-bound state:\n%s\nFIX: use `apply-partially' with a named handler, `process-get', or `lexical-let'."
+                (mapconcat #'identity (nreverse violations) "\n"))))))
+
 (provide 'test-structural)
 ;;; test-structural.el ends here

@@ -72,6 +72,9 @@ Orca calls them rather than forking ~400 lines; promoting them into
 (declare-function code-agent-org-cmux--agent-profile-ready-patterns "code-agent-org-cmux" (profile))
 (declare-function code-agent-org-cmux--agent-profile-busy-patterns "code-agent-org-cmux" (profile))
 (declare-function code-agent-org-cmux--agent-profile-cancel-keys "code-agent-org-cmux" (profile))
+
+;; Heading-derived tab title, shared with the cmux backend.
+(declare-function code-agent-org-terminal--tab-title "code-agent-org-terminal-base" ())
 #+END_SRC
 
 *** Customization
@@ -195,7 +198,42 @@ the same reasoning that bans =call-process= inside timers in
 This helper is the async escape hatch: fire and forget, with an
 optional sentinel callback receiving the parsed result.
 
+The sentinel is a *named function*, not a lambda over the enclosing
+=let*=.  literate-elisp loads this file under dynamic binding — the
+=lexical-binding: t= cookie is not honoured — so a lambda referencing
+=buf= or =callback= finds both unbound by the time the process exits,
+and the error surfaces from the =unwind-protect= cleanup as
+=Symbol's value as variable is void: buf=.  The process object carries
+what the sentinel needs instead: the output buffer is
+=process-buffer=, the callback is a process property.
+
 #+BEGIN_SRC elisp
+(defun code-agent-orca--async-sentinel (proc event)
+  "Hand PROC's parsed `--json' output to its stored callback on EVENT."
+  (when (string-match-p "\\`\\(finished\\|exited\\|killed\\|deleted\\)" event)
+    (let ((buf (process-buffer proc))
+          (callback (process-get proc 'orca-callback)))
+      (unwind-protect
+          (when callback
+            (condition-case err
+                (funcall callback
+                         (with-current-buffer buf
+                           (goto-char (point-min))
+                           (condition-case nil
+                               (let ((data (json-parse-buffer
+                                            :object-type 'alist
+                                            :array-type 'list
+                                            :null-object nil
+                                            :false-object nil)))
+                                 (if (alist-get 'ok data)
+                                     (alist-get 'result data)
+                                   (cons :error
+                                         (or (alist-get 'code (alist-get 'error data))
+                                             "unknown"))))
+                             (error (cons :error "unparseable-output")))))
+              (error (message "code-agent-orca async callback failed: %S" err))))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
 (defun code-agent-orca--call-async (backend args &optional callback)
   "Invoke the Orca CLI with ARGS plus `--json' without blocking Emacs.
 CALLBACK, when given, is called with the same value
@@ -205,30 +243,8 @@ CALLBACK, when given, is called with the same value
          (buf (generate-new-buffer " *orca-async*"))
          (proc (apply #'start-process "orca-async" buf cli
                       (append args (list "--json")))))
-    (set-process-sentinel
-     proc
-     (lambda (_p event)
-       (when (string-match-p "\\`\\(finished\\|exited\\|killed\\|deleted\\)" event)
-         (unwind-protect
-             (when callback
-               (condition-case err
-                   (funcall callback
-                            (with-current-buffer buf
-                              (goto-char (point-min))
-                              (condition-case nil
-                                  (let ((data (json-parse-buffer
-                                               :object-type 'alist
-                                               :array-type 'list
-                                               :null-object nil
-                                               :false-object nil)))
-                                    (if (alist-get 'ok data)
-                                        (alist-get 'result data)
-                                      (cons :error
-                                            (or (alist-get 'code (alist-get 'error data))
-                                                "unknown"))))
-                                (error (cons :error "unparseable-output")))))
-                 (error (message "code-agent-orca async callback failed: %S" err))))
-           (when (buffer-live-p buf) (kill-buffer buf))))))
+    (process-put proc 'orca-callback callback)
+    (set-process-sentinel proc #'code-agent-orca--async-sentinel)
     proc))
 #+END_SRC
 
@@ -284,6 +300,11 @@ user's Orca state and is theirs to authorise."
 The resolution above costs one 230 ms call.  Callers go through this
 wrapper so it happens once per backend instead of once per operation.
 
+The cache is per backend instance and nothing writes the id to the org
+heading: the worktree is a *function of the project root*, so
+re-deriving it is always right, while a recorded id goes wrong the day
+the repo is removed and re-added under a fresh uuid.
+
 #+BEGIN_SRC elisp
 (defun code-agent-orca--worktree-id (backend)
   "Return BACKEND's worktree id, resolving and caching it on first use."
@@ -291,6 +312,64 @@ wrapper so it happens once per backend instead of once per operation.
       (let ((id (code-agent-orca--resolve-worktree backend default-directory)))
         (setf (code-agent-multiplexer-backend-multiplexer-session-id backend) id)
         id)))
+#+END_SRC
+
+** Terminal Handle Cache
+:PROPERTIES:
+:CUSTOM_ID: orca-handle-cache
+:END:
+
+The terminal handle is the opposite case: it cannot be re-derived.
+=orca terminal list= reports =handle=, =ptyId=, =tabId=, =leafId= and
+=incarnationId= — all minted at runtime — plus =title=, which is the
+pty title the agent repaints (=✳ <current task>=), *not* the
+=--title= the launch passed.  Orca exposes no user-settable tag to
+match on, so "which terminal belongs to this workspace?" has exactly
+one answer: the one we remembered.
+
+Remembering it on the org heading was wrong twice over.  The handle
+does not outlive the Orca process, so a value committed to git is
+stale for every other machine and for this one after a restart; and
+the heading is a *document*, which should not carry a uuid that means
+nothing to a reader.  The status directory already holds this class of
+per-session runtime state (=<id>.request-id=, =<id>.from-emacs=) and
+has the matching lifetime — it lives in =/tmp=, so an Orca restart and
+a reboot both clear it.
+
+An Emacs restart, meanwhile, still finds the file and adopts the
+running terminal, which is the case the property was actually earning
+its keep for.
+
+#+BEGIN_SRC elisp
+(defvar code-agent-org-terminal-status-dir)
+
+(defun code-agent-orca--handle-file (workspace-session-id)
+  "Path of the file caching the Orca handle for WORKSPACE-SESSION-ID."
+  (expand-file-name (concat workspace-session-id ".orca-terminal")
+                    code-agent-org-terminal-status-dir))
+
+(defun code-agent-orca--save-handle (workspace-session-id handle)
+  "Cache HANDLE as the Orca terminal serving WORKSPACE-SESSION-ID."
+  (when (and workspace-session-id handle)
+    (make-directory code-agent-org-terminal-status-dir t)
+    (with-temp-file (code-agent-orca--handle-file workspace-session-id)
+      (insert handle))))
+
+(defun code-agent-orca--read-handle (workspace-session-id)
+  "Return the cached Orca handle for WORKSPACE-SESSION-ID, or nil."
+  (when workspace-session-id
+    (let ((path (code-agent-orca--handle-file workspace-session-id)))
+      (when (file-exists-p path)
+        (let ((val (string-trim (with-temp-buffer
+                                  (insert-file-contents path)
+                                  (buffer-string)))))
+          (unless (string-empty-p val) val))))))
+
+(defun code-agent-orca--forget-handle (workspace-session-id)
+  "Drop the cached handle for WORKSPACE-SESSION-ID."
+  (when workspace-session-id
+    (let ((path (code-agent-orca--handle-file workspace-session-id)))
+      (when (file-exists-p path) (delete-file path)))))
 #+END_SRC
 
 ** Protocol 2b — Multiplexer Wire
@@ -319,6 +398,15 @@ without the "inside another Claude Code session" refusal.
 LAUNCH-CMD arrives as a list for Protocol 2b compatibility with tmux;
 orca wants one string, so the parts are joined.
 
+The tab title is the workspace heading text, via the same
+=code-agent-org-terminal--tab-title= the cmux backend uses — several
+agents run against one worktree, so "which org section is this?" is the
+only question the tab strip can usefully answer.  The session key was
+the first cut and reads as =/long/path/file.org::sdd-20260726-…=, which
+is unique but unreadable at tab width.  =ignore-errors= covers the
+non-org caller: Protocol 2b permits launching without a buffer, and
+then the session key remains the honest fallback.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-mux-launch-session
   ((backend code-agent-orca-backend) launch-cmd)
@@ -328,7 +416,8 @@ Returns the terminal handle string, or nil on failure."
          (cmd (if (listp launch-cmd)
                   (mapconcat #'identity launch-cmd " ")
                 launch-cmd))
-         (title (or (code-agent-multiplexer-backend-session-key backend)
+         (title (or (ignore-errors (code-agent-org-terminal--tab-title))
+                    (code-agent-multiplexer-backend-session-key backend)
                     "code-agent"))
          (reply (code-agent-orca--call backend
                                        "terminal" "create"
@@ -558,7 +647,17 @@ The wait runs asynchronously: at up to
 =code-agent-orca-ready-timeout= seconds a synchronous call would
 freeze Emacs for the whole boot.
 
+CALLBACK reaches the reply translator through =apply-partially=, for
+the dynamic-binding reason spelled out under the async helper — a
+lambda closing over CALLBACK loses it before the process exits.
+
 #+BEGIN_SRC elisp
+(defun code-agent-orca--ready-reply (callback reply)
+  "Reduce REPLY from `terminal wait' to a boolean and pass it to CALLBACK."
+  (funcall callback
+           (and (not (code-agent-orca--error-code reply))
+                (eq t (alist-get 'satisfied (alist-get 'wait reply))))))
+
 (defun code-agent-orca-wait-for-ready (backend callback)
   "Wait until BACKEND's agent TUI has finished booting, then call CALLBACK.
 CALLBACK receives t when the terminal reached tui-idle, nil otherwise.
@@ -570,10 +669,7 @@ Never blocks Emacs."
              "--for" "tui-idle"
              "--timeout-ms" (number-to-string
                              (* 1000 code-agent-orca-ready-timeout)))
-       (lambda (reply)
-         (funcall callback
-                  (and (not (code-agent-orca--error-code reply))
-                       (eq t (alist-get 'satisfied (alist-get 'wait reply)))))))
+       (apply-partially #'code-agent-orca--ready-reply callback))
     (funcall callback nil)))
 #+END_SRC
 
@@ -634,13 +730,19 @@ cursor stream does not advance — Orca's own pane is the live view.
 
 *** Open Terminal Tab
 
+Launch-or-focus, matching what =code-agent-org-cmux-open-tab= has
+always done: "open the tab" reads as a single gesture to the user, and
+being told to press a different key first is a distinction only the
+implementation cares about.  An earlier version refused when no
+terminal existed; the transient menu's =I= then behaved differently
+under orca than under cmux for the same keystroke on the same kind of
+heading.
+
 #+BEGIN_SRC elisp
 (cl-defmethod code-agent-org-backend-open-terminal-tab
   ((backend code-agent-orca-backend))
-  "Raise BACKEND's Orca terminal tab."
-  (if (code-agent-multiplexer-backend-pane-id backend)
-      (code-agent-mux-focus backend)
-    (user-error "No Orca terminal for this session yet — launch it first")))
+  "Raise BACKEND's Orca terminal tab, launching the agent if none is up."
+  (code-agent-org-backend-launch backend))
 #+END_SRC
 
 *** Hook routing
@@ -651,9 +753,10 @@ turn completion or permission alerts, because both reach the
 multiplexer only through Protocol 2b generics this backend implements.
 
 Identity adoption is the exception.  cmux rebuilds identity by looking
-its workspace up by heading title; Orca regenerates tab titles from
-agent activity, so the title is not identity here.  The two ids the
-launch path wrote into properties are.
+its workspace up by heading title; Orca repaints tab titles from agent
+activity, so the title is not identity here.  The cached handle is —
+see [[#orca-handle-cache][Terminal Handle Cache]].  The worktree is not
+adopted at all: it re-resolves from the project root on first use.
 
 #+BEGIN_SRC elisp
 (declare-function code-agent-org-terminal--query-completed
@@ -677,12 +780,9 @@ launch path wrote into properties are.
 
 (cl-defmethod code-agent-org-backend-adopt-identity
   ((backend code-agent-orca-backend))
-  "Re-read BACKEND's worktree id and terminal handle from the heading."
-  (let ((worktree (org-entry-get nil "ORCA_WORKTREE" t))
-        (handle   (org-entry-get nil "ORCA_TERMINAL" t)))
-    (when worktree
-      (setf (code-agent-multiplexer-backend-multiplexer-session-id backend)
-            (string-remove-prefix "id:" worktree)))
+  "Re-read BACKEND's terminal handle from the cache for the heading at point."
+  (let ((handle (code-agent-orca--read-handle
+                 (org-entry-get nil "CLAUDE_SESSION_ID" t))))
     (when handle
       (setf (code-agent-multiplexer-backend-pane-id backend) handle))
     handle))
@@ -698,7 +798,9 @@ session so hook callbacks can find their way home.
 
 Idempotence is the contract: a session whose handle Orca still knows
 is focused, not relaunched.  Readiness is awaited asynchronously —
-a synchronous wait would freeze Emacs for the whole TUI boot.
+a synchronous wait would freeze Emacs for the whole TUI boot — and the
+handle travels into the readiness report through =apply-partially=,
+since a lambda closing over it would not survive to the callback.
 
 #+BEGIN_SRC elisp
 (declare-function code-agent-org-terminal-goto-session-heading
@@ -708,22 +810,24 @@ a synchronous wait would freeze Emacs for the whole TUI boot.
 (declare-function code-agent-org-current-session-key "code-agent-org-session" ())
 (defvar code-agent-org-terminal--workspace-to-session-key)
 
+(defun code-agent-orca--report-ready (handle ready)
+  "Report whether terminal HANDLE's TUI reached idle — READY is the verdict."
+  (message "Orca terminal %s %s" handle
+           (if ready "ready" "did not reach idle before the timeout")))
+
 (defun code-agent-orca--persist-identity (backend workspace-session-id)
-  "Write BACKEND's ids onto the session heading and register the session."
-  (let ((session-key (code-agent-org-current-session-key))
-        (worktree (code-agent-multiplexer-backend-multiplexer-session-id backend))
-        (handle   (code-agent-multiplexer-backend-pane-id backend)))
-    (save-excursion
-      (save-restriction
-        (code-agent-org-terminal-goto-session-heading)
-        (when worktree (org-set-property "ORCA_WORKTREE" (concat "id:" worktree)))
-        (when handle   (org-set-property "ORCA_TERMINAL" handle))))
+  "Cache BACKEND's terminal handle and register the session.
+Nothing is written to the heading: the worktree re-resolves from the
+project root and the handle lives in the status dir, which has the
+matching lifetime — see [[#orca-handle-cache][Terminal Handle Cache]]."
+  (let ((session-key (code-agent-org-current-session-key)))
+    (code-agent-orca--save-handle
+     workspace-session-id (code-agent-multiplexer-backend-pane-id backend))
     (when session-key
       (code-agent-org-session-put session-key :workspace-session-id workspace-session-id)
       (code-agent-org-session-put session-key :backend backend)
       (puthash workspace-session-id session-key
-               code-agent-org-terminal--workspace-to-session-key))
-    (when (buffer-file-name) (save-buffer))))
+               code-agent-org-terminal--workspace-to-session-key))))
 
 (cl-defmethod code-agent-org-backend-launch
   ((backend code-agent-orca-backend))
@@ -753,9 +857,7 @@ a synchronous wait would freeze Emacs for the whole TUI boot.
         (message "Orca terminal %s launched; waiting for the agent TUI…" handle)
         (code-agent-orca-wait-for-ready
          backend
-         (lambda (ready)
-           (message "Orca terminal %s %s" handle
-                    (if ready "ready" "did not reach idle before the timeout"))))
+         (apply-partially #'code-agent-orca--report-ready handle))
         handle))))
 #+END_SRC
 

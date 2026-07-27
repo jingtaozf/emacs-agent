@@ -55,7 +55,7 @@ The full environment stack:
 
 | Layer | Tool | What It Provides |
 |-------|------|------------------|
-| Terminal | cmux CLI | Workspace/pane/surface management, terminal I/O, browser automation |
+| Terminal | cmux CLI **or** `orca` | Workspace/worktree/pane management, terminal I/O, browser automation — detect which via `env \| grep -E '^(ORCA\|CMUX)_'`; an Orca pane has `ORCA_PANE_KEY`, a cmux pane has `CMUX_WORKSPACE_ID`. Orca's own guides: `orca skills get orca-cli`, `orca agent-context --json` |
 | Editor | `evalElisp` MCP | Full Emacs control — org-mode, buffers, variables, arbitrary Elisp |
 | Tracing | Phoenix (`localhost:6006`) | Execution traces, spans, latency — the experience store |
 
