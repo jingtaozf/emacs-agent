@@ -1176,6 +1176,79 @@ deleted by hand.
       (message "Imported %d worktree(s) as workspace headings" count))))
 #+END_SRC
 
+*** Visiting a path the agent printed
+
+Clicking a =path:line= in an Orca terminal cannot reach Emacs.  Orca
+routes every click in its terminal to its own editor — measured
+against three link forms in one pane: an OSC 8 hyperlink whose label
+is a path, one whose label carries no path at all, and a bare
+=org-protocol://= URL.  All three opened the Orca editor, and the CLI
+exposes no editor setting to redirect them.
+
+So the direction reverses: instead of the terminal pushing a file at
+Emacs, Emacs pulls the paths out of the terminal.  =terminal read=
+returns the pane's recent lines, the agent's =path:line= mentions are
+picked out of them, and the newest ones are offered for completion —
+which also beats clicking when a build just printed forty of them and
+the interesting one has scrolled past.
+
+#+BEGIN_SRC elisp
+(defconst code-agent-orca--path-line-re
+  "\\([~/.]?[[:alnum:]_./~+-]*[[:alnum:]_-]\\):\\([0-9]+\\)"
+  "Match PATH:LINE the way agents, compilers and test runners print it.
+Deliberately permissive — requiring an extension would drop
+`Makefile:12', and it is the file-existence check in
+`code-agent-orca--scan-paths' that separates a real hit from a
+timestamp or a URL port.")
+
+(defun code-agent-orca--scan-paths (lines root)
+  "Return (LABEL FILE . LINE) for each PATH:LINE in LINES, newest first.
+Relative paths resolve against ROOT, and anything that is not a real
+file is dropped — terminal output is full of `foo.py:12'-shaped text
+that names nothing on disk."
+  (let ((seen (make-hash-table :test 'equal))
+        (found nil))
+    (dolist (line lines)
+      (let ((start 0))
+        (while (string-match code-agent-orca--path-line-re line start)
+          (setq start (match-end 0))
+          (let* ((raw (match-string 1 line))
+                 (num (string-to-number (match-string 2 line)))
+                 (file (expand-file-name raw (or root default-directory)))
+                 (key (format "%s:%d" file num)))
+            (when (and (file-regular-p file) (not (gethash key seen)))
+              (puthash key t seen)
+              (push (cons (format "%s:%d" (abbreviate-file-name file) num)
+                          (cons file num))
+                    found))))))
+    found))
+
+(defun code-agent-org-orca-visit-path ()
+  "Open a PATH:LINE that this workspace's Orca terminal printed."
+  (interactive)
+  (let ((handle (save-excursion
+                  (code-agent-org-terminal-goto-session-heading)
+                  (code-agent-orca--read-handle
+                   (org-entry-get nil "CLAUDE_SESSION_ID" t)))))
+    (unless handle
+      (user-error "No Orca terminal recorded for this workspace — launch it first"))
+    (let* ((reply (code-agent-orca--call nil "terminal" "read"
+                                         "--terminal" handle "--limit" "300"))
+           (code (code-agent-orca--error-code reply)))
+      (when code (user-error "orca terminal read failed: %s" code))
+      (let* ((terminal (alist-get 'terminal reply))
+             (root (or (code-agent-org-get-project-root) default-directory))
+             (hits (code-agent-orca--scan-paths (alist-get 'tail terminal) root)))
+        (unless hits
+          (user-error "No path:line in the last 300 lines of that terminal"))
+        (let* ((choice (completing-read "Visit: " (mapcar #'car hits) nil t
+                                        nil nil (caar hits)))
+               (target (cdr (assoc choice hits))))
+          (find-file (car target))
+          (goto-char (point-min))
+          (forward-line (1- (cdr target))))))))
+#+END_SRC
+
 *** Dropping a worktree
 
 =orca worktree rm --force= deletes the checkout, the branch and git's

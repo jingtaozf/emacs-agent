@@ -262,5 +262,40 @@ nothing.  Orca's own pane is the live view."
     (should-not (code-agent-backend-supports-p b :sidebar-feedback))
     (should (code-agent-backend-supports-p b :interactive-input))))
 
+;;; ------------------------------------------------------------------
+;;; Path scanning (terminal output → visitable file:line)
+;;; ------------------------------------------------------------------
+
+(ert-deftest test-orca-scan-paths-keeps-only-real-files ()
+  "Terminal lines yield only path:line pairs that name a file on disk.
+
+Agent output is full of `foo.py:12'-shaped text that names nothing —
+a stack trace from a container, a path on someone else's machine, a
+sentence with a colon.  Offering those for completion would make the
+command useless exactly when the terminal is busy."
+  :tags '(:unit :fast :stable :orca)
+  (let* ((root (or (getenv "CODE_AGENT_TEST_ROOT") default-directory))
+         (lines (list "compiling CLAUDE.md:12 ok"
+                      "warning at nosuch-file-xyz.py:99"
+                      "again CLAUDE.md:12 (duplicate)"))
+         (hits (code-agent-orca--scan-paths lines root)))
+    (should (= 1 (length hits)))
+    (should (string-suffix-p "CLAUDE.md" (car (cdr (car hits)))))
+    (should (= 12 (cdr (cdr (car hits)))))))
+
+(ert-deftest test-orca-scan-paths-is-newest-first ()
+  "The most recently printed path is the completion default.
+
+Terminal output is chronological, so the interesting file is the one
+at the bottom; `completing-read' takes the head of this list as its
+default."
+  :tags '(:unit :fast :stable :orca)
+  (let* ((root (or (getenv "CODE_AGENT_TEST_ROOT") default-directory))
+         (hits (code-agent-orca--scan-paths
+                (list "first CLAUDE.md:1" "second Makefile:2")
+                root)))
+    (should (= 2 (length hits)))
+    (should (string-suffix-p "Makefile" (car (cdr (car hits)))))))
+
 (provide 'test-orca-backend)
 ;;; test-orca-backend.el ends here
