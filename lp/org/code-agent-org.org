@@ -442,6 +442,64 @@ interactive workspace command hangs off.
   ["" ("q" "Quit" transient-quit-one)])
 #+END_SRC
 
+** Opening a file from outside Emacs
+:PROPERTIES:
+:CUSTOM_ID: org-protocol-open-file
+:END:
+
+An agent prints =path:line= into its terminal a hundred times a day,
+and the terminal owns the click: Orca routes both plain paths and
+=file://= hyperlinks to its own editor, with no setting to redirect
+them.  A URL scheme is the one channel it hands to the operating
+system instead, so the path back to Emacs is a scheme macOS resolves
+to a handler that talks to the running server.
+
+=org-protocol= already parses the URL and dispatches on a
+sub-protocol, so nothing here re-implements query decoding.  Its
+built-in =open-source= is the wrong verb — that one maps a *published*
+URL back to a local file through =org-protocol-project-alist=; what a
+terminal emits is an absolute path that needs no mapping at all.
+
+The click lands while Orca is the frontmost application, so the
+handler ends by pulling the Emacs frame forward — visiting the file
+without raising the frame leaves the user looking at the terminal they
+clicked in.
+
+#+BEGIN_SRC elisp
+(with-eval-after-load 'org-protocol
+  (defun code-agent-org-protocol-open-file (info)
+    "Visit the file named in INFO, at its line when one is given.
+INFO is org-protocol's parsed plist, e.g. from
+=org-protocol://open-file?file=/abs/path&line=42=."
+    (let ((file (plist-get info :file))
+          (line (plist-get info :line)))
+      (when (and file (not (string-empty-p file)))
+        (find-file (expand-file-name file))
+        (when (and line (not (string-empty-p line)))
+          (goto-char (point-min))
+          (forward-line (1- (string-to-number line))))
+        (select-frame-set-input-focus (window-frame (selected-window)))))
+    ;; Returning nil keeps the client alive; org-protocol would
+    ;; otherwise treat the URL as a filename to visit.
+    nil)
+
+  (add-to-list 'org-protocol-protocol-alist
+               '("open-file"
+                 :protocol "open-file"
+                 :function code-agent-org-protocol-open-file
+                 :kill-client nil)))
+
+(defun code-agent-org-protocol-link (file &optional line)
+  "Return an OSC 8 hyperlink that opens FILE (at LINE) in this Emacs.
+Emit it from any tool whose output a terminal renders: the label stays
+=file:line=, the target is the scheme the terminal cannot swallow."
+  (let ((url (format "org-protocol://open-file?file=%s%s"
+                     (url-hexify-string (expand-file-name file))
+                     (if line (format "&line=%d" line) ""))))
+    (format "\033]8;;%s\033\\%s%s\033]8;;\033\\"
+            url (abbreviate-file-name file) (if line (format ":%d" line) ""))))
+#+END_SRC
+
 ** Keymap
 
 The keymap binds a single key to open the transient menu.
