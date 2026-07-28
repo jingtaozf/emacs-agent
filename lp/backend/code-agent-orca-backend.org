@@ -257,28 +257,70 @@ the caller's directory to the git top level, asks Orca about *that*,
 and on failure hands the caller a precise instruction instead of a
 generic error.
 
-Registration is deliberately not automatic: =orca repo add= mutates the
-user's app state and the CLI has no =repo rm=, so it is not something a
-backend should do behind the user's back.
+Registration stays the user's decision — =orca repo add= mutates the
+app's state and the CLI has no =repo rm= — but a bare instruction to
+go and type it was the wrong shape: a keystroke on a workspace heading
+turned into a trip to a terminal, and a notebook full of headings
+means that trip repeats per repository.  So the failure asks, once,
+and proceeds on a yes.
 
-*** Resolve a worktree id from a directory
+=selector_not_found= also covers three different situations, and
+telling them apart is the difference between an actionable message and
+a puzzle: the path may be no git checkout at all, a submodule (which
+Orca registers as its own repo, so the superproject being registered
+does not help), or simply a repo Orca has never seen.
 
 #+BEGIN_SRC elisp
+(defun code-agent-orca--git (dir &rest args)
+  "Run git ARGS in DIR, returning trimmed stdout, or nil on failure.
+A heading can outlive the checkout it names — a worktree removed, a
+project moved — and `call-process' signals rather than returning when
+`default-directory' does not exist, so the directory is checked first
+and a missing one is simply not a git checkout."
+  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
+    (when (file-directory-p default-directory)
+      (with-temp-buffer
+        (when (zerop (apply #'call-process "git" nil (current-buffer) nil args))
+          (string-trim (buffer-string)))))))
+
 (defun code-agent-orca--git-top-level (dir)
   "Return the git top level containing DIR, or DIR when it is not a repo."
-  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
-    (with-temp-buffer
-      (if (zerop (call-process "git" nil (current-buffer) nil
-                               "rev-parse" "--show-toplevel"))
-          (string-trim (buffer-string))
-        (directory-file-name (expand-file-name dir))))))
+  (or (code-agent-orca--git dir "rev-parse" "--show-toplevel")
+      (directory-file-name (expand-file-name dir))))
 
-(defun code-agent-orca--resolve-worktree (backend dir)
+(defun code-agent-orca--superproject (dir)
+  "Return DIR's superproject working tree when DIR is a submodule, else nil."
+  (let ((out (code-agent-orca--git dir "rev-parse" "--show-superproject-working-tree")))
+    (unless (or (null out) (string-empty-p out)) out)))
+
+(defun code-agent-orca--register-repo (backend root &optional submodule-of)
+  "Ask to register ROOT with Orca, returning non-nil once it is registered.
+SUBMODULE-OF names the superproject when ROOT is a submodule, which is
+worth saying out loud: a registered superproject does not cover it.
+The prompt mentions the one-way nature because `orca repo add' has no
+CLI counterpart."
+  (when (and (not noninteractive)
+             (yes-or-no-p
+              (format "Orca does not know %s%s.  Register it now (no CLI undo)? "
+                      (abbreviate-file-name root)
+                      (if submodule-of
+                          (format " — a submodule of %s, which Orca treats as a separate repo"
+                                  (file-name-nondirectory submodule-of))
+                        ""))))
+    (let* ((reply (code-agent-orca--call backend "repo" "add" "--path" root))
+           (code (code-agent-orca--error-code reply)))
+      (if code
+          (progn (message "orca repo add failed: %s" code) nil)
+        (message "Registered %s with Orca" (abbreviate-file-name root))
+        t))))
+
+(cl-defun code-agent-orca--resolve-worktree (backend dir &key (offer-register t))
   "Return the Orca worktree id owning DIR.
-Signals a `user-error' naming the exact `orca repo add' command when
-Orca does not know the enclosing repository — registration mutates the
-user's Orca state and is theirs to authorise."
-  (let* ((root (code-agent-orca--git-top-level dir))
+Offers to register the repository when Orca does not know it, and
+retries once after a successful registration; OFFER-REGISTER is what
+stops that retry from asking a second time."
+  (let* ((top (code-agent-orca--git dir "rev-parse" "--show-toplevel"))
+         (root (or top (directory-file-name (expand-file-name dir))))
          (reply (code-agent-orca--call backend
                                        "worktree" "show"
                                        "--worktree" (concat "path:" root)))
@@ -289,9 +331,22 @@ user's Orca state and is theirs to authorise."
         (setf (code-agent-orca-backend-worktree-path backend) root)
         id))
      ((equal code "selector_not_found")
-      (user-error
-       "Orca does not know %s. Register it first: orca repo add --path %s"
-       root root))
+      (let ((super (code-agent-orca--superproject root)))
+        (cond
+         ((null top)
+          (user-error "%s is not a git checkout — :PROJECT_ROOT: must name one"
+                      (abbreviate-file-name dir)))
+         ((and offer-register
+               (code-agent-orca--register-repo backend root super))
+          (code-agent-orca--resolve-worktree backend dir :offer-register nil))
+         (super
+          (user-error
+           "Orca does not know %s — a submodule is a separate repo to Orca.  Register it: orca repo add --path %s"
+           (abbreviate-file-name root) root))
+         (t
+          (user-error
+           "Orca does not know %s. Register it first: orca repo add --path %s"
+           root root)))))
      (t (user-error "orca worktree show failed: %s" code)))))
 #+END_SRC
 
@@ -941,22 +996,6 @@ A submodule registered on its own must win over its superproject."
         (when (and (string-prefix-p rp want) (> (length rp) best-len))
           (setq best repo best-len (length rp)))))))
 
-(defun code-agent-orca--superproject (dir)
-  "Return DIR's superproject working tree when DIR is a submodule, else nil."
-  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
-    (with-temp-buffer
-      (when (zerop (call-process "git" nil (current-buffer) nil
-                                 "rev-parse" "--show-superproject-working-tree"))
-        (let ((out (string-trim (buffer-string))))
-          (unless (string-empty-p out) out))))))
-
-(defun code-agent-orca--git (dir &rest args)
-  "Run git ARGS in DIR, returning trimmed stdout, or nil on failure."
-  (let ((default-directory (file-name-as-directory (expand-file-name dir))))
-    (with-temp-buffer
-      (when (zerop (apply #'call-process "git" nil (current-buffer) nil args))
-        (string-trim (buffer-string))))))
-
 (defun code-agent-orca--heading-roots ()
   "Map canonical =:PROJECT_ROOT:= → list of heading names across open org buffers.
 This is how a worktree learns whether some heading already claims it."
@@ -1015,10 +1054,68 @@ about and the notebook does not — the gap =import-worktrees= closes.
                           "BOARD" "AGENT" "LIVE" "REPO/WORKTREE" "BRANCH" "ORG HEADING"))
           (insert (make-string 120 ?-) "\n")
           (dolist (row rows)
-            (insert (code-agent-orca--row-line row owners) "\n")))
+            (insert (code-agent-orca--row-line row owners) "\n"))
+          (when-let* ((missing (code-agent-orca--unregistered-roots)))
+            (insert "\nUNREGISTERED — Orca cannot host a terminal in these; "
+                    "M-x code-agent-org-orca-register-roots\n")
+            (insert (make-string 120 ?-) "\n")
+            (dolist (cell missing)
+              (insert (format "%-58s %-14s %s\n"
+                              (abbreviate-file-name (car cell))
+                              (if (file-directory-p (car cell)) "" "(gone)")
+                              (string-join (cdr cell) ", "))))))
         (goto-char (point-min))
         (special-mode))
       (display-buffer buf))))
+
+(defun code-agent-orca--unregistered-roots ()
+  "Return ((ROOT . HEADINGS) …) for workspace roots Orca cannot resolve.
+A heading whose root is missing here cannot host a terminal at all, so
+this is the notebook's own pre-flight check — a dozen of them in one
+file is a discovery worth making before the twelfth keystroke fails.
+
+The test has to be Orca's own answer rather than a path comparison
+against the repo list: a linked worktree resolves fine while sitting
+at a path no registered repo is a prefix of."
+  (let ((seen (make-hash-table :test 'equal))
+        (out nil))
+    (maphash
+     (lambda (root heads)
+       (let* ((top (code-agent-orca--git-top-level root))
+              (key (code-agent-orca--canon top)))
+         (unless (gethash key seen)
+           (puthash key t seen)
+           (let ((resolvable
+                  (and (file-directory-p top)
+                       (null (code-agent-orca--error-code
+                              (code-agent-orca--call nil "worktree" "show"
+                                                     "--worktree"
+                                                     (concat "path:" top)))))))
+             (unless resolvable
+               (push (cons top heads) out))))))
+     (code-agent-orca--heading-roots))
+    out))
+
+(defun code-agent-org-orca-register-roots ()
+  "Register with Orca every workspace root it does not know yet."
+  (interactive)
+  (let ((missing (code-agent-orca--unregistered-roots)))
+    (unless missing
+      (user-error "Orca already knows every workspace root in the open notebooks"))
+    (let* ((labels (mapcar (lambda (cell)
+                             (format "%s — %s"
+                                     (abbreviate-file-name (car cell))
+                                     (string-join (cdr cell) ", ")))
+                           missing))
+           (chosen (completing-read-multiple "Register with Orca: " labels nil t))
+           (count 0))
+      (dolist (label chosen)
+        (let* ((idx (seq-position labels label))
+               (root (and idx (car (nth idx missing)))))
+          (when (and root (code-agent-orca--register-repo
+                           nil root (code-agent-orca--superproject root)))
+            (setq count (1+ count)))))
+      (message "Registered %d root(s) with Orca" count))))
 
 (defun code-agent-org-orca-worktree-status ()
   "Report Orca's live record for the worktree behind the heading at point."

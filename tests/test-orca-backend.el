@@ -234,12 +234,14 @@ one thing: the cache file keyed by CLAUDE_SESSION_ID."
   "`selector_not_found' becomes an instruction, not a raw error code.
 
 Orca hosts terminals only inside repos it has registered, and the CLI
-has no `repo rm', so the backend refuses rather than registering on the
-user's behalf.  The message has to carry the exact command."
+has no `repo rm', so the backend declines rather than registering on
+the user's behalf.  The message has to carry the exact command."
   :tags '(:unit :fast :stable :orca)
   (let ((b (code-agent-orca-backend-create :session-key "test::fixture")))
-    (cl-letf (((symbol-function 'code-agent-orca--git-top-level)
-               (lambda (_dir) "/tmp/not-registered")))
+    (cl-letf (((symbol-function 'code-agent-orca--git)
+               (lambda (_dir &rest args)
+                 (unless (member "--show-superproject-working-tree" args)
+                   "/tmp/not-registered"))))
       (test-orca--with-cli "{\"ok\":false,\"error\":{\"code\":\"selector_not_found\"}}"
         (let ((err (should-error (code-agent-orca--resolve-worktree b "/tmp/not-registered")
                                  :type 'user-error)))
@@ -261,6 +263,47 @@ nothing.  Orca's own pane is the live view."
     (should-not (code-agent-backend-supports-p b :verbose-follower))
     (should-not (code-agent-backend-supports-p b :sidebar-feedback))
     (should (code-agent-backend-supports-p b :interactive-input))))
+
+;;; ------------------------------------------------------------------
+;;; Unknown-repository diagnosis
+;;; ------------------------------------------------------------------
+
+(ert-deftest test-orca-unknown-repo-offers-registration ()
+  "A declined offer still names the exact command to run.
+
+`selector_not_found' covers three situations and one message for all
+of them is a puzzle: a path that is no checkout, a submodule (which
+Orca registers separately, so a registered superproject does not
+help), and a repo Orca simply has not seen.  Registration itself is
+offered rather than performed — `orca repo add' has no CLI undo."
+  :tags '(:unit :fast :stable :orca)
+  (let ((b (test-orca--backend))
+        (asked nil)
+        ;; The offer is suppressed under batch by design; unsuppress it so
+        ;; the test can watch for it.
+        (noninteractive nil))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (&rest _) (setq asked t) nil)))
+      ;; A directory that is no git checkout never reaches the offer.
+      (test-orca--with-cli "{\"ok\":false,\"error\":{\"code\":\"selector_not_found\"}}"
+        (cl-letf (((symbol-function 'code-agent-orca--git) (lambda (&rest _) nil)))
+          (let ((err (should-error (code-agent-orca--resolve-worktree b "/nowhere")
+                                   :type 'user-error)))
+            (should (string-match-p "not a git checkout" (error-message-string err))))))
+      (should-not asked)
+      ;; An unregistered repo asks first, then names the command.
+      (test-orca--with-cli "{\"ok\":false,\"error\":{\"code\":\"selector_not_found\"}}"
+        (cl-letf (((symbol-function 'code-agent-orca--git)
+                   (lambda (_dir &rest args)
+                     (when (equal (car args) "rev-parse")
+                       (if (member "--show-superproject-working-tree" args)
+                           nil
+                         "/tmp/some-repo")))))
+          (let ((err (should-error (code-agent-orca--resolve-worktree b "/tmp/some-repo")
+                                   :type 'user-error)))
+            (should (string-match-p "orca repo add --path /tmp/some-repo"
+                                    (error-message-string err))))))
+      (should asked))))
 
 ;;; ------------------------------------------------------------------
 ;;; Path scanning (terminal output → visitable file:line)
