@@ -1,335 +1,64 @@
-# -*- encoding:utf-8 Mode: POLY-ORG;  -*- ---
-#+Startup: noindent
-#+PROPERTY: header-args :results silent :eval no-export :comments org
-#+OPTIONS: num:nil toc:2 todo:nil tasks:nil tags:nil
-#+OPTIONS: skip:nil author:nil email:nil creator:nil timestamp:t
-#+PROPERTY: literate-lang elisp
-#+PROPERTY: literate-load yes
-#+TITLE: Emacs Claude Agent
-#+DESCRIPTION: Org files as the control plane for code agents running in cmux/tmux terminals
-#+AUTHOR: Jingtao Xu
+#+TITLE: emacs-agent — Emacs MCP server + custom in-Emacs agents
 
-* North Star
-:PROPERTIES:
-:CUSTOM_ID: north-star
-:END:
+An MCP (Model Context Protocol) HTTP server that exposes Emacs itself
+as a tool surface to external coding agents — Claude Code, Pi, or any
+MCP client — plus the home for custom in-Emacs agents built on top of
+it.  Sources are literate org files loaded directly via
+[[https://github.com/jingtaozf/literate-elisp][literate-elisp]]; the .org file IS the source.
 
-emacs-agent turns org files into the control plane for code agents:
-org headings define workspaces (=:CMUX_WORKSPACE:=/=:CLAUDE_SESSION_ID:=
-properties), agents run in cmux/tmux terminals, Emacs
-launches/restarts/monitors them — anything about rendering
-conversations or replicating a TUI belongs to the agent's own
-terminal (open via =I=).
+The repo was deliberately narrowed on 2026-08-13: the previous
+generation of features (cmux/tmux/orca terminal backends, org
+workspace management, python bridge, IDE bridge) is preserved intact
+on the =legacy-2026-08-13= branch.
 
-* Quickstart
-:PROPERTIES:
-:CUSTOM_ID: quickstart
-:END:
-
-#+begin_src bash
-git clone https://github.com/jingtaozf/emacs-agent.git ~/projects/emacs-agent
-brew install cmux tmux jq          # cmux recommended; tmux works cross-platform
-cd ~/projects/emacs-agent/python
-uv sync --extra dev                # installs workspace-bridge into .venv
-#+end_src
-
-Minimal Emacs config (init.el):
+* Quick start
 
 #+begin_src elisp
+;; deps: literate-elisp, web-server
 (add-to-list 'load-path "~/projects/emacs-agent")
-(require 'code-agent)              ; loads every LP module under lp/
-(add-hook 'org-mode-hook
-          (lambda ()
-            (when (string-match-p "\\.dev\\.org$" (or buffer-file-name ""))
-              (code-agent-org-mode 1))))
+(require 'code-agent)          ; loads trace + MCP server modules
+(emacs-mcp-server-start)       ; HTTP server at localhost:9999
 #+end_src
 
-Create your first workspace:
-
-1. Open any =foo.dev.org= file → =code-agent-org-mode= activates
-   (auto-starts the MCP server, see [[#mcp-server][MCP Server]]).
-2. =C-c C-/ n= — insert a new workspace heading.  Prompts for a name,
-   then inserts =:CMUX_WORKSPACE:=, =:CLAUDE_BACKEND: cmux=, and
-   =:CLAUDE_SESSION_ID:= properties on a new top-level heading.
-3. =C-c C-/ r= — launch (or restart) the agent in a cmux pane for
-   this workspace.
-4. =C-c C-/ s= — show status: which session key maps to which
-   cmux workspace.
-5. =C-c C-/ I= — open the cmux tab.  This is where you actually talk
-   to the agent — Emacs does not render the conversation itself.
-
-For the full command surface, =C-c C-/= opens a transient menu with
-every workspace / IDE / backend command below.
-
-** Where to look next
-
-| If you want to | Go to |
-|---+---|
-| Understand module layout + load order | [[file:ARCHITECTURE.org][ARCHITECTURE.org]] |
-| Pick an agent profile (claude / copilot / opencode / pi) | [[#agent-profiles][Agent Profiles]] |
-| Configure permissions (=:CLAUDE_PERMISSION_MODE:=) | [[#permission-modes][Permission Modes]] |
-| Use the tmux backend instead of cmux | [[#tmux-backend][tmux Backend]] |
-| Hack on the SDK itself | [[file:CLAUDE.md][CLAUDE.md]] + [[file:ARCHITECTURE.org][ARCHITECTURE.org]] + [[file:RATIONALE.md][RATIONALE.md]] |
-
-* Introduction
-:PROPERTIES:
-:CUSTOM_ID: introduction
-:END:
-
-** What is this?
-
-An Emacs package that manages code agents (Claude Code, GitHub
-Copilot CLI, OpenCode, Pi) as external processes running inside
-cmux or tmux terminal panes.  Emacs org-mode owns the *workspace
-model* — which heading maps to which terminal, which project
-directory, which permission mode — and provides lifecycle commands
-(launch, restart, cancel, status, open-tab).  It does **not** render
-the agent's conversation inline; that lives in the agent's own TUI,
-one keystroke away via =I=.
-
-** Why org headings as the control plane?
-
-Org properties are inherited, human-editable, and already how you
-organize project notes.  A workspace is just a heading with
-=:CMUX_WORKSPACE:=, =:CLAUDE_BACKEND:=, and =:CLAUDE_SESSION_ID:=
-properties — no separate config file, no separate UI to learn.
-Section-level property drawers let different headings in the same
-file target different projects, permission modes, or agent profiles.
-
-* Core Concepts
-:PROPERTIES:
-:CUSTOM_ID: core-concepts
-:END:
-
-** Workspace Model
-
-A *workspace* is an org heading carrying:
-
-| Property | Meaning |
-|----------+---------|
-| =:CMUX_WORKSPACE:= | Name of the cmux workspace this heading owns |
-| =:CLAUDE_BACKEND:= | =cmux= (default) or =tmux= — which multiplexer launches the agent |
-| =:CLAUDE_SESSION_ID:= | Session identifier, auto-generated as =sdd-<timestamp>= |
-| =:AGENT_TYPE:= | Which agent profile to launch: =claude= (default), =copilot=, =opencode=, or =pi= |
-| =:PROJECT_ROOT:= | Where to spawn the CLI process; inherited from parent headings, falls back to =default-directory= |
-| =:CLAUDE_PERMISSION_MODE:= | See [[#permission-modes][Permission Modes]] |
-
-=C-c C-/ n= (=code-agent-org-new-workspace=) inserts the first three
-properties on a fresh heading.  Everything else is optional and
-inherits down the org tree, so a file-level =#+PROPERTY: PROJECT_ROOT
-/path/to/project= applies to every workspace heading below it unless
-overridden per-section.
-
-** Transient Menu (=C-c C-/=)
-
-| Key | Command | Effect |
-|-----+---------+--------|
-| =n= | =code-agent-org-new-workspace= | Insert a new workspace heading |
-| =r= | =code-agent-org-cmux-restart= | Launch or restart the agent for this workspace |
-| =c= | =code-agent-org-cmux-cancel= | Cancel the in-flight operation |
-| =s= | =code-agent-org-cmux-show-status= | Show session key → workspace mapping |
-| =I= | =code-agent-org-open-terminal-tab= | Open (or focus) the cmux/tmux tab — where the conversation actually happens |
-| =P= | =code-agent-org-switch-permission-mode= | Cycle =:CLAUDE_PERMISSION_MODE:= |
-| =e= | =code-agent-org-ide-start= | Manually start the IDE WebSocket server (normally automatic, see below) |
-| =x= | =code-agent-org-ide-stop= | Stop the IDE WebSocket server |
-| =T= | =toggle-truncate-lines= | Toggle line wrap |
-| =o= | =code-agent-trace-open-phoenix= | Open the Phoenix tracing UI |
-
-** Agent Profiles
-
-Four agent profiles are registered
-(=code-agent-org-cmux--agent-profiles=), selected per-workspace via
-=:AGENT_TYPE:=:
-
-| Profile | Ready pattern | Busy pattern | Resume | IDE server | System prompt |
-|---------+---------------+--------------+--------+------------+----------------|
-| =claude= (default) | "type a message", "-- INSERT --" | "Tool:", "Thinking", "esc to interrupt" | yes | yes | yes |
-| =copilot= | "> ", "copilot>" | "Thinking...", "Running ", "●" | yes | no | no |
-| =opencode= | "❯", "opencode>" | "thinking", "running", "Generating" | yes | no | yes |
-| =pi= | "tok", "(auto)", "❯" | "Thinking", "esc to interrupt" | yes | no | yes |
-
-Each profile pairs a launch function with *ready*/*busy* regexes
-matched against the captured cmux pane text — this is how Emacs
-knows whether the agent is waiting for input or still working,
-without parsing any structured protocol.  =:cancel-keys:= sends the
-right interrupt sequence per agent (=escape= for Claude/Pi, =C-c= for
-Copilot/OpenCode).
-
-** Status Detection
-
-Two independent signals feed workspace status, and neither involves
-Emacs rendering the conversation:
-
-1. *Terminal pattern matching* — the ready/busy regexes above,
-   matched against the cmux pane's captured screen text on each
-   poll.  This is what backs the header-line spinner.
-2. *Hook-file permission signals* — Claude Code's =hooks.json=
-   fires =PreToolUse=/=PostToolUse= for every tool call.
-   =python/code_agent/workspace_bridge.py= filters this down to two
-   interactive tools (=AskUserQuestion=, =ExitPlanMode=) and notifies
-   Emacs over MCP so the mode-line can surface "waiting for your
-   answer" — every other tool call is intentionally silent to avoid
-   flooding Emacs's single-threaded main loop (see
-   [[file:.claude/rules/minimize-emacs-mcp-calls.md][minimize-emacs-mcp-calls.md]]).
-
-** Permission Modes
-
-The org property =CLAUDE_PERMISSION_MODE= selects one of four
-presets, each mapping to a Claude CLI =--permission-mode= value:
-
-| Preset | CLI value | Short |
-|--------+-----------+-------|
-| =readonly= (default) | =default= | RO |
-| =accept-edits= | =acceptEdits= | ED |
-| =plan= | =plan= | PL |
-| =bypass= | =bypassPermissions= | BP |
-
-=C-c C-/ P= cycles presets on the current workspace; the value is
-read-mostly at launch time — changing it while an agent is already
-running takes effect on the next restart.
-
-* IDE Integration
-:PROPERTIES:
-:CUSTOM_ID: ide-integration
-:END:
-
-Claude Code's =--ide= flag lets the CLI connect back to Emacs over a
-WebSocket for open-editor / selection / diagnostics context.
-=lp/ide/claude-ide.org= implements the Emacs side — one WebSocket
-server per cmux workspace (never one global server, which would let
-every Claude instance see every workspace's files).
-
-Lifecycle is fully automatic and gated by each agent profile's
-=:supports-ide:= slot — today only =claude= has it (=t=); copilot,
-opencode, and pi launches skip it entirely:
-
-- =code-agent-org-cmux--ensure-ide-server= fires before every cmux
-  launch, restore, and post-restart setup for an IDE-capable profile.
-  It writes a lockfile under =~/.claude/ide/= that the CLI discovers
-  via =--ide=.
-- =C-c C-/ e= / =x= (=code-agent-org-ide-start=/=-ide-stop=) exist for
-  manual control (e.g. restarting the server without restarting the
-  whole agent), but you normally never need them.
-
-If Emacs crashes, a stale lockfile can linger in =~/.claude/ide/= —
-delete it manually to reset.
-
-* Pi Profile
-:PROPERTIES:
-:CUSTOM_ID: pi-backend
-:END:
-
-[[https://github.com/earendil-works/pi][pi.dev]] (15+ LLM providers, configured machine-globally in
-=~/.pi/agent/settings.json=) runs as a cmux agent profile — set
-=:AGENT_TYPE: pi= on a =:CLAUDE_BACKEND: cmux= workspace and
-=C-c C-/ r= launches Pi's TUI in a cmux pane, same as Claude Code,
-Copilot, or OpenCode.
-
-Pi also loads a global =emacs-mcp= TypeScript extension
-(=make tangle-pi-extension= → writes
-=~/.pi/agent/extensions/emacs-mcp.ts=) so the LLM running inside Pi
-can read buffers, navigate org headings, and get properties via tool
-calls — this extension applies regardless of how Pi was launched, but
-today's only live consumer is the cmux profile.  Details in
-[[file:lp/backend/code-agent-pi-extensions.org::#pi-extensions-file-overview][code-agent-pi-extensions.org]].
-
-*Known gap*: a prompt typed directly in the cmux pane does not
-currently round-trip back into the org buffer.  The wiring
-(=attachCmuxResponseBridge=) existed once but its Python-side handler
-was removed when =workspace_bridge.py= was trimmed to permission-only;
-the dangling extension-side call was removed rather than restored,
-since restoring it alone would not make the round-trip work again.
-Rebuilding this needs fresh design on both ends — see the "Known gap"
-note in =code-agent-pi-extensions.org= for the full history.
-
-* tmux Backend
-:PROPERTIES:
-:CUSTOM_ID: tmux-backend
-:END:
-
-Set =:CLAUDE_BACKEND: tmux= for a cross-platform alternative to cmux
-(cmux is macOS-native; tmux runs anywhere tmux does).
-=lp/backend/code-agent-multiplexer.org= defines the shared abstract
-base (Protocol 2b: send-text / capture-screen / wait-for-ready) that
-both =code-agent-cmux-backend.org= and =code-agent-tmux-backend.org=
-implement — the tmux backend drives =tmux send-keys= /
-=capture-pane= / =pipe-pane= instead of the cmux CLI, but presents the
-same workspace properties and transient-menu commands described
-above.  IDE server integration and Pi's response-bridge gap do not
-apply to tmux workspaces (both are cmux-specific today).
-
-* MCP Server
-:PROPERTIES:
-:CUSTOM_ID: mcp-server
-:END:
-
-=code-agent-org-mode= auto-starts an MCP HTTP server
-(=lp/sdk/emacs-mcp-server.org=) exposing two built-in tools to any
-agent that connects (Claude Code CLI, Pi's extension, etc.):
-
-| Tool | Purpose |
-|------+---------|
-| =evalElisp= | Evaluate an Emacs Lisp expression and return the result — the single tool for all Emacs operations (buffer read/write, navigation, property inspection). Point/buffer/window state is restored after every call unless =save_current_state: false= is passed. |
-| =report_invocation= | Report when a skill or rule is being invoked, for real-time monitoring of agent behavior. |
-
-Manual control:
-
-#+begin_src elisp :load no
-(code-agent-org--ensure-mcp-server)   ; start
-(emacs-mcp-server-stop)               ; stop
-#+end_src
-
-* Configuration Reference
-:PROPERTIES:
-:CUSTOM_ID: configuration-reference
-:END:
-
-#+begin_src elisp :load no
-;; Claude CLI binary path (nil = auto-detect via PATH + common locations)
-(setq code-agent-cli-path nil)
-
-;; Default permission preset when a workspace has no CLAUDE_PERMISSION_MODE
-(setq code-agent-permission-preset "readonly")
-
-;; Default agent profile for new cmux workspaces (nil defers to :AGENT_TYPE:)
-(setq code-agent-org-cmux-agent-type nil)
-#+end_src
-
-Claude Code supports loading custom skills from =~/.claude/skills/=
-(markdown files in subdirectories) — =code-agent-org-setting-sources=
-controls which tiers (user/project/local) get merged in.
-
-* Architecture
-:PROPERTIES:
-:CUSTOM_ID: architecture
-:END:
-
-Module layout, load order, the tri-protocol backend design
-(lifecycle / agent-wire / multiplexer-wire), invariants, and
-extension points all live in [[file:ARCHITECTURE.org][ARCHITECTURE.org]] — read
-that before making structural changes.  Design rationale and
-rejected alternatives are in [[file:RATIONALE.md][RATIONALE.md]].
-Day-to-day conventions (testing, literate-programming rules, secrets
-handling) are in [[file:CLAUDE.md][CLAUDE.md]].
-
-* Running Tests
-:PROPERTIES:
-:CUSTOM_ID: running-tests
-:END:
+Point an MCP client at =http://localhost:9999/mcp=.  For Claude Code:
 
 #+begin_src bash
-make test-smoke          # syntax check, loads all .org files (< 2s)
-make test-unit           # unit tests (~13s)
-make lint                # static analysis
-make check                # lint + test-unit + test-org-unit + test-python (pre-commit gate)
+claude mcp add --transport http emacs http://localhost:9999/mcp
 #+end_src
 
-See [[file:CLAUDE.md][CLAUDE.md]] for the full command reference and
-[[file:.claude/rules/e2e-harness-dev-env.md][e2e-harness-dev-env.md]] for the live cmux + Emacs E2E harness.
+For Pi, tangle the bundled extension once — it reads =EMACS_MCP_URL=
+and gives every Pi session the same Emacs tools:
 
-* License
-:PROPERTIES:
-:CUSTOM_ID: license
-:END:
+#+begin_src bash
+make tangle-pi-extensions   # → ~/.pi/agent/extensions/{emacs-mcp,doom-loop}.ts
+#+end_src
 
-MIT
+* What's here
+
+| Path | Role |
+|------+------|
+| =lp/sdk/emacs-mcp-server.org= | The MCP server: evalElisp, report_invocation, … |
+| =lp/trace/code-agent-trace.org= | OTel span macros used by the server |
+| =lp/backend/code-agent-pi-extensions.org= | Pi TS extensions (tangle): =emacs-mcp.ts=, =doom-loop.ts= |
+| =lp/_drafts/draft.org= | Design queue — org-ai-agent-pi-topics proposal |
+| =docs/images/= | Design diagrams |
+
+* Development
+
+#+begin_src bash
+make lint        # static analysis
+make test-unit   # mcp + mode-line + otel unit tests
+make check       # lint + test-unit (pre-commit gate)
+#+end_src
+
+See =CLAUDE.md= for agent-facing rules and =ARCHITECTURE.org= for the
+module map.
+
+* Roadmap — org AI agent
+
+The next feature is *org-ai-agent-pi-topics*: org headings as
+concurrent Pi chat topics — Goal/Result durable in org, live chat via
+an embedded [[https://github.com/dnouri/pi-coding-agent][pi-coding-agent]] buffer pair, full transcript in Pi's
+session JSONL, GTD-aligned lifecycle (=SOMEDAY/TODO/NEXT/WAITING/
+REVIEW/DONE=) surfaced through org-agenda.  Full proposal with
+diagrams: =lp/_drafts/draft.org= § =2026-08-13-org-ai-agent-pi-topics=.

@@ -1,76 +1,14 @@
-#+TITLE: lp/ — Literate-Programming Tree Index
+# -*- mode: org; -*-
+#+TITLE: LP Source Index
 
-The =lp/= subtree is the canonical home of every literate-programming
-=.org= source in this repo.  Modules group by *role* — see each
-group's README for the role-level overview and the per-module table.
+Literate sources under =lp/<group>/=, loaded via =literate-elisp=
+(the .org file IS the source; no tangle except the Pi TS extensions).
+Everything deleted in the 2026-08-13 cleanup lives on the
+=legacy-2026-08-13= branch.
 
-* Groups
-
-| Group | What it owns | README |
-|-------+--------------+--------|
-| /sdk/ | Core SDK contracts: backend protocol, Python tangle source, IDE context collector, permission machinery, MCP server | [[file:sdk/README.org][sdk/README.org]] |
-| /backend/ | Concrete backends — multiplexers (cmux/tmux), Pi RPC | [[file:backend/README.org][backend/README.org]] |
-| /org/ | Org-mode integration — workspace management, session lifecycle, cmux/tmux backends, header-line | [[file:org/README.org][org/README.org]] |
-| /chat/ | Core SDK — process management, query API, activity/rate-limit mode-lines (embedded-chat helpers removed in the pivot) | [[file:chat/README.org][chat/README.org]] |
-| /ide/ | VS Code / JetBrains IDE server bridge over WebSocket | [[file:ide/README.org][ide/README.org]] |
-| /trace/ | OpenTelemetry tracing primitives — =code-agent-trace-with-span= macro family | [[file:trace/README.org][trace/README.org]] |
-| /_drafts/ | Design notes / proposals — not part of the load order; Jekyll-style underscore prefix excludes from build | n/a |
-
-* Read order for first-time readers
-
-1. =ARCHITECTURE.org= (top of repo) — Module Boundary Diagram +
-   invariants + extension points.
-2. =lp/INDEX.org= (this file) — pick the group whose README to read.
-3. The group's =README.org= — picks the module within the group.
-4. The module's =* Overview= section — motivation + invariant.
-
-* Load order (enforced by =code-agent.el=)
-
-The high-level group order is:
-
-1. =lp/trace/= — macros must exist before any consumer compiles.
-2. =lp/sdk/= — protocol generics + backend abstract base.
-3. =lp/backend/= — concrete backends register =cl-defmethod=
-   against /sdk/ generics.
-4. =lp/org/= — top-level integration; loads sub-modules in
-   internal-order.
-5. =lp/chat/= — independent of /org/; loads at any point after /sdk/.
-6. =lp/ide/= — independent of everything except minimal /sdk/ surface.
-
-** Per-module load sequence
-
-The full enumerated sequence enforced by =code-agent.el=, with
-"why this position" for each module:
-
-| Order | Module | Why this position |
-|-------+--------+-------------------|
-|     0 | [[file:trace/code-agent-trace.org][trace/code-agent-trace]] | OTel tracing macros — must compile before any consumer expands a =code-agent-with-span= |
-|     1 | [[file:sdk/code-agent-backend.org][sdk/code-agent-backend]] | SDK core: protocol generics, session/process state, active-query tracking + cancellation |
-|     3 | [[file:sdk/code-agent-ide.org][sdk/code-agent-ide]] | IDE-context envelope builder, no other deps |
-|     4 | [[file:chat/code-agent.org][chat/code-agent]] | Package shell + activity / rate-limit mode-lines, needs 1, 3 |
-|   4.5 | [[file:org/code-agent-org-customize.org][org/code-agent-org-customize]] | All defcustoms + hook defvars (zero deps, loaded first within /org/) |
-|     5 | [[file:org/code-agent-org-session.org][org/code-agent-org-session]] | Typed session-state struct, needs 4.5 |
-|   5.2 | [[file:org/code-agent-org-session-context.org][org/code-agent-org-session-context]] | Session-context collector + recovery, needs 5 |
-|   5.5 | [[file:org/code-agent-org-env-permission.org][org/code-agent-org-env-permission]] | ENV file parser + permission-mode resolver, needs 4.5 |
-|   5.7 | [[file:org/code-agent-org-project-prompts.org][org/code-agent-org-project-prompts]] | PROJECT_ROOT + system-prompt assembly, needs 4.5 |
-|   5.95 | [[file:org/code-agent-org-workspace.org][org/code-agent-org-workspace]] | Workspace navigation, needs 5.2 |
-|   7.5 | [[file:org/code-agent-org-process.org][org/code-agent-org-process]] | Persistent client registry + backend dispatch, needs 5 |
-|     8 | [[file:org/code-agent-org.org][org/code-agent-org]] | Top-level org integration — workspace management minor mode + transient menu |
-|   8.5 | [[file:org/code-agent-org-header-line.org][org/code-agent-org-header-line]] | Header-line UI, needs 8 |
-|  10.6 | [[file:org/code-agent-org-terminal-base.org][org/code-agent-org-terminal-base]] | Shared cmux/tmux helpers, needs 4 |
-|    11 | [[file:org/code-agent-org-cmux.org][org/code-agent-org-cmux]] | cmux terminal backend, needs 10.6 |
-|    12 | [[file:backend/code-agent-multiplexer.org][backend/code-agent-multiplexer]] | Multiplexer family base + Protocol 2b generics |
-|    12.1 | [[file:backend/code-agent-cmux-backend.org][backend/code-agent-cmux-backend]] | cmux concrete multiplexer backend |
-|    12.2 | [[file:backend/code-agent-tmux-backend.org][backend/code-agent-tmux-backend]] | tmux concrete multiplexer backend |
-|    12.3 | [[file:backend/code-agent-orca-backend.org][backend/code-agent-orca-backend]] | Orca concrete multiplexer backend |
-|    13.5 | [[file:backend/code-agent-pi-extensions.org][backend/code-agent-pi-extensions]] | Tangle source for Pi-side TS extensions: emacs-mcp + doom-loop (no Elisp load) |
-|    14 | [[file:sdk/emacs-mcp-server.org][sdk/emacs-mcp-server]] | Independent MCP server, loaded last |
-|   opt | [[file:sdk/code-agent-python.org][sdk/code-agent-python]] | Tangle source for =python/code_agent/*= (no Elisp load) |
-|   opt | [[file:ide/claude-ide.org][ide/claude-ide]] | WebSocket IDE bridge (needs =websocket= pkg) |
-
-* See also
-
-- =ARCHITECTURE.org= — repo-level architecture map.
-- =CLAUDE.md= — agent doctrine + commands.
-- =RATIONALE.md= — "why we decided X" log.
-- =CODEBASE-REVIEW.org= — prioritised tech-debt backlog.
+| File | Role |
+|------+------|
+| [[file:trace/code-agent-trace.org][trace/code-agent-trace.org]] | OTel span macros (no deps; loaded first) |
+| [[file:sdk/emacs-mcp-server.org][sdk/emacs-mcp-server.org]] | MCP HTTP server at localhost:9999 — exposes Emacs tools (evalElisp, report_invocation, …) to external agents |
+| [[file:backend/code-agent-pi-extensions.org][backend/code-agent-pi-extensions.org]] | Pi TS extensions tangled to =~/.pi/agent/extensions/=: =emacs-mcp.ts= (Pi → Emacs MCP client) + =doom-loop.ts= |
+| [[file:_drafts/draft.org][_drafts/draft.org]] | Design proposal queue — see § 2026-08-13-org-ai-agent-pi-topics |

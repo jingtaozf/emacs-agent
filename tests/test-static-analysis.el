@@ -216,10 +216,6 @@ top-level .org into a subdir.  Falls back to .git, then cwd."
 
 (defvar test-static--source-files
   '("lp/trace/code-agent-trace.org"
-    "lp/chat/code-agent.org"
-    "lp/org/code-agent-org.org"
-    "lp/org/code-agent-org-terminal-base.org"
-    "lp/org/code-agent-org-cmux.org"
     "lp/sdk/emacs-mcp-server.org")
   "List of .org source files to analyze, repo-relative.
 Load order matters: workspace-bridge and terminal-base before backends.
@@ -504,7 +500,7 @@ Files with missing optional dependencies are skipped if
     (should (> loaded 0))))
 
 (defvar test-static--known-forward-declarations
-  '("code-agent-org-terminal--workspace-to-session-key")
+  '()
   "Symbols that appear as forward declarations (defvar without init value)
 in one file and full definitions in another. Excluded from duplicate checks.")
 

@@ -1,200 +1,53 @@
 #+TITLE: Architecture
-#+DESCRIPTION: Meta-map for code-agent — navigational aid for what falls between literate documents
+#+DESCRIPTION: Meta-map for emacs-agent — cross-module concerns only
 
-This file covers ONLY cross-module concerns. Each .org file documents
-itself. *Tri-protocol refactor Phases 0–4 shipped* (2026-04-24); the
-full design lives in =code-agent-backend.org= → "Tri-Protocol
-Architecture"; this file's "Tri-Protocol Architecture" section below
-is the meta-map summary.
+Each .org file documents itself; this file covers only what falls
+between them.  The 2026-08-13 cleanup narrowed the repo to the Emacs
+MCP server; the full pre-cleanup architecture (tri-protocol backends,
+org workspace layer, python bridge) is preserved on the
+=legacy-2026-08-13= branch and in that branch's ARCHITECTURE.org.
 
 * Layout — =lp/<group>/= subtree
 
-| Group | Role | Examples |
+| Group | Role | Contents |
 |---+---+---|
-| =lp/trace/= | tracing macros (no deps) | code-agent-trace |
-| =lp/sdk/= | core SDK + Python bridge + MCP server | backend, ide, python, emacs-mcp-server |
-| =lp/chat/= | UI/coordination + comint utilities | code-agent, chat, translate, title, refine |
-| =lp/org/= | org-mode integration | 17 =code-agent-org-*= modules |
-| =lp/backend/= | concrete backends (tri-protocol) | multiplexer, cmux, tmux, acp-*, pi-* |
-| =lp/ide/= | optional websocket IDE | claude-ide |
+| =lp/trace/= | tracing macros (no deps, loaded first) | code-agent-trace |
+| =lp/sdk/= | MCP server | emacs-mcp-server |
+| =lp/backend/= | Pi-side TS extensions (tangle-only) | code-agent-pi-extensions |
 | =lp/_drafts/= | design proposals queue | draft.org |
 
 =code-agent.el= loader searches the repo root + every =lp/*/= subdir,
-so caller code stays layout-agnostic.  Cross-file links inside .org
-use repo-relative =[[file:lp/<group>/X.org]]= form.
+so caller code stays layout-agnostic.
 
-* Module Boundary Diagram
+* Module boundaries
 
 #+begin_example
-  Entry: code-agent.el (loads all modules in order below)
-  ─────────────────────────────────────────────────────────
-
-  ┌─────────────────────────────────────────────────────────────┐
-  │ TOP: lp/org/code-agent-org.org                              │
-  │   Org integration — AI blocks, streaming, execution         │
-  │   Depends on: code-agent, org sub-modules                   │
-  └──────────────────────┬──────────────────────────────────────┘
-                         │ requires
-  ┌──────────┬───────────┼───────────┬───────────┐
-  │ session  │  queue    │ response  │ scheduled │     (lp/org/*)
-  │  .org    │  .org     │  .org     │  .org     │
-  └──────────┴───────────┼───────────┴───────────┘
-                         │ all depend on
-  ┌──────────────────────┴──────────────────────────────────────┐
-  │ lp/chat/code-agent.org  (thin UI/coordination layer)        │
-  │   Mode-lines, package shell                                  │
-  │   Loads: backend, ide                                        │
-  └──────────────────────┬──────────────────────────────────────┘
-                         │ depends on
-  ┌──────────────────────┴──────────────────────────────────────┐
-  │ lp/sdk/code-agent-backend.org  (protocol + session utilities)│
-  │   Customization, session mgmt, process state,                │
-  │   active-query tracking + cancellation, backend protocol     │
-  │   (Protocol 1 generics + Protocol 3 org-integration)          │
-  └───┬───────────────────────────────────────────────────────────┘
-      │ cross-module dep
-  ┌───┴──────────────────┐
-  │ lp/sdk/               │
-  │ ide.org               │
-  │ (Buffer Context)      │
-  └───────────────────────┘
-  BOTTOM LAYER: no cross-dependencies
-  (independent / utility / optional: see Layout table above)
+  code-agent.el
+    └─ lp/trace/code-agent-trace.org    (span macros)
+         └─ lp/sdk/emacs-mcp-server.org (MCP HTTP server :9999)
+              ▲ HTTP
+  external agents ──────────────────────┘
+    Claude Code (mcp__emacs__evalElisp …)
+    Pi via ~/.pi/agent/extensions/emacs-mcp.ts
+      (tangled from lp/backend/code-agent-pi-extensions.org)
 #+end_example
-
-Full per-module load sequence (all 41 modules with rationale) lives
-in [[file:lp/INDEX.org::*Per-module load sequence][lp/INDEX.org § Per-module load sequence]] — kept there so this
-file stays a meta-map, not a per-module catalogue.
-
-High-level position:
-
-| Order | Group | Why |
-|-------+-------+-----|
-|   0   | =lp/trace/= | Macros must compile before consumers |
-|   1-3 | =lp/sdk/= | Protocol generics + IDE context |
-|   4   | =lp/chat/= entry (=code-agent.org=) | Activity / rate-limit mode-lines |
-|   5-11 | =lp/org/= | Org integration sub-modules in dependency order |
-|  12-13 | =lp/backend/= | Concrete multiplexer + ACP backends |
-|   14  | =lp/sdk/emacs-mcp-server= | Independent MCP server, loaded last |
-|   opt | =lp/chat/= helpers, =lp/ide/=, =lp/sdk/code-agent-python= tangle | Opt-in / not-loaded |
 
 * Invariants
 
-- Every public function has a docstring
-- Every test file appears in a Makefile target
-- Session state lives in hash tables, never global variables
-- Process filters/sentinels wrapped in condition-case (F36 enforces)
-- All code lives in =#+begin_src elisp= blocks (literate-elisp requirement)
-- Timer callbacks check liveness before operating on process/buffer
-- Test failures include =FIX:= remediation messages
+- The MCP server runs on Emacs's main thread: every handler must be
+  fast (< 2 s) and must never signal out of a process filter.
+- Only interactive tools warrant MCP calls from hooks — Emacs is
+  contacted when it owns state to update, never per-tool-use
+  (=minimize-emacs-mcp-calls= rule, kept from the pre-cleanup era).
+- Trace macros load before any module that uses them; changing a
+  macro requires reloading every consumer module.
 
-* Absence Constraints
+* Extension points
 
-| Constraint                                      | Why                                    |
-|-------------------------------------------------+----------------------------------------|
-| code-agent.org has no org-mode dependency      | Core SDK must work without org         |
-| emacs-mcp-server.org has no claude-* dependency  | Reusable as standalone MCP server      |
-| No circular dependencies between modules         | Load order would break                 |
-| No hardcoded paths in test files                 | Portable CI                            |
-| literate-elisp ignores lexical-binding: t        | Use lexical-let for closures           |
-| Tests never live inside .org files               | Always in tests/*.el                   |
-| No global mutable state                          | Session state keyed by buffer-local    |
-| No iTerm2 references in source .org files        | Backend removed; use generic terms     |
-| No standalone =code-agent--active-states= var  | Registry is sole owner; prevents split-brain |
-| No unguarded =(if parsed ...)= in JSON dispatch | Must check =(listp parsed)= first; bare JSON crashes |
-
-* Extension Points
-
-| To add...              | Go here                                                    |
-|------------------------+------------------------------------------------------------|
-| New agent backend      | Subclass =code-agent-backend= directly (or =code-agent-acp-backend= for ACP profiles); register in =code-agent-org-backend-registry= (see =code-agent-pi-backend.org=) |
-| New Pi extension tool  | Add =*** tool= subsection under =* Extension: emacs-mcp= in =code-agent-pi-extensions.org=; =make tangle-pi-extensions= |
-| New Pi extension (whole)| Add a top-level =* Extension: <name>= section with its own =:header-args:typescript :tangle ~/.pi/agent/extensions/<name>.ts:= in =code-agent-pi-extensions.org=; teach =Makefile= about the new output if you want CI to enforce it |
-| New multiplexer backend| Subclass =code-agent-multiplexer-backend=; register in =code-agent-org-backend-registry= |
-| New MCP tool           | Call =emacs-mcp-server-register-tool= from any module      |
-| New structural test    | Add =ert-deftest= to test-structural.el with =FIX:= msg   |
-| New org sub-module     | Create code-agent-org-NAME.org, add to code-agent.el/Makefile |
-| New test file          | Create tests/test-NAME.el, add to Makefile target          |
-| New behavior prompt    | Add .org file to prompts/tags/                             |
-| New agent profile      | Push onto =code-agent-multiplexer--agent-profiles= (post Phase 3); add launch-fn + defcustom + Python launcher + bridge hooks |
-
-* Development Lifecycle
-
-#+begin_example
-  Edit .org  ──>  Reload  ──>  Smoke  ──>  Unit
-     │               │           │           │
-  any .org     M-x literate-   make        make
-   file        elisp-load    test-smoke  test-unit
-#+end_example
-
-* Literate Programming
-
-Elisp source in .org files loaded by literate-elisp. Key constraints:
-=lexical-let= for closures, =cond=+equal= for string dispatch. The full
-document-first protocol + mechanical org conventions (heading levels,
-block naming, property inheritance) live in the imported literate-agent
-=literate-programming-document-first.md= rule (see =CLAUDE.md= top).
-
-* Python LP
-
-=code-agent-python.org= (tangle to =python/code_agent/*.py=). =make tangle-python=, =make check-python-structure=. Hook blocks direct .py edits.
-
-* Tri-Protocol Architecture
-
-Shipped 2026-04-24 (Phases 0–4). Full design in =code-agent-backend.org=
-→ "Tri-Protocol Architecture". Three protocols — lifecycle
-(=code-agent-backend-*=), mux-wire (=code-agent-mux-*=),
-org-integration (=code-agent-org-backend-*=). The agent-wire layer retired
-2026-05; agent backends inherit lifecycle base directly. The ACP agent
-family (opencode, gemini, codex) and =code-agent-claude-code-backend=
-(the JSON-stream agent backend) were both removed by 2026-07 — zero
-production callers survived the org-as-control-plane pivot. Only the
-multiplexer family (cmux, tmux, orca) remains; Pi runs as a cmux agent
-profile, not a distinct backend. Frontend dispatches via Protocol 3
-generics.
-
-*Single-page reference*: [[file:lp/sdk/PROTOCOL-MAP.org][lp/sdk/PROTOCOL-MAP.org]] — every =cl-defgeneric=
-× every backend, with "specialised by" + test-coverage columns.
-Consult before adding a new backend or a new generic.
-
-*Invariant (2026-07-25, established when orca joined the family)*: the
-frontend never names a backend.  A new multiplexer becomes reachable by
-writing =cl-defmethod= s and one registry entry, never by editing a
-dispatcher.  Rationale + the =fboundp= dispatchers it replaced:
-[[file:lp/backend/code-agent-orca-backend.org][code-agent-orca-backend.org]], [[file:lp/_drafts/draft.org::#orca-multiplexer-backend][draft.org § orca-multiplexer-backend]].
-
-* External Pattern Studies
-
-Ralph (overnight loop) and Atomic (SDLC-style harness) — per-pattern
-adoption notes in =code-agent-org.org= → "External Pattern Studies —
-Ralph and Atomic".
-
-* Removed Backends
-
-Pre-Tri-Protocol approaches deleted in commit =1038144= once cmux + tmux
-covered the same ground better:
-
-| Removed | Tried | Why it lost |
-|---------+-------+-------------|
-| iTerm2 driver | =iterm2-ctl= + screen-scrape | macOS-only; brittle; cmux has native hooks |
-| Native eat / vterm | Run Claude in-Emacs terminal | Emacs main thread blocks; can't survive process restart |
-| In-Emacs harness (general) | Various wrappers | External multiplexer wins on every axis |
-
-Survived: =--active-queries= registry / mode-line spinner /
-=*Claude Queries*= buffer (now drive cmux + tmux). The JSON-stream
-path itself (=code-agent-claude-code-backend= and the process-lifecycle
-wiring around it) did not survive — deleted 2026-07, zero production
-callers once cmux/tmux covered execution entirely.
-
-* Testing & Harness
-
-Three real surfaces (no boundary mocks):
-
-| Surface | Location | Driver |
-|---------+----------+--------|
-| Unit | =tests/test-*.el= =:unit= | =make test-unit= |
-| Structural | =tests/test-structural.el= | with =FIX:= remediation msgs |
-| E2E | =tests/e2e/E2E_TASKS.org= (32 tasks: cmux + tmux + bridge + cross-cutting) | =/loop= skill |
-
-Long-lived E2E fixtures: =tests/e2e/org/{workspace,tmux,pi-backend}-test.org=.
-Harness lessons distilled into =.claude/rules/= (LP / oop-smalltalk / bounded-resource / no-backward-compat / e2e-trace).
+- New in-Emacs agents (org-ai-agent-pi-topics first) land as new
+  =lp/<group>/= modules registered in =code-agent.el=.  Follow the
+  protocol style: classes + =cl-defgeneric= dispatched on the
+  receiver, never string discriminators (=oop-smalltalk-protocols=
+  rule).
+- New MCP tools: add a handler section in =emacs-mcp-server.org= +
+  a unit test in =tests/test-mcp-*.el=.

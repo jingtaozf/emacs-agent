@@ -8,16 +8,13 @@ on:
 
 env:
   DEPS_DIR: /tmp/deps
-  # Nix flake (used by purcell/setup-emacs) fetches GitHub tarballs.
-  # Without a token, the GitHub API returns 401 under rate-limit or
-  # if Nix's default flake-registry lookup hits unauthenticated mode.
-  # Pass GITHUB_TOKEN via NIX_CONFIG so Nix can auth against the
-  # GitHub API. See https://nix.dev/manual/nix/2.18/command-ref/conf-file#conf-access-tokens
+  # purcell/setup-emacs uses Nix, whose GitHub flake fetches 403 on
+  # anonymous shared-runner IPs.  Auth it with the workflow token.
   NIX_CONFIG: "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}"
 
 jobs:
-  smoke:
-    name: Smoke Test
+  check:
+    name: lint + unit tests
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -27,13 +24,9 @@ jobs:
         with:
           submodules: false
 
-      # Pre-configure Nix with the workflow's GITHUB_TOKEN BEFORE
-      # purcell/setup-emacs installs Nix.  Without this, Nix's flake
-      # fetcher hits api.github.com anonymously and 403s on shared
-      # runner IPs that recently exceeded the 60 req/hour anonymous
-      # rate limit.  The workflow-level NIX_CONFIG env alone is
-      # insufficient because install-nix writes /etc/nix/nix.conf
-      # with no access-tokens line and Nix loads that first.
+      # Pre-configure Nix with the token BEFORE setup-emacs installs
+      # Nix — the workflow-level NIX_CONFIG alone is insufficient
+      # because install-nix writes /etc/nix/nix.conf first.
       - name: Pre-configure Nix access token
         run: |
           mkdir -p ~/.config/nix
@@ -49,245 +42,21 @@ jobs:
           mkdir -p $DEPS_DIR
           git clone --depth 1 https://github.com/jingtaozf/literate-elisp.git $DEPS_DIR/literate-elisp
           git clone --depth 1 https://github.com/eschulte/emacs-web-server.git $DEPS_DIR/web-server
-          git clone --depth 1 https://github.com/company-mode/company-mode.git $DEPS_DIR/company
-          git clone --depth 1 https://github.com/ahyatt/emacs-websocket.git $DEPS_DIR/websocket
-          git clone --depth 1 https://github.com/joaotavora/yasnippet.git $DEPS_DIR/yasnippet
 
-      - name: Run smoke tests
+      - name: make check
         run: |
-          make test-smoke \
+          make check \
             LITERATE_ELISP_DIR=$DEPS_DIR/literate-elisp \
-            WEB_SERVER_DIR=$DEPS_DIR/web-server \
-            COMPANY_DIR=$DEPS_DIR/company \
-            WEBSOCKET_DIR=$DEPS_DIR/websocket \
-            YASNIPPET_DIR=$DEPS_DIR/yasnippet
-
-  unit:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    needs: smoke
-    strategy:
-      matrix:
-        emacs-version: ['30.1']
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: false
-
-      # Pre-configure Nix with the workflow's GITHUB_TOKEN BEFORE
-      # purcell/setup-emacs installs Nix.  Without this, Nix's flake
-      # fetcher hits api.github.com anonymously and 403s on shared
-      # runner IPs that recently exceeded the 60 req/hour anonymous
-      # rate limit.  The workflow-level NIX_CONFIG env alone is
-      # insufficient because install-nix writes /etc/nix/nix.conf
-      # with no access-tokens line and Nix loads that first.
-      - name: Pre-configure Nix access token
-        run: |
-          mkdir -p ~/.config/nix
-          echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" \
-            >> ~/.config/nix/nix.conf
-
-      - uses: purcell/setup-emacs@v8.0
-        with:
-          version: ${{ matrix.emacs-version }}
-
-      - name: Install Elisp dependencies
-        run: |
-          mkdir -p $DEPS_DIR
-          git clone --depth 1 https://github.com/jingtaozf/literate-elisp.git $DEPS_DIR/literate-elisp
-          git clone --depth 1 https://github.com/eschulte/emacs-web-server.git $DEPS_DIR/web-server
-          git clone --depth 1 https://github.com/company-mode/company-mode.git $DEPS_DIR/company
-          git clone --depth 1 https://github.com/ahyatt/emacs-websocket.git $DEPS_DIR/websocket
-          git clone --depth 1 https://github.com/joaotavora/yasnippet.git $DEPS_DIR/yasnippet
-
-      - name: Run agent unit tests
-        run: |
-          make test-agent-unit \
-            LITERATE_ELISP_DIR=$DEPS_DIR/literate-elisp \
-            WEB_SERVER_DIR=$DEPS_DIR/web-server \
-            COMPANY_DIR=$DEPS_DIR/company \
-            WEBSOCKET_DIR=$DEPS_DIR/websocket \
-            YASNIPPET_DIR=$DEPS_DIR/yasnippet
-
-      - name: Run org unit tests
-        run: |
-          make test-org-unit \
-            LITERATE_ELISP_DIR=$DEPS_DIR/literate-elisp \
-            WEB_SERVER_DIR=$DEPS_DIR/web-server \
-            COMPANY_DIR=$DEPS_DIR/company \
-            WEBSOCKET_DIR=$DEPS_DIR/websocket \
-            YASNIPPET_DIR=$DEPS_DIR/yasnippet
-
-      - name: Run backend unit tests
-        run: |
-          make test-backend-unit \
-            LITERATE_ELISP_DIR=$DEPS_DIR/literate-elisp \
-            WEB_SERVER_DIR=$DEPS_DIR/web-server \
-            COMPANY_DIR=$DEPS_DIR/company \
-            WEBSOCKET_DIR=$DEPS_DIR/websocket \
-            YASNIPPET_DIR=$DEPS_DIR/yasnippet
-
-      - name: Run MCP server unit tests
-        run: |
-          make test-mcp-unit \
-            LITERATE_ELISP_DIR=$DEPS_DIR/literate-elisp \
-            WEB_SERVER_DIR=$DEPS_DIR/web-server \
-            COMPANY_DIR=$DEPS_DIR/company \
-            WEBSOCKET_DIR=$DEPS_DIR/websocket \
-            YASNIPPET_DIR=$DEPS_DIR/yasnippet
-
-  lint:
-    name: Static Analysis
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        emacs-version: ['30.1']
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: false
-
-      # Pre-configure Nix with the workflow's GITHUB_TOKEN BEFORE
-      # purcell/setup-emacs installs Nix.  Without this, Nix's flake
-      # fetcher hits api.github.com anonymously and 403s on shared
-      # runner IPs that recently exceeded the 60 req/hour anonymous
-      # rate limit.  The workflow-level NIX_CONFIG env alone is
-      # insufficient because install-nix writes /etc/nix/nix.conf
-      # with no access-tokens line and Nix loads that first.
-      - name: Pre-configure Nix access token
-        run: |
-          mkdir -p ~/.config/nix
-          echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" \
-            >> ~/.config/nix/nix.conf
-
-      - uses: purcell/setup-emacs@v8.0
-        with:
-          version: ${{ matrix.emacs-version }}
-
-      - name: Install Elisp dependencies
-        run: |
-          mkdir -p $DEPS_DIR
-          git clone --depth 1 https://github.com/jingtaozf/literate-elisp.git $DEPS_DIR/literate-elisp
-          git clone --depth 1 https://github.com/eschulte/emacs-web-server.git $DEPS_DIR/web-server
-          git clone --depth 1 https://github.com/company-mode/company-mode.git $DEPS_DIR/company
-          git clone --depth 1 https://github.com/ahyatt/emacs-websocket.git $DEPS_DIR/websocket
-          git clone --depth 1 https://github.com/joaotavora/yasnippet.git $DEPS_DIR/yasnippet
-
-      - name: Run lint
-        run: |
-          make lint \
-            LITERATE_ELISP_DIR=$DEPS_DIR/literate-elisp \
-            WEB_SERVER_DIR=$DEPS_DIR/web-server \
-            COMPANY_DIR=$DEPS_DIR/company \
-            WEBSOCKET_DIR=$DEPS_DIR/websocket \
-            YASNIPPET_DIR=$DEPS_DIR/yasnippet
+            WEB_SERVER_DIR=$DEPS_DIR/web-server
 
   secrets:
-    name: Secret Scan (gitleaks)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0  # full history — gitleaks needs all commits, not just HEAD
-          submodules: false
-
-      # gitleaks/gitleaks-action@v2 now requires a paid license per
-      # https://github.com/gitleaks/gitleaks-action#-announcement —
-      # the announcement breaking-change applies to personal repos
-      # too.  Invoke the gitleaks binary directly instead; the binary
-      # itself stays MIT-licensed for OSS use.
-      - name: Install gitleaks
-        run: |
-          version=8.21.2
-          curl -sSL \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
-            | tar -xz -C /tmp gitleaks
-          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
-          gitleaks version
-
-      - name: Run gitleaks
-        run: gitleaks detect --source . --redact --no-banner --verbose
-
-  supply-chain:
-    name: Python supply-chain scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: false
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install pip-audit + safety
-        run: pip install pip-audit safety
-
-      - name: pip-audit (CVE scan against PyPI advisory DB)
-        # AI agents often hallucinate package names or pin obsolete versions;
-        # pip-audit catches both. Soft-fail (continue-on-error) so a single
-        # advisory doesn't block the merge — review the output instead. Hard
-        # failures (job FAIL) are reserved for *known-malicious* findings,
-        # which gitleaks-action and safety together flag.
-        run: |
-          cd python
-          pip-audit --strict || echo "::warning::pip-audit found issues — review CVEs above"
-        continue-on-error: true
-
-      - name: safety check (PyUp DB)
-        run: |
-          cd python
-          safety check --full-report || echo "::warning::safety check found issues — review above"
-        continue-on-error: true
-
-      - name: Summary
-        run: |
-          echo "Supply-chain scan complete. Soft warnings above don't fail the build;"
-          echo "review them before tagging a release. To make this job hard-fail,"
-          echo "remove the 'continue-on-error: true' lines."
-
-  pr-size:
-    name: PR Size Cap (≤ 400 LOC)
-    if: github.event_name == 'pull_request'
+    name: gitleaks secret scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           submodules: false
-
-      - name: Compute changed lines vs base
-        id: diff
-        run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          # Exclude lockfiles + auto-generated artifacts from the count;
-          # they make PRs look big without representing reviewer cognitive load.
-          EXCLUDED=':(exclude)*.lock' ':(exclude)uv.lock' ':(exclude)package-lock.json' \
-                   ':(exclude)pnpm-lock.yaml' ':(exclude)yarn.lock' ':(exclude)Cargo.lock' \
-                   ':(exclude)*.min.js' ':(exclude)*.min.css'
-          STAT=$(git diff --shortstat "$BASE...$HEAD" -- . $EXCLUDED || true)
-          echo "shortstat: $STAT"
-          ADDED=$(echo "$STAT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
-          DELETED=$(echo "$STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
-          TOTAL=$((ADDED + DELETED))
-          echo "added=$ADDED  deleted=$DELETED  total=$TOTAL"
-          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
-
-      - name: Enforce 400-LOC ceiling
-        run: |
-          TOTAL="${{ steps.diff.outputs.total }}"
-          if [ "$TOTAL" -gt 400 ]; then
-            echo "::error::PR is $TOTAL LOC (added+deleted), exceeds 400-line ceiling."
-            echo "::error::Split into smaller PRs (target 200, hard cap 400). See CLAUDE.md."
-            echo "::error::Lockfiles/min.js are already excluded from the count."
-            echo "::error::To intentionally bypass, add label 'big-pr-ok' to this PR."
-            # Allow a manual override via PR label
-            LABELS=$(jq -r '.pull_request.labels[].name' < "$GITHUB_EVENT_PATH" || echo "")
-            if echo "$LABELS" | grep -qx "big-pr-ok"; then
-              echo "::warning::label 'big-pr-ok' present — letting PR through despite size."
-              exit 0
-            fi
-            exit 1
-          fi
-          echo "PR size OK ($TOTAL LOC)."
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

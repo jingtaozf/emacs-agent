@@ -490,9 +490,22 @@ loops cannot be interrupted — an inherent Emacs limitation."
 
 *** Built-in Tools Definition
 
-Declarations consumed by the helpers below.
+Declarations consumed by the helpers below.  The invocation hook lived
+in the deleted backend module until the 2026-08-13 cleanup; the
+=report_invocation= tool is its only trigger, so the definition moved
+here next to it.
 
 #+BEGIN_SRC elisp
+(defvar code-agent-invocation-hook nil
+  "Hook called when agent reports skill/rule invocation via MCP tool.
+Each function receives (TYPE NAME REASON) where:
+  TYPE is \"skill\" or \"rule\"
+  NAME is the identifier (e.g., \"commit\", \"no-emojis\")
+  REASON is optional context string or nil.
+
+Triggered by the report_invocation MCP tool below, enabling real-time
+monitoring of agent behaviour.")
+
 (defun emacs-mcp-server--handler-report-invocation (params _session)
   "Handler for report_invocation tool.
 PARAMS contains type, name, and optional reason.
@@ -506,9 +519,7 @@ Runs `code-agent-invocation-hook' with the invocation details."
       (error "Missing required parameter: name"))
     (unless (member type '("skill" "rule"))
       (error "type must be \"skill\" or \"rule\", got: %s" type))
-    ;; Run the hook if defined (code-agent.org defines it)
-    (when (boundp 'code-agent-invocation-hook)
-      (run-hook-with-args 'code-agent-invocation-hook type name reason))
+    (run-hook-with-args 'code-agent-invocation-hook type name reason)
     ;; Return acknowledgment
     `(((type . "text") (text . ,(format "Recorded %s: %s" type name))))))
 

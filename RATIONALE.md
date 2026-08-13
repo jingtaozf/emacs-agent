@@ -136,6 +136,20 @@ the *third* time, write a new entry here.
   its regression surface. Note: Claude Code hooks don't cover the Pi backend
   (separate RPC) regardless.
 
+## 7. 2026-08-13 repo narrowed to the MCP server (legacy-2026-08-13 branch)
+
+- decision: delete everything except the Emacs MCP server (+ trace macros,
+  Pi TS extensions, proposal queue); full pre-cleanup tree lives on the
+  `legacy-2026-08-13` branch.
+- why: the terminal-backend generation (cmux/tmux/orca org workspaces,
+  python bridge, IDE bridge) went unused — the user drives coding agents
+  through Orca directly. Unused code was pure drift surface. New focus:
+  custom in-Emacs agents (org-ai-agent-pi-topics, draft.org 2026-08-13).
+- rejected: keeping modules dormant on master "for reference" — git
+  branches are the reference; dead code on master taxes every audit.
+- followup: pi-topics re-grows a minimal protocol layer as needed instead
+  of resurrecting the tri-protocol generics wholesale.
+
 ---
 
 ## How to add a new entry
