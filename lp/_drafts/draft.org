@@ -1337,3 +1337,412 @@ per-pane env vars instead.
 | =code-agent-org-cmux--ensure-ide-server= named in a Python MCP eval | the function is multiplexer-agnostic and works as-is; renaming touches four files for no behaviour change |
 | Orca app-restart behaviour | untested — see above |
 | No tangle-drift gate | the 2026-07-25 lesson wants =make check-tangle-drift=; needs a tangle-to-tempdir mode the Makefile lacks |
+
+* 2026-08-13-org-ai-agent-pi-topics
+:PROPERTIES:
+:CUSTOM_ID: org-ai-agent-pi-topics
+:STATUS: proposal — pending grilling (grilling-gate applies: new architecture)
+:OWNER: jt
+:END:
+
+** Motivation
+
+Make org-mode Pi's *primary* interface: spawn many conversation
+topics concurrently inside one org buffer, each topic a heading, each
+heading backed by a headless =pi --mode rpc= process.  The curated
+outcome (Goal + Result per topic) IS the artifact — searchable,
+refileable, archivable, agenda-visible; the raw transcript stays in
+Pi's session store, one property away, with a live chat buffer to
+watch or steer any topic on demand.  This is an "org AI agent": org
+supplies the durable UI (outline, properties, agenda, capture,
+links), =pi-coding-agent= supplies the live chat view, and Pi
+supplies the agent loop, tools, providers, and session store.
+
+The ask goes beyond the 2026-05-26 [[#pi-tui-migration][pi-tui-to-emacs-migration]]
+proposal (mirror the TUI's controls in Emacs) — here org *replaces*
+the TUI as the conversation surface, and the design goal is
+multi-topic concurrency, which the TUI cannot do at all (one process,
+one visible session).
+
+** Relation to the 2026-07-09 pivot — reversal, scoped
+
+Commit =26df975= ("pivot to org-as-control-plane") deleted
+=code-agent-pi-backend.org= (1421 lines) + =code-agent-pi-ui.org=
+(1031 lines) with the rationale: embedded chat competed with the
+org-as-control-plane direction and the execute-ai-block pipeline had
+rotted unreachable.  Pi survived only as a cmux =:AGENT_TYPE: pi=
+TUI profile.
+
+This proposal deliberately *reverses* the "no embedded conversation"
+half of that pivot, but not blindly:
+
+| 2026-07 failure ingredient | What is different now |
+|----------------------------+-----------------------|
+| Embedded chat was a *parallel surface* (chat buffers, refine, translate, title) competing with the org workspace model | One durable model: org (Goal / Result / state).  The chat buffer is an *ephemeral per-topic viewport* owned by upstream =pi-coding-agent= — disposable, never a second source of truth |
+| Response delivery rode an execute-ai-block pipeline that was "rotting unreachable" | Delivery is direct: process filter → marker under the owning heading.  No cmux bridge, no Python hop, no MCP round-trip |
+| Pi backend was one more =:CLAUDE_BACKEND:= amid ACP/Claude/chat variants — too many half-alive paths | Post-pivot the field is clean: cmux/tmux/orca mux family + exactly one embedded family (pi-rpc).  Tri-protocol seams already exist |
+| Single-session mindset (mirror the TUI) | Multi-topic is the *point*; the design starts from N concurrent processes |
+
+The control-plane model stays intact for coding workspaces: long-lived
+repo work keeps running as cmux/Orca terminal agents.  The pi-rpc
+topic family is for conversation-first work where the org record is
+the deliverable.  The two coexist behind different =AGENT_TYPE= /
+backend routing — they no longer compete for the same headings.
+
+** Research findings (2026-08-13)
+
+*** Pi RPC surface fits an external UI completely
+
+- Transport: LF-framed JSONL over stdin/stdout, no handshake
+  (=packages/coding-agent/src/modes/rpc/jsonl.ts:10-58=); spawn is the
+  only setup (=rpc-client.ts:92-97=).
+- 30 commands (=rpc-types.ts:19-69=): =prompt / steer / follow_up /
+  abort / new_session / switch_session / fork / clone / get_messages /
+  get_state / set_model / set_thinking_level / compact / bash /
+  get_session_stats / get_commands= …
+- Events re-streamed verbatim from the agent core
+  (=rpc-mode.ts:354-356=): =agent_start/end, turn_start/end,
+  message_start/update/end= (text + thinking deltas),
+  =tool_execution_start/update/end= (correlated by =toolCallId=).
+- Extension dialogs proxy over RPC as =extension_ui_request= /
+  =extension_ui_response= (=rpc-types.ts:213-258=), so an extension's
+  =ctx.ui.confirm/select/input= becomes an Emacs prompt.  Extensions
+  load normally in RPC mode (=ExtensionMode=, =types.ts:298=;
+  =docs/rpc.md:989-1178=).
+- Known TUI-only no-ops (from the Phase-1 survey, still true):
+  =registerMessageRenderer=, =setWidget/setFooter/setHeader=,
+  =ctx.ui.custom()=, =registerShortcut= — none load-bearing for v1.
+
+*** Pi's session store is an org-outline-shaped DAG
+
+Sessions live at =~/.pi/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl=
+(=session-manager.ts:436-442=).  Entries form a tree: every entry has
+=id/parentId=; a =leaf= entry repoints the current branch; =fork=
+copies a prefix into a new file recording =parentSession=
+(=jsonl-repo.ts:133-159=); =moveTo(entryId)= navigates to any earlier
+point with an LLM =branch_summary= (=session.ts:246-265=); compaction
+persists as an entry with =firstKeptEntryId= (=compaction.ts:267-383=).
+
+This maps 1:1 onto org outline operations — fork ⇢ clone subtree,
+branch ⇢ new child heading, compaction ⇢ collapsible summary block.
+The store is plain JSONL: Emacs can read it directly for a resume
+picker or tree view without any Pi PR.
+
+*** One process = one active session ⇒ process-per-topic
+
+=switch_session= switches the single active session serially; there is
+no concurrent multi-session hosting in one process (=rpc-mode.ts:51-55=
+closes over a single mutable =session=).  Concurrency unit is therefore
+*one =pi --mode rpc= process per running topic*.  Measured on this
+machine (pi v0.80.6, 2026-08-13): idle RPC process ≈ 151 MB RSS;
+5 concurrent ≈ 598 MB total (~120 MB avg, shared pages not deduped by
+=ps=); cold start spawn→=get_state= reply 0.88 s.  10 running topics
+≈ 1.2 GB — acceptable; idle topics can be reaped (kill process, keep
+=PI_SESSION= path; resume re-spawns against the JSONL file).
+
+*** What this repo already has
+
+| Asset | State |
+|-------+-------|
+| Workspace model: heading = session, org properties, =CUSTOM_ID= | live (=lp/org/code-agent-org-workspace.org:23-59=) |
+| Buffer-local session registry with per-session busy + queue | live (=lp/org/code-agent-org-session.org:192-216=) — already multi-topic-shaped |
+| Tri-protocol generics (lifecycle 9 + org-routing 7) | live; pi implements none today (=lp/sdk/PROTOCOL-MAP.org=) |
+| Pi extensions: =emacs-mcp.ts= (Pi → Emacs tools), =doom-loop.ts= | live, tangled from =lp/backend/code-agent-pi-extensions.org= |
+| Old pi RPC elisp (JSONL client, dispatch, extension-UI handlers, =C-c C-/ p= menu) | deleted but recoverable: =git show 26df975^:lp/backend/code-agent-pi-backend.org= (1421 lines) + =...pi-ui.org= (1031 lines).  Superseded — embedding =pi-coding-agent= replaces the client; kept only as fallback |
+| =reference/pi-coding-agent= (vendored [[https://github.com/dnouri/pi-coding-agent][dnouri/pi-coding-agent]] v2.3.1) | *adopted as the live chat layer* (see [[#pi-topic-chat][the chat surface]]): =--setup-session= creates sessions non-interactively, =switch_session= resumes from a JSONL path, all session state is buffer-local ⇒ N concurrent chat pairs.  Its one-buffer-one-session model matches one-topic-one-process exactly.  Upstream v2.7.0 checked 2026-08-13: still zero org — the org layer is ours to build |
+
+** Proposed architecture
+
+[[file:../../docs/images/pi-topics-workflow.svg]]
+
+*** Three surfaces, one topic
+
+| Surface | Owns | Lifetime |
+|---------+------+----------|
+| Org heading | Goal, Result, properties, GTD state | durable — the deliverable |
+| Chat buffer pair (=pi-coding-agent=) | live stream, tool/diff rendering, input, steering | ephemeral — pop open to watch or chat; kill to reap |
+| Session JSONL (=PI_SESSION= property) | every byte: turns, tools, thinking, forks | durable — the archive |
+
+#+begin_example
+,* WAITING pgvector vs qdrant                ← topic heading, GTD state
+  :PROPERTIES:
+  :AGENT_TYPE: pi-topic
+  :PI_SESSION: ~/.pi/agent/sessions/--…--/2026-08-13…jsonl
+  :PI_MODEL:  claude-sonnet-5
+  :END:
+,** Goal …
+,** Result …
+,* WAITING blog post on LP                   ← second topic, runs concurrently
+#+end_example
+
+- The org layer is a *thin orchestrator over =pi-coding-agent=*, which
+  owns the process and all chat rendering ([[#pi-topic-chat][the chat surface]]).
+  New module =lp/org/code-agent-pi-topics.org=: heading ⇄ session
+  mapping, GTD state flips, Result freshness, capture/agenda glue —
+  wrapped as Protocol 1 lifecycle + Protocol 3 org-routing methods so
+  the transient menu and existing dispatch keep working.
+- Routing: =AGENT_TYPE: pi-topic= on the heading selects the family;
+  the existing cmux =AGENT_TYPE: pi= terminal profile is untouched.
+
+*** The chat surface — reuse =pi-coding-agent= as-is
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat
+:END:
+
+Chatting happens where it already works: dnouri's chat + input buffer
+pair, popped per topic — streaming markdown, TAB-foldable thinking
+and tool output, diff overlays, steer (=C-c C-s=), follow-up queue,
+abort — all upstream-maintained, TUI-grade logs included.  Verified
+embedding points (vendored v2.3.1):
+
+| Need | Upstream API | Where |
+|------+--------------+-------|
+| Create/attach session non-interactively | =(pi-coding-agent--setup-session DIR "topic-slug")= — buffers named =*pi-coding-agent-chat:<dir><slug>*=, spawns =pi --mode rpc= only if absent | =pi-coding-agent.el:88= |
+| Resume from =PI_SESSION= | after spawn: RPC =switch_session :sessionPath <jsonl>= + =--refresh-session-state= + =--load-session-history= | =menu.el:494,408,365= |
+| Send prompt programmatically | =pi-coding-agent--prepare-and-send TEXT= with chat buffer current; busy-check + follow-up queue replicated from =pi-coding-agent-send= | =render.el:611=, =input.el:298= |
+| Turn finished | =advice-add= on =--handle-display-event=, filter ="agent_end"=; final text in =pi-coding-agent--state :messages= | =render.el:921,1066= |
+| Topic → chat buffer | =(pi-coding-agent--find-session DIR "topic-slug")= | =ui.el:779= |
+| Reap | =kill-buffer= the chat buffer — =--cleanup-on-kill= deletes process + input buffer | =render.el:860= |
+
+Concurrency is safe by construction: all upstream session state is
+buffer-local; the only globals are a request-id counter and a scratch
+fontification buffer.  The one fragile point: turn-completion has no
+public hook, so we advise a private function — pin the vendored
+version, and propose upstream a =pi-coding-agent-agent-end-functions=
+abnormal hook at =render.el:1066= (a 5-line PR that removes the
+fragility).
+
+*** Event routing — chat renders, org records
+
+| Stream | Chat buffer (upstream renders) | Org (our layer) |
+|--------+--------------------------------+-----------------|
+| text / thinking deltas | streamed markdown, TAB-foldable thinking | — |
+| tool calls + output | collapsible overlay, smart preview | — |
+| diffs | =diff-mode= overlay | only what the agent quotes into Result |
+| ="agent_end"= | final message rendered | =WAITING= → =REVIEW= flip, Result freshness check, mode-line count |
+| =extension_ui_request= | minibuffer prompt (modal, per-session) | header-line alert naming the owning topic |
+| errors / doom-loop abort | rendered in chat | =:ERROR:= drawer + heading tag — never silent |
+
+*** Permission + customisation live in extensions we own
+
+Safety fact: Pi ships *no per-tool-call approval at all* — its only
+gate is one-time project-level trust (=trust-selector.ts=,
+=core/trust-manager.ts=).  So our extension is not replacing a TUI
+feature, it is the *only* permission layer: a =tool_call= hook calls
+=ctx.ui.confirm= → surfaces in Emacs over RPC; auto-allow rules
+(read-only tools, path allowlists) stay in the TS extension so they
+also apply when Pi runs in a terminal.  =emacs-mcp.ts= already gives
+every topic Pi-side access to Emacs state; per-topic system prompt is
+injected via the =before_agent_start= hook (documented to allow
+injecting a message *and* rewriting the system prompt —
+=docs/extensions.md:276-342=), reading an env var set at spawn.
+Footgun to respect: =fork=/=switch_session= inside one process fully
+reloads the extension runtime and stales old =ctx= handles
+(=extensions.md:1178-1219=) — with process-per-topic we mostly avoid
+this path, but the fork-⇢-subtree feature must re-register its
+handlers after the reload.
+
+*** Concurrency discipline
+
+- All per-session state is buffer-local upstream; org writes happen
+  only at =agent_end= (state flip) and via =org_result= — nothing
+  streams into org, so the bounded-resource surface shrinks to chat
+  buffers upstream already manages.
+- Reap = kill the chat buffer (upstream cleans process + input
+  buffer); =PI_SESSION= survives on the heading; reopening runs
+  =--setup-session= + =switch_session= against the same JSONL.
+
+** Org document design — topic anatomy & the readability contract
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-anatomy
+:END:
+
+The load-bearing design decision: *org is a curated projection, not a
+mirror*.  Pi's session JSONL keeps every byte (deltas, full tool
+output, thinking); the org buffer keeps what a reviewer — human *or*
+future agent session — needs.  A transcript dump is write-once
+read-never; a projection stays reviewable at 10 concurrent topics.
+
+*** Three-part topic anatomy
+
+[[file:../../docs/images/pi-topics-org-layout.svg]]
+
+Same genre as this repo's LP section shape — minus any transcript:
+
+#+begin_example
+,* REVIEW pgvector vs qdrant for wisdom store        ← ① heading: auto-named
+  :PROPERTIES:                                          after turn 1 (mirrors
+  :AGENT_TYPE: pi-topic                                 Pi set_session_name)
+  :PI_SESSION: ~/.pi/agent/sessions/…jsonl           ← the only "Log": a pointer
+  :CUSTOM_ID:  topic-pgvector-vs-qdrant              ← stable cross-ref anchor
+  :END:
+,** Goal                                             ← ② intent, human-authored;
+   Compare for 1M-row wisdom store; p95 < 50ms…         edited, never appended
+,** Result                                           ← ③ AGENT-MAINTAINED distillate
+   Recommendation: pgvector.  [table]                   in org markup; rewritten
+   Rejected: qdrant — ops cost.                         each turn, not appended
+#+end_example
+
+No Log section in org (decision 2026-08-13): the transcript already
+exists twice — session JSONL (full fidelity) and the chat buffer
+(rendered live).  A third copy would be write-once-read-never bulk.
+Division of labour: the chat buffer answers "what is it doing?", the
+JSONL answers "what exactly happened?", org answers "what did we ask
+and what did we get?".  Folded, a 10-topic buffer reads like an
+inbox — outcome-named heading + GTD state per topic.
+
+*** How Result stays meaningful — the agent curates it
+
+The mechanism for "collect meaningful results" is *self-distillation
+through a tool*, not Emacs-side heuristics:
+
+- Our extension registers an =org_result= tool (rides the existing
+  =emacs-mcp.ts= bridge) whose contract is "replace the Result subtree
+  of your topic with org markup".
+- The per-topic system prompt (=before_agent_start=) instructs Pi:
+  maintain Result after every substantive turn — conclusion first,
+  decisions + rejected alternatives, links to files/turns; org syntax.
+- Because it is a tool call, the distillation is *in the session
+  record too* — a future =--session= resume sees what it previously
+  concluded, closing the agent-readability loop.
+
+Emacs-side fallback when the model neglects it: on =agent_end= with a
+stale Result, send a =follow_up= nudge ("update Result") — cheap,
+in-band, no extra pipeline.
+
+*** Markdown stays out of org
+
+Pi emits markdown; the chat buffer renders it natively — no
+conversion anywhere.  The only org-bound prose is Result, and the
+=org_result= tool contract demands org markup at the source (the E2E
+harness grades it).  The md→org converter the four-part draft needed
+is gone entirely.
+
+** GTD alignment — a topic is delegated work
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-gtd
+:END:
+
+The lifecycle is not ad-hoc: it is GTD's delegation workflow (Allen,
+/Getting Things Done/, rev. ed. 2015, ch. 2-3) mapped onto org — the
+same shape the org-GTD canon (Bernt Hansen's
+[[https://doc.norang.ca/org-mode.html][Organize Your Life In Plain Text!]],
+[[https://github.com/Trevoke/org-gtd.el][org-gtd.el]]) already trains the
+user's hands for.  Two GTD prescriptions do real design work here:
+
+1. org-gtd's Delegated category *requires a stated desired outcome* —
+   that is the Goal section (natural planning model: purpose →
+   outcome visioning → next action).
+2. Delegated work is *tracked, not watched* — the default posture is
+   the Waiting-For list plus review cadence, not staring at the
+   stream.  The chat buffer is an opt-in glance, not the workflow.
+
+| GTD construct | Topic mechanics |
+|---------------+-----------------|
+| Capture → in-box | =org-capture= template ⇒ heading in =TODO=, no process yet |
+| Clarify (2-minute rule) | trivial question ⇒ throwaway chat session, no heading; real work ⇒ write Goal |
+| Delegate + desired outcome | =NEXT= ⇒ spawn: session created, Goal sent, =SPAWNED_AT= stamped ⇒ =WAITING= |
+| Waiting-For list | =WAITING= topics — agenda block, no babysitting |
+| In-box of returned work | =agent_end= ⇒ =REVIEW=; human accepts (=DONE= + archive), steers (follow-up ⇒ =WAITING=), or kills (=CANCELLED=) |
+| Someday/Maybe | =SOMEDAY= heading — Goal drafted, never spawned |
+| Projects (>1 step) | parent heading with child topics; parent done when children are |
+| Weekly review | agenda sweep: stale =WAITING= (nudge or abort), unread =REVIEW=, prune =SOMEDAY=, archive =DONE= |
+
+Keyword line for topic files:
+
+#+begin_example
+#+TODO: SOMEDAY(s) TODO(t) NEXT(n) WAITING(w!) REVIEW(r!) | DONE(d!) CANCELLED(c@)
+#+end_example
+
+=w!= / =r!= log state-change timestamps — the delegation record GTD
+wants (when handed off, when returned) for free via org state logging.
+
+** Org-native leverage (the payoff)
+
+| Org feature | Agent meaning |
+|-------------+---------------|
+| GTD keywords (=SOMEDAY/TODO/NEXT/WAITING/REVIEW/DONE=) | topic lifecycle ([[#pi-topic-gtd][GTD alignment]]); =org-agenda= is the delegation dashboard |
+| Outline fold | collapse whole topics / tool noise; the 10-topic buffer stays readable |
+| Subtree clone + =fork= RPC | branch a conversation mid-way; org records both branches side by side |
+| =org-capture= template | spawn a topic from anywhere in Emacs (region + file link auto-included) |
+| Refile / archive | move topics between project files; =org-archive= closed topics — the knowledge stays greppable |
+| Column view on properties | per-topic model / tokens / cost via =get_session_stats= |
+| Links | tool outputs link to =file:line=; topics link to each other; LP docs link to the topic that produced them |
+| Babel | topic can emit runnable src blocks; verify in place |
+| Agenda + clocking | time-tracked agent sessions; daily review of what agents did |
+
+** Daily-workflow scenarios
+
+1. *Fan-out research*: capture 4 questions as 4 topics while coding;
+   each runs concurrently; agenda shows =REVIEW= as they land; archive
+   after harvest.  (Today: 4 cmux panes with no record in org.)
+2. *LP co-writing*: topic heading inside the same buffer as the LP
+   module; agent reads the module via =emacs-mcp=; prose lands as org
+   already — no markdown → org conversion loss.
+3. *Standing topics*: "explain this error", "review this diff" — one
+   =org-capture= keystroke from any buffer, region attached.
+4. *Session archaeology*: every conclusion the agents reached is org
+   text (Results) under version control / =org-ql=, with =PI_SESSION=
+   pointers into full JSONL when details matter — replaces scrollback
+   archaeology in terminal panes.
+5. *Weekly review*: one agenda sweep — nudge stale =WAITING=, read
+   =REVIEW= Results, archive =DONE=, prune =SOMEDAY=.
+
+** Phased plan
+
+| Phase | Scope | Verify |
+|-------+-------+--------|
+| P0 | =code-agent-pi-topics.org= over vendored =pi-coding-agent=: heading → =--setup-session=, Goal send, =agent_end= advice → =REVIEW= flip, =PI_SESSION= saved | E2E in =tests/e2e/org/workspace-test.org=: real pi; two topics chat concurrently, no cross-talk; flips land on the right heading |
+| P1 | GTD layer: =#+TODO:= keywords, capture template, agenda dashboard, reap (kill chat buffer) + resume (=switch_session=) round-trip | kill + reopen restores history into chat; heading state + =PI_SESSION= survive |
+| P2 | =org_result= tool + per-topic system prompt (=before_agent_start=), Result freshness nudge, non-modal permission routing (header-line names topic) | agent rewrites Result subtree in org markup; permission alert routes to owning topic |
+| P3 | fork⇢subtree, stats column view, model/thinking pickers, upstream PR =agent-end= hook, vendored bump v2.3.1 → v2.7.x | fork produces sibling heading with new =PI_SESSION= |
+
+** Rejected alternatives
+
+- *One pi process + =switch_session= for all topics* — serial by
+  design; a long tool run in topic A blocks topic B.  Rejected.
+- *Build our own JSONL client + chat renderer* (this proposal's first
+  draft: new =code-agent-pi-rpc.org= salvaging the deleted backend) —
+  duplicates what =pi-coding-agent= maintains upstream (protocol,
+  streaming render, diffs, folding, steering).  Rejected 2026-08-13
+  in favour of embedding it; the deleted backend stays recoverable as
+  fallback if upstream breaks.
+- *Transcript Log section in org* (also the first draft) — a third
+  copy of what session JSONL + chat buffer already hold; bulk that is
+  written once and read never.  Replaced by the =PI_SESSION= pointer
+  property.  Rejected 2026-08-13 (user decision).
+- *Terminal-TUI-only (status quo)* — no org record, no delegation
+  dashboard, transcript trapped in scrollback.
+
+** Open questions ([NEEDS CLARIFICATION] — grill before accepting)
+
+1. Does the pi-topic family *share* the workspace heading namespace
+   with cmux workspaces (same buffer, mixed =AGENT_TYPE=), or live in
+   dedicated topic files (e.g. =~/org/agents.org=)?
+2. Per-topic cwd: inherit buffer's project root, or a =PI_CWD=
+   property?  (Session dir encoding depends on cwd.)
+3. Which tools auto-allow without confirm in org-topic mode — reuse
+   the terminal profile's trust settings or stricter?
+4. Chat buffer display policy: side window, dedicated tab, or
+   =display-buffer-alist= left to the user?
+5. GTD keywords in shared org files vs per-topic-file =#+TODO:= line?
+6. Dependency form for =pi-coding-agent=: keep vendored v2.3.1 pinned,
+   or MELPA install + version check?  Bump to v2.7.x before or after
+   P0?
+
+** References
+
+- =reference/pi/packages/coding-agent/src/modes/rpc/= — RPC contract.
+- =reference/pi/packages/coding-agent/src/core/extensions/types.ts= — extension API.
+- =reference/pi/packages/agent/src/harness/session/= — session DAG store.
+- =reference/pi-coding-agent/= ([[https://github.com/dnouri/pi-coding-agent][dnouri/pi-coding-agent]]) — embedded
+  chat layer; embedding points =pi-coding-agent.el:88=,
+  =render.el:611,921,1066=, =ui.el:779=, =menu.el:494=.
+- David Allen, /Getting Things Done/, rev. ed., Penguin 2015, ch. 2-3
+  — five stages, delegation with desired outcome, natural planning.
+- [[https://doc.norang.ca/org-mode.html][Organize Your Life In Plain Text!]] + [[https://github.com/Trevoke/org-gtd.el][org-gtd.el]] — org GTD conventions
+  (keyword sets, inbox refile, agenda views).
+- [[#pi-tui-migration][2026-05-26-pi-tui-to-emacs-migration]] — TUI feature matrix + RPC gap list (still valid).
+- =git show 26df975^:lp/backend/code-agent-pi-backend.org= — fallback client.
+- [[file:../backend/code-agent-pi-extensions.org][code-agent-pi-extensions.org]] — =emacs-mcp.ts= + =doom-loop.ts=.
+- [[file:../org/code-agent-org-session.org][code-agent-org-session.org]] — session registry the topics reuse.

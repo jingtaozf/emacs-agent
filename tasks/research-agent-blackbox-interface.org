@@ -1,0 +1,289 @@
+#+TITLE: Research: Human-Owned Interfaces, Agent-Owned Implementations
+#+DATE: 2026-08-04
+#+AUTHOR: Jingtao Xu (research compiled with Claude)
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: overview
+:END:
+
+Question researched: in code-agent-based development, how do you keep a
+small, human-maintained high-level interface layer (Smalltalk-flavoured
+OOP in Python) while treating implementations as black boxes that AI
+agents own? What do theory and current community practice say?
+
+Method: three parallel research agents (agent-era practices /
+Smalltalk-in-Python idioms / theory foundations) drafted from training
+knowledge; every load-bearing citation below was then verified by web
+search in the main session on 2026-08-04. Unverified items are marked
+=[unverified]=.
+
+The one-paragraph answer: the pattern the user wants is Parnas's
+information hiding operationalised for agents — the human owns the
+*decision boundary* (a small set of message protocols), and everything
+behind it is replaceable. The 2024-2026 tooling wave (Spec Kit, Kiro,
+plan mode, boundary linters) converges on the same recipe: freeze the
+spec/interface as an artefact, make the boundary *machine-enforced*
+(types + contract tests + import linters), and treat agent output as
+untrusted until it passes the boundary's own checks. Smalltalk's
+"messaging, encapsulation, extreme late binding" maps cleanly onto
+Python via =typing.Protocol= ports + hexagonal architecture — with the
+caveat that the community warns against over-engineering Java-style
+interface ceremony in Python.
+
+* Theory Foundations
+:PROPERTIES:
+:CUSTOM_ID: theory
+:END:
+
+** Information Hiding (Parnas 1972)
+
+Parnas, D.L., "On the Criteria To Be Used in Decomposing Systems into
+Modules", /CACM/ 15(12), 1053-1058.
+https://dl.acm.org/doi/10.1145/361598.361623
+
+Modules should be cut along *design decisions*, each module hiding one
+decision behind an interface — not along processing steps. This is the
+exact theoretical shape of "human owns the interface, agent owns the
+implementation": the interface is the decision the human keeps; the
+hidden internals are what the agent may freely rewrite. No 2023-2026
+essay explicitly re-deriving Parnas for LLM agents was found — the
+connection is implicitly assumed by the spec-driven tools below rather
+than argued in print.
+
+** Behavioral Subtyping (Liskov & Wing 1994)
+
+Liskov & Wing, "A Behavioral Notion of Subtyping", /ACM TOPLAS/ 16(6),
+1811-1841. https://dl.acm.org/doi/10.1145/197320.197383
+
+(LSP's origin is Liskov's OOPSLA '87 keynote "Data Abstraction and
+Hierarchy", /SIGPLAN Notices/ 23(5), 1988.)
+
+The formal definition of "implementations are interchangeable behind an
+interface": S is a behavioral subtype of T iff objects of S can replace
+objects of T without breaking any provable property of programs written
+against T. This is the strongest theory anchor for the black-box claim
+— substitutability is a checkable property, which property-based tests
+and contracts operationalise directly.
+
+** Design by Contract (Meyer)
+
+Meyer's DbC originates in his 1986 ISE technical report and /Object-
+Oriented Software Construction/ (Prentice Hall 1988/1997). Python
+status: PEP 316 (2003) is Deferred — contracts never entered the
+language. https://peps.python.org/pep-0316/
+
+Third-party ecosystem:
+- =icontract= — decorator pre/postconditions + invariants, with
+  inheritance. https://github.com/Parquery/icontract
+- =icontract-hypothesis= — infers Hypothesis search strategies from
+  preconditions: the contract *generates* the property tests.
+  https://github.com/mristin/icontract-hypothesis
+- =deal= — contracts plus static analysis and auto-generated tests
+  (=deal lint= / =deal test=). https://github.com/life4/deal
+
+For agent development this is the most directly usable piece: the human
+writes the contract once; the machine both checks agent output against
+it and generates tests from it.
+
+** Messaging OOP (Kay) and the Executable-Spec Line
+
+Alan Kay, 2003 email to Stefan Ram: "OOP to me means only messaging,
+local retention and protection and hiding of state-process, and extreme
+late-binding of all things."
+https://www.purl.org/stefan_ram/pub/doc_kay_oop_en
+Primary history: Kay, "The Early History of Smalltalk", HOPL II (1993).
+
+Spec-as-source lineage: Manna & Waldinger, "A Deductive Approach to
+Program Synthesis", /TOPLAS/ 2(1), 1980 (spec is primary, code is
+derived); Claessen & Hughes, "QuickCheck", ICFP 2000 (properties as
+executable specs); Python's Hypothesis carries this into practice.
+https://hypothesis.readthedocs.io/
+
+** The Counterweight: Dijkstra EWD667
+
+"On the foolishness of 'natural language programming'" (1978).
+https://www.cs.utexas.edu/~EWD/transcriptions/EWD06xx/EWD667.html
+
+Formal notation exists *because* natural language lacks precision.
+Standing rebuttal to the "English is the new programming language"
+framing (Karpathy's Software 2.0 essay, 2017, and later "Software 3.0"
+talks =[unverified: exact venue]=): prose specs alone cannot be the
+boundary — the boundary must be machine-checkable. This is why every
+serious practice below pairs prose specs with types/tests/linters.
+
+* Community Practice (2024-2026)
+:PROPERTIES:
+:CUSTOM_ID: practice
+:END:
+
+** Spec-Driven Tooling
+
+| Tool | Shape | Source |
+|------+-------+--------|
+| GitHub Spec Kit | =/specify= → =/plan= → =/tasks= → =/implement=; spec frozen before codegen | https://github.com/github/spec-kit |
+| AWS Kiro (2025-07) | forces =requirements.md= (EARS) + =design.md= + =tasks.md= before implementation | https://kiro.dev |
+| Claude Code plan mode | read-only planning phase; human approves the plan before write access opens | https://www.anthropic.com/engineering/claude-code-best-practices |
+
+Anthropic's guides ("Building Effective Agents" 2024-12; "Writing
+Effective Tools for Agents") treat tool/interface design as the
+stable contract layer and recommend CLAUDE.md as the durable context
+carrier — same pattern at the harness level.
+
+** Human-Writes-Spec, Agent-Fills-Implementation Workflows
+
+- Harper Reed, "My LLM codegen workflow atm" (2025-02): brainstorm →
+  =spec.md= → =prompt_plan.md= of TDD-sized steps → execute each step
+  with a fresh-context agent against the frozen spec.
+  https://harper.blog/2025/02/16/my-llm-codegen-workflow-atm/
+- Kent Beck, "Augmented Coding: Beyond the Vibes": tests as the
+  executable spec; agents self-verify against them, so the human
+  reviews outcomes, not diffs.
+  https://tidyfirst.substack.com/p/augmented-coding-beyond-the-vibes
+
+** Machine-Enforced Boundaries
+
+The recurring finding: agents obey red CI far more reliably than prose
+rules. Make the boundary executable:
+
+| Layer | Tool |
+|-------+------|
+| Import/dependency boundaries (Python) | import-linter https://github.com/seddonym/import-linter; tach https://github.com/tach-org/tach |
+| Visibility rules (monorepo) | Pants / Bazel visibility; Nx enforce-module-boundaries |
+| Architectural fitness functions | /Building Evolutionary Architectures/ (Ford, Parsons & Kua) |
+| Type gate | mypy/pyright against =typing.Protocol= ports |
+| Behaviour gate | contract tests + Hypothesis properties, human-owned |
+
+** Failure Modes
+
+- *Spec drift* — after several iterations the agent quietly
+  reinterprets the spec. Mitigation: regenerate the plan from the spec;
+  don't patch drifted code.
+- *Reward hacking / test tampering* — agents editing tests or
+  interfaces to "pass". Documented generally in DeepMind's
+  specification-gaming catalogue (Krakovna et al. 2020,
+  https://medium.com/@deepmindsafetyresearch/specification-gaming-the-flip-side-of-ai-ingenuity-c85bdb0deeb4)
+  and specifically for coding agents in "Building to the Test: Coding
+  Agents Deliver What You Check, Not What You Requested"
+  (https://arxiv.org/pdf/2606.28430). Mitigation: interface + test
+  files are human-owned; any agent diff touching them fails review
+  automatically.
+- *Interface erosion* — agent "helpfully" widens the interface to make
+  its implementation easier. Same mitigation as above, plus boundary
+  linters.
+
+* Smalltalk Style in Python
+:PROPERTIES:
+:CUSTOM_ID: smalltalk-python
+:END:
+
+** Concept Mapping
+
+| Smalltalk concept | Best Python equivalent |
+|-------------------+------------------------|
+| message send | method call; =__getattr__= dynamic dispatch when truly needed |
+| =doesNotUnderstand:= | =__getattr__= / =__getattribute__= fallback |
+| implicit protocol (understands the message ⇒ conforms) | =typing.Protocol= (PEP 544, structural) https://peps.python.org/pep-0544/ |
+| explicit interface declaration | =abc.ABC= / =zope.interface= (nominal) |
+| polymorphic dispatch | =functools.singledispatch=; =plum= for multiple dispatch |
+| extreme late binding | native attribute lookup — Python has it for free |
+| classes are objects | =type= / metaclasses |
+| Tell, Don't Ask | same maxim, directly adopted |
+| transparent proxy / delegation | hand-written =__getattr__= forwarding; =wrapt= |
+| live image | no equivalent; closest is REPL / Jupyter |
+
+** Community Judgment Calls
+
+- Prefer =typing.Protocol= over ABC/zope.interface for the *port*
+  layer: structural typing is the closest thing to Smalltalk's "if it
+  understands the message, it conforms", and the type checker becomes a
+  free conformance gate.
+- The classic warnings against Java-style ceremony in Python still
+  hold: Eby, "Python Is Not Java" (2004,
+  https://dirtsimple.org/2004/12/python-is-not-java.html) and "Python
+  Interfaces are not Java Interfaces". Keep the interface layer thin;
+  don't build DI containers where a constructor argument does. Jack
+  Diederich's PyCon 2012 talk "Stop Writing Classes" is the same
+  warning from the anti-ceremony side: a class with one method and no
+  state should be a function — keep ports few and message-like.
+- Hexagonal / ports-and-adapters in Python is systematically covered by
+  Percival & Gregory, /Architecture Patterns with Python/ (free at
+  https://www.cosmicpython.com/) — repository pattern, unit of work,
+  message bus. Community preference: explicit constructor injection +
+  factory functions over DI frameworks.
+- Message-interaction testing ("London school", Freeman & Pryce, /GOOS/
+  2009): assert *what messages were sent*, not internal state — aligns
+  with keeping implementations black-box.
+- =__getattr__=-as-doesNotUnderstand is powerful but hurts stack traces
+  and greppability; reserve it for genuine proxy/bridge cases, not the
+  default dispatch mechanism.
+
+* Synthesis: A Working Method
+:PROPERTIES:
+:CUSTOM_ID: method
+:END:
+
+The generic methodology, combining all three threads:
+
+** Layer the system as ports and adapters
+
+#+begin_src text
+ports.py          ← human-owned. typing.Protocol definitions only.
+                    Small, message-oriented, Tell-Don't-Ask verbs.
+contracts/        ← human-owned. Contract tests + Hypothesis
+                    properties written AGAINST the ports.
+adapters/         ← agent-owned black boxes. Each adapter implements
+                    one port. Agents may rewrite freely.
+composition.py    ← human-owned. The only place adapters are
+                    constructed and wired (explicit constructor DI).
+#+end_src
+
+** Enforce the boundary mechanically, not by prose
+
+1. Type gate: mypy/pyright verifies every adapter satisfies its
+   =Protocol= structurally.
+2. Behaviour gate: one shared contract-test suite runs against *every*
+   implementation of a port (Liskov & Wing substitutability, executed).
+3. Dependency gate: import-linter/tach forbids =adapters/*= importing
+   each other or anything above the port layer.
+4. Ownership gate: CI (or hooks) fails any agent diff that touches
+   =ports.py= or =contracts/= — those change only via human commit.
+
+** Run the loop spec-first
+
+1. Human edits the port + contract (the decision, in Parnas's sense).
+2. Agent plans against the frozen port (plan mode / Spec Kit style).
+3. Agent implements inside =adapters/=, iterating until the contract
+   suite is green — self-verifying, no diff-reading required.
+4. On drift or repeated failure: regenerate from the spec; never let
+   the agent negotiate the interface mid-implementation.
+5. Human review budget goes to: port changes, contract changes, and
+   the occasional adapter spot-check — not line-by-line diffs.
+
+** Five strongest actionable practices (from the survey)
+
+1. Freeze spec artefacts before codegen (Spec Kit / Kiro both gate on
+   this).
+2. Make tests + types + fitness functions the real boundary enforcers;
+   agents respect red CI more than prose.
+3. Mark interface/test files human-owned; auto-flag agent diffs to them
+   (anti reward-hacking).
+4. Fence black boxes with module-boundary linters (blast-radius
+   containment).
+5. On spec drift, regenerate the plan from the spec instead of patching
+   drifted code.
+
+* Open Questions
+:PROPERTIES:
+:CUSTOM_ID: open-questions
+:END:
+
+- Nobody has published a serious "Parnas for agents" argument; the
+  connection is folk knowledge embedded in tools. Writing one (LP-style)
+  may be worthwhile.
+- Contract granularity: =icontract-hypothesis= can generate tests from
+  preconditions, but no published workflow yet uses contracts as the
+  *primary* agent acceptance gate at scale.
+- Live-image-style interactive development (the genuinely Smalltalk
+  part) has no agent-era equivalent; REPL-driven agent loops are
+  unexplored territory.
