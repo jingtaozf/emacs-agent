@@ -17,22 +17,21 @@ claude --plugin-dir ~/projects/literate-agent
 The plugin's `hooks/hooks.json` registers PreToolUse / PostToolUse
 hooks. Each hook is wrapped to source `_env.sh` (this directory)
 **if it exists** — that's how project-specific env overrides
-(e.g. `LITERATE_AGENT_TANGLE_MAKE_TARGET=tangle-python`) reach
-the plugin's hook scripts.
+(e.g. `LITERATE_AGENT_TANGLE_MAKE_TARGET=tangle-pi-extensions`)
+reach the plugin's hook scripts.
 
 ## Files in this directory
 
 - `_env.sh` — project-specific environment overrides for the
-  plugin hooks. Sourced by the literate-agent hooks before they run.
-  Tune for code-agent's single-repo Python LP layout (`.org` at
-  root, `make tangle-python` target).
+  plugin hooks.  Post-2026-08-13 cleanup the repo's only tangle is
+  the Pi TS extensions (outputs outside the repo), so no in-repo
+  tangled files are guarded.
 - `README.md` — this file.
 
 ## What if I don't load the plugin?
 
-The hooks simply don't fire. Edit/Write/MultiEdit on tangled `.py`
-files won't be blocked, auto-tangle won't run on `.org` saves.
-Nothing breaks, but the LP guardrails are absent.
+The hooks simply don't fire; LP guardrails (bare-`*` rejection,
+structure checks) are absent but nothing breaks.
 
 ## Permanent install (after literate-agent is on GitHub)
 

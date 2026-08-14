@@ -127,8 +127,3 @@ tangle-pi-extensions tangle-pi-extension:
 untangle-pi-extensions untangle-pi-extension:
 	@rm -f $(PI_EXTENSION_OUT) $(PI_EXTENSION_DOOM_OUT)
 	@echo "Removed $(PI_EXTENSION_OUT) $(PI_EXTENSION_DOOM_OUT)"
-
-# LP health audit (quarterly — see lp-agent-long-horizon-audit-cadence)
-.PHONY: audit-quarterly
-audit-quarterly:
-	@python3 scripts/audit_lp_health.py

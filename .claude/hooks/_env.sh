@@ -1,21 +1,16 @@
-# Sourced by code-agent's hooks before they run literate-agent's actual hook scripts.
-# Override the literate-agent defaults for this single-repo Python LP layout.
+# Sourced by literate-agent's plugin hooks before they run.
+# Post-2026-08-13 cleanup: the only tangle in this repo is the Pi TS
+# extensions (lp/backend/code-agent-pi-extensions.org → ~/.pi/agent/
+# extensions/, outside the repo), so there are no in-repo tangled
+# outputs to guard.
 
-# .org files at repo root, not under lp/
+# .org files live under lp/, searched from repo root
 export LITERATE_AGENT_LP_ROOT=""
 
-# Tangle target inheriting nothing (whole repo)
+# No in-repo tangle outputs — nothing to block edits on
 export LITERATE_AGENT_TANGLED_ROOTS=""
+export LITERATE_AGENT_TANGLED_OUTPUT_EXTS=""
 
-# Block edits to .py files only (default)
-export LITERATE_AGENT_TANGLED_OUTPUT_EXTS=".py"
-
-# code-agent uses 'make tangle-python', not 'make tangle'
-export LITERATE_AGENT_TANGLE_MAKE_TARGET="tangle-python"
-
-# code-agent's `make tangle-python` takes no FILE arg — it always
-# tangles code-agent-python.org. Override the default suggestion.
-export LITERATE_AGENT_TANGLE_RETANGLE_CMD="make tangle-python"
-
-# Whitelist exemptions (code-agent has no alembic, but keep default)
-export LITERATE_AGENT_TANGLED_WHITELIST_FRAGMENTS="/alembic/versions/"
+# Re-tangle command for the Pi extensions
+export LITERATE_AGENT_TANGLE_MAKE_TARGET="tangle-pi-extensions"
+export LITERATE_AGENT_TANGLE_RETANGLE_CMD="make tangle-pi-extensions"
