@@ -29,11 +29,39 @@ from MELPA.
       hook 5-arg signature confirmed. Result: 3 needs public-only (resume,
       send, reap), 3 need private symbols (create-with-dir, named lookup,
       final text) → upstream PR queue recorded in the platform proposal.
-- [ ] BLOCKER for U3/U4: pi-coding-agent v2.7 needs `md-ts-mode`,
-      `markdown-table-wrap`, `transient>=0.9`, none installed — batch load
-      fails with `Cannot open load file: md-ts-mode`. Plan: project-local
-      `package-user-dir` under `.cache/elpa` for tests (no change to the
-      user's Emacs); user installs from MELPA separately for interactive use.
+- [x] Dependency blocker resolved by the planner: pi-coding-agent (+ md-ts-mode,
+      markdown-table-wrap) installed into a PROJECT-LOCAL `.cache/elpa`
+      (`package-user-dir`), MELPA snapshot 20260809.2332. The user's
+      `~/.emacs.d` was NOT touched; `rm -rf .cache/elpa` reverts it. For
+      interactive use the user installs from MELPA themselves.
+- [x] U2 — `lp/org/pi-topic.org` pure org layer. VERIFIED: `make check` green
+      plus 16 planner-written checks against real temp-file org buffers.
+- [x] U3 — `lp/org/pi-topic-chat.org` engine layer (id, cwd, engine guard,
+      display style, chat/abort, activity-phase hook). VERIFIED: `make check`;
+      planner confirmed `pi-coding-agent-abort` and `--input-buffer` exist in
+      the INSTALLED package, not just in the stubs.
+- [x] U4 — PI_SESSION stamped from `pi-coding-agent--state` `:session-file`
+      (gap the planner's own U3 spec had missed). VERIFIED: `make check` 16/16.
+- [x] U5 — fixed: creating a topic inside an existing topic's subtree stamped
+      the ANCESTOR (found by live E2E). 3 regression tests.
+- [x] U6 — fixed: resume via `open-session-file` landed in the shared unnamed
+      buffer and lost the topic identity permanently (found by live E2E).
+      Now: named session + `switch_session` RPC + refresh/load history, plus
+      `file-truename` on cwd for the /var ↔ /private/var mismatch.
+- [x] P0 E2E VERDICT (real pi 0.80.6, two concurrent topics): 20/20 checks
+      pass — two distinct processes, no cross-talk, waiting→review via the
+      real activity hook, keyword mirrored, PI_SESSION stamped to existing
+      files, reap, resume into the SAME named session with history replayed
+      and the Goal not re-sent. Committed as `e761ca7`.
+
+## Next
+
+- [ ] P1 — capture template, agenda dashboard, transient menu, reap command
+- [ ] P2 — `org_result` / `org_goal` tools in `emacs-mcp.ts` + per-topic
+      system prompt via `before_agent_start`; then `pi-topic-refresh-result`
+- [ ] Upstream PRs (retire 5 private symbols): named-session lookup,
+      create-session with explicit dir, final assistant text at turn end,
+      resume into a named session
 - [ ] U2 — `lp/org/pi-topic.org` pure-org layer: `PI_*` property helpers,
       `pi-topic--state` get/set (+ TODO-keyword mirroring), `pi-topic-new`;
       `tests/test-pi-topic.el`; wired into `code-agent.el` + Makefile.
