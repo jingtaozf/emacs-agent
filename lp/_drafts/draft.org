@@ -1341,7 +1341,7 @@ per-pane env vars instead.
 * 2026-08-13-org-ai-agent-pi-topics
 :PROPERTIES:
 :CUSTOM_ID: org-ai-agent-pi-topics
-:STATUS: proposal — pending grilling (grilling-gate applies: new architecture)
+:STATUS: accepted — grilled 2026-08-14 (12 decisions, see Grilling decisions); P0 next
 :OWNER: jt
 :END:
 
@@ -1464,9 +1464,9 @@ machine (pi v0.80.6, 2026-08-13): idle RPC process ≈ 151 MB RSS;
 | Session JSONL (=PI_SESSION= property) | every byte: turns, tools, thinking, forks | durable — the archive |
 
 #+begin_example
-,* WAITING pgvector vs qdrant                ← topic heading, GTD state
+,* WAITING pgvector vs qdrant                ← topic heading (keyword = mirror)
   :PROPERTIES:
-  :AGENT_TYPE: pi-topic
+  :PI_STATE:   waiting                       ← state source of truth
   :PI_SESSION: ~/.pi/agent/sessions/--…--/2026-08-13…jsonl
   :PI_MODEL:  claude-sonnet-5
   :END:
@@ -1475,15 +1475,22 @@ machine (pi v0.80.6, 2026-08-13): idle RPC process ≈ 151 MB RSS;
 ,* WAITING blog post on LP                   ← second topic, runs concurrently
 #+end_example
 
+Shape decision (grilled 2026-08-14): this is a *small extension to any
+org buffer* — a handful of commands plus a handful of =PI_*=
+properties, not a dedicated file format.  A heading is a topic iff it
+carries =PI_*= properties; no routing property, no minor mode
+required.
+
+- Command surface (namespace =pi-topic-=, module =lp/org/pi-topic.org=):
+  =pi-topic-new= (insert heading + Goal skeleton + properties at
+  point), =pi-topic-chat= (spawn or resume the session, pop the chat
+  pair; on a fresh topic auto-sends Goal as the first prompt),
+  =pi-topic-abort=, =pi-topic-refresh-result= (manual Result nudge),
+  plus a small transient tying them together.
 - The org layer is a *thin orchestrator over =pi-coding-agent=*, which
   owns the process and all chat rendering ([[#pi-topic-chat][the chat surface]]).
-  New module =lp/org/code-agent-pi-topics.org=: heading ⇄ session
-  mapping, GTD state flips, Result freshness, capture/agenda glue.
-  Post-cleanup this is a fresh module — it grows its own minimal
-  class + generics protocol (per =oop-smalltalk-protocols=) rather
-  than resurrecting the deleted tri-protocol stack.
-- Routing: =AGENT_TYPE: pi-topic= on the heading selects the family;
-  the existing cmux =AGENT_TYPE: pi= terminal profile is untouched.
+  Fresh module — grows its own minimal class + generics protocol (per
+  =oop-smalltalk-protocols=), no tri-protocol resurrection.
 
 *** The chat surface — reuse =pi-coding-agent= as-is
 :PROPERTIES:
@@ -1493,8 +1500,17 @@ machine (pi v0.80.6, 2026-08-13): idle RPC process ≈ 151 MB RSS;
 Chatting happens where it already works: dnouri's chat + input buffer
 pair, popped per topic — streaming markdown, TAB-foldable thinking
 and tool output, diff overlays, steer (=C-c C-s=), follow-up queue,
-abort — all upstream-maintained, TUI-grade logs included.  Verified
-embedding points (vendored v2.3.1):
+abort — all upstream-maintained, TUI-grade logs included.  Display
+(grilled Q4/Q8): the upstream layout is kept verbatim *inside* its
+window — chat above, soft-dedicated input window below
+(=pi-coding-agent-input-window-height=, default 10 lines); by default
+=pi-topic-chat= first splits the frame so the org buffer stays visible
+on the left and the chat pair takes the right half (defcustom to fall
+back to the pure upstream take-over-current-window behaviour).
+Dependency (grilled Q6): runtime = MELPA-installed pi-coding-agent
+≥ 2.7 with a startup check that the advice points still exist; the
+vendored v2.3.1 submodule stays for reading.  Verified embedding
+points (vendored v2.3.1 — re-verify against v2.7.x as P0 step 0):
 
 | Need | Upstream API | Where |
 |------+--------------+-------|
@@ -1524,24 +1540,27 @@ fragility).
 | =extension_ui_request= | minibuffer prompt (modal, per-session) | header-line alert naming the owning topic |
 | errors / doom-loop abort | rendered in chat | =:ERROR:= drawer + heading tag — never silent |
 
-*** Permission + customisation live in extensions we own
+*** Permission + customisation follow the user's Pi setup
 
 Safety fact: Pi ships *no per-tool-call approval at all* — its only
 gate is one-time project-level trust (=trust-selector.ts=,
-=core/trust-manager.ts=).  So our extension is not replacing a TUI
-feature, it is the *only* permission layer: a =tool_call= hook calls
-=ctx.ui.confirm= → surfaces in Emacs over RPC; auto-allow rules
-(read-only tools, path allowlists) stay in the TS extension so they
-also apply when Pi runs in a terminal.  =emacs-mcp.ts= already gives
-every topic Pi-side access to Emacs state; per-topic system prompt is
-injected via the =before_agent_start= hook (documented to allow
-injecting a message *and* rewriting the system prompt —
-=docs/extensions.md:276-342=), reading an env var set at spawn.
+=core/trust-manager.ts=).  Grilled decision (Q3, 2026-08-14): topics
+add *no gate of their own* — whatever permission extensions the user
+runs globally (=~/.pi/agent/extensions/=) or per project
+(=.pi/extensions/=) apply unchanged, exactly as in a terminal Pi
+session.  Any =extension_ui_request= those extensions raise still
+surfaces per-session through =pi-coding-agent='s handler.
+
+Topic-side customisation stays in the global =emacs-mcp.ts= bridge:
+the =org_result= / =org_goal= tools live there and no-op when
+=PI_TOPIC_ID= is absent, so terminal Pi sessions are unaffected.
+Per-topic system prompt is injected via the =before_agent_start= hook
+(inject a message *and* rewrite the system prompt —
+=docs/extensions.md:276-342=), reading env vars set at spawn.
 Footgun to respect: =fork=/=switch_session= inside one process fully
 reloads the extension runtime and stales old =ctx= handles
-(=extensions.md:1178-1219=) — with process-per-topic we mostly avoid
-this path, but the fork-⇢-subtree feature must re-register its
-handlers after the reload.
+(=extensions.md:1178-1219=) — process-per-topic mostly avoids this;
+the fork-⇢-subtree feature must re-register handlers after reload.
 
 *** Concurrency discipline
 
@@ -1571,12 +1590,12 @@ read-never; a projection stays reviewable at 10 concurrent topics.
 Same genre as this repo's LP section shape — minus any transcript:
 
 #+begin_example
-,* REVIEW pgvector vs qdrant for wisdom store        ← ① heading: auto-named
-  :PROPERTIES:                                          after turn 1 (mirrors
-  :AGENT_TYPE: pi-topic                                 Pi set_session_name)
-  :PI_SESSION: ~/.pi/agent/sessions/…jsonl           ← the only "Log": a pointer
+,* REVIEW pgvector vs qdrant for wisdom store        ← ① heading: auto-named after
+  :PROPERTIES:                                          turn 1, placeholders only
+  :PI_STATE:   review                                ← state source of truth;
+  :PI_SESSION: ~/.pi/agent/sessions/…jsonl              TODO keyword just mirrors
   :CUSTOM_ID:  topic-pgvector-vs-qdrant              ← stable cross-ref anchor
-  :END:
+  :END:                                                 (PI_SESSION = the only "Log")
 ,** Goal                                             ← ② intent, human-authored;
    Compare for 1M-row wisdom store; p95 < 50ms…         edited, never appended
 ,** Result                                           ← ③ AGENT-MAINTAINED distillate
@@ -1649,7 +1668,12 @@ user's hands for.  Two GTD prescriptions do real design work here:
 | Projects (>1 step) | parent heading with child topics; parent done when children are |
 | Weekly review | agenda sweep: stale =WAITING= (nudge or abort), unread =REVIEW=, prune =SOMEDAY=, archive =DONE= |
 
-Keyword line for topic files:
+State mechanics (grilled Q14): =:PI_STATE:= property is the single
+source of truth — works in *any* org file with zero setup.  When the
+host file's =#+TODO:= keyword set happens to include the matching
+keywords, the state is additionally mirrored onto the heading's TODO
+keyword — that mirror is what makes the org-agenda dashboard work.
+Dedicated topic files opt into the full set:
 
 #+begin_example
 #+TODO: SOMEDAY(s) TODO(t) NEXT(n) WAITING(w!) REVIEW(r!) | DONE(d!) CANCELLED(c@)
@@ -1657,6 +1681,8 @@ Keyword line for topic files:
 
 =w!= / =r!= log state-change timestamps — the delegation record GTD
 wants (when handed off, when returned) for free via org state logging.
+Files without these keywords lose only the agenda view; the property
+still drives everything.
 
 ** Org-native leverage (the payoff)
 
@@ -1693,10 +1719,10 @@ wants (when handed off, when returned) for free via org state logging.
 
 | Phase | Scope | Verify |
 |-------+-------+--------|
-| P0 | =code-agent-pi-topics.org= over vendored =pi-coding-agent=: heading → =--setup-session=, Goal send, =agent_end= advice → =REVIEW= flip, =PI_SESSION= saved | E2E in =tests/e2e/org/workspace-test.org=: real pi; two topics chat concurrently, no cross-talk; flips land on the right heading |
-| P1 | GTD layer: =#+TODO:= keywords, capture template, agenda dashboard, reap (kill chat buffer) + resume (=switch_session=) round-trip | kill + reopen restores history into chat; heading state + =PI_SESSION= survive |
-| P2 | =org_result= tool + per-topic system prompt (=before_agent_start=), Result freshness nudge, non-modal permission routing (header-line names topic) | agent rewrites Result subtree in org markup; permission alert routes to owning topic |
-| P3 | fork⇢subtree, stats column view, model/thinking pickers, upstream PR =agent-end= hook, vendored bump v2.3.1 → v2.7.x | fork produces sibling heading with new =PI_SESSION= |
+| P0 | Step 0: re-verify the 4 embed points on MELPA pi-coding-agent v2.7.x.  Then =lp/org/pi-topic.org=: =pi-topic-new= / =pi-topic-chat= (spawn+resume, split display, auto-send Goal) / =pi-topic-abort=; =agent_end= advice → =:PI_STATE: review= + =PI_SESSION= saved | E2E fixture org: real pi; two topics chat concurrently, no cross-talk; state + session land on the right heading |
+| P1 | State mirroring to TODO keywords, capture template, agenda dashboard, reap (kill chat buffer) + resume (=switch_session=) round-trip, =pi-topic-refresh-result= | kill + reopen restores history into chat; =PI_STATE= + =PI_SESSION= survive |
+| P2 | =org_result= + =org_goal= tools in global =emacs-mcp.ts= (=PI_TOPIC_ID= no-op guard) + per-topic system prompt (=before_agent_start=) | agent rewrites Result subtree in org markup; Goal only changes on explicit request |
+| P3 | fork⇢subtree, stats column view, model/thinking pickers, upstream PR =agent-end= hook | fork produces sibling heading with new =PI_SESSION= |
 
 ** Rejected alternatives
 
@@ -1715,21 +1741,30 @@ wants (when handed off, when returned) for free via org state logging.
 - *Terminal-TUI-only (status quo)* — no org record, no delegation
   dashboard, transcript trapped in scrollback.
 
-** Open questions ([NEEDS CLARIFICATION] — grill before accepting)
+** Grilling decisions (2026-08-14)
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-grilling-decisions
+:END:
 
-1. Does the pi-topic family *share* the workspace heading namespace
-   with cmux workspaces (same buffer, mixed =AGENT_TYPE=), or live in
-   dedicated topic files (e.g. =~/org/agents.org=)?
-2. Per-topic cwd: inherit buffer's project root, or a =PI_CWD=
-   property?  (Session dir encoding depends on cwd.)
-3. Which tools auto-allow without confirm in org-topic mode — reuse
-   the terminal profile's trust settings or stricter?
-4. Chat buffer display policy: side window, dedicated tab, or
-   =display-buffer-alist= left to the user?
-5. GTD keywords in shared org files vs per-topic-file =#+TODO:= line?
-6. Dependency form for =pi-coding-agent=: keep vendored v2.3.1 pinned,
-   or MELPA install + version check?  Bump to v2.7.x before or after
-   P0?
+Grilling session per the grilling-gate rule; frontier emptied in three
+rounds.  What / why / rejected-alternative, one line each.  Rows
+marked ✋ overrode the agent's recommendation.
+
+| # | Decision | Why | Rejected |
+|---+----------+-----+----------|
+| 1 | Any org file hosts topics; capture defaults to per-project =topics.org= | zero-friction where you already work | dedicated global agents file (extra hop) |
+| 2 | cwd = topic file's project root, =PI_CWD= overrides | session dir encodes cwd; zero-config default | mandatory explicit property |
+| 3 ✋ | Permission follows the user's Pi global/project extension setup; no topic-specific gate | one authority, identical to terminal Pi behaviour | agent-proposed org-side tool_call confirm layer |
+| 4 ✋ | Reuse upstream chat-above/input-below layout verbatim; default org-left / chat-right frame split (defcustom) | user knows and likes the upstream style; org stays visible | agent-proposed side-window policy |
+| 5 | =:PI_STATE:= property is state source of truth; TODO keyword only mirrors when the file defines matching keywords | works in ANY file, zero intrusion into existing GTD keyword sets | mandatory =#+TODO:= line (intrusive), tags (no agenda story) |
+| 6 | Runtime dep = MELPA pi-coding-agent ≥ 2.7 + startup advice-point check; vendored submodule is read-only reference | advice targets a private fn — version drift must fail loudly | pinning runtime to vendored v2.3.1 (stale) |
+| 7 | Org owns intent + outcome; conversation lives in the chat buffer; first =pi-topic-chat= auto-sends Goal | "org 管意图与结果, 聊天归聊天 buffer" | routing every prompt through org (rebuilds an input layer) |
+| 8 | =org_result= / =org_goal= ride the global =emacs-mcp.ts=, no-op without =PI_TOPIC_ID= | one bridge file, existing tangle target | separate topic-only extension file |
+| 9 | Result freshness: manual =pi-topic-refresh-result= only | GTD: delegated work is tracked, not watched; auto-nudge costs a turn per topic | automatic follow_up on stale Result |
+| 10 | Heading auto-name fills placeholder headings only; never overwrites human text | the title is the human's voice | unconditional mirror of Pi's session name |
+| 11 | Namespace =pi-topic-*=, module =lp/org/pi-topic.org= | daily-driver commands deserve a short name; fresh module post-cleanup | =code-agent-pi-topics-*= (repo-convention length) |
+| 12 | Agent may rewrite Goal only on explicit in-chat request (=org_goal=); Result rewritten every turn | outcome-visioning lands back in org without losing human ownership | Goal strictly read-only for the agent |
+| 13 ✋ | Overall shape: a *small extension to any org buffer* — 5 commands + a few =PI_*= properties; GTD/agenda is optional sugar | lowest concept count; fits daily workflow | topics.org-centric machinery as the core |
 
 ** References
 
@@ -1747,3 +1782,139 @@ wants (when handed off, when returned) for free via org state logging.
 - =git show 26df975^:lp/backend/code-agent-pi-backend.org= — fallback client.
 - [[file:../backend/code-agent-pi-extensions.org][code-agent-pi-extensions.org]] — =emacs-mcp.ts= + =doom-loop.ts=.
 - [[file:../org/code-agent-org-session.org][code-agent-org-session.org]] — session registry the topics reuse.
+
+* 2026-08-14-emacs-agent-platform
+:PROPERTIES:
+:CUSTOM_ID: emacs-agent-platform
+:STATUS: proposal — pending grilling (frames the accepted pi-topics design as one plugin)
+:OWNER: jt
+:END:
+
+** Motivation — the product is an Emacs agent; org is a plugin
+
+Restating the project goal one level up: what this repo ships is an
+*Emacs agent* — Pi living inside Emacs as the engine, reachable from
+wherever the user already is.  Org integration
+([[#org-ai-agent-pi-topics][pi-topics]], accepted 2026-08-14) is *one
+surface plugin* — the knowledge-base/task surface, privileged because
+org is where this user's knowledge lives — not the platform itself.
+The platform question: through which surfaces should Pi reach Emacs,
+what is the common engine underneath them, and where does
+=pi-coding-agent= end and our layer begin?
+
+** Research findings (2026-08-14)
+
+*** Upstream pi-coding-agent has become embeddable
+
+The v2.3.1-based fragility assessment is obsolete.  Upstream grew a
+*deliberate public elisp API* (multiple community contributors):
+
+| Since | API | What it gives us |
+|-------+-----+------------------|
+| v2.6.0 | =pi-coding-agent-activity-phase-functions= (#223) | documented hook on =thinking/replying/running/compact/idle= transitions — likely replaces the planned advice on the private =agent_end= path |
+| v2.6.0 | =pi-coding-agent-run-command= (#212) | run Pi slash commands from elisp |
+| v2.6.0 | =pi-coding-agent-open-session-file= (#224) | open a JSONL session as a live chat pair — our resume path through a front door |
+| v2.6.0 | =pi-coding-agent-project-trust-policy= (#229) | trust policy knob, aligns with grilled Q3 |
+| v2.7.0 | RET on file targets, =!= shell on file at point (#250) | chat → editor navigation already solved upstream |
+| v2.7.0 | undo-history memory fix (#256), crash visibility (#257) | long-session hygiene we would otherwise own |
+
+Baseline: v2.7.0 requires pi ≥ 0.81.  Open issues show direction and
+receptiveness: #246 session management proposal, #242 =/tree=
+navigation, #176 extension UI, #261 images.  Consequence: *upstream-first*
+is the right strategy — ride public APIs, contribute gaps as PRs, keep
+only what upstream declares out of scope (org, KB, multi-topic
+orchestration).
+
+*** The Emacs AI surface map (survey, 2026-08-14)
+
+| Surface | Best current implementation | Lesson for us |
+|---------+-----------------------------+---------------|
+| Chat buffer | gptel, chatgpt-shell, pi-coding-agent | solved — embed upstream, do not rebuild |
+| Region rewrite + inline diff | =gptel-rewrite= (transient overlay), elysium (smerge blocks) | two proven apply-UX patterns; smerge feels like magit conflicts |
+| Ghost-text completion | copilot.el, minuet | commodity owned by dedicated packages — OUT of scope |
+| Minibuffer one-shot | =gptel-quick= style | cheap; maps to GTD 2-minute rule |
+| Org-block conversations | org-ai (=#+begin_ai= blocks) | nearest precedent to our deleted ai-block design; pi-topics' Goal/Result shape is the deliberate divergence (outcome over transcript) |
+| Project-wide agentic edits | aider architect mode, macher | Pi's own tools already do this from chat; surface = review UX, not engine |
+| magit / compile integration | no mature player | open field, cheap wins later |
+| KB as agent memory | khoj (external RAG service) | we can do it editor-native: org files + org-ql/ripgrep through emacs-mcp |
+
+ACP (Zed's agent-client-protocol, Emacs adoption = agent-shell):
+grepped =reference/pi= — *zero ACP support in pi*.  An ACP adapter
+would flatten Pi to a generic agent and lose sessions/extensions
+depth.  Verdict: stay pi-native via =pi-coding-agent=; ACP only ever
+as a future compatibility shim, not the integration path.
+
+** Architecture — four layers
+
+[[file:../../docs/images/pi-agent-platform.svg]]
+
+| Layer | Contents | Owner |
+|-------+----------+-------|
+| L3 Memory | org KB: topic Results, archives, notes — queried via KB tools; Pi instructed to consult it | ours |
+| L2 Surfaces | chat (upstream as-is) · =pi-topic= (org tasks/KB, accepted) · =pi-ask= (minibuffer one-shot) · later: magit commit msgs, compile-fix | ours (thin) |
+| L1 Bridge | =emacs-mcp= both directions: MCP server (Emacs tools → any agent) + =emacs-mcp.ts= (Pi-side client).  Grow semantic tools: =org_result/org_goal=, KB search (org-ql/rg), diff-apply, project navigation | ours |
+| L0 Engine | pi processes managed through =pi-coding-agent='s public API; session store = Pi JSONL | upstream |
+
+Design rules: every surface goes through L0's public API (no private
+advice unless upstream lacks the hook — then the fix is an upstream
+PR, not a workaround); every new agent capability lands as an L1 tool
+so all surfaces share it; L2 plugins stay independently loadable —
+org users load =pi-topic=, non-org users still get =pi-ask=/=pi-do=.
+
+** How this improves on pi-coding-agent (not competes)
+
+- *Embed + surround*: upstream owns process, chat, rendering; we own
+  orchestration (N topics), org/KB, cross-surface tools.
+- *Upstream contribution queue*: (1) turn-finished hook with final
+  text, if =activity-phase-functions='s =idle= transition proves
+  insufficient; (2) public programmatic session-creation API
+  (=--setup-session= is still private); (3) extension UI support
+  (#176) if our extensions need dialogs; (4) our session-management
+  needs folded into the #246 discussion.
+- *What we deliberately do NOT build*: completion (copilot/minuet),
+  a chat renderer, an ACP adapter, a second permission system
+  (grilled Q3), and a region-rewrite surface (=pi-do= — dropped
+  2026-08-14: chat + topics cover the need, and gptel-rewrite /
+  elysium already own that niche well).
+
+** Relation to pi-topics
+
+Unchanged and first: =pi-topic= is the flagship L2 plugin and the P0
+work item.  This proposal re-homes its engine glue: the
+heading⇄session mapping targets upstream public APIs
+(=open-session-file=, =activity-phase-functions=, =run-command=)
+instead of the private functions listed in the embed table — P0
+step 0 (re-verify on v2.7) becomes "map each embed point to its
+public replacement, PR upstream where none exists".
+
+** Roadmap (realigned)
+
+| Step | Ships | Layer |
+|------+-------+-------|
+| P0 | =pi-topic= on v2.7 public APIs (per accepted proposal) | L2 + L0 glue |
+| P1 | pi-topics P1 (state mirroring, capture, agenda, reap/resume) + =pi-ask= (minibuffer one-shot, throwaway session) | L2 |
+| P2 | =org_result=/=org_goal= + KB search tools (org-ql/rg over org roots) + per-topic system prompt | L1 + L3 |
+| P3 | fork⇢subtree, stats, magit/compile helpers, upstream PRs as queued | L2/L0 |
+
+** Open questions ([NEEDS CLARIFICATION] — grill before accepting)
+
+1. KB scope for L3: which org roots count as the knowledge base
+   (org-directory? explicit list? org-roam/denote aware)?
+2. =pi-ask= sessions: truly throwaway (=--no-session=) or logged as
+   lightweight topics for later capture?
+3. Package naming for the platform: keep repo =code-agent= namespace
+   for L0/L1 with =pi-topic=/=pi-ask= as command namespaces, or
+   rename the platform wholesale?
+4. Upstream PR appetite: how much time to invest in #246/#176 vs
+   keeping local glue?
+
+** References
+
+- pi-coding-agent releases v2.4.0–v2.7.0 + PRs #212 #223 #224 #229
+  #250 #248 #262; open issues #246 #242 #176 #261.
+- Survey: gptel, aidermacs, agent-shell (ACP), copilot.el, minuet,
+  ellama, chatgpt-shell, elysium, macher, org-ai, khoj.  (Training-
+  knowledge survey 2026-08-14; low-confidence rows flagged in the
+  research log, verify before citing externally.)
+- [[https://github.com/zed-industries/agent-client-protocol][agent-client-protocol]] — checked: no pi support.
+- [[#org-ai-agent-pi-topics][2026-08-13-org-ai-agent-pi-topics]] — the first L2 plugin (accepted).
