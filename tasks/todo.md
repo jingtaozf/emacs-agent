@@ -54,14 +54,37 @@ from MELPA.
       files, reap, resume into the SAME named session with history replayed
       and the Goal not re-sent. Committed as `e761ca7`.
 
-## Next
+- [x] U7 / P1 — `lp/org/pi-topic-workflow.org`: capture template (key `p`,
+      never clobbers an existing entry), `pi-topic-agenda-files`,
+      `*Pi Topics*` list ordered by lifecycle, `pi-topic-reap`,
+      `pi-topic-menu`. VERIFIED: `make check` 27/27 + 10 planner checks on a
+      different scenario (pre-existing `p` key, three topics across two files).
+- [x] U8 / P2 Emacs side — `lp/org/pi-topic-io.org`: locate a topic by
+      `PI_TOPIC_ID` (live buffers before files), replace just the named
+      section, save only files we opened ourselves; `PI_TOPIC_ID` +
+      `PI_TOPIC_FILE` injected by binding `process-environment` around session
+      creation. VERIFIED: `make check` 33/33.
+- [x] U9 / P2 Pi side — `org_result` + `org_goal` tools and a
+      `before_agent_start` system-prompt injection in `emacs-mcp.ts`, all
+      inert without `PI_TOPIC_ID`. VERIFIED: tangle produces 475 lines
+      containing all three markers.
+- [x] P2 E2E VERDICT (real pi + real MCP server on 9997): the agent answered
+      a decision question and wrote its OWN Result — conclusion first,
+      rejected alternative named, no markdown leakage, Goal untouched.
+      Committed as `81ed0b0`, CI green.
 
-- [ ] P1 — capture template, agenda dashboard, transient menu, reap command
-- [ ] P2 — `org_result` / `org_goal` tools in `emacs-mcp.ts` + per-topic
-      system prompt via `before_agent_start`; then `pi-topic-refresh-result`
-- [ ] Upstream PRs (retire 5 private symbols): named-session lookup,
-      create-session with explicit dir, final assistant text at turn end,
-      resume into a named session
+## Next — needs a human decision
+
+- [ ] Upstream PRs to dnouri/pi-coding-agent, which would retire all five
+      private symbols we depend on: (1) named-session lookup — the blocker,
+      (2) create-session honouring an explicit dir and returning the buffer,
+      (3) final assistant text at turn end, (4) resume INTO a named session.
+      Outward-facing (third-party repo, the user's GitHub identity) —
+      not started; awaiting the user's go-ahead.
+- [ ] `pi-topic-refresh-result` — the manual nudge from grilling decision 9;
+      cheap now that `org_result` exists.
+- [ ] Live-in-Emacs shakedown: the user installs pi-coding-agent from MELPA
+      in their own Emacs and drives a real topic by hand.
 - [ ] U2 — `lp/org/pi-topic.org` pure-org layer: `PI_*` property helpers,
       `pi-topic--state` get/set (+ TODO-keyword mirroring), `pi-topic-new`;
       `tests/test-pi-topic.el`; wired into `code-agent.el` + Makefile.
