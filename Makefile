@@ -15,6 +15,8 @@ LOAD_PATH = -L . -L tests -L $(LITERATE_ELISP_DIR) -L $(WEB_SERVER_DIR)
 LOAD_LITERATE = --eval "(require 'literate-elisp)"
 LOAD_TRACE = --eval "(literate-elisp-load \"$(PWD)/lp/trace/code-agent-trace.org\")"
 LOAD_MCP = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/sdk/emacs-mcp-server.org\")"
+LOAD_PI_TOPIC = $(LOAD_TRACE) --eval "(literate-elisp-load \"$(PWD)/lp/org/pi-topic.org\")" \
+	--eval "(literate-elisp-load \"$(PWD)/lp/org/pi-topic-chat.org\")"
 
 .PHONY: all
 all: test-unit
@@ -28,6 +30,7 @@ help:
 	@echo "  make test-mcp-unit      - MCP server unit tests"
 	@echo "  make test-mcp-mode-line - MCP mode-line spinner tests"
 	@echo "  make test-otel          - OTel trace unit tests"
+	@echo "  make test-pi-topic      - pi-topic org + chat layer unit tests"
 	@echo "  make check              - lint + test-unit (pre-commit gate)"
 	@echo "  make tangle-pi-extensions - Tangle Pi TS extensions to ~/.pi/agent/extensions/"
 	@echo "  make install-hooks      - Install git pre-commit hook"
@@ -57,7 +60,17 @@ install-hooks:
 test: test-unit
 
 .PHONY: test-unit
-test-unit: test-mcp-unit test-mcp-mode-line test-otel
+test-unit: test-mcp-unit test-mcp-mode-line test-otel test-pi-topic
+
+.PHONY: test-pi-topic
+test-pi-topic:
+	@echo "Running pi-topic org + chat layer unit tests..."
+	$(BATCH) $(LOAD_PATH) \
+		$(LOAD_LITERATE) \
+		$(LOAD_PI_TOPIC) \
+		-l tests/test-pi-topic.el \
+		-l tests/test-pi-topic-chat.el \
+		--eval "(ert-run-tests-batch-and-exit '(tag :pi-topic))"
 
 .PHONY: test-mcp-unit
 test-mcp-unit:

@@ -1,0 +1,331 @@
+#+TITLE: Pi Topic — the org layer of pi-topics
+#+PROPERTY: literate-load yes
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-overview
+:END:
+
+This module owns the /pure org/ half of pi-topics: what a topic *is* as
+a heading, how its lifecycle state is stored and mirrored, and how its
+Goal and Result sections are created and read back.  It knows nothing
+about Pi — no process, no session file, no chat buffer — so it loads
+and runs in any Emacs with org, and the chat layer that arrives later
+can be swapped without touching a line here.
+
+The single design invariant: *the =PI_STATE= property is the source of
+truth, and the TODO keyword is only ever a mirror*.  A topic is any
+heading carrying =PI_STATE=, which means pi-topics works in *any* org
+file with zero setup — no mandatory =#+TODO:= line, no tag convention,
+no per-file opt-in.  Files that happen to define the matching keywords
+additionally get the org-agenda delegation dashboard for free; files
+that do not lose only that view, never the state itself.
+
+The topic shape this module creates and reads:
+
+#+begin_example
+,* Untitled topic                     ← ① heading; PI_STATE makes it a topic
+  :PROPERTIES:
+  :PI_STATE: todo                     ← ② lifecycle, mirrored onto the keyword
+  :PI_CWD:   /elsewhere/              ←   only when ≠ the buffer project root
+  :END:
+,** Goal                              ← ③ intent, human-authored
+   Describe the desired outcome…
+,** Result                            ← ④ outcome, agent-maintained; empty at birth
+#+end_example
+
+Design rationale, GTD grounding, and the chat surface that will sit on
+top of this layer live in =lp/_drafts/draft.org=
+§ =2026-08-13-org-ai-agent-pi-topics=.
+
+* Module Preamble
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-preamble
+:END:
+
+=org= is the whole substrate; =project= is needed only to decide
+whether a new topic must record an explicit =PI_CWD=, and =subr-x= for
+=string-trim=.  All three are built in, so the module has no external
+dependency and can be loaded standalone in a batch Emacs.
+
+#+BEGIN_SRC elisp
+(require 'org)
+(require 'project)
+(require 'subr-x)
+#+END_SRC
+
+The lifecycle vocabulary is GTD's delegation workflow, lower-cased for
+the property and upper-cased for the keyword mirror.  It is a
+=defconst= rather than a =defcustom= because the set is not a
+preference: the state names are the contract between this layer, the
+agenda mirror, and every future consumer.
+
+#+BEGIN_SRC elisp
+(defconst pi-topic-states
+  '("todo" "next" "waiting" "review" "done" "cancelled" "someday")
+  "Lifecycle states a topic's PI_STATE property may hold.
+Lower-case here; the TODO-keyword mirror upper-cases them.")
+#+END_SRC
+
+* Topic Identity — the heading that carries PI_STATE
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-identity
+:END:
+
+Everything else in the module needs one answer first: /which/ heading
+is the topic?  Point is usually somewhere inside a topic — in the Goal
+body, on the Result heading — not on the topic heading itself, so the
+lookup climbs to the nearest ancestor-or-self heading carrying
+=PI_STATE=.  When no ancestor carries it we deliberately return the
+heading at point anyway: that is what lets
+[[#pi-topic-property-access][=pi-topic--set-property=]] stamp =PI_STATE= onto a
+fresh heading and thereby *make* it a topic, instead of needing a
+second bootstrap-only code path.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--position ()
+  "Return the buffer position of the topic heading governing point.
+Climbs to the nearest ancestor-or-self heading whose entry carries a
+PI_STATE property.  When no ancestor carries one, returns the heading
+at point, so a caller may stamp PI_STATE there and create a topic.
+Returns nil before the first heading of the buffer."
+  (unless (org-before-first-heading-p)
+    (save-excursion
+      (org-back-to-heading t)
+      (let ((fallback (point))
+            (found nil)
+            (climbing t))
+        (while (and climbing (not found))
+          (if (org-entry-get nil "PI_STATE")
+              (setq found (point))
+            (setq climbing (org-up-heading-safe))))
+        (or found fallback)))))
+#+END_SRC
+
+The public predicate is then a one-liner over that lookup, and answers
+the question callers actually ask — "am I inside a topic?" — rather
+than the narrower "is point exactly on the topic heading?".
+
+#+BEGIN_SRC elisp
+(defun pi-topic-p ()
+  "Return non-nil when point is inside a pi topic.
+A topic is a heading carrying a PI_STATE property; point may be on that
+heading or anywhere in its subtree."
+  (let ((pos (pi-topic--position)))
+    (and pos
+         (org-entry-get pos "PI_STATE")
+         t)))
+#+END_SRC
+
+* Property Access Scoped to the Topic
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-property-access
+:END:
+
+Bare =org-entry-get= reads the entry containing point, which from
+inside a Goal subtree is the *Goal* heading — the wrong drawer.  These
+two wrappers exist purely to route every property read and write to the
+topic heading resolved above, so no caller has to remember to climb.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--property (name)
+  "Return property NAME of the topic at point, or nil."
+  (let ((pos (pi-topic--position)))
+    (and pos (org-entry-get pos name))))
+
+(defun pi-topic--set-property (name value)
+  "Set property NAME of the topic at point to VALUE and return VALUE."
+  (let ((pos (pi-topic--position)))
+    (unless pos
+      (user-error "Not inside an org heading"))
+    (org-entry-put pos name value)
+    value))
+#+END_SRC
+
+* Lifecycle State and Its Keyword Mirror
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-state
+:END:
+
+Reading the state is just the property; the interesting half is
+writing.  The mirror onto the heading's TODO keyword is *conditional by
+design*: it fires only when the buffer's own keyword set already
+contains the matching upper-case word, so pi-topics never mutates a
+file's GTD vocabulary and never signals in a file that has a different
+one.  =org-inhibit-logging= is bound to ='note= so a keyword configured
+with =@= (note on entry) cannot block a background state change on a
+minibuffer prompt, while the cheap =!= timestamp logging — the
+delegation record GTD wants — still happens.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-state ()
+  "Return the lifecycle state of the topic at point, or nil."
+  (pi-topic--property "PI_STATE"))
+
+(defun pi-topic-set-state (state)
+  "Set the topic at point to lifecycle STATE and return it.
+STATE is a symbol or string from `pi-topic-states'.  It is stored
+lower-case in the PI_STATE property, and additionally mirrored onto the
+heading's TODO keyword when — and only when — the current buffer's
+`org-todo-keywords-1' contains the matching upper-case keyword."
+  (interactive (list (completing-read "Pi topic state: " pi-topic-states nil t)))
+  (let* ((state (downcase (if (stringp state) state (symbol-name state))))
+         (keyword (upcase state)))
+    (pi-topic--set-property "PI_STATE" state)
+    (when (member keyword org-todo-keywords-1)
+      (save-excursion
+        (goto-char (pi-topic--position))
+        (let ((org-inhibit-logging 'note))
+          (org-todo keyword))))
+    state))
+#+END_SRC
+
+* Creating a Topic
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-new
+:END:
+
+A topic is born as a skeleton, not a prompt: heading, Goal with a
+placeholder to overwrite, empty Result.  The placeholders are constants
+rather than options because a caller who wants different text edits the
+buffer — that is what the command leaves point positioned for.
+
+#+BEGIN_SRC elisp
+(defconst pi-topic--new-heading-text "Untitled topic"
+  "Heading text a freshly created topic starts with.")
+
+(defconst pi-topic--goal-placeholder
+  "Describe the desired outcome here."
+  "Placeholder line inserted into a new topic's Goal section.")
+#+END_SRC
+
+=PI_CWD= is written *only* when the buffer's directory differs from its
+project root, because the topic's working directory defaults to that
+root: a property that merely restates the default is noise in every
+drawer, and noise is what makes a folded 10-topic buffer unreadable.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--project-root ()
+  "Return this buffer's project root, or `default-directory' when none."
+  (or (let ((proj (project-current nil)))
+        (and proj (ignore-errors (expand-file-name (project-root proj)))))
+      (expand-file-name default-directory)))
+#+END_SRC
+
+The heading level follows the heading point sits in, so a topic
+captured under a project heading nests naturally; outside any heading
+it starts at level 1.  Point is left on the Goal placeholder — the one
+line the human is expected to replace immediately — and it is tracked
+with a marker rather than a position, because writing the properties
+drawer inserts text *above* that line and would shift a plain integer.
+
+Creation is the one place that must *not* go through
+[[#pi-topic-property-access][the climbing wrappers]].  The heading it has
+just inserted carries no =PI_STATE= yet, so the climb walks straight
+past it to the enclosing topic — and writing a topic while point sits
+inside an existing one is a designed workflow: topics written back to
+back, child topics under a project heading.  A live two-topic run
+showed the damage: the new heading never became a topic, and the
+parent's state was silently reset to =todo=.  Here the position is
+known exactly, so =org-entry-put= takes it directly; every other access
+keeps climbing, because every other access starts from a topic that
+already exists.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-new ()
+  "Insert a new pi topic skeleton at point and return its position.
+Creates the topic heading (at the level of the heading point is in, or
+level 1), a Goal section holding a placeholder line, an empty Result
+section, and a PROPERTIES drawer with PI_STATE set to \"todo\" plus
+PI_CWD when the buffer directory differs from its project root.
+The drawer is written on the new heading itself, never on an enclosing
+topic.  Leaves point on the Goal placeholder."
+  (interactive)
+  (let* ((level (or (org-current-level) 1))
+         (stars (make-string level ?*))
+         (sub-stars (make-string (1+ level) ?*))
+         (cwd (expand-file-name default-directory))
+         topic-pos goal-marker)
+    (unless (bolp)
+      (insert "\n"))
+    (setq topic-pos (point))
+    (insert stars " " pi-topic--new-heading-text "\n"
+            sub-stars " Goal\n")
+    (setq goal-marker (point-marker))
+    (insert pi-topic--goal-placeholder "\n"
+            sub-stars " Result\n")
+    (org-entry-put topic-pos "PI_STATE" "todo")
+    (unless (file-equal-p cwd (pi-topic--project-root))
+      (org-entry-put topic-pos "PI_CWD" cwd))
+    (goto-char goal-marker)
+    (set-marker goal-marker nil)
+    (end-of-line)
+    topic-pos))
+#+END_SRC
+
+* Reading Goal and Result
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-sections
+:END:
+
+Goal and Result are addressed by heading text among the topic's direct
+children — the two names are part of the topic contract, so a plain
+regexp over the subtree is enough and keeps the reader honest about
+what a "section" means here.  A missing section returns nil; a present
+but empty one returns the empty string, which is how a caller
+distinguishes "no Result section" from "Result not written yet".
+
+#+BEGIN_SRC elisp
+(defun pi-topic--section-position (name)
+  "Return the position of the NAME child heading of the topic at point.
+Returns nil when the topic has no such direct child."
+  (let ((topic (pi-topic--position)))
+    (when topic
+      (save-excursion
+        (goto-char topic)
+        (let ((bound (save-excursion (org-end-of-subtree t t)))
+              (regexp (format "^\\*\\{%d\\} +%s[ \t]*$"
+                              (1+ (org-current-level))
+                              (regexp-quote name))))
+          (when (re-search-forward regexp bound t)
+            (line-beginning-position)))))))
+
+(defun pi-topic--section-text (name)
+  "Return the body text of the topic's NAME section, or nil when absent.
+Planning lines and property drawers are skipped; the result is trimmed."
+  (let ((pos (pi-topic--section-position name)))
+    (when pos
+      (save-excursion
+        (goto-char pos)
+        (let ((end (save-excursion (org-end-of-subtree t t))))
+          (org-end-of-meta-data t)
+          (string-trim
+           (buffer-substring-no-properties (min (point) end) end)))))))
+#+END_SRC
+
+The two public readers are thin on purpose: consumers ask for /the
+topic's intent/ and /the topic's outcome/, never for "the text under
+the child heading named Goal".
+
+#+BEGIN_SRC elisp
+(defun pi-topic-goal ()
+  "Return the Goal text of the topic at point, or nil when absent."
+  (pi-topic--section-text "Goal"))
+
+(defun pi-topic-result ()
+  "Return the Result text of the topic at point, or nil when absent."
+  (pi-topic--section-text "Result"))
+#+END_SRC
+
+* Feature Registration
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-provide
+:END:
+
+The feature symbol lets tests and later layers =require= this module
+after =literate-elisp-load= has evaluated it, matching how every other
+module in this repo is consumed.
+
+#+BEGIN_SRC elisp
+(provide 'pi-topic)
+#+END_SRC

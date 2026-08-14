@@ -1,0 +1,529 @@
+#+TITLE: Pi Topic Chat — the engine layer of pi-topics
+#+PROPERTY: literate-load yes
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-overview
+:END:
+
+This module is the /engine/ half of pi-topics: it turns a topic heading
+into a live Pi session, sends the Goal as the opening prompt, and flips
+the topic to =review= when the agent stops talking.  Its sibling
+=lp/org/pi-topic.org= stays deliberately dependency-free — headings,
+=PI_STATE=, Goal and Result work in a bare Emacs — and every line that
+touches [[https://github.com/dnouri/pi-coding-agent][pi-coding-agent]]
+lives here instead.
+
+The invariant that keeps that split honest: *this file must load
+cleanly when pi-coding-agent is absent.*  There is no top-level
+=require= of it; the engine symbols are forward-declared, and
+[[#pi-topic-chat-engine-guard][=pi-topic--ensure-engine=]] is the single
+gate every command passes through.  A user with no Pi installed still
+gets the org layer, and gets one clear error naming the missing symbol
+if they try to chat.
+
+Two of the four engine entry points are *private upstream symbols*
+(=pi-coding-agent--setup-session=, =pi-coding-agent--find-session=).
+That is not laziness: =tasks/pi-topic-embed-map.md= verified against
+v2.7.0 that the public =pi-coding-agent= command derives its directory
+from =project-root= (so it cannot honour an explicit topic cwd) and
+that no public lookup takes a session name.  Until those land upstream,
+the guard turns a version bump that renames them into a legible error
+instead of a =void-function= backtrace mid-command.
+
+* Module Preamble
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-preamble
+:END:
+
+The org layer is a hard dependency and loads normally.  The engine is
+declared with the =ext:= prefix, which marks these as symbols of an
+external package that this file must never load itself.
+
+#+BEGIN_SRC elisp
+(require 'pi-topic)
+
+(declare-function pi-coding-agent--setup-session "ext:pi-coding-agent" (dir &optional session))
+(declare-function pi-coding-agent--find-session "ext:pi-coding-agent-ui" (dir &optional session))
+(declare-function pi-coding-agent--get-process "ext:pi-coding-agent-ui" ())
+(declare-function pi-coding-agent--rpc-async "ext:pi-coding-agent-core" (process command callback))
+(declare-function pi-coding-agent--refresh-session-state "ext:pi-coding-agent-menu"
+                  (proc chat-buf &optional session-file generation completion-callback))
+(declare-function pi-coding-agent--load-session-history "ext:pi-coding-agent-menu"
+                  (proc callback &optional chat-buf completion-callback))
+(declare-function pi-coding-agent-send "ext:pi-coding-agent-input" ())
+(declare-function pi-coding-agent-abort "ext:pi-coding-agent-input" ())
+(defvar pi-coding-agent--input-buffer)
+(defvar pi-coding-agent--state)
+#+END_SRC
+
+#+BEGIN_SRC elisp
+(defgroup pi-topic nil
+  "Org headings as concurrent Pi chat topics."
+  :group 'tools
+  :prefix "pi-topic-")
+#+END_SRC
+
+* Topic Identity Across Processes
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-id
+:END:
+
+A topic needs a name that survives Emacs restarts, buffer renames and
+heading edits, because that name /is/ the session key upstream stores
+its chat buffer under.  Heading text cannot serve: it is rewritten
+after turn one by design.  So the first chat mints an opaque id and
+parks it in =PI_TOPIC_ID=; every later lookup reuses it.
+
+#+BEGIN_SRC elisp
+(defconst pi-topic--id-alphabet "abcdefghijklmnopqrstuvwxyz0123456789"
+  "Characters the random suffix of a topic id is drawn from.")
+
+(defun pi-topic--generate-id ()
+  "Return a fresh topic id of the form pi-<unix-seconds>-<4 random chars>."
+  (let ((suffix ""))
+    (dotimes (_ 4)
+      (setq suffix
+            (concat suffix
+                    (string (aref pi-topic--id-alphabet
+                                  (random (length pi-topic--id-alphabet)))))))
+    (format "pi-%d-%s" (floor (float-time)) suffix)))
+
+(defun pi-topic--id ()
+  "Return the topic's PI_TOPIC_ID, minting and storing one when absent."
+  (or (pi-topic--property "PI_TOPIC_ID")
+      (pi-topic--set-property "PI_TOPIC_ID" (pi-topic--generate-id))))
+#+END_SRC
+
+The session's working directory follows the same property-overrides-
+default shape the org layer already uses for =PI_CWD=: the project root
+is the zero-config answer, and the property is the escape hatch for a
+topic that must run somewhere else.  It is resolved through
+=file-truename= because the directory is half of the session key:
+macOS answers =/var/…= to =expand-file-name= and =/private/var/…= to
+the same path once a session has been created, and the two spellings
+make [[#pi-topic-chat-open][the lookup]] miss its own session.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--cwd ()
+  "Return the working directory for the topic at point.
+The PI_CWD property when set, otherwise the buffer's project root."
+  (file-name-as-directory
+   (file-truename
+    (expand-file-name (or (pi-topic--property "PI_CWD")
+                          (pi-topic--project-root))))))
+#+END_SRC
+
+* The Engine Guard
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-engine-guard
+:END:
+
+Every command funnels through this check so a missing or moved engine
+fails once, loudly, and by name — instead of surfacing as a
+=void-function= three frames deep, which is what a version bump that
+renames a private symbol would otherwise produce.
+
+The private surface is *six* symbols, up from two.  The extra four are
+the price of [[#pi-topic-chat-open][resuming into a named session]]: upstream's
+only public resume, =pi-coding-agent-open-session-file=, attaches the
+transcript to the *unnamed* buffer for the directory, which destroys
+the one-topic-one-session identity everything else here is built on.
+Driving =switch_session= the way upstream's own resume does costs a
+process accessor, the RPC call, and the two refresh helpers.  Six
+guarded symbols is a worse dependency than two — and a legible error
+naming the one that moved is still far better than the alternative.
+
+#+BEGIN_SRC elisp
+(defconst pi-topic--engine-symbols
+  '(pi-coding-agent--setup-session
+    pi-coding-agent--find-session
+    pi-coding-agent--get-process
+    pi-coding-agent--rpc-async
+    pi-coding-agent--refresh-session-state
+    pi-coding-agent--load-session-history)
+  "Private pi-coding-agent functions pi-topic depends on.
+Verified against v2.7.0 in `tasks/pi-topic-embed-map.md'; all are
+candidates for a public replacement upstream.")
+
+(defun pi-topic--ensure-engine ()
+  "Signal a `user-error' unless the pi-coding-agent engine is usable."
+  (unless (require 'pi-coding-agent nil t)
+    (user-error "pi-topic: pi-coding-agent is not installed (cannot load feature `pi-coding-agent')"))
+  (dolist (symbol pi-topic--engine-symbols)
+    (unless (fboundp symbol)
+      (user-error "pi-topic: incompatible pi-coding-agent — `%s' is unbound" symbol)))
+  t)
+#+END_SRC
+
+* Window Placement
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-display
+:END:
+
+The default keeps the org buffer on screen: a topic is reviewed from
+the outline, so losing it to a full-width chat defeats the workflow.
+=upstream= is for users who already have a window discipline (or a
+=display-buffer-alist=) and want pi-coding-agent's own placement.
+
+#+BEGIN_SRC elisp
+(defcustom pi-topic-display-style 'split-right
+  "How `pi-topic-chat' places the chat session windows.
+
+`split-right' splits the frame first, so the org buffer keeps the left
+half and the chat pair opens on the right.  `upstream' does not split:
+the chat pair takes the current window."
+  :type '(choice (const :tag "Split the frame, chat on the right" split-right)
+                 (const :tag "Take the current window" upstream))
+  :group 'pi-topic)
+
+(defconst pi-topic--input-window-height 10
+  "Height in lines of the input window below a chat window.")
+#+END_SRC
+
+The size guards are not ceremony — they fire in practice.  A frame
+already carved into thirds, or a batch Emacs, has windows too short to
+split, and a command that raises "Window too small for splitting" after
+the session is already live would leave the user with a running agent
+and no way to see it.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--input-buffer (chat-buf)
+  "Return the pi input buffer linked to CHAT-BUF, or nil."
+  (when (buffer-live-p chat-buf)
+    (with-current-buffer chat-buf
+      (and (boundp 'pi-coding-agent--input-buffer)
+           pi-coding-agent--input-buffer))))
+
+(defun pi-topic--display-pair (chat-buf)
+  "Show CHAT-BUF in the selected window with its input buffer below."
+  (switch-to-buffer chat-buf)
+  (let ((input-buf (pi-topic--input-buffer chat-buf)))
+    (when (buffer-live-p input-buf)
+      (let ((window (if (>= (window-total-height)
+                            (+ pi-topic--input-window-height window-min-height))
+                        (split-window-below (- pi-topic--input-window-height))
+                      (display-buffer input-buf))))
+        (when (window-live-p window)
+          (set-window-buffer window input-buf)
+          (select-window window))))))
+
+(defun pi-topic--display-session (chat-buf)
+  "Display CHAT-BUF according to `pi-topic-display-style'."
+  (when (and (eq pi-topic-display-style 'split-right)
+             (>= (window-total-width) (* 2 window-min-width)))
+    (select-window (split-window-right)))
+  (pi-topic--display-pair chat-buf))
+#+END_SRC
+
+* Chat-Buffer to Topic Registry
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-registry
+:END:
+
+When the agent goes idle, the activity hook hands us a chat buffer and
+we must find the heading that owns it.  A marker — not a heading
+position or a =CUSTOM_ID= — is the right key: it tracks the heading as
+the org buffer is edited above it, which is exactly what happens while
+an agent is running.  The table is keyed by buffer so a killed session
+is trivially detectable.
+
+Unbounded growth is the obvious risk in a long-lived Emacs, so every
+write and every idle event sweeps entries whose chat buffer or org
+buffer has died, and releases the marker it was holding.
+
+#+BEGIN_SRC elisp
+(defvar pi-topic--chat-topics (make-hash-table :test 'eq)
+  "Map of live pi chat buffer to a marker at the topic heading owning it.")
+
+(defun pi-topic--forget-dead-sessions ()
+  "Drop registry entries whose chat buffer or topic buffer is gone."
+  (maphash
+   (lambda (chat-buf marker)
+     (unless (and (buffer-live-p chat-buf)
+                  (markerp marker)
+                  (buffer-live-p (marker-buffer marker)))
+       (when (markerp marker)
+         (set-marker marker nil))
+       (remhash chat-buf pi-topic--chat-topics)))
+   pi-topic--chat-topics))
+
+(defun pi-topic--register (chat-buf marker)
+  "Record that CHAT-BUF belongs to the topic at MARKER."
+  (pi-topic--forget-dead-sessions)
+  (puthash chat-buf marker pi-topic--chat-topics))
+
+(defun pi-topic--topic-marker (chat-buf)
+  "Return the live topic marker registered for CHAT-BUF, or nil."
+  (let ((marker (gethash chat-buf pi-topic--chat-topics)))
+    (and (markerp marker)
+         (buffer-live-p (marker-buffer marker))
+         marker)))
+#+END_SRC
+
+* Recording the Session File
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-session-file
+:END:
+
+=PI_SESSION= is what lets a topic survive the death of its chat
+buffer: with the JSONL path on the heading, the next
+[[#pi-topic-chat-open][=pi-topic-chat=]] resumes the conversation instead of
+starting a blank one.  Pi publishes that path in the chat buffer's
+=pi-coding-agent--state= plist, already normalised to an Emacs path
+(=pi-coding-agent-core.el= builds it through
+=pi-coding-agent--passive-emacs-path=), and the upstream
+=process-info= command reads it exactly this way.
+
+The read is deliberately total — dead buffer, unbound variable, empty
+state all answer nil.  It also stays out of
+[[#pi-topic-chat-engine-guard][the engine guard]]: unlike the two private
+functions there, a missing state plist costs nothing at the moment it
+is missing.  The path simply arrives with a later phase event.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--session-file (chat-buf)
+  "Return the session JSONL path pi recorded in CHAT-BUF, or nil."
+  (when (buffer-live-p chat-buf)
+    (with-current-buffer chat-buf
+      (and (boundp 'pi-coding-agent--state)
+           (plist-get pi-coding-agent--state :session-file)))))
+#+END_SRC
+
+Stamping is write-when-changed, never write-when-absent: pi populates
+its state asynchronously, so the common case at any given call is "no
+path yet", and clearing a good =PI_SESSION= because this particular
+moment had nothing to offer would silently cost the topic its
+resumability.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--stamp-session (chat-buf marker)
+  "Record CHAT-BUF's session file on the topic at MARKER.
+Does nothing when pi has published no path yet, so an existing
+PI_SESSION is never cleared."
+  (let ((path (pi-topic--session-file chat-buf)))
+    (when (and (stringp path)
+               (markerp marker)
+               (buffer-live-p (marker-buffer marker)))
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (goto-char marker)
+          (unless (equal path (pi-topic--property "PI_SESSION"))
+            (pi-topic--set-property "PI_SESSION" path)))))))
+#+END_SRC
+
+* Returned Work Lands in Review
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-activity
+:END:
+
+GTD's delegation loop needs one event: the delegate has answered.
+Upstream's =pi-coding-agent-activity-phase-functions= gives exactly
+that — phase =idle= with reason =phase-change=.  The other reasons
+(=reset=, =teardown=, =input-link=, =input-unlink=) are buffer
+lifecycle noise that also reports =idle=; acting on them would demote a
+=done= topic back to =review= every time its window was relinked.
+
+Adding the handler at load time is safe even without the engine:
+=add-hook= creates the variable, and =defcustom= later leaves an
+already-bound variable alone, so the registration survives
+pi-coding-agent loading afterwards.
+
+The hook doubles as the cheapest available clock for
+[[#pi-topic-chat-session-file][the session stamp]].  Every event is a stamp
+opportunity — =thinking= reaches us long before =idle= does, and a
+topic whose Emacs dies mid-turn should already carry its JSONL path.
+Only the review flip stays narrow.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--on-activity-phase (chat-buf _input-buf _old-phase new-phase reason)
+  "React to a pi activity event for CHAT-BUF.
+Records the session file on every event, and moves the owning topic to
+review when the turn finishes.  Called from
+`pi-coding-agent-activity-phase-functions' with NEW-PHASE and REASON as
+documented there; only idle/`phase-change' counts as finished."
+  (pi-topic--forget-dead-sessions)
+  (let ((marker (pi-topic--topic-marker chat-buf)))
+    (when marker
+      (pi-topic--stamp-session chat-buf marker)
+      (when (and (equal new-phase "idle")
+                 (eq reason 'phase-change))
+        (with-current-buffer (marker-buffer marker)
+          (save-excursion
+            (goto-char marker)
+            (pi-topic-set-state "review")))))))
+
+(add-hook 'pi-coding-agent-activity-phase-functions #'pi-topic--on-activity-phase)
+#+END_SRC
+
+* Opening a Topic's Chat
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-open
+:END:
+
+A topic always gets the session named =(cwd, id)=: reuse the live one
+if it exists, otherwise create it.  Resuming is a *second step applied
+to that session*, never a different way of obtaining one — which is
+the whole correction this section carries.
+
+=pi-coding-agent-open-session-file= looked like the obvious resume
+door, and it is the wrong one.  A live run measured what it does:
+the first chat produced
+=*pi-coding-agent-chat:<dir><pi-1786690796-od9f>*=, and after a reap
+and resume the buffer was =*pi-coding-agent-chat:<dir>*= — the
+*unnamed* session for that directory.  From then on
+=pi-coding-agent--find-session= with the topic's own =(cwd, id)=
+returned nil forever: the topic could not find its session,
+=pi-topic-abort= had nothing to abort, and two topics sharing a
+directory would both land in that one shared buffer.
+
+Only the first-ever chat sends the Goal — a resumed session already
+has it in its history, and re-sending would cost a turn and confuse
+the agent.
+
+"First-ever" is judged by =PI_SESSION= alone, and
+[[#pi-topic-chat-session-file][the session stamp]] keeps that property honest:
+=pi-topic-chat= stamps once on the way out — which is what catches a
+reused session whose state is already populated — and the activity
+hook stamps again on every phase event of the first turn.  A reused
+session therefore never re-sends the Goal.  The one gap left is
+structural: pi answers =get_state= asynchronously, so a topic
+re-chatted in the seconds between creating a session and its first
+phase event has no path to judge by and sends the Goal again.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--send (chat-buf text)
+  "Send TEXT to the session of CHAT-BUF through its input buffer."
+  (let ((input-buf (pi-topic--input-buffer chat-buf)))
+    (unless (buffer-live-p input-buf)
+      (user-error "pi-topic: chat session has no input buffer"))
+    (with-current-buffer input-buf
+      (erase-buffer)
+      (insert text)
+      (pi-coding-agent-send))))
+
+(defun pi-topic--open-session (cwd id)
+  "Return the named chat buffer for CWD and ID, creating the session if needed."
+  (let ((existing (pi-coding-agent--find-session cwd id)))
+    (if (buffer-live-p existing)
+        existing
+      (pi-coding-agent--setup-session cwd id))))
+#+END_SRC
+
+Pointing that session at a transcript is upstream's own resume,
+minus the window and generation bookkeeping that only matters when a
+human picked the file from a prompt: =switch_session=, then — on
+success only — refresh state and reload history.  Loading history
+after a *failed* switch would paint the old conversation under the new
+session's identity, which is why the guard is on the response, not on
+the RPC returning.
+
+The callback is a named function reached through =apply-partially=,
+not a lambda.  This file is loaded by =literate-elisp= without a
+=lexical-binding= cookie, so a lambda written here captures nothing:
+by the time the RPC answers, the =let= that held CHAT-BUF has long
+exited and the callback would fail on unbound variables.
+=apply-partially= is defined in a lexically-bound file, so the
+arguments it curries survive.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--report-resume (count)
+  "Report that a resumed session replayed COUNT messages."
+  (message "pi-topic: resumed session (%d messages)" count))
+
+(defun pi-topic--switch-session-callback (chat-buf proc path response)
+  "Finish a switch_session RPC for CHAT-BUF on PROC targeting PATH.
+RESPONSE is the pi reply; history is only reloaded on success."
+  (when (and (eq (plist-get response :success) t)
+             (buffer-live-p chat-buf))
+    (pi-coding-agent--refresh-session-state proc chat-buf path)
+    (pi-coding-agent--load-session-history proc #'pi-topic--report-resume
+                                           chat-buf)))
+
+(defun pi-topic--switch-session (chat-buf path)
+  "Switch the live session in CHAT-BUF to the transcript at PATH."
+  (let ((proc (with-current-buffer chat-buf (pi-coding-agent--get-process))))
+    (unless (processp proc)
+      (user-error "pi-topic: chat session has no process to resume with"))
+    (pi-coding-agent--rpc-async
+     proc
+     (list :type "switch_session" :sessionPath path)
+     (apply-partially #'pi-topic--switch-session-callback chat-buf proc path))))
+
+(defun pi-topic--resume-session (chat-buf session-file)
+  "Point CHAT-BUF at SESSION-FILE unless it is already the current one."
+  (let ((current (pi-topic--session-file chat-buf)))
+    (when (and (stringp session-file)
+               (file-exists-p session-file)
+               (not (and (stringp current)
+                         (file-equal-p current session-file))))
+      (pi-topic--switch-session chat-buf session-file))))
+#+END_SRC
+
+The command itself resolves everything from the org buffer /before/
+displaying anything, because displaying changes the selected buffer and
+the topic's marker is the only way back.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-chat ()
+  "Open the Pi chat session for the topic at point and return its buffer.
+The session is always the one named after the topic's own id; a
+recorded PI_SESSION transcript is switched into it rather than opened
+as a separate session.  Sends the Goal as the opening prompt when the
+topic has no PI_SESSION yet, and moves the topic to the waiting state."
+  (interactive)
+  (pi-topic--ensure-engine)
+  (unless (pi-topic-p)
+    (user-error "pi-topic: point is not inside a topic"))
+  (let* ((marker (copy-marker (pi-topic--position)))
+         (id (pi-topic--id))
+         (cwd (pi-topic--cwd))
+         (session-file (pi-topic--property "PI_SESSION"))
+         (goal (pi-topic-goal))
+         (chat-buf (pi-topic--open-session cwd id)))
+    (unless (buffer-live-p chat-buf)
+      (user-error "pi-topic: pi-coding-agent returned no chat buffer"))
+    (pi-topic--resume-session chat-buf session-file)
+    (pi-topic--register chat-buf marker)
+    (pi-topic--display-session chat-buf)
+    (when (and (null session-file)
+               goal
+               (not (string-empty-p goal)))
+      (pi-topic--send chat-buf goal))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (goto-char marker)
+        (pi-topic-set-state "waiting")))
+    (pi-topic--stamp-session chat-buf marker)
+    chat-buf))
+#+END_SRC
+
+Aborting deliberately does /not/ mint an id: a topic that was never
+chatted has no session to stop, and generating an id there would leave
+a misleading property behind.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-abort ()
+  "Abort the running turn of the topic at point."
+  (interactive)
+  (pi-topic--ensure-engine)
+  (let* ((id (pi-topic--property "PI_TOPIC_ID"))
+         (chat-buf (and id (pi-coding-agent--find-session (pi-topic--cwd) id))))
+    (unless (buffer-live-p chat-buf)
+      (user-error "pi-topic: no live chat session for this topic"))
+    (with-current-buffer chat-buf
+      (pi-coding-agent-abort))))
+#+END_SRC
+
+* Feature Registration
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-provide
+:END:
+
+Same contract as the org layer: the feature symbol is what tests and
+later layers =require= once =literate-elisp-load= has evaluated this
+file.
+
+#+BEGIN_SRC elisp
+(provide 'pi-topic-chat)
+#+END_SRC

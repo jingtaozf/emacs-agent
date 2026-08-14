@@ -21,6 +21,10 @@
 ;; - lp/trace/code-agent-trace.org: OTel span macros
 ;; - lp/sdk/emacs-mcp-server.org: MCP HTTP server exposing Emacs tools
 ;;   to external agents (Claude Code, Pi, ...) at localhost:9999
+;; - lp/org/pi-topic.org: the pure org layer of pi-topics — topic
+;;   headings, PI_STATE lifecycle, Goal/Result sections
+;; - lp/org/pi-topic-chat.org: the engine layer — turns a topic into a
+;;   live pi-coding-agent session (degrades to an error when absent)
 ;;
 ;; Quick Start:
 ;;   (require 'code-agent)
@@ -73,6 +77,8 @@ ad-hoc files added later), then every immediate subdir of ``lp/``."
 ;; lp/_drafts/draft.org) will register their modules here as they land.
 (code-agent--load-module "code-agent-trace")
 (code-agent--load-module "emacs-mcp-server")
+(code-agent--load-module "pi-topic")
+(code-agent--load-module "pi-topic-chat")
 
 (provide 'code-agent)
 
