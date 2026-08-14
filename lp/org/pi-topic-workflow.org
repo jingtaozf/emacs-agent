@@ -1,0 +1,420 @@
+#+TITLE: Pi Topic Workflow — capture, list, reap, menu
+#+PROPERTY: literate-load yes
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-overview
+:END:
+
+The org layer says what a topic /is/ and the chat layer runs it; this
+module is the surface a human actually touches all day.  Four moves,
+each one a GTD verb: *capture* a topic from anywhere in Emacs, *list*
+the ones in flight, *reap* a session whose answer has been read, and
+reach all of it from one *menu*.
+
+Nothing here talks to pi.  It requires
+[[file:pi-topic-chat.org::#pi-topic-chat-overview][the chat layer]] for the
+session registry and the commands the menu offers, and that layer
+already loads clean without pi-coding-agent — so this one does too.
+=transient= is likewise optional: the menu degrades to one honest
+error, the other five commands do not care.
+
+The design pressure throughout is *do not open what you can read*.  A
+weekly review across a dozen agenda files should not visit a dozen
+buffers to discover that eleven of them contain no topics at all.
+
+* Module Preamble
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-preamble
+:END:
+
+=pi-topic-chat= pulls in the org layer, =project=, and the session
+registry this module reaps from.  =org-capture= is required eagerly
+because the capture template mutates its variable; =transient= is
+deliberately absent here and required at the bottom of the file.
+
+#+BEGIN_SRC elisp
+(require 'pi-topic-chat)
+(require 'org-capture)
+(require 'seq)
+#+END_SRC
+
+* Where Captured Topics Land
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-capture-file
+:END:
+
+The default has to be computed at capture time, not at load time: a
+single Emacs session moves between projects all day, and a topics file
+frozen to whichever project happened to be current when the package
+loaded is worse than no default at all.  So the option holds nil for
+"follow the project" and a function resolves it on every call.
+
+The fallback chain differs from
+[[file:pi-topic-chat.org::#pi-topic-chat-id][the session cwd]] on purpose: a
+session must run *somewhere real*, so that one ends at
+=default-directory=, while a captured topic belongs in the user's org
+tree, so this one ends at =org-directory=.
+
+#+BEGIN_SRC elisp
+(defcustom pi-topic-file nil
+  "Org file `org-capture' drops new pi topics into.
+
+nil means follow the current project: `topics.org' at the project root
+of wherever capture is invoked, falling back to `org-directory' and
+then to \"~/org\" when there is no project."
+  :type '(choice (const :tag "Follow the current project" nil)
+                 (file :tag "Fixed file"))
+  :group 'pi-topic)
+
+(defun pi-topic--capture-directory ()
+  "Return the directory a project-following topics file belongs in."
+  (or (let ((proj (project-current nil)))
+        (and proj (ignore-errors (expand-file-name (project-root proj)))))
+      (and (boundp 'org-directory) org-directory)
+      "~/org"))
+
+(defun pi-topic--capture-file ()
+  "Return the org file new topics are captured into."
+  (expand-file-name
+   (or pi-topic-file
+       (expand-file-name "topics.org" (pi-topic--capture-directory)))))
+#+END_SRC
+
+* The Capture Template
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-capture
+:END:
+
+The template body is assembled from the same constant
+=pi-topic-new= uses, so the two entry points cannot drift into two
+different topic shapes.  =%i%?= puts any active region into the Goal
+and leaves point after it — the GTD clarify step is "state the desired
+outcome", and that is the one thing capture should ask for.
+
+The target is the *function symbol*, not its current value:
+=org-capture-expand-file= calls it at capture time, which is what keeps
+the project-following default alive after the template has been
+registered once at startup.
+
+#+BEGIN_SRC elisp
+(defconst pi-topic--capture-key "p"
+  "Key `pi-topic-add-capture-template' claims in `org-capture-templates'.")
+
+(defun pi-topic--capture-body ()
+  "Return the capture template body for a new topic."
+  (concat "* " pi-topic--new-heading-text "\n"
+          ":PROPERTIES:\n:PI_STATE: todo\n:END:\n"
+          "** Goal\n%i%?\n"
+          "** Result\n"))
+
+(defun pi-topic-capture-template ()
+  "Return the `org-capture-templates' entry for a new pi topic."
+  (list pi-topic--capture-key "Pi topic" 'entry
+        (list 'file 'pi-topic--capture-file)
+        (pi-topic--capture-body)
+        :empty-lines 1))
+#+END_SRC
+
+Registration refuses to overwrite: =p= is a popular key, and a user
+who already bound it to their own template would rather hear about the
+collision than lose it.  Re-running is therefore also idempotent,
+which matters because reloading a literate module re-runs everything
+in it.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-add-capture-template ()
+  "Add the pi topic template to `org-capture-templates' under \"p\".
+Leaves an existing entry for that key untouched.  Returns the list."
+  (interactive)
+  (if (assoc pi-topic--capture-key org-capture-templates)
+      (message "pi-topic: capture key %S already taken — left alone"
+               pi-topic--capture-key)
+    (push (pi-topic-capture-template) org-capture-templates))
+  org-capture-templates)
+#+END_SRC
+
+* Which Files Hold Topics
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-files
+:END:
+
+Topics live wherever the user writes them, so the scan set is the
+capture file plus the agenda — but only the agenda files that actually
+contain one.  The test is a text search for the property, run in a
+temp buffer: visiting a file costs an org-mode initialisation, a
+possible =org-persist= read and a permanent buffer, and paying that
+for every agenda file to discover that most have no topics is the
+tax this function exists to avoid.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--file-has-topics-p (file)
+  "Return non-nil when FILE's text contains a PI_STATE property."
+  (and (stringp file)
+       (file-readable-p file)
+       (with-temp-buffer
+         (insert-file-contents file)
+         (goto-char (point-min))
+         (and (re-search-forward "^[ \t]*:PI_STATE:" nil t) t))))
+
+(defun pi-topic-agenda-files ()
+  "Return the files worth scanning for topics.
+The capture file first, then every `org-agenda-files' entry that
+carries at least one PI_STATE property."
+  (let ((files (list (pi-topic--capture-file))))
+    (dolist (file (org-agenda-files t))
+      (let ((file (expand-file-name file)))
+        (when (and (not (member file files))
+                   (pi-topic--file-has-topics-p file))
+          (push file files))))
+    (nreverse files)))
+#+END_SRC
+
+* The Topic List
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-list
+:END:
+
+Scanning is where visiting is finally worth it: heading text and
+property values are org's job, and re-implementing keyword and tag
+stripping against a regexp is how a lister quietly starts lying.
+Buffers opened here stay open, exactly as =org-agenda= leaves them —
+killing them could sever a marker that
+[[file:pi-topic-chat.org::#pi-topic-chat-registry][the session registry]] is
+holding on a live topic.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--scan-file (file)
+  "Return a plist per topic found in FILE, in document order."
+  (when (file-readable-p file)
+    (with-current-buffer (find-file-noselect file)
+      (when (derived-mode-p 'org-mode)
+        (org-with-wide-buffer
+         (let ((topics nil))
+           (org-map-entries
+            (lambda ()
+              (let ((state (org-entry-get nil "PI_STATE")))
+                (when state
+                  (push (list :state state
+                              :heading (org-get-heading t t t t)
+                              :file file
+                              :line (line-number-at-pos)
+                              :position (point))
+                        topics)))))
+           (nreverse topics)))))))
+#+END_SRC
+
+Ordering is the lifecycle, not the alphabet: the review sweep wants
+=next= before =waiting= before =review=, because that is the order the
+work moves in.  States outside the vocabulary sort last rather than
+raising — a hand-typed =PI_STATE= should show up in the list, which is
+where the typo becomes visible.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--state-rank (state)
+  "Return the lifecycle position of STATE, or one past the end."
+  (or (seq-position pi-topic-states state #'equal)
+      (length pi-topic-states)))
+
+(defun pi-topic--collect-topics ()
+  "Return every topic across `pi-topic-agenda-files', lifecycle-ordered."
+  (let ((topics nil))
+    (dolist (file (pi-topic-agenda-files))
+      (setq topics (append topics (pi-topic--scan-file file))))
+    (sort topics
+          (lambda (a b)
+            (let ((rank-a (pi-topic--state-rank (plist-get a :state)))
+                  (rank-b (pi-topic--state-rank (plist-get b :state))))
+              (if (= rank-a rank-b)
+                  (let ((file-a (plist-get a :file))
+                        (file-b (plist-get b :file)))
+                    (if (equal file-a file-b)
+                        (< (plist-get a :line) (plist-get b :line))
+                      (string< file-a file-b)))
+                (< rank-a rank-b)))))))
+#+END_SRC
+
+Each row is a button rather than an org link because the list buffer
+is not an org buffer, and a button carries its target in properties —
+no closure, which this dynamically-bound file could not keep anyway.
+The buffer is rebuilt from scratch on every invocation: a topic list
+that can be stale is worse than no list, because it is believed.
+
+#+BEGIN_SRC elisp
+(defconst pi-topic--list-buffer-name "*Pi Topics*"
+  "Name of the buffer `pi-topic-list' renders into.")
+
+(defun pi-topic--list-visit (button)
+  "Jump to the topic heading BUTTON was made from."
+  (let ((file (button-get button 'pi-topic-file))
+        (position (button-get button 'pi-topic-position)))
+    (pop-to-buffer (find-file-noselect file))
+    (widen)
+    (goto-char position)
+    (when (fboundp 'org-fold-show-entry)
+      (org-fold-show-entry))
+    (recenter)))
+
+(defun pi-topic--insert-topic-line (topic)
+  "Insert one clickable row for TOPIC at point."
+  (let ((file (plist-get topic :file))
+        (line (plist-get topic :line)))
+    (insert (format "%-10s" (plist-get topic :state)))
+    (insert-text-button
+     (format "%-44s %s:%d"
+             (plist-get topic :heading)
+             (file-name-nondirectory file)
+             line)
+     'action #'pi-topic--list-visit
+     'follow-link t
+     'help-echo (format "Visit %s:%d" file line)
+     'pi-topic-file file
+     'pi-topic-position (plist-get topic :position))
+    (insert "\n")))
+
+(defun pi-topic-list ()
+  "Show every pi topic across `pi-topic-agenda-files' and return the buffer."
+  (interactive)
+  (let ((topics (pi-topic--collect-topics))
+        (buffer (get-buffer-create pi-topic--list-buffer-name)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (if (null topics)
+            (insert "No pi topics found.\n")
+          (dolist (topic topics)
+            (pi-topic--insert-topic-line topic))))
+      (special-mode)
+      (goto-char (point-min)))
+    (pop-to-buffer buffer)
+    buffer))
+#+END_SRC
+
+* Reaping a Session
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-reap
+:END:
+
+Reaping closes the /window on/ the conversation, never the
+conversation: the properties are left exactly as they are, so
+=PI_SESSION= still names the JSONL and the next
+[[file:pi-topic-chat.org::#pi-topic-chat-open][=pi-topic-chat=]] resumes into it.
+That is the whole point — a reviewed topic should stop costing a
+process without losing its history.
+
+The chat buffer is found through the registry first, which means reap
+works with no pi-coding-agent loaded at all; the engine lookup is a
+second opinion for a session this Emacs did not start, and it is
+guarded rather than assumed.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--registered-chat-buffer ()
+  "Return the live chat buffer registered for the topic at point, or nil."
+  (pi-topic--forget-dead-sessions)
+  (let ((topic (pi-topic--position))
+        (buffer (current-buffer))
+        (found nil))
+    (when topic
+      (maphash (lambda (chat-buf marker)
+                 (when (and (null found)
+                            (eq (marker-buffer marker) buffer)
+                            (= (marker-position marker) topic))
+                   (setq found chat-buf)))
+               pi-topic--chat-topics))
+    found))
+
+(defun pi-topic--engine-chat-buffer ()
+  "Return the engine's chat buffer for the topic at point, or nil.
+Answers nil rather than signalling when pi-coding-agent is not loaded."
+  (let ((id (pi-topic--property "PI_TOPIC_ID")))
+    (and id
+         (fboundp 'pi-coding-agent--find-session)
+         (pi-coding-agent--find-session (pi-topic--cwd) id))))
+#+END_SRC
+
+Killing a pi chat buffer normally asks twice — once for the live
+process, once through pi's own =kill-buffer-query-functions= entry.
+Both prompts are noise for a deliberate reap, so both are silenced
+here rather than answered by the user.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--kill-session-buffer (buffer)
+  "Kill BUFFER and its process without asking."
+  (when (buffer-live-p buffer)
+    (let ((proc (get-buffer-process buffer)))
+      (when (processp proc)
+        (set-process-query-on-exit-flag proc nil)))
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer buffer))))
+
+(defun pi-topic-reap ()
+  "Kill the chat session of the topic at point, keeping its properties.
+PI_SESSION is left alone, so the transcript survives and the next
+`pi-topic-chat' resumes it."
+  (interactive)
+  (unless (pi-topic-p)
+    (user-error "pi-topic: point is not inside a topic"))
+  (let ((chat-buf (or (pi-topic--registered-chat-buffer)
+                      (pi-topic--engine-chat-buffer))))
+    (if (not (buffer-live-p chat-buf))
+        (progn (message "pi-topic: no live chat session for this topic") nil)
+      (let ((input-buf (pi-topic--input-buffer chat-buf)))
+        (remhash chat-buf pi-topic--chat-topics)
+        (pi-topic--kill-session-buffer chat-buf)
+        (pi-topic--kill-session-buffer input-buf))
+      (message "pi-topic: session reaped — PI_SESSION still names the transcript")
+      t)))
+#+END_SRC
+
+* The Menu
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-menu
+:END:
+
+The heading answers the question a user opening the menu already has —
+what state is this topic in — so the menu doubles as the smallest
+possible status readout.
+
+=transient= ships with Emacs 28 but this package supports 27, and a
+=transient-define-prefix= at top level would take the whole module down
+with it when it is missing.  Wrapping the definition in =eval= defers
+macro expansion past the =require=, and the fallback keeps
+=pi-topic-menu= a real command that explains itself.  The prefix is
+bound to no key: which key belongs to pi-topics is the user's call.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--menu-description ()
+  "Return the heading line shown at the top of `pi-topic-menu'."
+  (if (pi-topic-p)
+      (format "Pi topic [%s]" (or (pi-topic-state) "?"))
+    "Pi topic (none at point)"))
+
+(if (require 'transient nil t)
+    (eval '(transient-define-prefix pi-topic-menu ()
+             "Commands for the pi topic at point."
+             [:description pi-topic--menu-description
+              ("n" "new topic" pi-topic-new)
+              ("c" "chat" pi-topic-chat)
+              ("a" "abort turn" pi-topic-abort)
+              ("r" "reap session" pi-topic-reap)
+              ("l" "list topics" pi-topic-list)
+              ("s" "set state" pi-topic-set-state)])
+          t)
+  (defun pi-topic-menu ()
+    "Report that the transient package is needed for the pi topic menu."
+    (interactive)
+    (user-error "pi-topic: the menu needs the `transient' package")))
+#+END_SRC
+
+* Feature Registration
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-workflow-provide
+:END:
+
+Same contract as the other two layers: the feature symbol is what
+tests and user configuration =require= once =literate-elisp-load= has
+evaluated this file.
+
+#+BEGIN_SRC elisp
+(provide 'pi-topic-workflow)
+#+END_SRC

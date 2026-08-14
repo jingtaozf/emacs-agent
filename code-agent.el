@@ -23,8 +23,11 @@
 ;;   to external agents (Claude Code, Pi, ...) at localhost:9999
 ;; - lp/org/pi-topic.org: the pure org layer of pi-topics — topic
 ;;   headings, PI_STATE lifecycle, Goal/Result sections
+;; - lp/org/pi-topic-io.org: the write-back path — address a topic by
+;;   PI_TOPIC_ID, replace a section body, hand the id to the process
 ;; - lp/org/pi-topic-chat.org: the engine layer — turns a topic into a
 ;;   live pi-coding-agent session (degrades to an error when absent)
+;; - lp/org/pi-topic-workflow.org: capture, topic list, reap, menu
 ;;
 ;; Quick Start:
 ;;   (require 'code-agent)
@@ -78,7 +81,9 @@ ad-hoc files added later), then every immediate subdir of ``lp/``."
 (code-agent--load-module "code-agent-trace")
 (code-agent--load-module "emacs-mcp-server")
 (code-agent--load-module "pi-topic")
+(code-agent--load-module "pi-topic-io")
 (code-agent--load-module "pi-topic-chat")
+(code-agent--load-module "pi-topic-workflow")
 
 (provide 'code-agent)
 

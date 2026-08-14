@@ -1,0 +1,244 @@
+#+TITLE: Pi Topic IO — the agent's write-back path
+#+PROPERTY: literate-load yes
+
+* Overview
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-io-overview
+:END:
+
+Everything so far pushes /out/ of org: the Goal becomes a prompt, the
+state follows the session.  This module is the return path — how a pi
+process, told which topic it serves, writes its distilled Result back
+into the heading that asked the question.
+
+Two halves.  Addressing: a topic is found by its =PI_TOPIC_ID=, not by
+buffer, file or position, because the agent knows only the id it was
+handed at spawn time and by the time it answers the user may have
+refiled the heading into another file.  Delivery:
+=pi-topic-write-section= replaces exactly one subsection body and
+touches nothing else — not the drawer, not the sibling section, not the
+neighbouring topic.
+
+The id reaches the process through the environment.  Upstream's
+=pi-coding-agent--start-process= calls =make-process= with no =:env=
+(=pi-coding-agent-core.el:676=), so the child inherits Emacs'
+=process-environment= as it stands at spawn time; binding it around the
+call that creates the session is the whole mechanism, and it costs no
+new private symbol.
+
+This module loads without pi-coding-agent, and without the workflow
+layer too — see [[#pi-topic-io-addressing][the addressing section]] for what
+the latter buys when it is present.
+
+* Module Preamble
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-io-preamble
+:END:
+
+The org layer is the only hard dependency, and that is deliberate:
+=pi-topic-chat= requires *this* module (it binds the environment
+around session creation), and the workflow layer requires the chat
+layer, so a =require= in the other direction would close a cycle.
+
+#+BEGIN_SRC elisp
+(require 'pi-topic)
+#+END_SRC
+
+* Addressing a Topic by Id
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-io-addressing
+:END:
+
+Live buffers are searched first, always.  A user reading a topic with
+unsaved edits in front of them is the normal case while an agent is
+working, and answering from the file on disk would hand the writer a
+stale copy — whose save would then silently discard whatever the human
+had typed.  The disk is consulted only for files nothing is visiting.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--scan-buffer-for-id (id)
+  "Return a marker at the topic in the current buffer carrying ID, or nil.
+The property line is found by text search and then confirmed through
+org, so a stray mention inside a source block cannot match."
+  (when (derived-mode-p 'org-mode)
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (let ((found nil))
+       (while (and (null found)
+                   (re-search-forward "^[ \t]*:PI_TOPIC_ID:[ \t]*\\(.+?\\)[ \t]*$"
+                                      nil t))
+         (when (equal id (match-string-no-properties 1))
+           (save-excursion
+             (org-back-to-heading t)
+             (when (equal id (org-entry-get nil "PI_TOPIC_ID"))
+               (setq found (point-marker))))))
+       found))))
+#+END_SRC
+
+The file half is an *optional capability*: it needs the list of topic
+files, which the workflow layer owns.  Loaded on its own, this module
+still addresses every topic the user has open — which is every topic
+an agent is currently working on — and simply cannot reach the ones
+that live only on disk.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--topic-files ()
+  "Return the files worth searching for a topic id.
+Empty unless the workflow layer, which owns the file list, is loaded."
+  (when (fboundp 'pi-topic-agenda-files)
+    (pi-topic-agenda-files)))
+
+(defun pi-topic--file-mentions-id-p (file id)
+  "Return non-nil when FILE's text contains ID at all."
+  (and (stringp file)
+       (file-readable-p file)
+       (with-temp-buffer
+         (insert-file-contents file)
+         (goto-char (point-min))
+         (and (search-forward id nil t) t))))
+
+(defun pi-topic--find-by-id (id)
+  "Return a marker at the topic whose PI_TOPIC_ID is ID, or nil.
+Live org buffers are searched first; a file is opened only when no
+live buffer answers and its text mentions ID."
+  (when (and (stringp id) (not (string-empty-p id)))
+    (let ((found nil))
+      (dolist (buffer (buffer-list))
+        (unless found
+          (with-current-buffer buffer
+            (setq found (pi-topic--scan-buffer-for-id id)))))
+      (dolist (file (pi-topic--topic-files))
+        (unless (or found (find-buffer-visiting file))
+          (when (pi-topic--file-mentions-id-p file id)
+            (with-current-buffer (find-file-noselect file)
+              (setq found (pi-topic--scan-buffer-for-id id))))))
+      found)))
+#+END_SRC
+
+* Writing a Section
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-io-write
+:END:
+
+The child lookup is anchored at point rather than reusing the org
+layer's climbing version: the writer already stands on the heading it
+means, and re-deriving it through the =PI_STATE= climb would resolve a
+different heading for anything addressed by id alone.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--child-section-position (name)
+  "Return the position of the NAME child of the heading point is on, or nil."
+  (save-excursion
+    (let ((bound (save-excursion (org-end-of-subtree t t)))
+          (regexp (format "^\\*\\{%d\\} +%s[ \t]*$"
+                          (1+ (org-current-level))
+                          (regexp-quote name))))
+      (when (re-search-forward regexp bound t)
+        (line-beginning-position)))))
+
+(defun pi-topic--section-body-block (text)
+  "Return TEXT as a section body: trimmed, newline-terminated, or empty."
+  (let ((body (string-trim (or text ""))))
+    (if (string-empty-p body) "" (concat body "\n"))))
+#+END_SRC
+
+Replacement is bounded by the subsection's own subtree, so the drawer
+above it and the sibling section below it are outside the edited
+region by construction.  A missing subsection is appended at the end
+of the topic — the Result of a topic whose skeleton predates this
+module still lands in the right place, at the right level.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--replace-section-body (name text)
+  "Replace the body of the NAME child of the heading at point with TEXT.
+Creates the child at the end of the topic when it does not exist."
+  (let ((position (pi-topic--child-section-position name))
+        (body (pi-topic--section-body-block text)))
+    (if position
+        (progn
+          (goto-char position)
+          (let ((end (save-excursion (org-end-of-subtree t t))))
+            (org-end-of-meta-data t)
+            (delete-region (min (point) end) end)
+            (insert body)))
+      (let ((stars (make-string (1+ (org-current-level)) ?*))
+            (end (save-excursion (org-end-of-subtree t t))))
+        (goto-char end)
+        (unless (bolp)
+          (insert "\n"))
+        (insert stars " " name "\n" body)))))
+#+END_SRC
+
+Saving follows one rule: *this module saves only what it opened*.  A
+buffer the user already had is left modified, because saving it would
+commit edits they have not finished and have not asked anyone to
+write; a buffer opened here has no such edits and would otherwise
+leave the agent's answer visible nowhere but in a buffer nobody knows
+exists.  The snapshot of =buffer-list= taken before the search is what
+distinguishes the two.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-write-section (id name text)
+  "Replace the body of topic ID's NAME section with TEXT.
+NAME is a child heading such as \"Goal\" or \"Result\", created when
+absent.  Returns t on success, nil when ID names no known topic."
+  (let* ((known-buffers (buffer-list))
+         (marker (pi-topic--find-by-id id)))
+    (when marker
+      (let* ((buffer (marker-buffer marker))
+             (opened (not (memq buffer known-buffers))))
+        (with-current-buffer buffer
+          (org-with-wide-buffer
+           (goto-char marker)
+           (pi-topic--replace-section-body name text))
+          (when opened
+            (save-buffer)))
+        (set-marker marker nil)
+        t))))
+
+(defun pi-topic-write-result (id text)
+  "Replace the Result section of topic ID with TEXT."
+  (pi-topic-write-section id "Result" text))
+
+(defun pi-topic-write-goal (id text)
+  "Replace the Goal section of topic ID with TEXT."
+  (pi-topic-write-section id "Goal" text))
+#+END_SRC
+
+* Telling the Process Which Topic It Serves
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-io-env
+:END:
+
+Two variables are enough for the agent to write back: the id it must
+quote, and the file it lives in — the latter only so a tool can show
+the user where the answer landed.  =PI_TOPIC_FILE= is the empty string
+for a topic in a buffer with no file, rather than absent, so a
+consumer can read it unconditionally.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-io-env (id)
+  "Return \"NAME=VALUE\" strings describing topic ID for a pi process.
+Meant to be prepended to `process-environment' around the call that
+spawns the process."
+  (let* ((marker (pi-topic--find-by-id id))
+         (buffer (and marker (marker-buffer marker)))
+         (file (and (buffer-live-p buffer) (buffer-file-name buffer))))
+    (when marker
+      (set-marker marker nil))
+    (list (format "PI_TOPIC_ID=%s" (or id ""))
+          (format "PI_TOPIC_FILE=%s" (or file "")))))
+#+END_SRC
+
+* Feature Registration
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-io-provide
+:END:
+
+The feature symbol is what =pi-topic-chat= requires to get
+=pi-topic-io-env=, and what a pi extension's Emacs-side handler
+requires to reach the writers.
+
+#+BEGIN_SRC elisp
+(provide 'pi-topic-io)
+#+END_SRC

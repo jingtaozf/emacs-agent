@@ -43,6 +43,11 @@
 (defvar test-pi-topic-chat--created nil
   "List of (DIR . SESSION) the fake `pi-coding-agent--setup-session' saw.")
 
+(defvar test-pi-topic-chat--spawn-env nil
+  "List of PI_TOPIC_ID values visible to the fake `--setup-session'.
+Upstream spawns pi with no `:env', so what `getenv' answers inside the
+session-creating call is exactly what the pi process would inherit.")
+
 (defvar test-pi-topic-chat--opened nil
   "List of session files the fake `pi-coding-agent-open-session-file' saw.")
 
@@ -98,6 +103,7 @@ passes without the package being installed."
         test-pi-topic-chat--opened nil
         test-pi-topic-chat--aborted nil
         test-pi-topic-chat--find-result nil
+        test-pi-topic-chat--spawn-env nil
         test-pi-topic-chat--rpc nil
         test-pi-topic-chat--rpc-response '(:success t)
         test-pi-topic-chat--refreshed nil
@@ -114,6 +120,7 @@ passes without the package being installed."
                   ((symbol-function 'pi-coding-agent--setup-session)
                    (lambda (dir &optional session)
                      (push (cons dir session) test-pi-topic-chat--created)
+                     (push (getenv "PI_TOPIC_ID") test-pi-topic-chat--spawn-env)
                      (test-pi-topic-chat--new-session)))
                   ((symbol-function 'pi-coding-agent-open-session-file)
                    (lambda (file)
@@ -513,6 +520,29 @@ unnamed buffer for the directory, losing the topic's session forever."
                 (should (null test-pi-topic-chat--refreshed))
                 (should (null test-pi-topic-chat--history-loads)))))))
       (delete-file session))))
+
+;;; Regression: the spawned process is told which topic it serves
+
+(ert-deftest test-pi-topic-chat-spawn-inherits-topic-id ()
+  "The session-creating call runs with PI_TOPIC_ID in `process-environment'.
+Upstream's `make-process' has no `:env', so whatever `getenv' answers
+there is what the pi process inherits."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic--run
+   test-pi-topic--topic
+   (lambda ()
+     (let ((org-buf (current-buffer)))
+       (goto-char (point-min))
+       (should-not (getenv "PI_TOPIC_ID"))
+       (test-pi-topic-chat--with-engine
+        (lambda ()
+          (with-current-buffer org-buf (pi-topic-chat))
+          (should (equal 1 (length test-pi-topic-chat--spawn-env)))
+          (with-current-buffer org-buf
+            (should (equal (pi-topic--property "PI_TOPIC_ID")
+                           (car test-pi-topic-chat--spawn-env))))
+          ;; The binding is scoped to the spawn, not leaked globally.
+          (should-not (getenv "PI_TOPIC_ID"))))))))
 
 (provide 'test-pi-topic-chat)
 ;;; test-pi-topic-chat.el ends here

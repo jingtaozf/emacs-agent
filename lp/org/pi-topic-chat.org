@@ -42,6 +42,7 @@ external package that this file must never load itself.
 
 #+BEGIN_SRC elisp
 (require 'pi-topic)
+(require 'pi-topic-io)
 
 (declare-function pi-coding-agent--setup-session "ext:pi-coding-agent" (dir &optional session))
 (declare-function pi-coding-agent--find-session "ext:pi-coding-agent-ui" (dir &optional session))
@@ -464,6 +465,15 @@ The command itself resolves everything from the org buffer /before/
 displaying anything, because displaying changes the selected buffer and
 the topic's marker is the only way back.
 
+Session creation happens inside a =process-environment= binding so the
+spawned pi knows which topic it serves and can
+[[file:pi-topic-io.org::#pi-topic-io-write][write its Result back]].  Upstream
+spawns with no =:env=, so the child simply inherits what Emacs holds at
+that instant — which is why the binding has to wrap the call rather
+than be set once at load.  A resumed topic gets the same treatment for
+free: it too goes through =pi-topic--open-session= to obtain a process,
+and only then is that fresh process switched onto the transcript.
+
 #+BEGIN_SRC elisp
 (defun pi-topic-chat ()
   "Open the Pi chat session for the topic at point and return its buffer.
@@ -480,7 +490,9 @@ topic has no PI_SESSION yet, and moves the topic to the waiting state."
          (cwd (pi-topic--cwd))
          (session-file (pi-topic--property "PI_SESSION"))
          (goal (pi-topic-goal))
-         (chat-buf (pi-topic--open-session cwd id)))
+         (chat-buf (let ((process-environment
+                          (append (pi-topic-io-env id) process-environment)))
+                     (pi-topic--open-session cwd id))))
     (unless (buffer-live-p chat-buf)
       (user-error "pi-topic: pi-coding-agent returned no chat buffer"))
     (pi-topic--resume-session chat-buf session-file)
