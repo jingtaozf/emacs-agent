@@ -208,6 +208,102 @@ layer's climbing version: the writer already stands on the heading it
 means, and re-deriving it through the =PI_STATE= climb would resolve a
 different heading for anything addressed by id alone.
 
+An agent writing a Result writes /org/, and org contains headings.  A
+line reading =* Options= inside that text is not decoration: inserted
+verbatim it becomes a top-level heading, a *sibling* of the topic, and
+everything after it silently falls out of the topic's subtree.  The
+outline looks intact until you fold it.
+
+This repo solved the same problem once before, for SDD subsections —
+commit =cbc115f=, =claude-org--adjust-heading-levels=.  The design is
+reused as it stands: take the level of the *first* heading in the text
+as the baseline, shift every heading by the difference between that
+baseline and the target, clamp at level 1, and hand back text with no
+headings untouched.  Relative depth is preserved, so an agent that
+wrote =* Options= / =** Trade-offs= keeps its own structure wherever
+it lands.
+
+Two cases that reference did not face.  The first is a source block
+that legitimately begins a line with an asterisk — a code sample, a
+shell glob, an org snippet being quoted.  *Leaving those alone is not
+enough*: org's parser sees a column-0 asterisk as a headline even
+inside =#+begin_src=, so a code sample containing one tears the topic
+apart exactly as a bare heading would.  Measured on the payload in the
+tests: a file with two topics came back with three.
+
+Org's own answer is the protective comma, and this repo already
+mandates it — =rules/lp-comma-escape-leading-star.md=, the same trap
+from the other direction.  So inside a fence the scan writes =,*=
+instead of shifting.  Org strips that comma when the block is edited,
+tangled or parsed — =org-element='s =:value= for the block reads back
+=* foo= byte for byte — while the parser stops seeing a headline.
+
+Shifting and escaping are therefore two answers to one question: *who
+owns this column-0 asterisk?*  Outside a fence it is org's, and the
+level must be made to fit.  Inside one it is the author's, and the
+text must be protected from org.
+
+The second case is depth: a shift computed from an unusually deep
+baseline could push headings past anything org renders sensibly, so no
+heading is moved deeper than the section's own level plus six.
+
+#+BEGIN_SRC elisp
+(defconst pi-topic--block-begin-re "^[ \t]*#\\+begin_\\(src\\|example\\)\\b"
+  "Line that opens a region where column-0 asterisks are not headings.")
+
+(defconst pi-topic--block-end-re "^[ \t]*#\\+end_\\(src\\|example\\)\\b"
+  "Line that closes a `pi-topic--block-begin-re' region.")
+
+(defconst pi-topic--heading-re "\\(\\*+\\)[ \t]"
+  "A heading line, matched at the beginning of a line.")
+
+(defun pi-topic--adjust-heading-levels (content target-level)
+  "Make CONTENT safe to insert under a section at TARGET-LEVEL minus one.
+Headings outside any block are shifted so the first sits at
+TARGET-LEVEL, preserving relative depth, never rising above level 1 and
+never sinking below TARGET-LEVEL plus five.  Column-0 asterisks inside
+a source or example block are comma-escaped instead, which is how org
+protects code samples from its own headline parser; an already-escaped
+line is left as it is.  CONTENT with neither is returned unchanged.
+
+Modelled on `claude-org--adjust-heading-levels\' (commit cbc115f)."
+  (with-temp-buffer
+    (insert content)
+    (let ((case-fold-search t)
+          (baseline nil)
+          (in-block nil))
+      (goto-char (point-min))
+      (while (and (null baseline) (not (eobp)))
+        (cond
+         ((looking-at pi-topic--block-begin-re) (setq in-block t))
+         ((looking-at pi-topic--block-end-re) (setq in-block nil))
+         ((and (not in-block) (looking-at pi-topic--heading-re))
+          (setq baseline (length (match-string 1)))))
+        (forward-line 1))
+      (let ((shift (if baseline (- target-level baseline) 0))
+            (deepest (+ target-level 5)))
+        (setq in-block nil)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (cond
+           ((looking-at pi-topic--block-begin-re) (setq in-block t))
+           ((looking-at pi-topic--block-end-re) (setq in-block nil))
+           ;; Inside a fence the asterisk belongs to the author: protect it.
+           ;; A line already starting with a comma cannot match, so escaping
+           ;; is idempotent.
+           (in-block
+            (when (looking-at "\\*")
+              (insert ",")))
+           ;; Outside one it belongs to org: make its level fit.
+           ((looking-at pi-topic--heading-re)
+            (let* ((old (length (match-string 1)))
+                   (new (min deepest (max 1 (+ old shift)))))
+              (unless (= new old)
+                (replace-match (make-string new ?*) t t nil 1)))))
+          (forward-line 1))
+        (buffer-string)))))
+#+END_SRC
+
 #+BEGIN_SRC elisp
 (defun pi-topic--child-section-position (name)
   "Return the position of the NAME child of the heading point is on, or nil."
@@ -234,9 +330,13 @@ module still lands in the right place, at the right level.
 #+BEGIN_SRC elisp
 (defun pi-topic--replace-section-body (name text)
   "Replace the body of the NAME child of the heading at point with TEXT.
-Creates the child at the end of the topic when it does not exist."
-  (let ((position (pi-topic--child-section-position name))
-        (body (pi-topic--section-body-block text)))
+Creates the child at the end of the topic when it does not exist.
+Headings inside TEXT are shifted to start one level below the section,
+so agent-written org nests under it instead of escaping the topic."
+  (let* ((section-level (1+ (org-current-level)))
+         (position (pi-topic--child-section-position name))
+         (body (pi-topic--section-body-block
+                (pi-topic--adjust-heading-levels text (1+ section-level)))))
     (if position
         (progn
           (goto-char position)
@@ -244,7 +344,7 @@ Creates the child at the end of the topic when it does not exist."
             (org-end-of-meta-data t)
             (delete-region (min (point) end) end)
             (insert body)))
-      (let ((stars (make-string (1+ (org-current-level)) ?*))
+      (let ((stars (make-string section-level ?*))
             (end (save-excursion (org-end-of-subtree t t))))
         (goto-char end)
         (unless (bolp)

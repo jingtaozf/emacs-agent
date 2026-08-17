@@ -351,6 +351,49 @@ export function apply(ctx) {
 }
 #+end_src
 
+** 口号之下:两条线,不是一条
+
+"一切皆插件"解释不了 DSH。按[[https://mp.weixin.qq.com/s/Kf87hcNdSmY4ODWI4UZ8cg][浮之静《DSH 架构解析》]](2026-08-14,基于
+commit =47f9438= 读源码)的划分,真正的结构是两套同时运行的系统:
+
+| 线                 | 回答的问题             | 载体                                        |
+|--------------------+------------------------+---------------------------------------------|
+| Cordis 运行时插件图 | 系统*现在由什么组成*   | Context / service / effect / Fiber / Loader |
+| Session 追加式事件流 | 系统*刚才做过什么*     | append-only event log → =deriveMessages()=  |
+
+Agent loop 夹在中间:从插件图取模型、工具、提示词、会话服务,把执行过程写回
+事件流。这个切分比"插件很多"有解释力 —— 它说明为什么一个产品级 harness 不能
+只看 loop:最小 loop 只需拼 prompt、调模型、执行工具;完整产品还要处理凭证、
+会话恢复与压缩、工具策略与审批、沙箱、多宿主、子 agent、插件启停,以及 UI
+如何观察同一份运行事实。
+
+Cordis 承担组合复杂度,Session 承担历史连续性。
+
+** 两条组合轴:Profile × Preset
+
+官方宣传的"四种模式"不是四套互斥的启动方案。源码里组合有两条正交轴:
+
+| 轴              | 取值                                       | 作用域    |
+|-----------------+--------------------------------------------+-----------|
+| Runtime Profile | =web= / =headless=                         | 进程级    |
+| Agent Preset    | =standard= / =code= / =minimal= / =cordis= | *每会话*  |
+
+所以一个 Web 进程能同时承载用不同 preset 的会话。Preset id 会写进 Session
+header —— 恢复会话必须复用同一组合,否则历史里已出现过的工具与提示词会和当前
+能力不一致。
+
+** 动态装卸会不会毁掉 KV cache
+
+不必然。DSH 每个 step 重读插件图,但只要模型可见的 system prompt、工具
+schema、模型路由与历史前缀不变,重组仍得到相同前缀 —— 它为此稳定 prompt
+section 与工具的顺序。真正导致失效的是动态变化*穿透到模型请求*:工具集合
+改变、提示词 section 改写、模型被切换,或 compaction 替换了历史。
+
+两个容易误解的点:=request/header= 记录请求面变化,但它本身不是 cache key;
+=deriveMessages()= 的本地缓存只减少重复投影,不减少模型实际接收的上下文。
+前缀缓存复用的是相同前缀的计算,不会缩短有效上下文,也不会把那段历史变成
+零 token。
+
 ** DSH 把本文的三种驱动做成了三个包
 
 这是它对本文最直接的价值 —— [[#drivers][循环的驱动方式]]那一节的三种形态,在 DSH 里是
@@ -375,6 +418,25 @@ Completion and blockers are worker reports, not independent evaluation.
 =goal= 包把同一件事列进 Known Limitations —— *No independent evaluator*:
 记录完成或阻塞的调用方即权威,evaluator 认证被推迟到单独的策略层。
 换句话说,[[#verification-hierarchy][验证层级]]那一节的活儿,DSH 一行也没替你干。
+
+** DSH 的成本一侧:五条
+
+统一机制的收益和代价来自同一处。这五条比优势更该先记住:
+
+| 成本                | 具体表现                                                          |
+|---------------------+-------------------------------------------------------------------|
+| 静态代码 ≠ 实际系统 | import 图只说明可能性;Profile/Bundle/Patch/Preset/realm 共同决定真实拓扑 |
+| 动态依赖放大因果链  | Provider 一次变化会让一组 Consumer Fiber 依次卸载重载             |
+| *可逆 ≠ 事务*       | effect 只回收插件声明过的资源,补偿不了已发的网络消息、共享文件写入、支付 |
+| *插件化 ≠ 安全*     | =inject= 约束的是通过 Context 用能力,拦不住同进程代码直接 import Node API |
+| 性能代价无量化      | 论文与仓库都没给 Cordis 运行时开销或大规模插件图的对照基准        |
+
+第三、四条直接否掉"插件隔离即沙箱"的直觉。effect 解决所有权,worker thread
+解决部分执行隔离,两者都不是不受信任代码的权限边界 —— =cordis= preset
+(创造模式,能查看当前组合并挂载内存插件)应按*高权限运行时实验室*理解。
+
+运维推论:缺最终配置树的 bug report 连复现对象都没描述完整。排障除了调用栈,
+还要看 Provider 身份、Fiber epoch、当前 committed binding 和清理是否收敛。
 
 ** Pi — 核心极小,拒绝清单即设计
 
@@ -407,7 +469,32 @@ Pi is aggressively extensible so it doesn't have to dictate your workflow.
 仓库根 README 明确:Pi 不含内置权限系统,不限制文件系统、进程、网络或
 凭据访问;更强的隔离边界请用容器化。
 
+** 先分层,再比较
+
+比较之前必须分层,否则会把层级差写成功能差。同一篇架构解析给出的分层:
+
+| 层              | 项目                                    |
+|-----------------+-----------------------------------------|
+| 组合框架        | Cordis(不理解模型与工具)               |
+| 完整 harness / 产品宿主 | DSH · OpenClaw · Hermes-Agent · Codex |
+| agent 内环      | Pi                                      |
+
+也就是说 *Pi 更接近 DSH 内部的 agent 内环*,而不是 DSH 的同层竞品。各自重心:
+
+| 项目         | 重心                                                   |
+|--------------+--------------------------------------------------------|
+| Pi           | 内环短、合同直接,不引入领域无关的组合运行时           |
+| OpenClaw     | Gateway + 产品领域,扩展能力由宿主语义直接说明          |
+| Hermes-Agent | 把"这项能力占多少永久模型上下文"当设计约束             |
+| Codex        | typed app-server,Thread / Turn / Item 执行语义         |
+| DSH          | 把 harness 的*组合关系本身*做成运行时系统              |
+
+一个副产品事实:OpenClaw 早期核心依赖 Pi,最近重构已内化吸收,现在只剩
+=pi-tui= 一个外部依赖 —— 内环可以被吸收,组合运行时不容易。
+
 ** 逐项对照
+
+下表只比 DSH 与 Pi 这两个本文关心的对象,并接受上面的分层保留。
 
 | 维度         | DeepSeek Harness                     | Pi                                  |
 |--------------+--------------------------------------+-------------------------------------|
@@ -433,8 +520,18 @@ hacking 度量这三样仍然是你自己的工程量 —— 这恰好复述了�
 - 两者都不解决"谁来判完成"。这一层自己补,或用[[#drivers][条件驱动]]那节的做法:
   换一个模型当评估器。
 
-二手参考(观点性,数字以上表为准):[[https://www.ailinklab.com/en/opensource/pi-agent-harness/][Pi: A Coding Agent That Refuses to Own
-Your Workflow]]、[[https://thenewstack.io/deepseek-harness-open-source-plugins/][The New Stack 对 DSH 插件架构的报道]]。
+判断标准可以压成一句:*复杂度在哪里,就选把那处做成一等公民的那个*。复杂度在
+agent loop → Pi 的直接性;在渠道与产品集成 → OpenClaw 的领域边界;在多客户端
+一致性 → Codex 的 typed app-server;当 Provider、工具、会话、沙箱、UI 与 loop
+都需要按部署或会话重新组合时,Cordis 的投入才开始显出价值。
+
+读 DSH 源码的推荐顺序(来自同一篇解析):先看 Loader 输出的配置树,再追
+service 的 provide / inject、Context realm 与 Fiber effect,最后沿 Session
+event 走到 =deriveMessages()= 检查模型实际看到什么。
+
+参考:[[https://mp.weixin.qq.com/s/Kf87hcNdSmY4ODWI4UZ8cg][浮之静《DSH:DeepSeek Harness 架构解析》]](2026-08-14,源码级,本节多数
+判断的来源)。观点性二手:[[https://www.ailinklab.com/en/opensource/pi-agent-harness/][Pi: A Coding Agent That Refuses to Own Your
+Workflow]]、[[https://thenewstack.io/deepseek-harness-open-source-plugins/][The New Stack 对 DSH 插件架构的报道]]。
 
 * 本文未一手核实的说法
 :PROPERTIES:
@@ -451,3 +548,8 @@ Your Workflow]]、[[https://thenewstack.io/deepseek-harness-open-source-plugins/
 - Pi 的 stars/forks 与 =pi-telemetry= 包来自 GitHub 页面抓取;本地
   =reference/pi= 克隆停在 2026-06-19,只含 4 个 package。
 - Pi 支持 "15+ LLM providers" 来自二手评测,未逐个在源码中核对。
+- DSH 的两条组合轴、KV-cache 失效边界、五项成本转述自浮之静的源码级解析
+  (基于 commit =47f9438=),我核到了 profile/preset 与配置分层,未逐条复核
+  Fiber / realm / effect 的运行时语义。
+- "约 20% 的 DSH 提交与 Codex worktree 有关"是该文引用的社区统计,三手,
+  未核。

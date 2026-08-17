@@ -299,5 +299,157 @@ an org file the user never listed anywhere."
      (test-pi-topic-io--engage file "pi-1000-bbbb")
      (should (equal 2 (hash-table-count pi-topic--id-locations))))))
 
+;;; Regression: agent-written headings must nest, not escape
+
+(defun test-pi-topic-io--top-level-count (file)
+  "Return the number of level-1 headings org parses in FILE's buffer."
+  (with-current-buffer (find-file-noselect file)
+    (org-with-wide-buffer
+     (length (org-map-entries (lambda () t) "LEVEL=1")))))
+
+(defun test-pi-topic-io--buffer-text (file)
+  "Return FILE's buffer text — the write may not have been saved."
+  (with-current-buffer (find-file-noselect file)
+    (org-with-wide-buffer
+     (buffer-substring-no-properties (point-min) (point-max)))))
+
+(ert-deftest test-pi-topic-io-agent-headings-nest-under-the-section ()
+  "A level-1 heading in the agent's text lands under Result, not beside it."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     ;; Counting first opens the file, so the write lands in that buffer
+     ;; and — correctly — leaves saving to whoever opened it.  Every
+     ;; assertion below therefore reads the buffer, not the disk.
+     (let ((before (test-pi-topic-io--top-level-count file)))
+       (should (pi-topic-write-result
+                "pi-1000-aaaa"
+                "* Options\nOne.\n** Trade-offs\nTwo.\n"))
+       ;; The topic is at level 1, Result at 2, so the text starts at 3…
+       (let ((text (test-pi-topic-io--buffer-text file)))
+         (should (string-match-p "^\\*\\*\\* Options$" text))
+         ;; …and relative depth is preserved: Trade-offs was one deeper.
+         (should (string-match-p "^\\*\\*\\*\\* Trade-offs$" text)))
+       ;; The property that actually matters: the outline did not gain a
+       ;; sibling, so the topic was not torn in two.
+       (should (equal before (test-pi-topic-io--top-level-count file)))
+       ;; And the whole write is inside Result's own subtree — org reads
+       ;; it back as the section body, shifted, not as anything adrift.
+       (should (equal "*** Options\nOne.\n**** Trade-offs\nTwo."
+                      (test-pi-topic-io--section file "pi-1000-aaaa" "Result")))))))
+
+(ert-deftest test-pi-topic-io-headless-text-is-written-unchanged ()
+  "Text with no heading at all goes in exactly as written."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (should (pi-topic-write-result
+              "pi-1000-aaaa"
+              "Recommendation: pgvector.\n\n- ops cost\n- p95 latency"))
+     (should (equal "Recommendation: pgvector.\n\n- ops cost\n- p95 latency"
+                    (test-pi-topic-io--section file "pi-1000-aaaa" "Result"))))))
+
+(ert-deftest test-pi-topic-io-asterisks-in-src-blocks-are-escaped ()
+  "A column-0 asterisk inside a source block is protected, not shifted."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (should (pi-topic-write-result
+              "pi-1000-aaaa"
+              (concat "* Sketch\n"
+                      "#+begin_src org\n"
+                      "* not a real heading\n"
+                      "** nor this one\n"
+                      "#+end_src\n"
+                      "** After the block\n")))
+     (let ((text (test-pi-topic-io--file-contents file)))
+       ;; The real headings moved…
+       (should (string-match-p "^\\*\\*\\* Sketch$" text))
+       (should (string-match-p "^\\*\\*\\*\\* After the block$" text))
+       ;; …and the sample kept its own level, behind org's comma.
+       (should (string-match-p "^,\\* not a real heading$" text))
+       (should (string-match-p "^,\\*\\* nor this one$" text))))))
+
+(ert-deftest test-pi-topic-io-adjust-clamps-and-preserves-depth ()
+  "The helper itself: baseline, relative depth, floor and ceiling."
+  :tags '(:unit :pi-topic)
+  ;; First heading becomes the target; the second keeps its offset.
+  (should (equal "*** A\ntext\n**** B\n"
+                 (pi-topic--adjust-heading-levels "* A\ntext\n** B\n" 3)))
+  ;; Shifting up cannot rise above level 1.
+  (should (equal "* A\n* B\n"
+                 (pi-topic--adjust-heading-levels "*** A\n* B\n" 1)))
+  ;; Nothing sinks deeper than the target plus five.
+  (should (equal "*** A\n******** B\n"
+                 (pi-topic--adjust-heading-levels "* A\n******************* B\n" 3)))
+  ;; No heading at all: identity, untouched.
+  (should (equal "just prose\n" (pi-topic--adjust-heading-levels "just prose\n" 3)))
+  ;; A block-only asterisk is not a baseline — it is escaped instead.
+  (should (equal "#+begin_src org\n,* sample\n#+end_src\n"
+                 (pi-topic--adjust-heading-levels
+                  "#+begin_src org\n* sample\n#+end_src\n" 3)))
+  ;; Escaping is idempotent: a line that already carries the comma is
+  ;; left exactly as the author wrote it.
+  (should (equal "#+begin_src org\n,* sample\n#+end_src\n"
+                 (pi-topic--adjust-heading-levels
+                  "#+begin_src org\n,* sample\n#+end_src\n" 3))))
+
+;;; Regression: a code sample must not be able to split the topic
+
+(defun test-pi-topic-io--src-block-value (file)
+  "Return the body of the first src block in FILE's buffer, as org reads it.
+`org-element' strips the protective comma, so this is the sample the
+author wrote."
+  (with-current-buffer (find-file-noselect file)
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (search-forward "#+begin_src")
+     (org-element-property :value (org-element-at-point)))))
+
+(ert-deftest test-pi-topic-io-src-block-cannot-split-the-topic ()
+  "The exact payload that split a two-topic file leaves it with two.
+Asserted through `org-map-entries', because the parser is the thing
+being fooled: string matching would agree with the broken version."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (let ((before (test-pi-topic-io--top-level-count file)))
+       (should (equal 2 before))
+       (should (pi-topic-write-result
+                "pi-1000-aaaa"
+                (concat "* Options\nprose\n** Trade-offs\nmore\n"
+                        "#+begin_src elisp\n* not a heading\n#+end_src\ntail")))
+       (should (equal before (test-pi-topic-io--top-level-count file)))
+       ;; The tail after the block is still inside the topic, which is
+       ;; what a stray headline would have taken away.
+       (should (string-match-p
+                "tail" (test-pi-topic-io--section file "pi-1000-aaaa" "Result")))
+       ;; The sample survives byte for byte once org strips the comma.
+       (should (equal "* not a heading\n"
+                      (test-pi-topic-io--src-block-value file)))
+       ;; And on disk it carries the comma that makes that possible.
+       (should (string-match-p "^,\\* not a heading$"
+                               (test-pi-topic-io--buffer-text file)))))))
+
+(ert-deftest test-pi-topic-io-escaping-is-not-repeated ()
+  "Re-writing already-escaped text does not grow a second comma."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (let ((payload (concat "* Sketch\n#+begin_src elisp\n"
+                            ",* already escaped\n#+end_src\n")))
+       (should (pi-topic-write-result "pi-1000-aaaa" payload))
+       (let ((text (test-pi-topic-io--buffer-text file)))
+         (should (string-match-p "^,\\* already escaped$" text))
+         (should-not (string-match-p "^,,\\* already escaped$" text)))
+       ;; org still reads the author's line back unchanged.
+       (should (equal "* already escaped\n"
+                      (test-pi-topic-io--src-block-value file)))))))
+
 (provide 'test-pi-topic-io)
 ;;; test-pi-topic-io.el ends here
