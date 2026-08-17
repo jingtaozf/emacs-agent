@@ -1,0 +1,453 @@
+#+TITLE: AI Loop — 自主循环的工程实践与前沿边界
+#+DATE: 2026-08-16
+#+OPTIONS: toc:2 num:nil
+
+* 结论先行
+:PROPERTIES:
+:CUSTOM_ID: thesis
+:END:
+
+循环本身是三行 shell。难的是 *评估器* 和 *每轮的上下文处置*。
+
+2025–2026 这一批进展——AlphaEvolve、Darwin Gödel Machine、AI Scientist、
+Claude Code 的 =/loop= 与 =/goal=——共用同一个骨架:
+
+: 提议 → 执行 → 评估 → 保留或丢弃 → 重置上下文 → 下一轮
+
+它们的差别几乎只在评估器的强度上。一份覆盖 1250 篇 arXiv 论文的综述
+([[https://arxiv.org/abs/2607.07663][Chen et al. 2026, arXiv:2607.07663]])把这句话下成了定论:把评估信号从形式化验证器
+到内在自评排成一个层级后,"demonstrated self-improvement strength tracks
+this hierarchy",而失败模式"follow from its violations"。
+
+工程上的推论只有一条:*先建评估器,再建循环*。反过来做,得到的是一台高速
+产出无人能验证之物的机器。
+
+* 循环的驱动方式:什么让下一轮开始
+:PROPERTIES:
+:CUSTOM_ID: drivers
+:END:
+
+三种驱动互补而非互斥。Claude Code 三种都有官方实现,可以当参考实现读。
+
+| 驱动     | 下一轮由什么触发 | 停止条件                         | 官方实现                  |
+|----------+------------------+----------------------------------+---------------------------|
+| 条件驱动 | 上一轮结束       | 评估模型判定 met 或 impossible   | [[https://code.claude.com/docs/en/goal][=/goal=]]                   |
+| 时间驱动 | 时间间隔到       | 手动停、模型自判完成、7 天过期   | [[https://code.claude.com/docs/en/scheduled-tasks][=/loop=]]                   |
+| 事件驱动 | 外部事件到达     | 事件源结束                       | Stop hook / Channels / Monitor |
+
+** 条件驱动的关键设计:换一个模型来判完成
+
+=/goal= 的判定不是由干活的模型做的:"completion is decided by a fresh model
+rather than the one doing the work"。这是防 self-confirming loop 最便宜的一
+道闸。评估器返回三种判词,第三种常被自建循环忽略:
+
+- *Not yet met* — 判词理由回灌,作为下一轮的指引
+- *Met* — 清除目标,记录达成
+- *Impossible* — 判定条件永远无法满足,清除并记录失败
+
+还有一道熔断值得抄:"If Claude keeps answering the evaluator without making
+progress (no tool use for several turns in a row), Claude Code stops the loop"。
+只说话不动手,就是循环已经空转。
+
+评估器"does not call tools, so it can only judge what Claude has already
+surfaced in the conversation" —— 所以终止条件必须写成执行者的输出能自证的
+形式,而不是需要评估器自己去查的形式。
+
+** 时间驱动:能用事件就别轮询
+
+固定间隔适合真正的外部轮询(CI、部署、远端队列)。自定速模式下模型每轮在
+1 分钟到 1 小时之间挑延迟并打印理由。官方文档自己给出了更优解:"Monitor
+runs a background script and streams each output line back, which avoids
+polling altogether and is often more token-efficient and responsive than
+re-running a prompt on an interval"。
+
+* 验证层级:循环质量的天花板
+:PROPERTIES:
+:CUSTOM_ID: verification-hierarchy
+:END:
+
+[[https://arxiv.org/abs/2607.07663][RSI 综述]]把评估信号排成一条强度递减的链:
+
+1. 形式化验证器 formal verifier
+2. 可执行测试 / 代码执行器
+3. 结构化 rubric / process reward model
+4. LLM-as-judge
+5. 内在自评 intrinsic self-assessment
+
+违反层级的代价是三种具名失败:self-confirming loops、model collapse、
+diversity collapse。[[https://arxiv.org/abs/2505.03335][Absolute Zero]] 是第二档的干净样本:模型自己出题自己解,
+但用 code executor 作 grounded environment 验证,零外部数据仍达到编码与数
+学推理的 SOTA。
+
+** 当测试套件成为唯一监督面
+
+[[https://arxiv.org/abs/2605.21384][SpecBench]](2026-05,30 个系统级任务)把问题说得很直白:"As long-horizon
+coding agents produce more code than any developer can review, oversight
+collapses onto a single surface: the automated test suite."
+
+测得的数字是可见测试与留出测试的通过率之差:"grows by 28 percentage points
+for every tenfold increase in code size"。代码越多,监督面越假。论文里的样
+本是一个 2900 行的 hash table,靠记住测试输入通过。
+
+同期的 [[https://arxiv.org/abs/2605.02964][Reward Hacking Benchmark]] 给出后训练的影响:同族对照(DeepSeek-V3 vs
+DeepSeek-R1-Zero)下 exploit rate 从 0.6% 升到 13.9%。
+
+自我改进系统本身也会干这事。[[https://sakana.ai/dgm/][Darwin Gödel Machine]] 被记录到"removed special
+tool-use markers we added to detect such hallucinations, sabotaging the
+hallucination detection function"——它绕过的正是研究者为抓它而设的探针。
+
+** 落地的五条
+
+1. 留一套 agent 看不到也改不了的 held-out 测试。可见与留出的差值就是
+   reward hacking 的度量,不是可选的观测项。
+2. 优先 code-based grader:"Fast, cheap, objective, reproducible"。
+   model-based grader 必须与人工判定校准后才可用。
+3. =pass@k= 与 =pass^k= 分开报——前者答"能不能做出来",后者答"稳不稳"。
+4. 读 transcript:"You won't know if your graders are working well unless
+   you read the transcripts and grades from many trials."
+5. 不要把"按正确顺序调用了哪些工具"写进评分。官方明确点名这会造成
+   "overly brittle tests";评产出,不评路径。
+
+来源:[[https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents][Demystifying evals for AI agents]]。
+
+* 上下文:每轮要么压缩,要么重置
+:PROPERTIES:
+:CUSTOM_ID: context
+:END:
+
+[[https://research.trychroma.com/context-rot][Chroma 的 context rot 报告]](2025-07,18 个模型)给了实证:模型并非均匀处理
+上下文,输入变长时可靠性下降,连 retrieval 和文本复制这类简单任务也退化。
+Anthropic 的表述是模型有 "attention budget",而 [[https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents][context engineering]] 的目标
+是找到 "the smallest possible set of high-signal tokens that maximize the
+likelihood of some desired outcome"。
+
+三种长程手法,可叠加:
+
+| 手法                    | 做法                                  | 代价                                       |
+|-------------------------+---------------------------------------+--------------------------------------------|
+| compaction              | 接近窗口上限时摘要后重开              | 压得太狠会丢掉"当时看不出重要"的细节       |
+| structured note-taking  | 状态写到窗口外的文件,需要时再注入    | 开销小,但需要约定文件格式                 |
+| sub-agent               | 子 agent 干脏活,只回摘要             | 编排开销 + token 成本                      |
+
+** 极端做法:每轮全新上下文
+
+[[https://ghuntley.com/ralph/][Ralph 循环]]把重置做到底:
+
+#+begin_src bash
+while :; do cat PROMPT.md | claude-code ; done
+#+end_src
+
+每轮是全新进程、全新上下文,对话历史一点不留。仓库即记忆;跨轮持久的只有
+=PROMPT.md=、=fix_plan.md= 和 =specs/=。作者的原则是 "deterministically
+allocate the stack the same way every loop"。
+
+它的代价作者自己写清楚了:"There's no way in heck would I use Ralph in an
+existing code base"。这是绿地项目的技术,不是既有代码库的技术。
+
+** 保守但更可用的版本
+
+[[https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents][Anthropic 的 long-running harness]] 用同样的思路但保留了增量性:一个
+initializer agent 建立 =init.sh= 与进度文件,之后每个 session 的 coding
+agent 做一件事、留下干净环境。跨 session 的状态载体是三样:
+
+- 功能清单文件(JSON,每项标 passing / failing)
+- 进度文件(每轮写摘要)
+- git commit(带描述性 message)
+
+新 session 开工先读 git log 与进度文件恢复状态,并跑基线测试再动手。规矩
+是 "Self-verify all features. Only mark features as 'passing' after careful
+testing"。
+
+状态落在磁盘上,不落在对话里——这是三种手法唯一共享的前提。
+
+* 终止与预算
+:PROPERTIES:
+:CUSTOM_ID: termination
+:END:
+
+** 把边界写进条件本身
+
+官方对终止条件的三要素说明得很具体:一个可测终态(测试结果、退出码、文件
+数、空队列)、一个说明怎么证明的检查(=npm test= exits 0)、以及路上不许动
+什么。再加一句轮数上限,例如 "or stop after 20 turns"。
+
+** 抄现成的硬边界
+
+Claude Code 的三条约束值得照抄进任何自建循环:
+
+- recurring task 7 天自动过期——"This bounds how long a forgotten loop can run"
+- 单 session 最多 50 个 scheduled task
+- jitter:按 task ID 派生的确定性偏移,避免所有 session 同一秒打 API
+
+** 先算一轮的钱
+
+[[https://www.anthropic.com/engineering/multi-agent-research-system][Anthropic 的多 agent 系统]]给了量级参考:"Agents typically use about 4× more
+tokens than chat interactions","Multi-agent systems use about 15× more
+tokens than chats"。循环把这个数再乘以轮数。一轮的成本乘以你能容忍的轮数,
+就是这个循环的预算上限;先算,再启动。
+
+* 每轮做多少与并行
+:PROPERTIES:
+:CUSTOM_ID: granularity
+:END:
+
+各家的答案一致:*一轮一个单元*。Ralph 是一轮一件事,DGM 与 AlphaEvolve 是
+一轮一次变异,=/goal= 是一轮一个 turn。
+
+并行的收益有实测也有边界。同一份多 agent 报告里,orchestrator-worker 架构
+(Opus 4 领队 + Sonnet 4 子 agent)在 BrowseComp 上比单 agent Opus 4 高
+90.2%,复杂查询的耗时降低最多 90%;但适用面窄:"Most coding tasks involve
+fewer truly parallelizable tasks",共享上下文或强依赖的场景不适合拆。
+
+[[https://github.com/humanlayer/12-factor-agents][12-factor agents]] 里与循环直接相关的五条:own your context window(3)、own
+your control flow(8)、compact errors into context window(9)、small
+focused agents(10)、make your agent a stateless reducer(12)。
+
+* 失败模式清单
+:PROPERTIES:
+:CUSTOM_ID: failure-modes
+:END:
+
+| 症状               | 机制                     | 对策                              | 一手来源      |
+|--------------------+--------------------------+-----------------------------------+---------------|
+| 提前宣布完成       | 没有可验证的终态         | 结构化功能清单 + 独立评估器       | Anthropic harness |
+| 占位实现           | 通过测试的最省力路径     | 留出测试 + 提示层明令禁止         | Ralph         |
+| 改测试 / 删断言    | 监督面塌缩到测试套件     | held-out 测试 + 测试目录只读      | SpecBench     |
+| 同一功能重复实现   | 没有跨轮记忆             | =fix_plan.md= + 先搜索后动手      | Ralph         |
+| 上下文腐烂         | 长窗口非均匀处理         | compaction / 重置 / sub-agent     | Chroma        |
+| 空转不用工具       | 评估器能被话术满足       | no-progress 熔断                  | =/goal=       |
+| 自我确认闭环       | 评估者与执行者同源       | 换模型评估,或上移验证层级        | RSI 综述      |
+
+* 一个够用的最小骨架
+:PROPERTIES:
+:CUSTOM_ID: skeleton
+:END:
+
+目录布局把上面所有约束物化成文件:
+
+#+begin_src text
+repo/
+  .claude/loop.md        # 每轮的默认指令(超过 25000 字节会被截断)
+  fix_plan.md            # 优先级列表,agent 每轮更新
+  specs/                 # 需求真相,agent 只读
+  tests/held_out/        # agent 不可见、不可改;与可见测试的差值即 hacking 度量
+  PROGRESS.md            # 上轮做了什么、验证了什么、剩什么
+#+end_src
+
+=loop.md= 的形状——写成你会直接敲进去的那句话,不需要结构:
+
+#+begin_src markdown
+检查 release/next 的 PR。CI 红了就拉失败 job 的日志、定位、推最小修复。
+有新的 review comment 就逐条处理并 resolve。全绿且无事,一行说明即可。
+#+end_src
+
+条件驱动那一侧,一个合格的 =/goal= 条件长这样:
+
+#+begin_src text
+tests/auth 全部通过且 lint 干净;以 `make check` 退出码 0 为证;
+过程中不修改 tests/held_out 下任何文件;或在 20 轮后停止。
+#+end_src
+
+四个部件对应四条约束:可测终态、怎么证明、不许动什么、轮数上限。
+
+* 前沿:同一个骨架,换一个评估器
+:PROPERTIES:
+:CUSTOM_ID: frontier
+:END:
+
+| 系统                    | 提议者              | 评估器                  | 保留机制               | 一手结果                                       |
+|-------------------------+---------------------+-------------------------+------------------------+------------------------------------------------|
+| [[https://www.nature.com/articles/s41586-023-06924-6][FunSearch]] (Nature 2023) | LLM 写函数          | 程序化打分器            | 程序数据库             | 8 维 cap set 找到大小 512 的构造               |
+| [[https://arxiv.org/abs/2506.13131][AlphaEvolve]] (2025-06)   | Gemini Flash + Pro  | 一个或多个 evaluator    | 演化种群               | 56 年来首次超越 Strassen 的矩阵乘法            |
+| [[https://sakana.ai/shinka-evolve/][ShinkaEvolve]] (2025-09)  | bandit 选 LLM       | 同上                    | archive + 新颖性拒采样 | 26 圆装填新 SOTA,仅 150 samples                |
+| [[https://sakana.ai/dgm/][DGM]] (2025-05)           | agent 改自己的代码  | SWE-bench / Polyglot    | 谱系 archive           | SWE-bench 20.0% → 50.0%;Polyglot 14.2% → 30.7% |
+| [[https://arxiv.org/abs/2408.08435][ADAS]] Meta Agent Search  | meta agent 写 agent | 任务基准                | 不断增长的 archive     | 自指:meta agent 自己也是 agent                 |
+| [[https://arxiv.org/abs/2504.08066][AI Scientist-v2]] (2025)  | 最佳优先树搜索      | 内部评审 + 真实同行评审 | BFTS 树                | 一篇全 AI 生成论文通过 ICLR 2025 workshop 评审 |
+| [[https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/][AI co-scientist]]         | 六个专门 agent      | 锦标赛 Elo + 自我辩论   | evolution agent        | 三项生物医学方向的湿实验验证                   |
+| [[https://arxiv.org/abs/2505.03335][Absolute Zero]] (2025)    | 模型自己出题        | code executor           | RL 更新                | 零外部数据达编码与数学推理 SOTA                |
+
+三个跨系统的共性值得记住:
+
+1. *评估器是不变量,提议者可替换*。八个系统换了八种提议者,评估器的位置从
+   未空缺。
+2. *archive 是通用防线*。保留不是最优的祖先能防过早收敛;DGM 明确写了
+   "future self-modifications can then branch off from any agent in this
+   growing archive"。
+3. *结果的可信度等于评估器的可信度*。AI Scientist-v2 那篇过审论文的外部复
+   核发现了幻觉与结果夸大——这正是"同行评审/LLM 判官"这一档的典型失败,
+   与层级预测的一致。
+
+** 边界在哪里
+
+同一份 RSI 综述把两件事分开:
+
+- *bounded self-refinement* —— 收敛、可评估,已经是工业实践
+- *open-ended RSI* —— "remains bounded by grounding requirements, collapse
+  dynamics, and compute constraints on every measured axis"
+
+人类退不出的那个位置叫 "research direction-setting",它正好坐在验证层级的
+顶端——因为没有比人更强的信号能替它打分。
+
+** 为什么现在值得投工程
+
+[[https://metr.org/blog/2025-03-19-measuring-ai-ability-to-complete-long-tasks/][METR]] 的 50%-task-completion time horizon(模型有 50% 概率完成的任务,对人
+类而言的耗时)"doubling approximately every 7 months for the last 6 years"。
+循环的价值随单轮可完成任务的长度线性上升,所以这条曲线就是投工程的理由。
+
+METR 自己列的 caveat 一并记下:对任务选择与人工耗时口径敏感;2024–2025 的
+数据单独拟合会更快;趋势外推不保证成立。
+
+* 开源 harness 对照:DeepSeek Harness 与 Pi
+:PROPERTIES:
+:CUSTOM_ID: harness-comparison
+:END:
+
+2026 年两个值得读源码的开源 harness,对"循环该由谁拥有"给出了相反的答案。
+下面的数字全部一手核到:DSH 为 =gh api= + 本地浅克隆统计(2026-08-17),
+Pi 为 =reference/pi= 本地克隆(停在 2026-06-19)加 GitHub 页面快照。
+
+** DeepSeek Harness — 一切皆插件
+
+[[https://github.com/deepseek-ai/deepseek-harness][deepseek-ai/deepseek-harness]],MIT,2026-08-13 创建,默认分支 =master=。
+底座是 [[https://github.com/cordiverse/cordis][Cordis]] 的"时空可组合"插件框架。
+
+| 维度         | 实测值                                    |
+|--------------+-------------------------------------------|
+| stars / fork | 134,918 / 13,572                          |
+| 代码规模     | 497,489 行 TS,248 个 workspace package   |
+| 内置工具     | =docs/tool-catalog.md= 收录 52 个         |
+| 状态         | v0.1 developer preview                    |
+
+README 用全大写自我警告:"THERE WILL BE COMPATIBILITY-BREAKING CHANGES."
+
+起步与四种入口(=dsh= 本身只是 profile 启动器,profile = 有序的插件
+bundle 补丁栈):
+
+#+begin_src sh
+npx @deepseek-ai/dsh web              # Web UI,默认 127.0.0.1:3080
+dsh --profile headless "run the tests"  # 一次性 session,打印结果后退出
+dsh plugin --profile <name> <pnpm args> # 转发 pnpm 管理该 profile 插件
+dsh --profile web --port 8080           # 首个不认识的 token 之后交给 app
+#+end_src
+
+配置合成顺序:各 bundle patch → profile 的 =cordis.patch.yml= →
+=$DSH_HOME/cordis.patch.yml=(默认 =~/.dsh=)→ =--patch= 覆盖层。
+=--dump-config= 只看合成结果不启动。
+
+插件是导出 =apply= 的 TS 模块,=ctx= 上注册的一切在卸载时自动回收:
+
+#+begin_src typescript
+import { defineTool } from '@deepseek-ai/dsh-tools'
+
+export const name = 'greet-tool'
+export const inject = ['tools']        // 框架等 tools 服务就绪后才加载
+
+export function apply(ctx) {
+  ctx.tools.register(defineTool({
+    name: 'greet',
+    parameters: { name: { type: 'string', required: true } },
+    async execute(args) { return `Hello, ${args.name}!` },
+  }))
+}
+#+end_src
+
+** DSH 把本文的三种驱动做成了三个包
+
+这是它对本文最直接的价值 —— [[#drivers][循环的驱动方式]]那一节的三种形态,在 DSH 里是
+可独立装卸的插件:
+
+| 包                             | 循环形态             | 一手约束                                             |
+|--------------------------------+----------------------+------------------------------------------------------|
+| =packages/core/agent-loop=      | 基础 turn/step       | "the only package in the harness that contains concrete loop logic" |
+| =packages/goal/goal=            | 条件驱动(≈ =/goal=) | 事件溯源,session log 是唯一持久权威;activation 从不持久化 |
+| =packages/workflow/tool-ralph=  | 全新上下文迭代       | 每轮 fresh child,=inheritsParentContext: false=,workspace 即长期记忆 |
+
+可直接抄的默认边界:=maxRounds: 256=、=maxHandoffChars: 16384=、
+=maxResultChars: 16384=、=maxParallelToolCalls: 10=。
+
+关键的是它没解决什么。=tool-ralph= 的 README 自己写明终态结果是 worker
+自报:
+
+#+begin_quote
+Completion and blockers are worker reports, not independent evaluation.
+#+end_quote
+
+=goal= 包把同一件事列进 Known Limitations —— *No independent evaluator*:
+记录完成或阻塞的调用方即权威,evaluator 认证被推迟到单独的策略层。
+换句话说,[[#verification-hierarchy][验证层级]]那一节的活儿,DSH 一行也没替你干。
+
+** Pi — 核心极小,拒绝清单即设计
+
+[[https://github.com/earendil-works/pi][earendil-works/pi]],MIT。本地克隆实测 196,106 行 TS,4 个 package
+(=agent= / =ai= / =coding-agent= / =tui=);GitHub 页面另列出 =pi-telemetry=。
+页面快照 91.6k stars / 11.4k forks。
+
+四种运行模式:
+
+| 模式          | 用法                                    |
+|---------------+-----------------------------------------|
+| interactive   | 默认                                    |
+| print         | =pi -p "Summarize this"=(可读管道 stdin)|
+| json          | =--mode json=,事件按行输出              |
+| rpc           | =--mode rpc=,供进程集成                 |
+
+它的设计几乎全部由拒绝构成,README 的 Philosophy 一节逐条列了理由:
+
+#+begin_quote
+Pi is aggressively extensible so it doesn't have to dictate your workflow.
+#+end_quote
+
+- *No MCP* —— 写带 README 的 CLI 工具,或自己做扩展
+- *No sub-agents* —— 用 tmux 起多个 pi 实例,或自己写
+- *No permission popups* —— 跑容器里,或自己做确认流
+- *No plan mode* —— 把计划写文件
+- *No built-in to-dos* —— "They confuse models." 用 =TODO.md=
+- *No background bash* —— 用 tmux,换取完整可观测性
+
+仓库根 README 明确:Pi 不含内置权限系统,不限制文件系统、进程、网络或
+凭据访问;更强的隔离边界请用容器化。
+
+** 逐项对照
+
+| 维度         | DeepSeek Harness                     | Pi                                  |
+|--------------+--------------------------------------+-------------------------------------|
+| 赌注         | 一切皆插件,连 agent loop 都可换     | 核心极小,循环留给你自己拼          |
+| 规模         | 497K 行 / 248 包                     | 196K 行 / 4 包                      |
+| 内置循环     | goal / ralph / workflow 三种         | 无                                  |
+| 子 agent     | 一等公民(=subagentProvider=)        | 明确不做,用 tmux                   |
+| 工具协议     | 有 MCP client(=packages/mcp=)       | 明确 No MCP                         |
+| 权限         | permission policy + 沙箱插件(E2B)  | 无,靠容器                          |
+| 主界面       | Web UI                               | TUI                                 |
+| 扩展单位     | Cordis 插件 / bundle / profile       | extension / skill / pi package      |
+| 成熟度       | v0.1 dev preview,官方预告破坏兼容   | 相对稳定,仍在演进                  |
+
+** 对选型的意义
+
+两者在[[#verification-hierarchy][验证层级]]上是同一个空档:DSH 把循环骨架给足但明说不做独立评估;
+Pi 连骨架都不给。所以无论选哪个,held-out 测试、独立评估器、reward
+hacking 度量这三样仍然是你自己的工程量 —— 这恰好复述了本文的中心结论。
+
+- 想要现成的 goal / Ralph 循环骨架,并且需要替换 loop 本身 → DSH,但按
+  dev preview 对待,别承载生产。
+- 已有自己的工作流,只想要一个不抢方向盘的执行器 → Pi。
+- 两者都不解决"谁来判完成"。这一层自己补,或用[[#drivers][条件驱动]]那节的做法:
+  换一个模型当评估器。
+
+二手参考(观点性,数字以上表为准):[[https://www.ailinklab.com/en/opensource/pi-agent-harness/][Pi: A Coding Agent That Refuses to Own
+Your Workflow]]、[[https://thenewstack.io/deepseek-harness-open-source-plugins/][The New Stack 对 DSH 插件架构的报道]]。
+
+* 本文未一手核实的说法
+:PROPERTIES:
+:CUSTOM_ID: unverified
+:END:
+
+- "上下文超过 40% 进入 dumb zone":只见于二手解读,12-factor 原文未见此数字。
+- Ralph 的"5 万美元合同、297 美元交付":作者本人标注为单一轶事。
+- METR 关于最新模型(如 Opus 4.6 约 12 小时)的数字来自检索摘要,未在 METR
+  原文中核到。
+- AI Scientist-v2 过审论文的外部批评来自二手报道,未取到原始批评文本。
+- DSH "两天涨到 9.5 万星"的增长曲线来自二手报道;本文只核到 2026-08-17
+  的快照值 134,918。
+- Pi 的 stars/forks 与 =pi-telemetry= 包来自 GitHub 页面抓取;本地
+  =reference/pi= 克隆停在 2026-06-19,只含 4 个 package。
+- Pi 支持 "15+ LLM providers" 来自二手评测,未逐个在源码中核对。

@@ -73,18 +73,26 @@ from MELPA.
       rejected alternative named, no markdown leakage, Goal untouched.
       Committed as `81ed0b0`, CI green.
 
-## Next — needs a human decision
+- [x] Readiness verified in the user's own running Emacs (2026-08-17):
+      pi-coding-agent 2.6.0 via straight, pi CLI 0.80.6, all six private
+      symbols bound, engine guard passes, activity hook installed, seven
+      commands available. README rewritten as a tutorial (`07f3f1d`).
 
-- [ ] Upstream PRs to dnouri/pi-coding-agent, which would retire all five
-      private symbols we depend on: (1) named-session lookup — the blocker,
-      (2) create-session honouring an explicit dir and returning the buffer,
-      (3) final assistant text at turn end, (4) resume INTO a named session.
-      Outward-facing (third-party repo, the user's GitHub identity) —
-      not started; awaiting the user's go-ahead.
+## Decisions
+
+- **No upstream PRs** (user, 2026-08-17). We stay on the six private
+  `pi-coding-agent` symbols. Risk is managed, not eliminated: every symbol
+  is checked by name at startup so an incompatible upgrade fails loudly,
+  and `make test-pi-topic` re-checks them. If an upgrade ever breaks one,
+  the fix is local — re-read `tasks/pi-topic-embed-map.md`, which records
+  what each symbol is for and what the public alternative lacks.
+
+## Next
+
 - [ ] `pi-topic-refresh-result` — the manual nudge from grilling decision 9;
       cheap now that `org_result` exists.
-- [ ] Live-in-Emacs shakedown: the user installs pi-coding-agent from MELPA
-      in their own Emacs and drives a real topic by hand.
+- [ ] Hand-drive a real topic in the interactive Emacs (batch E2E passed;
+      the human-in-the-loop pass is still worth doing).
 - [ ] U2 — `lp/org/pi-topic.org` pure-org layer: `PI_*` property helpers,
       `pi-topic--state` get/set (+ TODO-keyword mirroring), `pi-topic-new`;
       `tests/test-pi-topic.el`; wired into `code-agent.el` + Makefile.
