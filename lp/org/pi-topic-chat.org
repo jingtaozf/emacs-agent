@@ -461,9 +461,16 @@ RESPONSE is the pi reply; history is only reloaded on success."
       (pi-topic--switch-session chat-buf session-file))))
 #+END_SRC
 
-The command itself resolves everything from the org buffer /before/
-displaying anything, because displaying changes the selected buffer and
-the topic's marker is the only way back.
+Both commands that talk to a session — chat and
+[[#pi-topic-chat-refresh][refresh]] — need the same seven steps in the same
+order, and the only thing they disagree about is which prompt goes out.
+So the seven steps live here once, taking the prompt as an argument:
+the alternative is two copies that agree today and drift the first time
+one of them learns something.
+
+It resolves everything from the org buffer /before/ displaying
+anything, because displaying changes the selected buffer and the
+topic's marker is the only way back.
 
 Session creation happens inside a =process-environment= binding so the
 spawned pi knows which topic it serves and can
@@ -475,13 +482,13 @@ free: it too goes through =pi-topic--open-session= to obtain a process,
 and only then is that fresh process switched onto the transcript.
 
 #+BEGIN_SRC elisp
-(defun pi-topic-chat ()
-  "Open the Pi chat session for the topic at point and return its buffer.
-The session is always the one named after the topic's own id; a
-recorded PI_SESSION transcript is switched into it rather than opened
-as a separate session.  Sends the Goal as the opening prompt when the
-topic has no PI_SESSION yet, and moves the topic to the waiting state."
-  (interactive)
+(defun pi-topic--engage-session (prompt)
+  "Open or resume the session of the topic at point and return its buffer.
+Sends PROMPT as one turn when it is a non-empty string, and nothing at
+all otherwise.  Registers the chat buffer against the topic so the
+activity hook can find its way back, displays it per
+`pi-topic-display-style', moves the topic to waiting, and records the
+transcript path once pi publishes it."
   (pi-topic--ensure-engine)
   (unless (pi-topic-p)
     (user-error "pi-topic: point is not inside a topic"))
@@ -489,7 +496,6 @@ topic has no PI_SESSION yet, and moves the topic to the waiting state."
          (id (pi-topic--id))
          (cwd (pi-topic--cwd))
          (session-file (pi-topic--property "PI_SESSION"))
-         (goal (pi-topic-goal))
          (chat-buf (let ((process-environment
                           (append (pi-topic-io-env id) process-environment)))
                      (pi-topic--open-session cwd id))))
@@ -498,16 +504,31 @@ topic has no PI_SESSION yet, and moves the topic to the waiting state."
     (pi-topic--resume-session chat-buf session-file)
     (pi-topic--register chat-buf marker)
     (pi-topic--display-session chat-buf)
-    (when (and (null session-file)
-               goal
-               (not (string-empty-p goal)))
-      (pi-topic--send chat-buf goal))
+    (when (and (stringp prompt) (not (string-empty-p prompt)))
+      (pi-topic--send chat-buf prompt))
     (with-current-buffer (marker-buffer marker)
       (save-excursion
         (goto-char marker)
         (pi-topic-set-state "waiting")))
     (pi-topic--stamp-session chat-buf marker)
     chat-buf))
+#+END_SRC
+
+Chat's whole contribution is the answer to one question: is this the
+first time?  The Goal goes out exactly when no transcript has been
+recorded yet, and the shared engine does the rest.
+
+#+BEGIN_SRC elisp
+(defun pi-topic-chat ()
+  "Open the Pi chat session for the topic at point and return its buffer.
+The session is always the one named after the topic's own id; a
+recorded PI_SESSION transcript is switched into it rather than opened
+as a separate session.  Sends the Goal as the opening prompt when the
+topic has no PI_SESSION yet, and moves the topic to the waiting state."
+  (interactive)
+  (pi-topic--engage-session
+   (and (null (pi-topic--property "PI_SESSION"))
+        (pi-topic-goal))))
 #+END_SRC
 
 Aborting deliberately does /not/ mint an id: a topic that was never
@@ -525,6 +546,75 @@ a misleading property behind.
       (user-error "pi-topic: no live chat session for this topic"))
     (with-current-buffer chat-buf
       (pi-coding-agent-abort))))
+#+END_SRC
+
+* Refreshing the Result
+:PROPERTIES:
+:CUSTOM_ID: pi-topic-chat-refresh
+:END:
+
+Result freshness is a *command*, never an automatic extra turn.  The
+rejected design was to nudge on every =agent_end= with a stale
+Result — which spends one model turn per topic per session, forever,
+on the chance that the agent forgot something it was already told to
+do.  GTD's posture for delegated work is the same: tracked, not
+watched.  So the nudge exists, and the human decides when it is worth
+a turn.
+
+That price is why the prompt is a =defcustom= rather than a constant:
+a user who finds the wording too long is paying for it on every
+refresh.
+
+#+BEGIN_SRC elisp
+(defcustom pi-topic-refresh-result-prompt
+  (concat "Update the Result section of this topic using the org_result "
+          "tool. Lead with the conclusion, then the decision taken and any "
+          "alternative you rejected with the reason, then org links to the "
+          "files or lines that matter. Use org markup, not markdown, and do "
+          "not paste the transcript.")
+  "Prompt `pi-topic-refresh-result' sends to ask for a fresh Result.
+The text is sent verbatim as an ordinary turn, so every refresh costs
+one full turn of model time and budget.  That price is deliberate: it
+is what keeps Result freshness a command the human issues rather than
+an automatic turn spent after every session."
+  :type 'string
+  :group 'pi-topic)
+#+END_SRC
+
+Refusing to nudge an undelegated topic is the one place this command
+is opinionated.  Engaging a session and asking it to summarise work it
+has never done would produce a confident Result about nothing, written
+into org, over the human's Goal — a worse outcome than an error.  A
+transcript on disk counts as delegated even with no live buffer, since
+[[#pi-topic-chat-open][the shared engine]] resumes it before the prompt goes
+out.
+
+#+BEGIN_SRC elisp
+(defun pi-topic--delegated-p ()
+  "Return non-nil when the topic at point has already been delegated.
+True when a chat buffer is live for its (cwd, id), or when PI_SESSION
+names a transcript that still exists."
+  (let ((id (pi-topic--property "PI_TOPIC_ID"))
+        (session-file (pi-topic--property "PI_SESSION")))
+    (or (and (stringp session-file)
+             (file-exists-p session-file))
+        (and id
+             (buffer-live-p (pi-coding-agent--find-session (pi-topic--cwd) id))
+             t))))
+
+(defun pi-topic-refresh-result ()
+  "Ask this topic's agent to bring its Result section up to date.
+Sends `pi-topic-refresh-result-prompt' as one ordinary turn, resuming
+the recorded session first when no chat buffer is live.  Never sends
+the Goal — that is the opening prompt of `pi-topic-chat' and re-sending
+it would restart the conversation instead of closing it."
+  (interactive)
+  (pi-topic--ensure-engine)
+  (unless (pi-topic-p)
+    (user-error "pi-topic: point is not inside a topic"))
+  (unless (pi-topic--delegated-p)
+    (user-error "pi-topic: this topic has no session yet — run `pi-topic-chat' first"))
+  (pi-topic--engage-session pi-topic-refresh-result-prompt))
 #+END_SRC
 
 * Feature Registration

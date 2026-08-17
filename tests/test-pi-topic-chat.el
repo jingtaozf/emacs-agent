@@ -544,5 +544,108 @@ there is what the pi process inherits."
           ;; The binding is scoped to the spawn, not leaked globally.
           (should-not (getenv "PI_TOPIC_ID"))))))))
 
+;;; Refresh: the manual Result nudge
+
+(ert-deftest test-pi-topic-chat-refresh-sends-nudge-not-goal ()
+  "`pi-topic-refresh-result' sends the nudge and never the Goal."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic--run
+   test-pi-topic--topic
+   (lambda ()
+     (let ((org-buf (current-buffer)))
+       (goto-char (point-min))
+       ;; Chatted once already: it has an id and a live session, but pi has
+       ;; not published a transcript path yet — the state in which
+       ;; `pi-topic-chat' would still send the Goal.
+       (pi-topic--set-property "PI_TOPIC_ID" "pi-1000-live")
+       (test-pi-topic-chat--with-engine
+        (lambda ()
+          (setq test-pi-topic-chat--find-result
+                (test-pi-topic-chat--new-session))
+          (with-current-buffer org-buf (pi-topic-refresh-result))
+          (should (equal 1 (length test-pi-topic-chat--sent)))
+          (should (equal pi-topic-refresh-result-prompt
+                         (cdr (car test-pi-topic-chat--sent))))
+          (should-not (equal "Compare pgvector and qdrant."
+                             (cdr (car test-pi-topic-chat--sent))))))))))
+
+(ert-deftest test-pi-topic-chat-refresh-resumes-recorded-session ()
+  "With a PI_SESSION but no live buffer, refresh resumes before nudging."
+  :tags '(:unit :pi-topic)
+  (let ((session (make-temp-file "pi-topic-refresh-" nil ".jsonl" "{}\n")))
+    (unwind-protect
+        (test-pi-topic--run
+         test-pi-topic--topic
+         (lambda ()
+           (let ((org-buf (current-buffer)))
+             (goto-char (point-min))
+             (pi-topic--set-property "PI_SESSION" session)
+             (test-pi-topic-chat--with-engine
+              (lambda ()
+                (with-current-buffer org-buf (pi-topic-refresh-result))
+                ;; A named session was created and switched onto the file.
+                (should (equal 1 (length test-pi-topic-chat--created)))
+                (should (null test-pi-topic-chat--opened))
+                (should (equal (list session)
+                               (test-pi-topic-chat--switch-paths)))
+                ;; And only then did the nudge go out.
+                (should (equal (list pi-topic-refresh-result-prompt)
+                               (mapcar #'cdr test-pi-topic-chat--sent))))))))
+      (delete-file session))))
+
+(ert-deftest test-pi-topic-chat-refresh-registers-this-topic ()
+  "Refresh leaves the topic waiting and owning the chat buffer."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic--run
+   (concat test-pi-topic--topic
+           "* Second topic\n:PROPERTIES:\n:PI_STATE: todo\n:END:\n"
+           "** Goal\nSecond goal.\n** Result\n")
+   (lambda ()
+     (let ((org-buf (current-buffer)))
+       (goto-char (point-min))
+       (pi-topic--set-property "PI_TOPIC_ID" "pi-1000-live")
+       (test-pi-topic-chat--with-engine
+        (lambda ()
+          (setq test-pi-topic-chat--find-result
+                (test-pi-topic-chat--new-session))
+          (let ((chat (with-current-buffer org-buf
+                        (goto-char (point-min))
+                        (pi-topic-refresh-result))))
+            (should (equal "waiting"
+                           (test-pi-topic-chat--state-at
+                            org-buf "^\\* Untitled topic$")))
+            ;; The registration is what lets the hook find its way back.
+            (pi-topic--on-activity-phase chat nil "replying" "idle"
+                                         'phase-change)
+            (should (equal "review"
+                           (test-pi-topic-chat--state-at
+                            org-buf "^\\* Untitled topic$")))
+            (should (equal "todo"
+                           (test-pi-topic-chat--state-at
+                            org-buf "^\\* Second topic$"))))))))))
+
+(ert-deftest test-pi-topic-chat-refresh-refuses-undelegated-topic ()
+  "Nudging a topic that was never chatted is an error, not a no-op."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic--run
+   test-pi-topic--topic
+   (lambda ()
+     (let ((org-buf (current-buffer)))
+       (goto-char (point-min))
+       (test-pi-topic-chat--with-engine
+        (lambda ()
+          ;; No live session, no PI_SESSION.
+          (should (null test-pi-topic-chat--find-result))
+          (let ((err (should-error
+                      (with-current-buffer org-buf (pi-topic-refresh-result))
+                      :type 'user-error)))
+            (should (string-match-p "pi-topic-chat" (cadr err))))
+          ;; Nothing was created, nothing was sent, the state stands.
+          (should (null test-pi-topic-chat--created))
+          (should (null test-pi-topic-chat--sent))
+          (should (equal "todo"
+                         (test-pi-topic-chat--state-at
+                          org-buf "^\\* Untitled topic$")))))))))
+
 (provide 'test-pi-topic-chat)
 ;;; test-pi-topic-chat.el ends here

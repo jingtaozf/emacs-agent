@@ -17,6 +17,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'org)
 (require 'org-capture)
 (require 'pi-topic)
@@ -163,6 +164,81 @@
      (should-not (pi-topic-reap))
      (should (equal "/gone/session.jsonl" (pi-topic--property "PI_SESSION")))
      (should (equal "todo" (pi-topic-state))))))
+
+;;; Where topics are filed is the user's choice
+
+(defmacro test-pi-topic-workflow--no-prompt (&rest body)
+  "Run BODY with `read-file-name' rigged to fail the test if called."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'read-file-name)
+              (lambda (&rest _) (error "pi-topic prompted when it must not"))))
+     ,@body))
+
+(ert-deftest test-pi-topic-workflow-capture-file-string-never-prompts ()
+  "A configured file name is used verbatim, without asking."
+  :tags '(:unit :pi-topic)
+  (let ((pi-topic-file "/tmp/pinned-topics.org")
+        (pi-topic--remembered-file nil))
+    (test-pi-topic-workflow--no-prompt
+      (should (equal "/tmp/pinned-topics.org" (pi-topic--capture-file)))
+      ;; Reading uses it too, and still does not ask.
+      (should (equal "/tmp/pinned-topics.org" (pi-topic--known-capture-file))))
+    ;; Asking never happened, so nothing was remembered.
+    (should-not pi-topic--remembered-file)))
+
+(ert-deftest test-pi-topic-workflow-capture-file-function-is-called ()
+  "A function value is called for the file name, without asking."
+  :tags '(:unit :pi-topic)
+  (let* ((calls 0)
+         (pi-topic-file (lambda ()
+                          (setq calls (1+ calls))
+                          "/tmp/computed-topics.org"))
+         (pi-topic--remembered-file nil))
+    (test-pi-topic-workflow--no-prompt
+      (should (equal "/tmp/computed-topics.org" (pi-topic--capture-file)))
+      (should (equal 1 calls))
+      (should (equal "/tmp/computed-topics.org" (pi-topic--capture-file)))
+      (should (equal 2 calls)))))
+
+(ert-deftest test-pi-topic-workflow-capture-file-asks-once-then-remembers ()
+  "With nil, the first call asks and every later call reuses the answer."
+  :tags '(:unit :pi-topic)
+  (let ((pi-topic-file nil)
+        (pi-topic--remembered-file nil)
+        (prompts 0)
+        (offered nil))
+    (cl-letf (((symbol-function 'read-file-name)
+               (lambda (_prompt &optional _dir default &rest _)
+                 (setq prompts (1+ prompts)
+                       offered default)
+                 "/tmp/picked-topics.org")))
+      (should (equal "/tmp/picked-topics.org" (pi-topic--capture-file)))
+      (should (equal 1 prompts))
+      ;; The offered default is the project topics.org it used to hardcode.
+      (should (equal "topics.org" (file-name-nondirectory offered))))
+    ;; Second call: no prompt at all, same answer.
+    (test-pi-topic-workflow--no-prompt
+      (should (equal "/tmp/picked-topics.org" (pi-topic--capture-file)))
+      (should (equal "/tmp/picked-topics.org" (pi-topic--known-capture-file))))
+    (should (equal 1 prompts))))
+
+(ert-deftest test-pi-topic-workflow-template-target-stays-a-function ()
+  "Building the template resolves nothing and therefore asks nothing."
+  :tags '(:unit :pi-topic)
+  (let ((pi-topic-file nil)
+        (pi-topic--remembered-file nil))
+    (test-pi-topic-workflow--no-prompt
+      (let ((template (pi-topic-capture-template)))
+        ;; The target is the resolver itself, so the question waits for a
+        ;; capture rather than for init.el.
+        (should (equal (list 'file 'pi-topic--capture-file) (nth 3 template)))
+        (should (functionp (nth 1 (nth 3 template))))
+        ;; Registration is equally quiet.
+        (let ((org-capture-templates nil))
+          (pi-topic-add-capture-template)
+          (should (equal (list 'file 'pi-topic--capture-file)
+                         (nth 3 (car org-capture-templates)))))))
+    (should-not pi-topic--remembered-file)))
 
 (provide 'test-pi-topic-workflow)
 ;;; test-pi-topic-workflow.el ends here

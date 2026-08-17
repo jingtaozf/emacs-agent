@@ -376,6 +376,77 @@ function elispString(s: string): string {
 }
 #+end_src
 
+*** Reading an evalElisp reply
+:PROPERTIES:
+:CUSTOM_ID: pi-ext-elisp-reply
+:END:
+
+=evalElisp= does not resolve to the elisp value.  It resolves to the
+MCP text payload, and that payload is a *JSON envelope*.  Verified
+against the running server:
+
+#+begin_example
+(+ 1 1)                     → {"success":true,"result":"2\n"}
+(pi-topic-write-result …)   → {"success":true,"result":"nil\n"}
+(error "boom")              → {"success":false,"error":"boom","errorType":"error"}
+#+end_example
+
+Three consequences a tool author has to know.  Comparing the raw
+string to an elisp value — =out === "t"= — can never be true, because
+the raw string always starts with =\{=.  The printed value carries a
+trailing newline, so it needs trimming after extraction.  And an
+Emacs-side *error* still arrives as an MCP success, so
+=callMcpTool= does not throw: a tool that ignores =success= will
+silently read an error envelope as a value.
+
+That third one is how =org_result= came to tell the model it had
+failed while the org file on disk had in fact been written: the reply
+was =\{"success":true,"result":"t\n"\}=, the comparison against ="t"=
+failed, and the tool reported a missing topic.
+
+The fallback to the raw string is deliberate rather than defensive: a
+future server that answers with the bare printed value stays readable
+by this helper without a coordinated release.
+
+#+begin_src typescript
+interface ElispReply {
+	/** The printed elisp value, or null when Emacs signalled. */
+	value: string | null;
+	/** Emacs-side error text, or null when the form returned normally. */
+	error: string | null;
+}
+
+function parseElispReply(out: string): ElispReply {
+	try {
+		const payload = JSON.parse(out) as {
+			success?: boolean;
+			result?: unknown;
+			error?: unknown;
+		};
+		if (payload && typeof payload === "object") {
+			if (payload.success === false) {
+				return {
+					value: null,
+					error: String(payload.error ?? "unknown Emacs error"),
+				};
+			}
+			return { value: String(payload.result ?? ""), error: null };
+		}
+	} catch {
+		// Not an envelope — treat the reply as the printed value itself.
+	}
+	return { value: out, error: null };
+}
+#+end_src
+
+Tools that hand the reply straight back to the model — =emacs_eval=,
+=emacs_buffer_read=, =emacs_org_navigate= and friends — pass the
+envelope through untouched and are *correct as they stand*: the model
+reads JSON perfectly well, and unwrapping there would only hide the
+=success= flag from it.  The rule is narrower than "always parse": any
+tool that *branches* on the reply must go through =parseElispReply=
+first.
+
 ** Tool implementations
 :PROPERTIES:
 :CUSTOM_ID: pi-ext-tools
@@ -657,11 +728,17 @@ would be spent on a tool that could never have worked.  Absent id,
 absent tools, and those sessions behave exactly as they did before
 this section existed.
 
-Both writers share one helper, because both have the same two
-outcomes: Emacs answers =t= when the section was replaced, and =nil=
-when no topic carries this id — the case worth naming in the reply,
-since it means the heading was deleted or its property edited while
-the agent was working.
+Both writers share one helper, because both have the same outcomes,
+read out of [[#pi-ext-elisp-reply][the reply envelope]] rather than off the raw
+string.  Emacs answers =t= when the section was replaced and =nil=
+when no topic carries this id — the case worth naming, since it means
+the heading was deleted or its property edited while the agent was
+working.  An Emacs-side error is a third, different thing and is
+reported verbatim: telling the model "no such topic" when the real
+answer was =void-function pi-topic-write-result= sends it looking for
+a heading that was never the problem.  Anything else is an unexpected
+reply and says so — a write that cannot be confirmed must never be
+reported as done.
 
 #+begin_src typescript
 const ORG_TEXT_PARAMS = Type.Object({
@@ -677,11 +754,18 @@ async function writeTopicSection(
 	text: string,
 ): Promise<string> {
 	const code = `(${elispFn} ${elispString(TOPIC_ID)} ${elispString(text)})`;
-	const out = (await evalElisp(code)).trim();
-	if (out !== "t") {
+	const reply = parseElispReply(await evalElisp(code));
+	if (reply.error !== null) {
+		return `FAILED: Emacs raised an error writing ${label}: ${reply.error}`;
+	}
+	const value = (reply.value ?? "").trim();
+	if (value === "t") {
+		return `${label} replaced for topic ${TOPIC_ID}.`;
+	}
+	if (value === "nil") {
 		return `FAILED: Emacs knows no topic with PI_TOPIC_ID=${TOPIC_ID}. Nothing was written — the heading may have been deleted or its property changed.`;
 	}
-	return `${label} replaced for topic ${TOPIC_ID}.`;
+	return `FAILED: unexpected reply from Emacs while writing ${label}: ${JSON.stringify(value)}`;
 }
 #+end_src
 
@@ -746,6 +830,10 @@ Probe the MCP server once when a Pi session starts. If unreachable
 we warn — but don't block; the user may not have started the Emacs
 MCP server yet, or may be using Pi standalone for an unrelated task.
 
+The probe checks the JSON-RPC reply as well as the HTTP status, for
+the same reason [[#pi-ext-elisp-reply][an elisp reply needs parsing]]: a 200
+proves the transport, not that the dispatcher accepted the call.
+
 #+begin_src typescript
 function attachHealthCheck(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
@@ -761,6 +849,13 @@ function attachHealthCheck(pi: ExtensionAPI): void {
 				signal: ac.signal,
 			});
 			if (!r.ok) throw new Error(`HTTP ${r.status}`);
+			// Same lesson as the elisp envelope: a 200 is the transport
+			// answering, not the dispatcher agreeing.  A JSON-RPC error
+			// member here means the server is up and refusing.
+			const payload = (await r.json()) as { error?: { message?: string } };
+			if (payload?.error) {
+				throw new Error(payload.error.message ?? "JSON-RPC error");
+			}
 			vlog("MCP health check OK");
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);

@@ -49,11 +49,12 @@ layer, so a =require= in the other direction would close a cycle.
 :CUSTOM_ID: pi-topic-io-addressing
 :END:
 
-Live buffers are searched first, always.  A user reading a topic with
-unsaved edits in front of them is the normal case while an agent is
-working, and answering from the file on disk would hand the writer a
-stale copy — whose save would then silently discard whatever the human
-had typed.  The disk is consulted only for files nothing is visiting.
+Live buffers are searched before files, always.  A user reading a
+topic with unsaved edits in front of them is the normal case while an
+agent is working, and answering from the file on disk would hand the
+writer a stale copy — whose save would then silently discard whatever
+the human had typed.  The disk is consulted only for files nothing is
+visiting.
 
 #+BEGIN_SRC elisp
 (defun pi-topic--scan-buffer-for-id (id)
@@ -75,11 +76,79 @@ org, so a stray mention inside a source block cannot match."
        found))))
 #+END_SRC
 
+Before either of those, a registry.  It exists because the file
+heuristics *cannot be made to work*: a topic may live in any org file
+the user likes, and nothing obliges them to add that file to
+=org-agenda-files= or to make it the capture file — so a topic whose
+buffer has been killed becomes unreachable through no fault of the
+user's.  That is not hypothetical; a live run logged
+=FAILED: Emacs knows no topic with PI_TOPIC_ID=pi-1786955959-xtv8=
+after its org buffer was closed mid-session.
+
+The entry is filled by [[#pi-topic-io-env][=pi-topic-io-env=]], which is asked
+for exactly the topics a session is being created for — the ones an
+agent will later write back to.  Both halves are stored: the marker,
+which survives the user editing the file around it, and the file name,
+which survives the buffer being killed.  Neither alone is enough.
+
+#+BEGIN_SRC elisp
+(defvar pi-topic--id-locations (make-hash-table :test 'equal)
+  "Map of topic id to a (MARKER . FILE) pair locating that topic.
+MARKER tracks the heading inside a live buffer; FILE re-opens it after
+that buffer is gone.")
+
+(defun pi-topic--forget-dead-locations ()
+  "Drop registry entries that can no longer locate anything.
+An entry survives on either half: a marker in a live buffer, or a file
+that still exists.  A detached marker beside a live file is kept — the
+file is what makes that entry useful."
+  (maphash
+   (lambda (id entry)
+     (let ((marker (car entry))
+           (file (cdr entry)))
+       (unless (or (and (markerp marker) (buffer-live-p (marker-buffer marker)))
+                   (and (stringp file) (file-exists-p file)))
+         (when (markerp marker)
+           (set-marker marker nil))
+         (remhash id pi-topic--id-locations))))
+   pi-topic--id-locations))
+
+(defun pi-topic--remember-location (id marker)
+  "Record MARKER, and the file it lives in, as the location of topic ID.
+The stored marker is a copy: callers release the markers they are
+handed, and the registry must not be emptied by that."
+  (pi-topic--forget-dead-locations)
+  (when (and (stringp id)
+             (markerp marker)
+             (buffer-live-p (marker-buffer marker)))
+    (let ((previous (car (gethash id pi-topic--id-locations))))
+      (when (markerp previous)
+        (set-marker previous nil)))
+    (puthash id
+             (cons (copy-marker marker)
+                   (buffer-file-name (marker-buffer marker)))
+             pi-topic--id-locations)))
+
+(defun pi-topic--find-in-registry (id)
+  "Return a fresh marker for ID from the location registry, or nil.
+Prefers the live buffer the topic was engaged in; falls back to
+re-opening the file it was in when that buffer is gone."
+  (let* ((entry (gethash id pi-topic--id-locations))
+         (marker (car entry))
+         (file (cdr entry)))
+    (cond
+     ((and (markerp marker) (buffer-live-p (marker-buffer marker)))
+      (copy-marker marker))
+     ((and (stringp file) (file-readable-p file))
+      (with-current-buffer (find-file-noselect file)
+        (pi-topic--scan-buffer-for-id id))))))
+#+END_SRC
+
 The file half is an *optional capability*: it needs the list of topic
 files, which the workflow layer owns.  Loaded on its own, this module
-still addresses every topic the user has open — which is every topic
-an agent is currently working on — and simply cannot reach the ones
-that live only on disk.
+still addresses every topic the user has open and every topic the
+registry has seen — and simply cannot reach a never-engaged topic that
+lives only on disk.
 
 #+BEGIN_SRC elisp
 (defun pi-topic--topic-files ()
@@ -97,22 +166,36 @@ Empty unless the workflow layer, which owns the file list, is loaded."
          (goto-char (point-min))
          (and (search-forward id nil t) t))))
 
+(defun pi-topic--find-in-buffers (id)
+  "Return a marker for ID found by scanning every live org buffer, or nil."
+  (let ((found nil))
+    (dolist (buffer (buffer-list))
+      (unless found
+        (with-current-buffer buffer
+          (setq found (pi-topic--scan-buffer-for-id id)))))
+    found))
+
+(defun pi-topic--find-in-files (id)
+  "Return a marker for ID found in the topic files, or nil.
+Skips files something is already visiting — those were covered by the
+buffer scan — and opens only files whose text mentions ID."
+  (let ((found nil))
+    (dolist (file (pi-topic--topic-files))
+      (unless (or found (find-buffer-visiting file))
+        (when (pi-topic--file-mentions-id-p file id)
+          (with-current-buffer (find-file-noselect file)
+            (setq found (pi-topic--scan-buffer-for-id id))))))
+    found))
+
 (defun pi-topic--find-by-id (id)
   "Return a marker at the topic whose PI_TOPIC_ID is ID, or nil.
-Live org buffers are searched first; a file is opened only when no
-live buffer answers and its text mentions ID."
+Tried in order: the location registry, every live org buffer, then the
+topic files.  The registry comes first because it is the only source
+that knows about a topic in a file the user never listed anywhere."
   (when (and (stringp id) (not (string-empty-p id)))
-    (let ((found nil))
-      (dolist (buffer (buffer-list))
-        (unless found
-          (with-current-buffer buffer
-            (setq found (pi-topic--scan-buffer-for-id id)))))
-      (dolist (file (pi-topic--topic-files))
-        (unless (or found (find-buffer-visiting file))
-          (when (pi-topic--file-mentions-id-p file id)
-            (with-current-buffer (find-file-noselect file)
-              (setq found (pi-topic--scan-buffer-for-id id))))))
-      found)))
+    (or (pi-topic--find-in-registry id)
+        (pi-topic--find-in-buffers id)
+        (pi-topic--find-in-files id))))
 #+END_SRC
 
 * Writing a Section
@@ -220,11 +303,15 @@ consumer can read it unconditionally.
 (defun pi-topic-io-env (id)
   "Return \"NAME=VALUE\" strings describing topic ID for a pi process.
 Meant to be prepended to `process-environment' around the call that
-spawns the process."
+spawns the process.  Records the topic's location on the way through:
+this call is the last moment at which the topic is guaranteed to be
+findable, and the agent it is about to spawn will need to find it
+again later, possibly after its buffer is gone."
   (let* ((marker (pi-topic--find-by-id id))
          (buffer (and marker (marker-buffer marker)))
          (file (and (buffer-live-p buffer) (buffer-file-name buffer))))
     (when marker
+      (pi-topic--remember-location id marker)
       (set-marker marker nil))
     (list (format "PI_TOPIC_ID=%s" (or id ""))
           (format "PI_TOPIC_FILE=%s" (or file "")))))

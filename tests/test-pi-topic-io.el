@@ -55,14 +55,45 @@ Untouched result.
 
 (defun test-pi-topic-io--with-file (content fn)
   "Call FN with a temp org file holding CONTENT, reachable by topic id.
-`pi-topic--find-by-id' only opens files the workflow layer lists, so the
-fixture registers the temp file as both the capture file and the agenda."
+The fixture registers the temp file as both the capture file and the
+agenda, so the file-set heuristics can reach it, and starts from an
+empty location registry."
   (let* ((file (make-temp-file "pi-topic-io-" nil ".org" content))
          (pi-topic-file file)
          (org-agenda-files (list file)))
+    (clrhash pi-topic--id-locations)
     (unwind-protect
         (funcall fn file)
+      (clrhash pi-topic--id-locations)
       (test-pi-topic-io--cleanup file))))
+
+(defun test-pi-topic-io--with-unlisted-file (content fn)
+  "Call FN with a temp org file that no file-set heuristic can reach.
+It is neither the capture file nor an agenda file — the situation a
+user creates simply by writing a topic in an org file of their own."
+  (let* ((file (make-temp-file "pi-topic-io-unlisted-" nil ".org" content))
+         (capture (make-temp-file "pi-topic-io-capture-" nil ".org" ""))
+         (pi-topic-file capture)
+         (org-agenda-files nil))
+    (clrhash pi-topic--id-locations)
+    (unwind-protect
+        (funcall fn file)
+      (clrhash pi-topic--id-locations)
+      (test-pi-topic-io--cleanup file)
+      (test-pi-topic-io--cleanup capture))))
+
+(defun test-pi-topic-io--engage (file id)
+  "Do what session creation does: visit FILE and ask for ID's environment.
+Returns the buffer now visiting FILE."
+  (let ((buffer (find-file-noselect file)))
+    (pi-topic-io-env id)
+    buffer))
+
+(defun test-pi-topic-io--kill (buffer)
+  "Kill BUFFER the way a user closing a file would."
+  (with-current-buffer buffer
+    (set-buffer-modified-p nil))
+  (kill-buffer buffer))
 
 (defun test-pi-topic-io--file-contents (file)
   "Return the current on-disk text of FILE."
@@ -185,6 +216,88 @@ fixture registers the temp file as both the capture file and the agenda."
          (should (equal "pi-1000-aaaa" (getenv "PI_TOPIC_ID")))))
      ;; An unknown id still yields a usable, file-less pair.
      (should (member "PI_TOPIC_FILE=" (pi-topic-io-env "pi-9999-zzzz"))))))
+
+;;; Regression: a topic must stay reachable after its buffer is gone
+
+(ert-deftest test-pi-topic-io-reaches-topic-after-buffer-killed ()
+  "The registry keeps a topic writable once its buffer has been killed."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (test-pi-topic-io--kill (test-pi-topic-io--engage file "pi-1000-aaaa"))
+     (should-not (find-buffer-visiting file))
+     ;; The registry answers on its own, before any file-set scan.
+     (should (pi-topic--find-in-registry "pi-1000-aaaa"))
+     (should (pi-topic-write-result "pi-1000-aaaa" "Answered after the kill."))
+     ;; Asserted in the buffer, not on disk: the probe above re-opened the
+     ;; file, so the write found it already open and — correctly — left
+     ;; saving to whoever opened it.
+     (should (equal "Answered after the kill."
+                    (test-pi-topic-io--section file "pi-1000-aaaa" "Result"))))))
+
+(ert-deftest test-pi-topic-io-reaches-topic-in-unlisted-file ()
+  "A topic in nobody's agenda is still reachable once it has been engaged.
+This is the live-run defect: the file-set heuristics cannot know about
+an org file the user never listed anywhere."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-unlisted-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (test-pi-topic-io--kill (test-pi-topic-io--engage file "pi-1000-aaaa"))
+     ;; Neither heuristic can see this file…
+     (should-not (member file (pi-topic--topic-files)))
+     (should-not (pi-topic--find-in-files "pi-1000-aaaa"))
+     (should-not (pi-topic--find-in-buffers "pi-1000-aaaa"))
+     ;; …and the write lands anyway.
+     (should (pi-topic-write-result "pi-1000-aaaa" "Reached the unlisted file."))
+     (should (string-match-p "Reached the unlisted file\\."
+                             (test-pi-topic-io--file-contents file)))
+     ;; The registry claims nothing it has not seen: the sibling topic in
+     ;; the same file was never engaged and has no entry.  (It is findable
+     ;; now only because the write re-opened the file.)
+     (should-not (gethash "pi-1000-bbbb" pi-topic--id-locations)))))
+
+(ert-deftest test-pi-topic-io-stale-entry-returns-nil ()
+  "A registry entry whose buffer and file are both gone answers nil."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-unlisted-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (test-pi-topic-io--kill (test-pi-topic-io--engage file "pi-1000-aaaa"))
+     (delete-file file)
+     (should-not (pi-topic--find-by-id "pi-1000-aaaa"))
+     (should-not (pi-topic-write-result "pi-1000-aaaa" "nowhere"))
+     (should (equal 1 (hash-table-count pi-topic--id-locations)))
+     ;; Recording any other topic sweeps the unusable entry out, so the
+     ;; table cannot grow forever across a long session.
+     (let ((other (make-temp-file
+                   "pi-topic-io-other-" nil ".org"
+                   (concat "* Other\n:PROPERTIES:\n:PI_STATE: todo\n"
+                           ":PI_TOPIC_ID: pi-3000-dddd\n:END:\n"
+                           "** Goal\ng\n** Result\n"))))
+       (unwind-protect
+           (progn
+             (test-pi-topic-io--engage other "pi-3000-dddd")
+             (should-not (gethash "pi-1000-aaaa" pi-topic--id-locations))
+             (should (equal 1 (hash-table-count pi-topic--id-locations))))
+         (test-pi-topic-io--cleanup other)))
+     ;; Re-create it so the fixture's cleanup has something to delete.
+     (write-region "" nil file))))
+
+(ert-deftest test-pi-topic-io-registry-does-not-grow-on-re-engage ()
+  "Engaging the same topic twice replaces its entry instead of adding one."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic-io--with-file
+   test-pi-topic-io--two-topics
+   (lambda (file)
+     (test-pi-topic-io--engage file "pi-1000-aaaa")
+     (should (equal 1 (hash-table-count pi-topic--id-locations)))
+     (test-pi-topic-io--engage file "pi-1000-aaaa")
+     (should (equal 1 (hash-table-count pi-topic--id-locations)))
+     ;; A second, genuinely different topic does take its own slot.
+     (test-pi-topic-io--engage file "pi-1000-bbbb")
+     (should (equal 2 (hash-table-count pi-topic--id-locations))))))
 
 (provide 'test-pi-topic-io)
 ;;; test-pi-topic-io.el ends here

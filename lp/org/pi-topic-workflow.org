@@ -44,41 +44,77 @@ deliberately absent here and required at the bottom of the file.
 :CUSTOM_ID: pi-topic-workflow-capture-file
 :END:
 
-The default has to be computed at capture time, not at load time: a
-single Emacs session moves between projects all day, and a topics file
-frozen to whichever project happened to be current when the package
-loaded is worse than no default at all.  So the option holds nil for
-"follow the project" and a function resolves it on every call.
+Where a topic lands is the user's filing decision, not ours, so the
+default is to *ask*.  Guessing a per-project =topics.org= and writing
+there silently is the kind of helpfulness that scatters a dozen half-
+used files across a dozen checkouts; asking once costs a second and
+puts the topic where the human actually keeps their work.
 
-The fallback chain differs from
+The answer is remembered for the session, so only the first capture
+asks.  Nothing is remembered across restarts on purpose: the right
+file genuinely does change between one day's work and the next, and a
+sticky value would be a preference the user never set.
+
+Configuring the option turns the prompt off entirely, in either of two
+shapes — a fixed file, or a function computing one (per project, per
+month, per whatever).  A capture template that stops to ask despite
+explicit configuration is a bug, so the prompt is reached only when
+=pi-topic-file= is nil and nothing has been remembered yet.
+
+The =org-directory= tail of the fallback differs from
 [[file:pi-topic-chat.org::#pi-topic-chat-id][the session cwd]] on purpose: a
 session must run *somewhere real*, so that one ends at
 =default-directory=, while a captured topic belongs in the user's org
-tree, so this one ends at =org-directory=.
+tree.
 
 #+BEGIN_SRC elisp
 (defcustom pi-topic-file nil
-  "Org file `org-capture' drops new pi topics into.
+  "Where `org-capture' drops new pi topics.  One of three things:
 
-nil means follow the current project: `topics.org' at the project root
-of wherever capture is invoked, falling back to `org-directory' and
-then to \"~/org\" when there is no project."
-  :type '(choice (const :tag "Follow the current project" nil)
-                 (file :tag "Fixed file"))
+nil        — ask.  The prompt offers `topics.org' at the current
+             project root, and the answer is reused for the rest of
+             this Emacs session, so only the first capture asks.
+a string   — always that file.  Never asks.
+a function — called with no arguments, returns the file name.  Never
+             asks; use this to file by project, by month, or by any
+             rule of your own."
+  :type '(choice (const :tag "Ask, then remember for this session" nil)
+                 (file :tag "Always this file")
+                 (function :tag "Compute the file name"))
   :group 'pi-topic)
 
+(defvar pi-topic--remembered-file nil
+  "File the user picked when `pi-topic-file' is nil.
+Session-scoped by design: the right place to file changes between one
+day's work and the next, and persisting it would invent a preference
+the user never set.")
+
 (defun pi-topic--capture-directory ()
-  "Return the directory a project-following topics file belongs in."
+  "Return the directory the offered default topics file belongs in."
   (or (let ((proj (project-current nil)))
         (and proj (ignore-errors (expand-file-name (project-root proj)))))
       (and (boundp 'org-directory) org-directory)
       "~/org"))
 
+(defun pi-topic--read-capture-file ()
+  "Ask where topics should be filed and remember the answer."
+  (let ((default (expand-file-name "topics.org" (pi-topic--capture-directory))))
+    (setq pi-topic--remembered-file
+          (expand-file-name
+           (read-file-name "Pi topic file: "
+                           (file-name-directory default)
+                           default
+                           nil
+                           (file-name-nondirectory default))))))
+
 (defun pi-topic--capture-file ()
-  "Return the org file new topics are captured into."
+  "Return the org file new topics are captured into, asking if need be."
   (expand-file-name
-   (or pi-topic-file
-       (expand-file-name "topics.org" (pi-topic--capture-directory)))))
+   (cond
+    ((stringp pi-topic-file) pi-topic-file)
+    ((functionp pi-topic-file) (funcall pi-topic-file))
+    (pi-topic--remembered-file pi-topic--remembered-file)
+    (t (pi-topic--read-capture-file)))))
 #+END_SRC
 
 * The Capture Template
@@ -92,10 +128,15 @@ different topic shapes.  =%i%?= puts any active region into the Goal
 and leaves point after it — the GTD clarify step is "state the desired
 outcome", and that is the one thing capture should ask for.
 
-The target is the *function symbol*, not its current value:
-=org-capture-expand-file= calls it at capture time, which is what keeps
-the project-following default alive after the template has been
-registered once at startup.
+The target is the *function symbol*, not its current value, and now
+that resolving it can prompt, that indirection carries the whole
+design.  =org-capture-expand-file= calls the symbol when a capture
+runs; storing =(pi-topic--capture-file)= instead would resolve at
+*registration* time, which for most users is inside their init file —
+so Emacs would stop and ask where topics go before the session had
+even started, once, forever frozen to that answer.  With the symbol,
+the question is asked the first time the user actually captures
+something, which is the only moment they have an opinion.
 
 #+BEGIN_SRC elisp
 (defconst pi-topic--capture-key "p"
@@ -147,6 +188,12 @@ possible =org-persist= read and a permanent buffer, and paying that
 for every agenda file to discover that most have no topics is the
 tax this function exists to avoid.
 
+The capture file is included only when it is already *known*.  Reading
+is not the moment to ask where topics should be filed: =pi-topic-list=
+popping a file prompt before it can show you anything would be the
+same bug as a capture template that asks despite explicit
+configuration, just wearing a different hat.
+
 #+BEGIN_SRC elisp
 (defun pi-topic--file-has-topics-p (file)
   "Return non-nil when FILE's text contains a PI_STATE property."
@@ -157,11 +204,19 @@ tax this function exists to avoid.
          (goto-char (point-min))
          (and (re-search-forward "^[ \t]*:PI_STATE:" nil t) t))))
 
+(defun pi-topic--known-capture-file ()
+  "Return the capture file when it is already decided, else nil.
+Never prompts — this is the read-side view of `pi-topic--capture-file'."
+  (cond
+   ((stringp pi-topic-file) (expand-file-name pi-topic-file))
+   ((functionp pi-topic-file) (expand-file-name (funcall pi-topic-file)))
+   (pi-topic--remembered-file pi-topic--remembered-file)))
+
 (defun pi-topic-agenda-files ()
   "Return the files worth scanning for topics.
-The capture file first, then every `org-agenda-files' entry that
-carries at least one PI_STATE property."
-  (let ((files (list (pi-topic--capture-file))))
+The capture file when one is already known, then every
+`org-agenda-files' entry that carries at least one PI_STATE property."
+  (let ((files (delq nil (list (pi-topic--known-capture-file)))))
     (dolist (file (org-agenda-files t))
       (let ((file (expand-file-name file)))
         (when (and (not (member file files))
@@ -373,7 +428,9 @@ PI_SESSION is left alone, so the transcript survives and the next
 
 The heading answers the question a user opening the menu already has —
 what state is this topic in — so the menu doubles as the smallest
-possible status readout.
+possible status readout.  =r= and =R= are deliberately adjacent and
+deliberately different: lower-case reaps the session, upper-case spends
+a turn asking for a fresh Result.
 
 =transient= ships with Emacs 28 but this package supports 27, and a
 =transient-define-prefix= at top level would take the whole module down
@@ -396,6 +453,7 @@ bound to no key: which key belongs to pi-topics is the user's call.
               ("n" "new topic" pi-topic-new)
               ("c" "chat" pi-topic-chat)
               ("a" "abort turn" pi-topic-abort)
+              ("R" "refresh Result" pi-topic-refresh-result)
               ("r" "reap session" pi-topic-reap)
               ("l" "list topics" pi-topic-list)
               ("s" "set state" pi-topic-set-state)])
