@@ -199,7 +199,6 @@ passes without the package being installed."
    test-pi-topic--topic
    (lambda ()
      (goto-char (point-min))
-     (should-not (pi-topic--property "PI_CWD"))
      (should (file-equal-p (pi-topic--cwd) (pi-topic--project-root)))
      (pi-topic--set-property "PI_CWD" temporary-file-directory)
      (should (file-equal-p (pi-topic--cwd) temporary-file-directory))

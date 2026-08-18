@@ -199,10 +199,18 @@ buffer — that is what the command leaves point positioned for.
   "Placeholder line inserted into a new topic's Goal section.")
 #+END_SRC
 
-=PI_CWD= is written *only* when the buffer's directory differs from its
-project root, because the topic's working directory defaults to that
-root: a property that merely restates the default is noise in every
-drawer, and noise is what makes a folded 10-topic buffer unreadable.
+=PI_CWD= is written on *every* new topic, even when it equals the
+project root the resolver would have picked anyway.  The earlier
+version omitted it in that case to keep drawers quiet, which was the
+wrong trade: the working directory decides which project the agent can
+see and which session directory Pi records under, so it is the one
+setting a reader most often wants to change — and a property you can
+edit in place beats one you have to know the name of.  It is stored
+abbreviated (=~/…=) so a drawer stays readable.
+
+Changing it later only affects sessions not yet created: an existing
+session was already opened against the old directory, so retarget a
+topic by reaping it and clearing =PI_SESSION= first.
 
 #+BEGIN_SRC elisp
 (defun pi-topic--project-root ()
@@ -236,15 +244,16 @@ already exists.
   "Insert a new pi topic skeleton at point and return its position.
 Creates the topic heading (at the level of the heading point is in, or
 level 1), a Goal section holding a placeholder line, an empty Result
-section, and a PROPERTIES drawer with PI_STATE set to \"todo\" plus
-PI_CWD when the buffer directory differs from its project root.
+section, and a PROPERTIES drawer with PI_STATE set to \"todo\" and
+PI_CWD set to the directory the agent will run in — always written out,
+even when it equals the default, so it can be edited in place.
 The drawer is written on the new heading itself, never on an enclosing
 topic.  Leaves point on the Goal placeholder."
   (interactive)
   (let* ((level (or (org-current-level) 1))
          (stars (make-string level ?*))
          (sub-stars (make-string (1+ level) ?*))
-         (cwd (expand-file-name default-directory))
+         (cwd (pi-topic--project-root))
          topic-pos goal-marker)
     (unless (bolp)
       (insert "\n"))
@@ -255,8 +264,7 @@ topic.  Leaves point on the Goal placeholder."
     (insert pi-topic--goal-placeholder "\n"
             sub-stars " Result\n")
     (org-entry-put topic-pos "PI_STATE" "todo")
-    (unless (file-equal-p cwd (pi-topic--project-root))
-      (org-entry-put topic-pos "PI_CWD" cwd))
+    (org-entry-put topic-pos "PI_CWD" (abbreviate-file-name cwd))
     (goto-char goal-marker)
     (set-marker goal-marker nil)
     (end-of-line)

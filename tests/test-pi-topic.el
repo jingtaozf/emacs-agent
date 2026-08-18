@@ -72,6 +72,27 @@ Compare pgvector and qdrant.
      (should (pi-topic-p))
      (should (equal "todo" (pi-topic-state))))))
 
+(ert-deftest test-pi-topic-new-always-writes-cwd ()
+  "`pi-topic-new' always records PI_CWD, so it can be edited in place.
+The working directory decides which project the agent sees; omitting it
+when it matched the default meant the reader had to know the property
+name before they could change it."
+  :tags '(:unit :pi-topic)
+  (test-pi-topic--run
+   ""
+   (lambda ()
+     (goto-char (point-max))
+     (pi-topic-new)
+     (let ((recorded (pi-topic--property "PI_CWD")))
+       ;; Present even though nothing here differs from the default.
+       (should recorded)
+       (should (file-equal-p recorded (pi-topic--project-root)))
+       ;; And it is the value the session resolver actually uses.
+       (should (file-equal-p (pi-topic--cwd) recorded))
+       ;; Editing it retargets the topic.
+       (pi-topic--set-property "PI_CWD" temporary-file-directory)
+       (should (file-equal-p (pi-topic--cwd) temporary-file-directory))))))
+
 ;;; Test 2: state round-trips through the PI_STATE property
 
 (ert-deftest test-pi-topic-state-round-trips-through-property ()
